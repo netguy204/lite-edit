@@ -357,6 +357,17 @@ impl TextBuffer {
         self.cursor = Position::new(line, col);
     }
 
+    // Chunk: docs/chunks/mouse_drag_selection - Mouse drag selection
+    /// Sets the cursor to an arbitrary position without clearing selection.
+    ///
+    /// This is used during drag operations where we want to extend the selection
+    /// from a fixed anchor. The position is clamped to valid bounds.
+    pub fn move_cursor_preserving_selection(&mut self, pos: Position) {
+        let line = pos.line.min(self.line_count().saturating_sub(1));
+        let col = pos.col.min(self.line_len(line));
+        self.cursor = Position::new(line, col);
+    }
+
     // ==================== Validation ====================
 
     /// Debug assertion: verifies that the incremental line_index matches
@@ -1000,6 +1011,65 @@ mod tests {
         buf.set_cursor(Position::new(0, 2));
         assert!(!buf.has_selection());
         assert_eq!(buf.selection_anchor, None);
+    }
+
+    // ==================== Move Cursor Preserving Selection Tests ====================
+    // Chunk: docs/chunks/mouse_drag_selection - Mouse drag selection
+
+    #[test]
+    fn test_move_cursor_preserving_selection_keeps_anchor() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 0));
+        buf.set_selection_anchor_at_cursor();
+        buf.move_cursor_preserving_selection(Position::new(0, 3));
+
+        // Cursor should move
+        assert_eq!(buf.cursor_position(), Position::new(0, 3));
+        // Anchor should remain unchanged
+        assert_eq!(buf.selection_anchor, Some(Position::new(0, 0)));
+        // Should have selection from anchor to cursor
+        assert!(buf.has_selection());
+    }
+
+    #[test]
+    fn test_move_cursor_preserving_selection_clamps_line() {
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.set_cursor(Position::new(0, 0));
+        buf.set_selection_anchor_at_cursor();
+        // Try to move past last line
+        buf.move_cursor_preserving_selection(Position::new(10, 0));
+
+        // Should clamp to last line
+        assert_eq!(buf.cursor_position(), Position::new(1, 0));
+    }
+
+    #[test]
+    fn test_move_cursor_preserving_selection_clamps_column() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 0));
+        buf.set_selection_anchor_at_cursor();
+        // Try to move past end of line
+        buf.move_cursor_preserving_selection(Position::new(0, 100));
+
+        // Should clamp to line length
+        assert_eq!(buf.cursor_position(), Position::new(0, 5));
+    }
+
+    #[test]
+    fn test_move_cursor_preserving_selection_multiline() {
+        let mut buf = TextBuffer::from_str("hello\nworld\nfoo");
+        buf.set_cursor(Position::new(0, 2));
+        buf.set_selection_anchor_at_cursor();
+        buf.move_cursor_preserving_selection(Position::new(2, 1));
+
+        // Cursor moved to line 2, column 1
+        assert_eq!(buf.cursor_position(), Position::new(2, 1));
+        // Anchor unchanged at original position
+        assert_eq!(buf.selection_anchor, Some(Position::new(0, 2)));
+        // Should have selection
+        assert!(buf.has_selection());
+        // Selected text should be "llo\nworld\nf"
+        assert_eq!(buf.selected_text(), Some("llo\nworld\nf".to_string()));
     }
 
     // ==================== Basic Tests ====================

@@ -1,177 +1,169 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk extends the existing mouse event infrastructure (from `mouse_click_cursor`) to support drag-to-select behavior. The architecture follows the established patterns:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Event Pipeline Extension**: Add `mouseDragged:` and `mouseUp:` handlers in MetalView, mirroring the existing `mouseDown:` pattern. Each forwards events through the mouse handler callback using the existing `convert_mouse_event` helper.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **Selection Lifecycle in BufferFocusTarget**: Extend `handle_mouse` to manage the full selection lifecycle:
+   - On `Down`: Position cursor AND set selection anchor (leveraging `text_selection_model` APIs)
+   - On `Moved` (drag): Move cursor to extend selection from anchor
+   - On `Up`: Finalize selection (clear if click-without-drag)
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/mouse_drag_selection/GOAL.md)
-with references to the files that you expect to touch.
--->
+3. **Dirty Region Tracking**: Selection changes require marking affected lines dirty so the renderer (handled by `selection_rendering` chunk) can update highlights. We'll mark lines from the previous selection extent to the new extent.
 
-## Subsystem Considerations
+The implementation builds directly on:
+- `pixel_to_buffer_position` from `mouse_click_cursor` for coordinate conversion
+- `set_selection_anchor_at_cursor`, `clear_selection`, `has_selection` from `text_selection_model`
+- The existing `MouseEvent` / `MouseEventKind` types
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Per TESTING_PHILOSOPHY.md, we follow the Humble View Architecture: all selection state manipulation is testable via `BufferFocusTarget::handle_mouse` with mocked events, without requiring a window or GPU.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add mouseDragged handler to MetalView
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Override `mouseDragged:` in MetalView to forward drag events through the mouse handler callback.
 
-Example:
+**Location**: `crates/editor/src/metal_view.rs`
 
-### Step 1: Define the SegmentHeader struct
+**Details**:
+- Add `#[unsafe(method(mouseDragged:))]` handler in the `impl MetalView` block within `define_class!`
+- Call `convert_mouse_event(event, MouseEventKind::Moved)` and forward to `mouse_handler`
+- Pattern mirrors the existing `__mouse_down` implementation
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+**Test**: Not directly unit-testable (NSView override). Integration tested via Step 5.
 
-Location: src/segment/format.rs
+### Step 2: Add mouseUp handler to MetalView
 
-### Step 2: Implement header serialization
+Override `mouseUp:` in MetalView to forward mouse-up events.
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+**Location**: `crates/editor/src/metal_view.rs`
 
-### Step 3: ...
+**Details**:
+- Add `#[unsafe(method(mouseUp:))]` handler in the `define_class!` block
+- Call `convert_mouse_event(event, MouseEventKind::Up)` and forward to `mouse_handler`
+- Same pattern as Step 1
 
----
+**Test**: Not directly unit-testable. Integration tested via Step 5.
 
-**BACKREFERENCE COMMENTS**
+### Step 3: Extend handle_mouse to set selection anchor on mouse down
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+Modify `BufferFocusTarget::handle_mouse` to set the selection anchor when mouse down occurs.
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+**Location**: `crates/editor/src/buffer_target.rs`
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+**Details**:
+- In the `MouseEventKind::Down` branch, after setting the cursor position, call `ctx.buffer.set_selection_anchor_at_cursor()`
+- This establishes the anchor for potential drag selection
 
-Format (place immediately before the symbol):
+**Test**: Add test `test_mouse_down_sets_selection_anchor` - verify that after a `MouseEventKind::Down` event, `buffer.selection_anchor` equals the clicked position.
+
+### Step 4: Implement drag handling in handle_mouse
+
+Handle `MouseEventKind::Moved` events to extend selection during drag.
+
+**Location**: `crates/editor/src/buffer_target.rs`
+
+**Details**:
+- In the `MouseEventKind::Moved` branch:
+  1. Convert pixel position to buffer position using `pixel_to_buffer_position`
+  2. Store the previous cursor position for dirty tracking
+  3. Move cursor directly (without clearing selection - need to update cursor without calling `set_cursor` which clears selection)
+  4. Mark dirty lines from min(old_cursor.line, new_cursor.line) to max(old_cursor.line, new_cursor.line)
+
+**Important**: We cannot use `set_cursor` because it clears the selection. We need to add a method that moves the cursor without clearing selection, or directly manipulate the cursor while preserving the anchor.
+
+**Solution**: Add a helper method `move_cursor_preserving_selection` to TextBuffer that sets cursor position without clearing the selection anchor.
+
+**Test**: Add test `test_mouse_drag_extends_selection` - simulate down→moved→moved sequence and verify selection_range spans from anchor to final cursor position.
+
+### Step 5: Implement mouse-up finalization in handle_mouse
+
+Handle `MouseEventKind::Up` to finalize or clear selection.
+
+**Location**: `crates/editor/src/buffer_target.rs`
+
+**Details**:
+- In the `MouseEventKind::Up` branch:
+  1. If anchor equals cursor (click without drag), call `ctx.buffer.clear_selection()`
+  2. Otherwise, leave selection active for subsequent copy/replace operations
+  3. No cursor position change on mouse-up
+
+**Test**: Add test `test_click_without_drag_clears_selection` - set up existing selection, then simulate down+up at same position, verify selection is cleared. Add test `test_drag_then_release_preserves_selection` - verify selection remains after drag+release.
+
+### Step 6: Add move_cursor_preserving_selection to TextBuffer
+
+Add a method to TextBuffer that sets cursor position without clearing the selection anchor.
+
+**Location**: `crates/buffer/src/text_buffer.rs`
+
+**Details**:
+```rust
+/// Sets the cursor to an arbitrary position without clearing selection.
+///
+/// This is used during drag operations where we want to extend the selection
+/// from a fixed anchor. The position is clamped to valid bounds.
+pub fn move_cursor_preserving_selection(&mut self, pos: Position) {
+    let line = pos.line.min(self.line_count().saturating_sub(1));
+    let col = pos.col.min(self.line_len(line));
+    self.cursor = Position::new(line, col);
+}
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+**Test**: Add test `test_move_cursor_preserving_selection_keeps_anchor` - set anchor, call method, verify anchor unchanged and cursor moved.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 7: Compute dirty region for selection changes during drag
+
+Track old and new selection extents and mark the full range dirty.
+
+**Location**: `crates/editor/src/buffer_target.rs`
+
+**Details**:
+- In the `MouseEventKind::Moved` handler, before moving the cursor:
+  1. Get the current selection range (anchor to old cursor)
+  2. After moving cursor, get the new selection range
+  3. Compute the union of old and new ranges
+  4. Mark `DirtyLines::Range(min_line, max_line)` or use `FullViewport` if range is large
+
+**Alternative**: For simplicity, mark from `min(anchor.line, old_cursor.line, new_cursor.line)` to `max(...)` as dirty.
+
+**Note**: Need to check how DirtyRegion handles line ranges. Current implementation has `DirtyLines::Single(line)` and `DirtyLines::FromLineToEnd(line)`. May need to add a range variant or use `FullViewport`.
+
+**Test**: Add test verifying dirty region covers both old and new selection lines.
+
+### Step 8: Write comprehensive unit tests
+
+Add remaining tests per success criteria.
+
+**Location**: `crates/editor/src/buffer_target.rs` (tests module)
+
+**Tests to add**:
+1. `test_mouse_sequence_down_moved_up` - Full lifecycle test
+2. `test_drag_past_line_end_clamps_column` - Click, drag past line end, verify column clamped
+3. `test_drag_below_last_line_clamps_to_last_line` - Drag below buffer, verify line clamped
+4. `test_drag_above_first_line_clamps_to_first_line` - Drag with negative y (above view), verify line 0
+5. `test_selection_range_during_drag` - Verify selection_range() returns correct ordered range at each step
+6. `test_drag_updates_dirty_region` - Verify correct lines are marked dirty
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **mouse_click_cursor**: Provides `pixel_to_buffer_position`, `MouseEvent`, `MetalView::convert_mouse_event`, and the mouse handler callback infrastructure. **Status: ACTIVE (complete)**
+- **text_selection_model**: Provides `set_selection_anchor_at_cursor`, `clear_selection`, `has_selection`, `selection_range`. **Status: ACTIVE (complete)**
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Cursor movement without selection clear**: The current `set_cursor` method clears selection. We need `move_cursor_preserving_selection` (Step 6) to avoid this during drag.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Dirty region granularity**: Current `DirtyLines` enum has `Single`, `FromLineToEnd`, and `None`. For selection drag, we ideally want a range. Current workaround: use `FromLineToEnd(min_affected_line)` which may over-dirty. The selection_rendering chunk will handle actual rendering; this chunk just needs to ensure affected lines are marked.
+
+3. **No existing anchor state tracking in BufferFocusTarget**: We may need to track whether we're in a drag operation (mouse down without mouse up yet). However, since the selection anchor already exists on the buffer and we clear selection on mouse-up if anchor==cursor, we may not need additional state.
+
+4. **Scroll during drag**: The goal explicitly states "auto-scroll during drag is a future enhancement." We clamp to visible/valid bounds only. No need to implement scroll-on-drag.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->
