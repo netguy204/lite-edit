@@ -1,11 +1,31 @@
 ---
-status: IMPLEMENTING
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
   - crates/buffer/src/text_buffer.rs
   - crates/buffer/src/types.rs
-code_references: []
+code_references:
+  - ref: crates/buffer/src/text_buffer.rs#TextBuffer::selection_anchor
+    implements: "Selection anchor field storing optional Position for anchor-cursor selection model"
+  - ref: crates/buffer/src/text_buffer.rs#TextBuffer::set_selection_anchor
+    implements: "Sets selection anchor at arbitrary position (clamped to valid bounds)"
+  - ref: crates/buffer/src/text_buffer.rs#TextBuffer::set_selection_anchor_at_cursor
+    implements: "Convenience method to start selection at current cursor position"
+  - ref: crates/buffer/src/text_buffer.rs#TextBuffer::clear_selection
+    implements: "Clears selection anchor (no selection)"
+  - ref: crates/buffer/src/text_buffer.rs#TextBuffer::has_selection
+    implements: "Returns true if anchor is set and differs from cursor"
+  - ref: crates/buffer/src/text_buffer.rs#TextBuffer::selection_range
+    implements: "Returns (start, end) in document order regardless of selection direction"
+  - ref: crates/buffer/src/text_buffer.rs#TextBuffer::selected_text
+    implements: "Returns the text content within the selection range"
+  - ref: crates/buffer/src/text_buffer.rs#TextBuffer::select_all
+    implements: "Selects entire buffer (anchor at start, cursor at end)"
+  - ref: crates/buffer/src/text_buffer.rs#TextBuffer::delete_selection
+    implements: "Deletes selected text, places cursor at selection start, clears anchor"
+  - ref: crates/buffer/src/types.rs#Position
+    implements: "Added Ord/PartialOrd traits for position comparison in selection range ordering"
 narrative: editor_qol_interactions
 investigation: null
 subsystems: []
