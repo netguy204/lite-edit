@@ -33,6 +33,12 @@ objc2-core-text = "0.3"
 objc2-core-graphics = "0.3"
 # Core Foundation framework (CFString, CGFloat, etc.)
 objc2-core-foundation = "0.3"
+# Filesystem watching (FSEvents on macOS)
+notify = "6"
+
+[dev-dependencies]
+# Temporary directories for testing
+tempfile = "3"
 
 [build-dependencies]
 
