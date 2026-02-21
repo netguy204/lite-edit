@@ -1188,7 +1188,13 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             let event = KeyEvent::new(
                 Key::Char('a'),
                 Modifiers {
@@ -1216,7 +1222,13 @@ mod tests {
         assert!(!buffer.has_selection());
 
         let result = {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             let event = KeyEvent::new(
                 Key::Char('c'),
                 Modifiers {
@@ -1243,7 +1255,13 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
 
             // Cmd+A to select all
             let select_all = KeyEvent::new(
@@ -1280,7 +1298,13 @@ mod tests {
         // Verify we have a selection first
         // Need to do this differently since set_cursor clears selection
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             // Select all first
             let select_all = KeyEvent::new(
                 Key::Char('a'),
@@ -1296,7 +1320,13 @@ mod tests {
         dirty = DirtyRegion::None; // Reset dirty
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             let copy = KeyEvent::new(
                 Key::Char('c'),
                 Modifiers {
