@@ -1,8 +1,13 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/editor/src/metal_view.rs
+  - crates/editor/src/main.rs
+  - crates/editor/src/editor_state.rs
+  - crates/editor/src/buffer_target.rs
+  - crates/editor/tests/viewport_test.rs
 code_references: []
 narrative: null
 investigation: null
@@ -10,9 +15,12 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["clipboard_operations", "mouse_click_cursor", "text_selection_model", "quit_command"]
+created_after:
+- clipboard_operations
+- mouse_click_cursor
+- text_selection_model
+- quit_command
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

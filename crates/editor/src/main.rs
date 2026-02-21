@@ -3,6 +3,7 @@
 // Chunk: docs/chunks/viewport_rendering - Viewport + Buffer-to-Screen Rendering
 // Chunk: docs/chunks/editable_buffer - Main loop + input events + editable buffer
 // Chunk: docs/chunks/mouse_click_cursor - Mouse click cursor positioning
+// Chunk: docs/chunks/viewport_scrolling - Scroll event handling
 //!
 //! lite-edit: A lightweight, GPU-accelerated text editor for macOS
 //!
@@ -53,7 +54,7 @@ use objc2_foundation::{
 use lite_edit_buffer::TextBuffer;
 
 use crate::editor_state::EditorState;
-use crate::input::{KeyEvent, MouseEvent};
+use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
 use crate::metal_view::MetalView;
 use crate::renderer::Renderer;
 
@@ -202,6 +203,14 @@ impl EditorController {
     /// Handles a mouse event by forwarding to the editor state.
     fn handle_mouse(&mut self, event: MouseEvent) {
         self.state.handle_mouse(event);
+        self.render_if_dirty();
+    }
+
+    /// Handles a scroll event by forwarding to the editor state.
+    ///
+    /// Scroll events only affect the viewport position, not the cursor.
+    fn handle_scroll(&mut self, delta: ScrollDelta) {
+        self.state.handle_scroll(delta);
         self.render_if_dirty();
     }
 
@@ -448,6 +457,12 @@ impl AppDelegate {
         let mouse_controller = controller.clone();
         metal_view.set_mouse_handler(move |event| {
             mouse_controller.borrow_mut().handle_mouse(event);
+        });
+
+        // Set up scroll handler
+        let scroll_controller = controller.clone();
+        metal_view.set_scroll_handler(move |delta| {
+            scroll_controller.borrow_mut().handle_scroll(delta);
         });
 
         // Make the view first responder to receive key events

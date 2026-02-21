@@ -1,5 +1,6 @@
 // Chunk: docs/chunks/editable_buffer - Main loop + input events + editable buffer
 // Chunk: docs/chunks/mouse_click_cursor - Mouse click cursor positioning
+// Chunk: docs/chunks/viewport_scrolling - Scroll event handling
 //!
 //! Buffer focus target implementation.
 //!
@@ -367,7 +368,7 @@ mod tests {
     use super::*;
     use crate::dirty_region::DirtyRegion;
     use crate::font::FontMetrics;
-    use crate::input::Modifiers;
+    use crate::input::{Modifiers, ScrollDelta};
     use crate::viewport::Viewport;
     use lite_edit_buffer::{Position, TextBuffer};
 
@@ -1341,5 +1342,156 @@ mod tests {
         assert!(buffer.has_selection());
         // No dirty region since copy doesn't modify the buffer
         assert_eq!(dirty, DirtyRegion::None);
+    }
+
+    // ==================== Scroll Event Tests ====================
+    // Chunk: docs/chunks/viewport_scrolling - Scroll event handling tests
+
+    #[test]
+    fn test_scroll_down_increases_offset() {
+        let content = (0..50)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut buffer = TextBuffer::from_str(&content);
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0); // 10 visible lines
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Initial offset
+        assert_eq!(viewport.scroll_offset, 0);
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            // Scroll down by 3 lines (positive dy)
+            // line_height = 16, so 3 lines = 48 pixels
+            target.handle_scroll(ScrollDelta::new(0.0, 48.0), &mut ctx);
+        }
+
+        assert_eq!(viewport.scroll_offset, 3);
+        assert_eq!(dirty, DirtyRegion::FullViewport);
+    }
+
+    #[test]
+    fn test_scroll_up_decreases_offset() {
+        let content = (0..50)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut buffer = TextBuffer::from_str(&content);
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        viewport.scroll_to(10, 50); // Start scrolled down
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            // Scroll up by 3 lines (negative dy)
+            target.handle_scroll(ScrollDelta::new(0.0, -48.0), &mut ctx);
+        }
+
+        assert_eq!(viewport.scroll_offset, 7); // 10 - 3 = 7
+        assert_eq!(dirty, DirtyRegion::FullViewport);
+    }
+
+    #[test]
+    fn test_scroll_clamps_to_bounds() {
+        let content = (0..20)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut buffer = TextBuffer::from_str(&content);
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0); // 10 visible lines, 20 total lines
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            // Try to scroll down by 30 lines (more than buffer length)
+            target.handle_scroll(ScrollDelta::new(0.0, 30.0 * 16.0), &mut ctx);
+        }
+
+        // Should be clamped to max (20 - 10 = 10)
+        assert_eq!(viewport.scroll_offset, 10);
+    }
+
+    #[test]
+    fn test_scroll_does_not_move_cursor() {
+        let content = (0..50)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut buffer = TextBuffer::from_str(&content);
+        buffer.set_cursor(Position::new(5, 3));
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        let original_cursor = buffer.cursor_position();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            target.handle_scroll(ScrollDelta::new(0.0, 160.0), &mut ctx);
+        }
+
+        // Cursor position should be unchanged
+        assert_eq!(buffer.cursor_position(), original_cursor);
+    }
+
+    #[test]
+    fn test_small_scroll_delta_ignored() {
+        let content = (0..50)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut buffer = TextBuffer::from_str(&content);
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            // Scroll by less than half a line (won't round to a full line)
+            target.handle_scroll(ScrollDelta::new(0.0, 7.0), &mut ctx);
+        }
+
+        // Should remain at 0 since 7/16 rounds to 0
+        assert_eq!(viewport.scroll_offset, 0);
+        assert_eq!(dirty, DirtyRegion::None); // No change, no dirty
     }
 }

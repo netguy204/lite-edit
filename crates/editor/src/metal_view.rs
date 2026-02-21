@@ -1,6 +1,7 @@
 // Chunk: docs/chunks/metal_surface - macOS window + Metal surface foundation
 // Chunk: docs/chunks/editable_buffer - Main loop + input events + editable buffer
 // Chunk: docs/chunks/mouse_click_cursor - Mouse click cursor positioning
+// Chunk: docs/chunks/viewport_scrolling - Scroll event handling
 //!
 //! Metal-backed NSView implementation
 //!
@@ -20,7 +21,7 @@ use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSRect, NSSize};
 use objc2_metal::MTLDevice;
 use objc2_quartz_core::{CALayer, CAMetalLayer};
 
-use crate::input::{Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind};
+use crate::input::{Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind, ScrollDelta};
 
 // CGFloat is a type alias for f64 on 64-bit systems
 type CGFloat = f64;
@@ -35,6 +36,9 @@ pub type KeyHandler = Box<dyn Fn(KeyEvent)>;
 /// Type alias for mouse event handler callback
 pub type MouseHandler = Box<dyn Fn(MouseEvent)>;
 
+/// Type alias for scroll event handler callback
+pub type ScrollHandler = Box<dyn Fn(ScrollDelta)>;
+
 /// Internal state for MetalView
 pub struct MetalViewIvars {
     /// The CAMetalLayer for Metal rendering
@@ -47,6 +51,8 @@ pub struct MetalViewIvars {
     key_handler: RefCell<Option<KeyHandler>>,
     /// Mouse event handler callback
     mouse_handler: RefCell<Option<MouseHandler>>,
+    /// Scroll event handler callback
+    scroll_handler: RefCell<Option<ScrollHandler>>,
 }
 
 impl Default for MetalViewIvars {
@@ -76,6 +82,7 @@ impl Default for MetalViewIvars {
             scale_factor: Cell::new(1.0),
             key_handler: RefCell::new(None),
             mouse_handler: RefCell::new(None),
+            scroll_handler: RefCell::new(None),
         }
     }
 }
@@ -182,6 +189,17 @@ define_class!(
                 }
             }
         }
+
+        /// Handle scroll wheel events (trackpad, mouse wheel)
+        #[unsafe(method(scrollWheel:))]
+        fn __scroll_wheel(&self, event: &NSEvent) {
+            if let Some(scroll_delta) = self.convert_scroll_event(event) {
+                let handler = self.ivars().scroll_handler.borrow();
+                if let Some(handler) = handler.as_ref() {
+                    handler(scroll_delta);
+                }
+            }
+        }
     }
 );
 
@@ -268,6 +286,14 @@ impl MetalView {
         *self.ivars().mouse_handler.borrow_mut() = Some(Box::new(handler));
     }
 
+    /// Sets the scroll event handler callback
+    ///
+    /// The handler will be called for each scrollWheel event, with the
+    /// NSEvent converted to our Rust-native ScrollDelta type.
+    pub fn set_scroll_handler(&self, handler: impl Fn(ScrollDelta) + 'static) {
+        *self.ivars().scroll_handler.borrow_mut() = Some(Box::new(handler));
+    }
+
     /// Converts an NSEvent to our KeyEvent type
     fn convert_key_event(&self, event: &NSEvent) -> Option<KeyEvent> {
         let modifiers = self.convert_modifiers(event);
@@ -311,6 +337,38 @@ impl MetalView {
             position,
             modifiers,
         })
+    }
+
+    /// Converts an NSEvent scroll wheel event to our ScrollDelta type
+    ///
+    /// macOS scroll wheel events provide delta values in points. For trackpads
+    /// with "natural scrolling" enabled (the default), scrolling down (content
+    /// moves up) produces positive deltaY values.
+    ///
+    /// We convert the delta to our ScrollDelta type with the convention:
+    /// - Positive dy = scroll down (content moves up, scroll_offset increases)
+    /// - Negative dy = scroll up (content moves down, scroll_offset decreases)
+    fn convert_scroll_event(&self, event: &NSEvent) -> Option<ScrollDelta> {
+        // NSEvent scrolling delta methods
+        // scrollingDeltaX/Y return CGFloat (f64 on 64-bit)
+        // These are "precise" deltas that work with trackpads and mice
+        let dx = event.scrollingDeltaX();
+        let dy = event.scrollingDeltaY();
+
+        // Skip events with no scroll delta
+        if dx == 0.0 && dy == 0.0 {
+            return None;
+        }
+
+        // macOS "natural scrolling" (default on trackpads) inverts the direction:
+        // - Moving fingers down on trackpad = negative deltaY = content scrolls up
+        // - Moving fingers up on trackpad = positive deltaY = content scrolls down
+        //
+        // Our convention is:
+        // - Positive dy = scroll down (show content further in the document)
+        //
+        // So we negate the delta to match our convention.
+        Some(ScrollDelta::new(-dx, -dy))
     }
 
     /// Converts NSEvent modifier flags to our Modifiers type

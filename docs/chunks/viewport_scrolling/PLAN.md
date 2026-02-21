@@ -1,177 +1,127 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk implements scroll event handling and the "ensure cursor visible" snap-back behavior. The architecture follows the existing Humble View pattern from TESTING_PHILOSOPHY.md: scroll events mutate `Viewport.scroll_offset` through the focus target, cursor position is unchanged, and when a keystroke is received while the cursor is off-screen, the viewport snaps back to make the cursor visible before the edit is processed.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The key insight from the existing codebase is that `ensure_cursor_visible()` in `EditorContext` already handles the snap-back logic — we just need to ensure it's called at the right time (before keystroke processing when cursor is off-screen) and that scroll events are properly wired through the macOS event system.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+**Strategy:**
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/viewport_scrolling/GOAL.md)
-with references to the files that you expect to touch.
--->
+1. **Wire scroll events through macOS**: Add `scrollWheel:` handler to `MetalView` that converts `NSEvent` scroll deltas to our `ScrollDelta` type and invokes a callback.
 
-## Subsystem Considerations
+2. **Extend input handling**: Add a scroll handler to `EditorController` that forwards to `EditorState`, which delegates to the focus target's `handle_scroll` method.
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+3. **Ensure cursor visibility on keystroke**: Modify `EditorState.handle_key()` to call `ensure_cursor_visible()` before delegating to the focus target when the cursor is off-screen.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
+4. **Cursor rendering**: The existing code in `glyph_buffer.rs` already checks `viewport.buffer_line_to_screen_line()` before rendering the cursor — if the cursor is off-screen, `buffer_line_to_screen_line()` returns `None` and no cursor quad is generated.
 
-If no subsystems are relevant, delete this section.
+**Testing approach per TESTING_PHILOSOPHY.md:**
 
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
+Since scroll input and viewport mutation are pure state operations, tests can exercise the full event-to-state pipeline without a GPU:
 
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
+- Scroll events mutate `scroll_offset` correctly
+- Cursor position is unchanged by scroll
+- Cursor off-screen after scroll produces no cursor quad in glyph buffer
+- Keystroke when cursor is off-screen triggers snap-back before mutation
 
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Visual verification will confirm macOS scroll event integration.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add scroll handler callback infrastructure to MetalView
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Extend `MetalViewIvars` with a `scroll_handler: RefCell<Option<ScrollHandler>>` and add a `scrollWheel:` method override that converts the NSEvent scroll delta to our `ScrollDelta` type and invokes the callback.
 
-Example:
+The macOS scroll delta is in pixels; we'll convert to line-based scrolling in the focus target (which has access to line_height via the viewport).
 
-### Step 1: Define the SegmentHeader struct
+**Files:** `crates/editor/src/metal_view.rs`
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+**Tests:** Manual verification (scroll event handling is platform code)
 
-Location: src/segment/format.rs
+### Step 2: Wire scroll handler through EditorController and EditorState
 
-### Step 2: Implement header serialization
+Add `set_scroll_handler()` to `MetalView` and wire it in `AppDelegate.setup_window()` to call `EditorController.handle_scroll()`.
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Add `handle_scroll(delta: ScrollDelta)` to `EditorState` that forwards to the focus target's `handle_scroll()` method. This follows the same pattern as `handle_key()` and `handle_mouse()`.
 
-### Step 3: ...
+**Files:** `crates/editor/src/metal_view.rs`, `crates/editor/src/main.rs`, `crates/editor/src/editor_state.rs`
 
----
+**Tests:** Unit tests for `EditorState.handle_scroll()` verifying viewport mutation and dirty marking.
 
-**BACKREFERENCE COMMENTS**
+### Step 3: Implement scroll handling in BufferFocusTarget
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+The `FocusTarget` trait already declares `handle_scroll(&mut self, delta: ScrollDelta, ctx: &mut EditorContext)` and `BufferFocusTarget` already implements it — the logic converts pixel delta to lines, adjusts `scroll_offset`, and marks `FullViewport` dirty.
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+Verify this implementation is correct:
+- Positive dy = scroll down = content moves up = `scroll_offset` increases
+- Negative dy = scroll up = content moves down = `scroll_offset` decreases
+- Clamping is handled by `Viewport.scroll_to()`
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+**Files:** `crates/editor/src/buffer_target.rs` (verify existing implementation)
 
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
+**Tests:** Unit tests for scroll delta → viewport offset conversion with various delta values.
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+### Step 4: Implement "ensure cursor visible" before keystroke processing
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Modify `EditorState.handle_key()` to check if the cursor is currently off-screen and, if so, call `ensure_cursor_visible()` BEFORE delegating to the focus target.
+
+The check is: `viewport.buffer_line_to_screen_line(buffer.cursor_position().line).is_none()`.
+
+This ensures that any keystroke that would mutate the buffer (or move the cursor) first snaps the viewport back to make the cursor visible.
+
+**Files:** `crates/editor/src/editor_state.rs`
+
+**Tests:**
+- Create a long buffer, scroll cursor off-screen, send keystroke → viewport should snap back
+- Verify buffer mutation is applied after snap-back
+
+### Step 5: Verify cursor is not rendered when off-screen
+
+The existing code in `GlyphBuffer.update_from_buffer_with_cursor()` already checks `viewport.buffer_line_to_screen_line(cursor_pos.line)` before generating the cursor quad. If this returns `None`, no cursor is rendered.
+
+Add a targeted unit test to confirm this behavior.
+
+**Files:** (verification only — no code changes expected)
+
+**Tests:** Unit test that creates a viewport+buffer state with cursor off-screen and verifies no cursor quad is generated.
+
+### Step 6: Integration test and visual verification
+
+Create an integration test that:
+1. Sets up a buffer with many lines (50+)
+2. Scrolls down programmatically (via scroll delta)
+3. Verifies cursor position unchanged
+4. Sends a keystroke
+5. Verifies viewport snapped back and cursor is visible
+
+Visual verification:
+1. Run the editor with the demo buffer
+2. Scroll using trackpad/mouse wheel
+3. Verify viewport moves but cursor stays at its buffer position
+4. Verify cursor disappears when scrolled off-screen
+5. Type a character → viewport should snap back to cursor
+
+**Files:** `crates/editor/tests/viewport_test.rs` or new `scroll_test.rs`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+**Chunks that must be complete:**
+- `viewport_rendering` (ACTIVE) — Provides `Viewport` with `scroll_to()`, `ensure_visible()`, `buffer_line_to_screen_line()`
+- `editable_buffer` (ACTIVE) — Provides `EditorState`, `FocusTarget` trait, event handling infrastructure
 
-If there are no dependencies, delete this section.
--->
+**External dependencies:** None — scroll event handling uses existing macOS/objc2-app-kit bindings.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Scroll delta direction convention**: macOS uses "natural scrolling" by default where positive delta = scroll down. The existing `BufferFocusTarget.handle_scroll()` implementation assumes positive dy = scroll down. Need to verify this matches macOS behavior.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Scroll momentum/inertia**: macOS provides momentum scroll events after the user lifts their finger. These should work automatically since we handle each scroll event incrementally.
+
+3. **Scroll sensitivity**: The conversion from pixel delta to lines uses `(delta.dy / line_height).round()`. This may feel too slow or too fast depending on user preferences. A sensitivity multiplier could be added later.
+
+4. **Fractional scrolling**: Currently we scroll by whole lines. Smooth scrolling (fractional scroll_offset) is a future enhancement and out of scope.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- POPULATE DURING IMPLEMENTATION -->

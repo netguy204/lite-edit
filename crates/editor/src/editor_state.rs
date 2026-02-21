@@ -1,5 +1,6 @@
 // Chunk: docs/chunks/editable_buffer - Main loop + input events + editable buffer
 // Chunk: docs/chunks/mouse_click_cursor - Mouse click cursor positioning
+// Chunk: docs/chunks/viewport_scrolling - Scroll event handling
 //!
 //! Editor state container.
 //!
@@ -14,7 +15,7 @@ use crate::context::EditorContext;
 use crate::dirty_region::DirtyRegion;
 use crate::focus::FocusTarget;
 use crate::font::FontMetrics;
-use crate::input::{KeyEvent, MouseEvent};
+use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
 use crate::viewport::Viewport;
 use lite_edit_buffer::TextBuffer;
 
@@ -98,6 +99,9 @@ impl EditorState {
     ///
     /// App-level shortcuts (like Cmd+Q for quit) are intercepted here
     /// before being forwarded to the focus target.
+    ///
+    /// If the cursor has been scrolled off-screen, we snap the viewport back
+    /// to make the cursor visible BEFORE processing the keystroke.
     pub fn handle_key(&mut self, event: KeyEvent) {
         use crate::input::Key;
 
@@ -113,7 +117,7 @@ impl EditorState {
         // Record keystroke time for cursor blink reset
         self.last_keystroke = Instant::now();
 
-        // Ensure cursor is visible when typing
+        // Ensure cursor blink visibility is on when typing
         if !self.cursor_visible {
             self.cursor_visible = true;
             // Mark cursor line dirty to show it
@@ -123,6 +127,24 @@ impl EditorState {
                 self.buffer.line_count(),
             );
             self.dirty_region.merge(dirty);
+        }
+
+        // If the cursor is off-screen (scrolled away), snap the viewport back
+        // to make the cursor visible BEFORE processing the keystroke.
+        // This ensures typing after scrolling doesn't edit at a position
+        // the user can't see.
+        let cursor_line = self.buffer.cursor_position().line;
+        if self
+            .viewport
+            .buffer_line_to_screen_line(cursor_line)
+            .is_none()
+        {
+            // Cursor is off-screen - scroll to make it visible
+            let line_count = self.buffer.line_count();
+            if self.viewport.ensure_visible(cursor_line, line_count) {
+                // Viewport scrolled - mark full viewport dirty
+                self.dirty_region.merge(DirtyRegion::FullViewport);
+            }
         }
 
         // Create context and forward to focus target
@@ -165,6 +187,22 @@ impl EditorState {
             self.view_height,
         );
         self.focus_target.handle_mouse(event, &mut ctx);
+    }
+
+    /// Handles a scroll event by forwarding to the active focus target.
+    ///
+    /// Scroll events only affect the viewport, not the cursor position or buffer.
+    /// The cursor may end up off-screen after scrolling, which is intentional.
+    pub fn handle_scroll(&mut self, delta: ScrollDelta) {
+        // Create context and forward to focus target
+        let mut ctx = EditorContext::new(
+            &mut self.buffer,
+            &mut self.viewport,
+            &mut self.dirty_region,
+            self.font_metrics,
+            self.view_height,
+        );
+        self.focus_target.handle_scroll(delta, &mut ctx);
     }
 
     /// Returns true if any screen region needs re-rendering.
@@ -234,7 +272,7 @@ impl Default for EditorState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::input::{Key, Modifiers};
+    use crate::input::{Key, Modifiers, ScrollDelta};
     use std::time::Duration;
 
     /// Creates test font metrics with known values
@@ -441,5 +479,123 @@ mod tests {
 
         assert!(!state.should_quit);
         assert_eq!(state.buffer.content(), "q");
+    }
+
+    // =========================================================================
+    // Scroll handling tests
+    // =========================================================================
+
+    #[test]
+    fn test_handle_scroll_moves_viewport() {
+        // Create a buffer with many lines
+        let content = (0..50)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut state = EditorState::new(
+            lite_edit_buffer::TextBuffer::from_str(&content),
+            test_font_metrics(),
+        );
+        state.update_viewport_size(160.0); // 10 visible lines
+
+        // Initial scroll offset should be 0
+        assert_eq!(state.viewport.scroll_offset, 0);
+
+        // Scroll down by 5 lines (positive dy = scroll down)
+        // line_height is 16.0, so 5 lines = 80 pixels
+        state.handle_scroll(ScrollDelta::new(0.0, 80.0));
+
+        // Viewport should have scrolled
+        assert_eq!(state.viewport.scroll_offset, 5);
+        assert!(state.is_dirty()); // Should be dirty after scroll
+    }
+
+    #[test]
+    fn test_handle_scroll_does_not_move_cursor() {
+        // Create a buffer with many lines
+        let content = (0..50)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut state = EditorState::new(
+            lite_edit_buffer::TextBuffer::from_str(&content),
+            test_font_metrics(),
+        );
+        state.update_viewport_size(160.0);
+
+        // Set cursor to line 3
+        state.buffer.set_cursor(lite_edit_buffer::Position::new(3, 5));
+
+        // Scroll down by 10 lines
+        state.handle_scroll(ScrollDelta::new(0.0, 160.0));
+
+        // Cursor position should be unchanged
+        assert_eq!(
+            state.buffer.cursor_position(),
+            lite_edit_buffer::Position::new(3, 5)
+        );
+    }
+
+    #[test]
+    fn test_keystroke_snaps_back_when_cursor_off_screen() {
+        // Create a buffer with many lines
+        let content = (0..50)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut state = EditorState::new(
+            lite_edit_buffer::TextBuffer::from_str(&content),
+            test_font_metrics(),
+        );
+        state.update_viewport_size(160.0); // 10 visible lines
+
+        // Cursor starts at line 0
+        assert_eq!(state.buffer.cursor_position().line, 0);
+
+        // Scroll down so cursor is off-screen (scroll to show lines 15-24)
+        state.handle_scroll(ScrollDelta::new(0.0, 15.0 * 16.0)); // 15 lines * 16 pixels
+        assert_eq!(state.viewport.scroll_offset, 15);
+
+        // Clear dirty flag
+        let _ = state.take_dirty_region();
+
+        // Now type a character - viewport should snap back to show cursor
+        state.handle_key(KeyEvent::char('X'));
+
+        // Cursor should still be at line 0, and viewport should have scrolled
+        // back to make line 0 visible
+        assert_eq!(state.buffer.cursor_position().line, 0);
+        assert_eq!(state.viewport.scroll_offset, 0);
+        assert!(state.is_dirty()); // Should be dirty after snap-back
+    }
+
+    #[test]
+    fn test_no_snapback_when_cursor_visible() {
+        // Create a buffer with many lines
+        let content = (0..50)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut state = EditorState::new(
+            lite_edit_buffer::TextBuffer::from_str(&content),
+            test_font_metrics(),
+        );
+        state.update_viewport_size(160.0); // 10 visible lines
+
+        // Move cursor to line 15
+        state.buffer.set_cursor(lite_edit_buffer::Position::new(15, 0));
+
+        // Scroll to make line 15 visible (show lines 10-19)
+        state.viewport.scroll_to(10, 50);
+        assert_eq!(state.viewport.scroll_offset, 10);
+
+        // Clear dirty flag
+        let _ = state.take_dirty_region();
+
+        // Type a character - viewport should NOT snap back since cursor is visible
+        state.handle_key(KeyEvent::char('X'));
+
+        // Scroll offset should remain at 10
+        assert_eq!(state.viewport.scroll_offset, 10);
     }
 }
