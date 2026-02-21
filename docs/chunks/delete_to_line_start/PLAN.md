@@ -1,177 +1,109 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk adds Cmd+Backspace to delete from the cursor to the beginning of the current line, following the established patterns for deletion commands in lite-edit.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The implementation mirrors the existing `delete_to_line_end` method in `TextBuffer` and the `DeleteToLineEnd` command wiring in `buffer_target.rs`. The key difference is:
+- `delete_to_line_end`: deletes characters *after* the cursor (forward deletion)
+- `delete_to_line_start`: deletes characters *before* the cursor (backward deletion), placing cursor at column 0
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+Following the testing philosophy in `docs/trunk/TESTING_PHILOSOPHY.md`, we will use TDD:
+1. Write failing tests for `delete_to_line_start` behavior
+2. Implement the method to make tests pass
+3. Wire through the command enum and key resolution
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/delete_to_line_start/GOAL.md)
-with references to the files that you expect to touch.
--->
-
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+The architecture is:
+- **TextBuffer** (buffer crate): Pure Rust state mutation, fully testable
+- **Command enum + resolve_command** (editor crate): Stateless mapping from key events to commands
+- **execute_command** (editor crate): Dispatches commands to buffer methods
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add failing tests for delete_to_line_start
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add unit tests to `crates/buffer/src/text_buffer.rs` in the `#[cfg(test)]` module. Tests should cover all success criteria from GOAL.md:
 
-Example:
+1. **delete_to_line_start_from_middle**: Cursor at col 5 in `"hello world"` → deletes `"hello"`, leaves `" world"` with cursor at col 0
+2. **delete_to_line_start_from_end**: Cursor at end of `"hello world"` (col 11) → deletes entire line content, leaves `""` with cursor at col 0
+3. **delete_to_line_start_at_col_0**: Cursor at col 0 → no-op, returns `DirtyLines::None`
+4. **delete_to_line_start_with_selection**: Active selection → deletes selection (not line-start), delegates to `delete_selection()`
+5. **delete_to_line_start_multiline**: In a multi-line buffer, only affects current line, does not join with previous line
+6. **delete_to_line_start_empty_line**: Cursor at col 0 on empty line → no-op
 
-### Step 1: Define the SegmentHeader struct
+Location: `crates/buffer/src/text_buffer.rs`
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Implement delete_to_line_start in TextBuffer
 
-Location: src/segment/format.rs
+Add the `delete_to_line_start` method to `TextBuffer` that:
 
-### Step 2: Implement header serialization
+1. If there's an active selection, delegate to `delete_selection()` and return its result
+2. If cursor is at column 0, return `DirtyLines::None` (no-op)
+3. Otherwise:
+   - Calculate the number of characters to delete: `cursor.col`
+   - Position the gap at cursor
+   - Delete backward `cursor.col` times using `buffer.delete_backward()`
+   - Update `line_index.remove_char()` for each deletion
+   - Set cursor to column 0
+   - Return `DirtyLines::Single(cursor.line)`
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+The method signature: `pub fn delete_to_line_start(&mut self) -> DirtyLines`
 
-### Step 3: ...
+Location: `crates/buffer/src/text_buffer.rs`
 
----
+### Step 3: Add DeleteToLineStart command variant
 
-**BACKREFERENCE COMMENTS**
+Add a new variant to the `Command` enum:
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+/// Delete from cursor to start of line (Cmd+Backspace)
+DeleteToLineStart,
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `crates/editor/src/buffer_target.rs`, in the `Command` enum
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 4: Add key binding in resolve_command
+
+Add a match arm for Cmd+Backspace in the `resolve_command` function:
+
+```rust
+// Cmd+Backspace → delete to line start
+Key::Backspace if mods.command && !mods.control => Some(Command::DeleteToLineStart),
+```
+
+This must be placed **before** the generic `Key::Backspace => Some(Command::DeleteBackward)` match arm to take precedence.
+
+Location: `crates/editor/src/buffer_target.rs`, in `resolve_command()`
+
+### Step 5: Add execution wiring in execute_command
+
+Add a match arm in `execute_command` for the new command:
+
+```rust
+Command::DeleteToLineStart => ctx.buffer.delete_to_line_start(),
+```
+
+This follows the same pattern as `DeleteToLineEnd` — the method returns `DirtyLines` which is then passed to `ctx.mark_dirty()`.
+
+Location: `crates/editor/src/buffer_target.rs`, in `execute_command()`
+
+### Step 6: Verify tests pass and existing behavior unchanged
+
+Run the full test suite to ensure:
+1. All new `delete_to_line_start` tests pass
+2. Existing `delete_backward` tests still pass (plain Backspace unchanged)
+3. Existing `move_to_line_start` tests still pass (Cmd+Left unchanged)
+
+Command: `cargo test --package lite-edit-buffer`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+None. This chunk builds on the existing buffer and command infrastructure.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
-
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Key binding conflict**: Need to verify that Cmd+Backspace doesn't conflict with any existing binding. Current code shows `Key::Backspace` without modifier checks maps to `DeleteBackward`, so adding a `mods.command` guard should not break anything.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- Populated during implementation -->

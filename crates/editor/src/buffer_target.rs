@@ -33,6 +33,8 @@ enum Command {
     DeleteForward,
     /// Delete from cursor to end of line (kill-line)
     DeleteToLineEnd,
+    /// Delete from cursor to start of line (Cmd+Backspace)
+    DeleteToLineStart,
     /// Move cursor left by one character
     MoveLeft,
     /// Move cursor right by one character
@@ -95,6 +97,9 @@ fn resolve_command(event: &KeyEvent) -> Option<Command> {
 
         // Tab
         Key::Tab if !mods.command && !mods.control => Some(Command::InsertTab),
+
+        // Cmd+Backspace → delete to line start
+        Key::Backspace if mods.command && !mods.control => Some(Command::DeleteToLineStart),
 
         // Backspace (Delete backward)
         Key::Backspace => Some(Command::DeleteBackward),
@@ -202,6 +207,7 @@ impl BufferFocusTarget {
             Command::DeleteBackward => ctx.buffer.delete_backward(),
             Command::DeleteForward => ctx.buffer.delete_forward(),
             Command::DeleteToLineEnd => ctx.buffer.delete_to_line_end(),
+            Command::DeleteToLineStart => ctx.buffer.delete_to_line_start(),
             Command::MoveLeft => {
                 ctx.buffer.move_left();
                 // Cursor movement doesn't dirty buffer content, but we need to redraw
