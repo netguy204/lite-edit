@@ -1,177 +1,110 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk implements the standard macOS cursor behavior where an I-beam cursor appears when the mouse hovers over an editable text area. This is purely a visual affordance at the NSView layer — it signals to users that the area is editable, following macOS human interface guidelines.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Strategy:**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+The implementation uses the standard macOS cursor management API via `resetCursorRects`. When the window system needs to know what cursor to display, it calls `resetCursorRects` on each view. We override this method to call `addCursorRect:cursor:` with the view's bounds and `NSCursor.iBeam`.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/ibeam_cursor/GOAL.md)
-with references to the files that you expect to touch.
--->
+This is a minimal change that follows the established patterns in `MetalView`:
+
+1. **Add `resetCursorRects` override to MetalView** — Within the `define_class!` macro, add a method override that calls `addCursorRect:cursor:` with `self.bounds()` and `NSCursor::iBeam()`.
+
+2. **Import NSCursor** — Add the necessary import from `objc2_app_kit`.
+
+**Testing approach per TESTING_PHILOSOPHY.md:**
+
+This change falls under the "Humble View Architecture" category — it's platform shell code that directly manipulates macOS cursor management and cannot be meaningfully unit-tested in isolation. Per the testing philosophy:
+
+> "GPU rendering, macOS window management, and Metal pipeline setup involve visual output and platform state that can't be meaningfully asserted in a unit test. For these, write the implementation first, verify visually..."
+
+Visual verification will confirm:
+- I-beam cursor appears when mouse enters the view
+- Arrow cursor returns when mouse exits the view
+- I-beam is maintained during mouse movement and drag operations
+- No functional regressions in click, drag, or scroll behavior
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems are relevant to this change. The work is isolated to a single NSView method override with no cross-cutting concerns.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add NSCursor import to metal_view.rs
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add `NSCursor` to the imports from `objc2_app_kit`.
 
-Example:
+**Location:** `crates/editor/src/metal_view.rs`
 
-### Step 1: Define the SegmentHeader struct
+**Details:**
+- Find the existing `use objc2_app_kit::...` line
+- Add `NSCursor` to the imported types
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Override resetCursorRects in MetalView
 
-Location: src/segment/format.rs
+Add the `resetCursorRects` method override within the `define_class!` macro.
 
-### Step 2: Implement header serialization
+**Location:** `crates/editor/src/metal_view.rs`, inside the `impl MetalView` block within `define_class!`
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+**Details:**
+- Add a new method with `#[unsafe(method(resetCursorRects))]` attribute
+- The method should:
+  1. Call `discardCursorRects()` on self to clear any existing cursor rects
+  2. Get the view's bounds via `self.bounds()`
+  3. Get the I-beam cursor via `NSCursor::iBeam()`
+  4. Call `self.addCursorRect:cursor:` with the bounds and I-beam cursor
 
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+**Code pattern:**
+```rust
+// Chunk: docs/chunks/ibeam_cursor - I-beam cursor over editable area
+/// Sets up cursor rects to display I-beam cursor over the editable area
+#[unsafe(method(resetCursorRects))]
+fn __reset_cursor_rects(&self) {
+    // Clear existing cursor rects
+    self.discardCursorRects();
+    // Add I-beam cursor for the entire view bounds
+    unsafe {
+        self.addCursorRect_cursor(self.bounds(), &NSCursor::iBeam());
+    }
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+**Note:** The exact method name for `addCursorRect:cursor:` in objc2 bindings may be `addCursorRect_cursor` or similar — verify against objc2-app-kit API.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 3: Visual verification
+
+Build and run the editor to verify:
+
+1. **I-beam on entry:** Mouse cursor changes to I-beam when entering the MetalView bounds
+2. **Arrow on exit:** Mouse cursor reverts to arrow when leaving the MetalView bounds
+3. **I-beam during movement:** I-beam is maintained while moving within the view
+4. **I-beam during drag:** I-beam is maintained during mouse drag operations
+5. **No regressions:** Click, drag, and scroll behaviors remain functional
+
+**Verification command:** `cargo run` in `crates/editor`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+**No blocking dependencies.** The change uses:
 
-If there are no dependencies, delete this section.
--->
+- `objc2-app-kit` (already in `Cargo.toml`) for `NSCursor` and `NSView` methods
+- The existing `MetalView` class infrastructure from `metal_surface` chunk
+- The `define_class!` pattern already established for NSView overrides
+
+The chunks listed in `created_after` (`mouse_drag_selection`, `shift_arrow_selection`, `text_selection_rendering`, `viewport_scrolling`) are ordering constraints for delivery, not implementation dependencies — this chunk doesn't depend on their code.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **objc2-app-kit API for NSCursor:** The exact method names in the objc2 Rust bindings may differ from the Objective-C API names. For example, `addCursorRect:cursor:` may be exposed as `addCursorRect_cursor` or similar. Verify the exact API during implementation.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Cursor rects and bounds updates:** When the view resizes, macOS should automatically invalidate cursor rects and call `resetCursorRects` again. However, if the cursor doesn't update correctly during window resizing, we may need to explicitly call `invalidateCursorRectsForView:` in `setFrameSize:`. This is unlikely to be needed but worth monitoring.
+
+3. **Cursor during scroll:** The I-beam cursor should persist during scroll wheel events since we're using cursor rects (not tracking areas). Verify this during testing.
+
+4. **Layer-backed view considerations:** Since MetalView uses `wantsLayer = true`, confirm that cursor rect behavior is unaffected by layer backing. The macOS documentation doesn't indicate any issues with layer-backed views and cursor rects.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- POPULATE DURING IMPLEMENTATION -->

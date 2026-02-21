@@ -16,7 +16,7 @@ use std::cell::{Cell, RefCell};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSView};
+use objc2_app_kit::{NSCursor, NSEvent, NSEventModifierFlags, NSView};
 use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSRect, NSSize};
 use objc2_metal::MTLDevice;
 use objc2_quartz_core::{CALayer, CAMetalLayer};
@@ -223,6 +223,16 @@ define_class!(
                     handler(scroll_delta);
                 }
             }
+        }
+
+        // Chunk: docs/chunks/ibeam_cursor - I-beam cursor over editable area
+        /// Sets up cursor rects to display I-beam cursor over the editable area
+        #[unsafe(method(resetCursorRects))]
+        fn __reset_cursor_rects(&self) {
+            // Clear existing cursor rects
+            self.discardCursorRects();
+            // Add I-beam cursor for the entire view bounds
+            self.addCursorRect_cursor(self.bounds(), &NSCursor::IBeamCursor());
         }
     }
 );
