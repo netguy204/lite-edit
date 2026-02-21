@@ -4,10 +4,12 @@ ticket: null
 parent_chunk: null
 code_paths:
   - Cargo.toml
-  - build.rs
-  - src/main.rs
-  - src/metal_view.rs
-  - src/renderer.rs
+  - crates/editor/Cargo.toml
+  - crates/editor/build.rs
+  - crates/editor/src/main.rs
+  - crates/editor/src/metal_view.rs
+  - crates/editor/src/renderer.rs
+  - crates/editor/tests/smoke_test.rs
   - README.md
 code_references: []
 narrative: null
