@@ -1,11 +1,19 @@
 ---
-status: IMPLEMENTING
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
 - crates/buffer/src/text_buffer.rs
 - crates/editor/src/buffer_target.rs
-code_references: []
+code_references:
+  - ref: crates/buffer/src/text_buffer.rs#TextBuffer::delete_backward_word
+    implements: "Character-class based backward word deletion logic with gap buffer integration"
+  - ref: crates/editor/src/buffer_target.rs#Command::DeleteBackwardWord
+    implements: "Command enum variant for Alt+Backspace action"
+  - ref: crates/editor/src/buffer_target.rs#resolve_command
+    implements: "Key binding mapping Option+Backspace to DeleteBackwardWord command"
+  - ref: crates/editor/src/buffer_target.rs#execute_command
+    implements: "Command execution wiring for DeleteBackwardWord"
 narrative: editor_ux_refinements
 investigation: null
 subsystems: []

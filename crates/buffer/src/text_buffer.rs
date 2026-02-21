@@ -630,6 +630,7 @@ impl TextBuffer {
         DirtyLines::Single(self.cursor.line)
     }
 
+    // Chunk: docs/chunks/kill_line - Ctrl+K kill-line operation
     /// Deletes all characters from the cursor to the end of the current line.
     ///
     /// This implements kill-line (Emacs `C-k`) behavior:

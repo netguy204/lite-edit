@@ -34,6 +34,7 @@ enum Command {
     // Chunk: docs/chunks/delete_backward_word - Alt+Backspace word deletion
     /// Delete backward by one word (Alt+Backspace)
     DeleteBackwardWord,
+    // Chunk: docs/chunks/kill_line - Ctrl+K kill-line operation
     /// Delete from cursor to end of line (kill-line)
     DeleteToLineEnd,
     /// Move cursor left by one character
@@ -86,6 +87,7 @@ enum Command {
 /// Per the H2 investigation finding, all target chords are single-step
 /// modifier+key combinations, so no state machine is needed.
 // Chunk: docs/chunks/shift_arrow_selection - Shift+Arrow key selection
+// Chunk: docs/chunks/line_nav_keybindings - Maps Home/End keys and Ctrl+A/Ctrl+E to line navigation commands
 fn resolve_command(event: &KeyEvent) -> Option<Command> {
     let mods = &event.modifiers;
 
@@ -181,6 +183,7 @@ fn resolve_command(event: &KeyEvent) -> Option<Command> {
         Key::Char('e') if mods.control && !mods.command => Some(Command::MoveToLineEnd),
 
         // Ctrl+K → kill line (delete to end of line)
+        // Chunk: docs/chunks/kill_line - Ctrl+K key binding resolution
         Key::Char('k') if mods.control && !mods.command => Some(Command::DeleteToLineEnd),
 
         // Unhandled
@@ -201,6 +204,7 @@ impl BufferFocusTarget {
     }
 
     /// Executes a command on the buffer through the editor context.
+    // Chunk: docs/chunks/line_nav_keybindings - Executes MoveToLineStart/MoveToLineEnd commands via TextBuffer methods
     fn execute_command(&self, cmd: Command, ctx: &mut EditorContext) {
         let dirty = match cmd {
             Command::InsertChar(ch) => ctx.buffer.insert_char(ch),
@@ -210,6 +214,7 @@ impl BufferFocusTarget {
             Command::DeleteForward => ctx.buffer.delete_forward(),
             // Chunk: docs/chunks/delete_backward_word - Alt+Backspace word deletion
             Command::DeleteBackwardWord => ctx.buffer.delete_backward_word(),
+            // Chunk: docs/chunks/kill_line - Execute DeleteToLineEnd command
             Command::DeleteToLineEnd => ctx.buffer.delete_to_line_end(),
             Command::MoveLeft => {
                 ctx.buffer.move_left();
