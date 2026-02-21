@@ -282,6 +282,7 @@ impl EditorController {
         }
     }
 
+    // Chunk: docs/chunks/text_selection_rendering - Syncs selection anchor from edit buffer to renderer buffer
     /// Syncs the renderer's buffer with the editor state's buffer.
     fn sync_renderer_buffer(&mut self) {
         // Update viewport on renderer - sync the pixel offset for smooth scrolling

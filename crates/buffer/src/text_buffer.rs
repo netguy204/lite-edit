@@ -148,6 +148,7 @@ impl TextBuffer {
         self.selection_anchor = None;
     }
 
+    // Chunk: docs/chunks/text_selection_rendering - Exposes selection anchor for renderer buffer sync
     /// Returns the selection anchor position, if any.
     pub fn selection_anchor(&self) -> Option<Position> {
         self.selection_anchor
