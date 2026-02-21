@@ -1,6 +1,7 @@
 // Chunk: docs/chunks/text_buffer - Text buffer data structure with gap buffer backing
 
 /// Position in the buffer as (line, column) where both are 0-indexed.
+// Chunk: docs/chunks/text_selection_model - Selection anchor and range API (added Ord)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Position {
     pub line: usize,
@@ -10,6 +11,22 @@ pub struct Position {
 impl Position {
     pub fn new(line: usize, col: usize) -> Self {
         Self { line, col }
+    }
+}
+
+impl PartialOrd for Position {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Position {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Compare by line first, then by column
+        match self.line.cmp(&other.line) {
+            std::cmp::Ordering::Equal => self.col.cmp(&other.col),
+            ord => ord,
+        }
     }
 }
 

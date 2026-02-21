@@ -18,13 +18,18 @@ use crate::types::{DirtyLines, Position};
 /// - Content storage via a gap buffer
 /// - Line boundary tracking for efficient line-based access
 /// - Cursor position as (line, column)
+/// - Selection anchor for text selection (anchor-cursor model)
 ///
 /// All mutation operations return `DirtyLines` to enable efficient rendering.
+// Chunk: docs/chunks/text_selection_model - Selection anchor and range API
 #[derive(Debug)]
 pub struct TextBuffer {
     buffer: GapBuffer,
     line_index: LineIndex,
     cursor: Position,
+    /// Selection anchor position. When `Some`, the selection spans from anchor to cursor.
+    /// The anchor may come before or after the cursor (both directions are valid).
+    selection_anchor: Option<Position>,
     /// Mutation counter for sampling debug assertions (debug builds only).
     #[cfg(debug_assertions)]
     debug_mutation_count: u64,
@@ -37,6 +42,7 @@ impl TextBuffer {
             buffer: GapBuffer::new(),
             line_index: LineIndex::new(),
             cursor: Position::default(),
+            selection_anchor: None,
             #[cfg(debug_assertions)]
             debug_mutation_count: 0,
         }
@@ -56,6 +62,7 @@ impl TextBuffer {
             buffer,
             line_index,
             cursor: Position::default(),
+            selection_anchor: None,
             #[cfg(debug_assertions)]
             debug_mutation_count: 0,
         }
@@ -117,6 +124,130 @@ impl TextBuffer {
         self.buffer.to_string()
     }
 
+    // ==================== Selection ====================
+    // Chunk: docs/chunks/text_selection_model - Selection anchor and range API
+
+    /// Sets the selection anchor to the given position.
+    ///
+    /// The position is clamped to valid bounds.
+    pub fn set_selection_anchor(&mut self, pos: Position) {
+        let line = pos.line.min(self.line_count().saturating_sub(1));
+        let col = pos.col.min(self.line_len(line));
+        self.selection_anchor = Some(Position::new(line, col));
+    }
+
+    /// Sets the selection anchor to the current cursor position.
+    ///
+    /// This is a convenience method for starting a selection at the cursor.
+    pub fn set_selection_anchor_at_cursor(&mut self) {
+        self.selection_anchor = Some(self.cursor);
+    }
+
+    /// Clears the selection anchor (no selection).
+    pub fn clear_selection(&mut self) {
+        self.selection_anchor = None;
+    }
+
+    /// Returns true if there is an active selection (anchor is set and differs from cursor).
+    pub fn has_selection(&self) -> bool {
+        match self.selection_anchor {
+            Some(anchor) => anchor != self.cursor,
+            None => false,
+        }
+    }
+
+    /// Returns the selection range as (start, end) in document order.
+    ///
+    /// Returns `None` if there is no active selection.
+    pub fn selection_range(&self) -> Option<(Position, Position)> {
+        let anchor = self.selection_anchor?;
+        if anchor == self.cursor {
+            return None;
+        }
+        // Return in document order (start <= end)
+        if anchor < self.cursor {
+            Some((anchor, self.cursor))
+        } else {
+            Some((self.cursor, anchor))
+        }
+    }
+
+    /// Returns the text within the selection range.
+    ///
+    /// Returns `None` if there is no active selection.
+    pub fn selected_text(&self) -> Option<String> {
+        let (start, end) = self.selection_range()?;
+        let start_offset = self.position_to_offset(start);
+        let end_offset = self.position_to_offset(end);
+        Some(self.buffer.slice(start_offset, end_offset))
+    }
+
+    /// Selects all text in the buffer.
+    ///
+    /// Sets the anchor to the start of the buffer and cursor to the end.
+    pub fn select_all(&mut self) {
+        self.selection_anchor = Some(Position::new(0, 0));
+        // Set cursor to buffer end without clearing selection
+        let last_line = self.line_count().saturating_sub(1);
+        let last_col = self.line_len(last_line);
+        self.cursor = Position::new(last_line, last_col);
+    }
+
+    /// Deletes the selected text and places the cursor at the start of the former selection.
+    ///
+    /// Returns `DirtyLines::None` if there is no active selection.
+    pub fn delete_selection(&mut self) -> DirtyLines {
+        let (start, end) = match self.selection_range() {
+            Some(range) => range,
+            None => return DirtyLines::None,
+        };
+
+        let is_multiline = start.line != end.line;
+        let start_line = start.line;
+
+        // Convert positions to offsets
+        let start_offset = self.position_to_offset(start);
+        let end_offset = self.position_to_offset(end);
+        let chars_to_delete = end_offset - start_offset;
+
+        // Position cursor at end of selection and delete backward
+        self.cursor = end;
+        self.sync_gap_to_cursor();
+
+        // Delete characters one by one from end to start
+        // This is O(n) in selection size but correct
+        for _ in 0..chars_to_delete {
+            let deleted = self.buffer.delete_backward();
+            if let Some(ch) = deleted {
+                if ch == '\n' {
+                    // Removing a newline joins lines
+                    let prev_line = self.cursor.line - 1;
+                    let prev_line_len_before = self.line_len(prev_line);
+                    self.line_index.remove_newline(prev_line);
+                    self.cursor.line = prev_line;
+                    self.cursor.col = prev_line_len_before;
+                } else {
+                    // Regular character deletion
+                    self.line_index.remove_char(self.cursor.line);
+                    self.cursor.col -= 1;
+                }
+                self.sync_gap_to_cursor();
+            }
+        }
+
+        // Clear selection anchor
+        self.selection_anchor = None;
+
+        // Cursor should now be at start position
+        self.assert_line_index_consistent();
+
+        if is_multiline {
+            DirtyLines::FromLineToEnd(start_line)
+        } else {
+            DirtyLines::Single(start_line)
+        }
+    }
+
     // ==================== Cursor Movement ====================
 
     /// Converts a (line, col) position to a buffer offset.
@@ -129,7 +260,9 @@ impl TextBuffer {
     ///
     /// If at the beginning of a line, moves to the end of the previous line.
     /// If at the beginning of the buffer, does nothing.
+    /// Clears any active selection.
     pub fn move_left(&mut self) {
+        self.clear_selection();
         if self.cursor.col > 0 {
             self.cursor.col -= 1;
         } else if self.cursor.line > 0 {
@@ -142,7 +275,9 @@ impl TextBuffer {
     ///
     /// If at the end of a line, moves to the beginning of the next line.
     /// If at the end of the buffer, does nothing.
+    /// Clears any active selection.
     pub fn move_right(&mut self) {
+        self.clear_selection();
         let line_len = self.line_len(self.cursor.line);
 
         if self.cursor.col < line_len {
@@ -157,7 +292,9 @@ impl TextBuffer {
     ///
     /// The column is clamped to the length of the target line.
     /// If at the first line, does nothing.
+    /// Clears any active selection.
     pub fn move_up(&mut self) {
+        self.clear_selection();
         if self.cursor.line > 0 {
             self.cursor.line -= 1;
             let line_len = self.line_len(self.cursor.line);
@@ -169,7 +306,9 @@ impl TextBuffer {
     ///
     /// The column is clamped to the length of the target line.
     /// If at the last line, does nothing.
+    /// Clears any active selection.
     pub fn move_down(&mut self) {
+        self.clear_selection();
         if self.cursor.line + 1 < self.line_count() {
             self.cursor.line += 1;
             let line_len = self.line_len(self.cursor.line);
@@ -178,22 +317,30 @@ impl TextBuffer {
     }
 
     /// Moves the cursor to the start of the current line.
+    /// Clears any active selection.
     pub fn move_to_line_start(&mut self) {
+        self.clear_selection();
         self.cursor.col = 0;
     }
 
     /// Moves the cursor to the end of the current line.
+    /// Clears any active selection.
     pub fn move_to_line_end(&mut self) {
+        self.clear_selection();
         self.cursor.col = self.line_len(self.cursor.line);
     }
 
     /// Moves the cursor to the start of the buffer (line 0, column 0).
+    /// Clears any active selection.
     pub fn move_to_buffer_start(&mut self) {
+        self.clear_selection();
         self.cursor = Position::new(0, 0);
     }
 
     /// Moves the cursor to the end of the buffer.
+    /// Clears any active selection.
     pub fn move_to_buffer_end(&mut self) {
+        self.clear_selection();
         let last_line = self.line_count().saturating_sub(1);
         let last_col = self.line_len(last_line);
         self.cursor = Position::new(last_line, last_col);
@@ -202,7 +349,9 @@ impl TextBuffer {
     /// Sets the cursor to an arbitrary position.
     ///
     /// The position is clamped to valid bounds.
+    /// Clears any active selection.
     pub fn set_cursor(&mut self, pos: Position) {
+        self.clear_selection();
         let line = pos.line.min(self.line_count().saturating_sub(1));
         let col = pos.col.min(self.line_len(line));
         self.cursor = Position::new(line, col);
@@ -249,11 +398,15 @@ impl TextBuffer {
 
     /// Inserts a character at the cursor position.
     ///
+    /// If there is an active selection, deletes it first before inserting.
     /// Returns the dirty lines affected by this operation.
     pub fn insert_char(&mut self, ch: char) -> DirtyLines {
         if ch == '\n' {
             return self.insert_newline();
         }
+
+        // Delete selection first if present
+        let mut dirty = self.delete_selection();
 
         self.sync_gap_to_cursor();
         self.buffer.insert(ch);
@@ -263,13 +416,18 @@ impl TextBuffer {
         self.cursor.col += 1;
 
         self.assert_line_index_consistent();
-        DirtyLines::Single(dirty_line)
+        dirty.merge(DirtyLines::Single(dirty_line));
+        dirty
     }
 
     /// Inserts a newline at the cursor position, splitting the current line.
     ///
+    /// If there is an active selection, deletes it first before inserting.
     /// Returns the dirty lines affected by this operation.
     pub fn insert_newline(&mut self) -> DirtyLines {
+        // Delete selection first if present
+        let mut dirty = self.delete_selection();
+
         self.sync_gap_to_cursor();
         let offset = self.position_to_offset(self.cursor);
 
@@ -283,14 +441,21 @@ impl TextBuffer {
         self.cursor.col = 0;
 
         self.assert_line_index_consistent();
-        DirtyLines::FromLineToEnd(dirty_from)
+        dirty.merge(DirtyLines::FromLineToEnd(dirty_from));
+        dirty
     }
 
     /// Deletes the character before the cursor (Backspace).
     ///
+    /// If there is an active selection, deletes the selection instead.
     /// Returns the dirty lines affected by this operation.
-    /// If at the beginning of the buffer, returns `DirtyLines::None`.
+    /// If at the beginning of the buffer with no selection, returns `DirtyLines::None`.
     pub fn delete_backward(&mut self) -> DirtyLines {
+        // If there's a selection, delete it and return
+        if self.has_selection() {
+            return self.delete_selection();
+        }
+
         if self.cursor.col == 0 && self.cursor.line == 0 {
             // At the very beginning of the buffer
             return DirtyLines::None;
@@ -333,9 +498,15 @@ impl TextBuffer {
 
     /// Deletes the character after the cursor (Delete key).
     ///
+    /// If there is an active selection, deletes the selection instead.
     /// Returns the dirty lines affected by this operation.
-    /// If at the end of the buffer, returns `DirtyLines::None`.
+    /// If at the end of the buffer with no selection, returns `DirtyLines::None`.
     pub fn delete_forward(&mut self) -> DirtyLines {
+        // If there's a selection, delete it and return
+        if self.has_selection() {
+            return self.delete_selection();
+        }
+
         let line_len = self.line_len(self.cursor.line);
         let is_last_line = self.cursor.line + 1 >= self.line_count();
 
@@ -425,6 +596,7 @@ impl TextBuffer {
 
     /// Inserts a string at the cursor position.
     ///
+    /// If there is an active selection, deletes it first before inserting.
     /// This is a convenience method that inserts each character in sequence.
     /// Returns the combined dirty region.
     pub fn insert_str(&mut self, s: &str) -> DirtyLines {
@@ -432,6 +604,8 @@ impl TextBuffer {
             return DirtyLines::None;
         }
 
+        // Delete selection first if present
+        let mut dirty = self.delete_selection();
         let start_line = self.cursor.line;
         let mut has_newline = false;
 
@@ -439,14 +613,17 @@ impl TextBuffer {
             if ch == '\n' {
                 has_newline = true;
             }
+            // Note: insert_char won't delete selection again since we already cleared it
             let _ = self.insert_char(ch);
         }
 
-        if has_newline {
+        let insert_dirty = if has_newline {
             DirtyLines::FromLineToEnd(start_line)
         } else {
             DirtyLines::Single(start_line)
-        }
+        };
+        dirty.merge(insert_dirty);
+        dirty
     }
 }
 
@@ -459,6 +636,371 @@ impl Default for TextBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ==================== Selection Anchor Tests ====================
+
+    #[test]
+    fn test_set_selection_anchor() {
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.set_selection_anchor(Position::new(0, 2));
+        assert_eq!(buf.selection_anchor, Some(Position::new(0, 2)));
+    }
+
+    #[test]
+    fn test_set_selection_anchor_at_cursor() {
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.set_cursor(Position::new(1, 3));
+        buf.set_selection_anchor_at_cursor();
+        assert_eq!(buf.selection_anchor, Some(Position::new(1, 3)));
+    }
+
+    #[test]
+    fn test_clear_selection() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_selection_anchor(Position::new(0, 2));
+        buf.clear_selection();
+        assert_eq!(buf.selection_anchor, None);
+    }
+
+    #[test]
+    fn test_has_selection_false_when_no_anchor() {
+        let buf = TextBuffer::from_str("hello");
+        assert!(!buf.has_selection());
+    }
+
+    #[test]
+    fn test_has_selection_false_when_anchor_equals_cursor() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 3));
+        buf.set_selection_anchor(Position::new(0, 3));
+        assert!(!buf.has_selection());
+    }
+
+    #[test]
+    fn test_has_selection_true_when_selection_exists() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 4));
+        buf.set_selection_anchor(Position::new(0, 1));
+        assert!(buf.has_selection());
+    }
+
+    // ==================== Selection Range Tests ====================
+
+    #[test]
+    fn test_selection_range_forward() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 5));
+        buf.set_selection_anchor(Position::new(0, 0));
+        let range = buf.selection_range().unwrap();
+        assert_eq!(range, (Position::new(0, 0), Position::new(0, 5)));
+    }
+
+    #[test]
+    fn test_selection_range_backward() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 0));
+        buf.set_selection_anchor(Position::new(0, 5));
+        // Should still return in document order (start <= end)
+        let range = buf.selection_range().unwrap();
+        assert_eq!(range, (Position::new(0, 0), Position::new(0, 5)));
+    }
+
+    #[test]
+    fn test_selection_range_multiline() {
+        let mut buf = TextBuffer::from_str("hello\nworld\ntest");
+        buf.set_cursor(Position::new(2, 2));
+        buf.set_selection_anchor(Position::new(0, 3));
+        let range = buf.selection_range().unwrap();
+        assert_eq!(range, (Position::new(0, 3), Position::new(2, 2)));
+    }
+
+    #[test]
+    fn test_selection_range_none_when_no_anchor() {
+        let buf = TextBuffer::from_str("hello");
+        assert!(buf.selection_range().is_none());
+    }
+
+    #[test]
+    fn test_selected_text_single_line() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 4));
+        buf.set_selection_anchor(Position::new(0, 1));
+        assert_eq!(buf.selected_text(), Some("ell".to_string()));
+    }
+
+    #[test]
+    fn test_selected_text_multiline() {
+        let mut buf = TextBuffer::from_str("hello\nworld\ntest");
+        buf.set_cursor(Position::new(1, 3));
+        buf.set_selection_anchor(Position::new(0, 3));
+        // Should get "lo\nwor"
+        assert_eq!(buf.selected_text(), Some("lo\nwor".to_string()));
+    }
+
+    #[test]
+    fn test_selected_text_empty_when_anchor_equals_cursor() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 3));
+        buf.set_selection_anchor(Position::new(0, 3));
+        assert!(buf.selected_text().is_none());
+    }
+
+    // ==================== Select All Tests ====================
+
+    #[test]
+    fn test_select_all_empty_buffer() {
+        let mut buf = TextBuffer::new();
+        buf.select_all();
+        // Empty buffer: anchor at (0,0), cursor at (0,0), no selection
+        assert_eq!(buf.selection_anchor, Some(Position::new(0, 0)));
+        assert_eq!(buf.cursor_position(), Position::new(0, 0));
+        assert!(!buf.has_selection());
+    }
+
+    #[test]
+    fn test_select_all_single_line() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.select_all();
+        assert_eq!(buf.selection_anchor, Some(Position::new(0, 0)));
+        assert_eq!(buf.cursor_position(), Position::new(0, 5));
+        assert!(buf.has_selection());
+        assert_eq!(buf.selected_text(), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_select_all_multiline() {
+        let mut buf = TextBuffer::from_str("hello\nworld\ntest");
+        buf.select_all();
+        assert_eq!(buf.selection_anchor, Some(Position::new(0, 0)));
+        assert_eq!(buf.cursor_position(), Position::new(2, 4)); // end of "test"
+        assert!(buf.has_selection());
+        assert_eq!(buf.selected_text(), Some("hello\nworld\ntest".to_string()));
+    }
+
+    // ==================== Delete Selection Tests ====================
+
+    #[test]
+    fn test_delete_selection_single_line() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 4));
+        buf.set_selection_anchor(Position::new(0, 1));
+        let dirty = buf.delete_selection();
+        assert_eq!(buf.content(), "ho");
+        assert_eq!(buf.cursor_position(), Position::new(0, 1));
+        assert_eq!(buf.selection_anchor, None);
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_selection_multiline() {
+        let mut buf = TextBuffer::from_str("hello\nworld\ntest");
+        buf.set_cursor(Position::new(1, 3));
+        buf.set_selection_anchor(Position::new(0, 3));
+        let dirty = buf.delete_selection();
+        assert_eq!(buf.content(), "helld\ntest");
+        assert_eq!(buf.cursor_position(), Position::new(0, 3));
+        assert_eq!(buf.selection_anchor, None);
+        // Multi-line deletion should return FromLineToEnd
+        assert_eq!(dirty, DirtyLines::FromLineToEnd(0));
+    }
+
+    #[test]
+    fn test_delete_selection_backward_selection() {
+        // Anchor after cursor
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 1));
+        buf.set_selection_anchor(Position::new(0, 4));
+        let dirty = buf.delete_selection();
+        assert_eq!(buf.content(), "ho");
+        assert_eq!(buf.cursor_position(), Position::new(0, 1));
+        assert_eq!(buf.selection_anchor, None);
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_selection_clears_anchor() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 4));
+        buf.set_selection_anchor(Position::new(0, 1));
+        let _ = buf.delete_selection();
+        assert_eq!(buf.selection_anchor, None);
+    }
+
+    #[test]
+    fn test_delete_selection_cursor_at_start() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 4));
+        buf.set_selection_anchor(Position::new(0, 1));
+        let _ = buf.delete_selection();
+        // Cursor should be at the start of the former selection
+        assert_eq!(buf.cursor_position(), Position::new(0, 1));
+    }
+
+    #[test]
+    fn test_delete_selection_no_op_when_no_selection() {
+        let mut buf = TextBuffer::from_str("hello");
+        // No selection anchor set
+        let dirty = buf.delete_selection();
+        assert_eq!(buf.content(), "hello");
+        assert_eq!(dirty, DirtyLines::None);
+    }
+
+    #[test]
+    fn test_delete_selection_no_op_when_anchor_equals_cursor() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 2));
+        buf.set_selection_anchor(Position::new(0, 2));
+        let dirty = buf.delete_selection();
+        assert_eq!(buf.content(), "hello");
+        assert_eq!(dirty, DirtyLines::None);
+    }
+
+    // ==================== Mutations with Selection Tests ====================
+
+    #[test]
+    fn test_insert_char_with_selection_replaces() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 4));
+        buf.set_selection_anchor(Position::new(0, 1)); // selects "ell"
+        let _ = buf.insert_char('X');
+        assert_eq!(buf.content(), "hXo");
+        assert!(!buf.has_selection());
+    }
+
+    #[test]
+    fn test_insert_newline_with_selection_replaces() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 4));
+        buf.set_selection_anchor(Position::new(0, 1)); // selects "ell"
+        let _ = buf.insert_newline();
+        assert_eq!(buf.content(), "h\no");
+        assert_eq!(buf.line_count(), 2);
+        assert!(!buf.has_selection());
+    }
+
+    #[test]
+    fn test_insert_str_with_selection_replaces() {
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 11));
+        buf.set_selection_anchor(Position::new(0, 6)); // selects "world"
+        let _ = buf.insert_str("universe");
+        assert_eq!(buf.content(), "hello universe");
+        assert!(!buf.has_selection());
+    }
+
+    #[test]
+    fn test_delete_backward_with_selection_deletes_selection() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 4));
+        buf.set_selection_anchor(Position::new(0, 1)); // selects "ell"
+        let _ = buf.delete_backward();
+        // Should delete only the selection, not an additional char
+        assert_eq!(buf.content(), "ho");
+        assert!(!buf.has_selection());
+    }
+
+    #[test]
+    fn test_delete_forward_with_selection_deletes_selection() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 4));
+        buf.set_selection_anchor(Position::new(0, 1)); // selects "ell"
+        let _ = buf.delete_forward();
+        // Should delete only the selection, not an additional char
+        assert_eq!(buf.content(), "ho");
+        assert!(!buf.has_selection());
+    }
+
+    // ==================== Movement Clears Selection Tests ====================
+
+    #[test]
+    fn test_move_left_clears_selection() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 4));
+        buf.set_selection_anchor(Position::new(0, 1));
+        buf.move_left();
+        assert!(!buf.has_selection());
+        assert_eq!(buf.selection_anchor, None);
+    }
+
+    #[test]
+    fn test_move_right_clears_selection() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 4));
+        buf.set_selection_anchor(Position::new(0, 1));
+        buf.move_right();
+        assert!(!buf.has_selection());
+        assert_eq!(buf.selection_anchor, None);
+    }
+
+    #[test]
+    fn test_move_up_clears_selection() {
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.set_cursor(Position::new(1, 2));
+        buf.set_selection_anchor(Position::new(1, 0));
+        buf.move_up();
+        assert!(!buf.has_selection());
+        assert_eq!(buf.selection_anchor, None);
+    }
+
+    #[test]
+    fn test_move_down_clears_selection() {
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.set_cursor(Position::new(0, 4));
+        buf.set_selection_anchor(Position::new(0, 1));
+        buf.move_down();
+        assert!(!buf.has_selection());
+        assert_eq!(buf.selection_anchor, None);
+    }
+
+    #[test]
+    fn test_move_to_line_start_clears_selection() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 4));
+        buf.set_selection_anchor(Position::new(0, 1));
+        buf.move_to_line_start();
+        assert!(!buf.has_selection());
+        assert_eq!(buf.selection_anchor, None);
+    }
+
+    #[test]
+    fn test_move_to_line_end_clears_selection() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 3));
+        buf.set_selection_anchor(Position::new(0, 1));
+        buf.move_to_line_end();
+        assert!(!buf.has_selection());
+        assert_eq!(buf.selection_anchor, None);
+    }
+
+    #[test]
+    fn test_move_to_buffer_start_clears_selection() {
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.set_cursor(Position::new(1, 2));
+        buf.set_selection_anchor(Position::new(0, 3));
+        buf.move_to_buffer_start();
+        assert!(!buf.has_selection());
+        assert_eq!(buf.selection_anchor, None);
+    }
+
+    #[test]
+    fn test_move_to_buffer_end_clears_selection() {
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.set_cursor(Position::new(0, 4));
+        buf.set_selection_anchor(Position::new(0, 1));
+        buf.move_to_buffer_end();
+        assert!(!buf.has_selection());
+        assert_eq!(buf.selection_anchor, None);
+    }
+
+    #[test]
+    fn test_set_cursor_clears_selection() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 4));
+        buf.set_selection_anchor(Position::new(0, 1));
+        buf.set_cursor(Position::new(0, 2));
+        assert!(!buf.has_selection());
+        assert_eq!(buf.selection_anchor, None);
+    }
 
     // ==================== Basic Tests ====================
 
