@@ -96,8 +96,8 @@ fn resolve_command(event: &KeyEvent) -> Option<Command> {
         // Ctrl+E → end of line (Emacs-style)
         Key::Char('e') if mods.control && !mods.command => Some(Command::MoveToLineEnd),
 
-        // Cmd+K → kill line (delete to end of line)
-        Key::Char('k') if mods.command && !mods.control => Some(Command::DeleteToLineEnd),
+        // Ctrl+K → kill line (delete to end of line)
+        Key::Char('k') if mods.control && !mods.command => Some(Command::DeleteToLineEnd),
 
         // Unhandled
         _ => None,
@@ -556,10 +556,10 @@ mod tests {
         assert!(dirty.is_dirty());
     }
 
-    // ==================== Cmd+K Kill Line Tests ====================
+    // ==================== Ctrl+K Kill Line Tests ====================
 
     #[test]
-    fn test_cmd_k_deletes_to_line_end() {
+    fn test_ctrl_k_deletes_to_line_end() {
         let mut buffer = TextBuffer::from_str("hello world");
         buffer.set_cursor(Position::new(0, 5)); // After "hello"
         let mut viewport = Viewport::new(16.0);
@@ -572,7 +572,7 @@ mod tests {
             let event = KeyEvent::new(
                 Key::Char('k'),
                 Modifiers {
-                    command: true,
+                    control: true,
                     ..Default::default()
                 },
             );
@@ -586,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cmd_k_joins_lines_at_end_of_line() {
+    fn test_ctrl_k_joins_lines_at_end_of_line() {
         let mut buffer = TextBuffer::from_str("hello\nworld");
         buffer.set_cursor(Position::new(0, 5)); // At end of "hello"
         let mut viewport = Viewport::new(16.0);
@@ -599,7 +599,7 @@ mod tests {
             let event = KeyEvent::new(
                 Key::Char('k'),
                 Modifiers {
-                    command: true,
+                    control: true,
                     ..Default::default()
                 },
             );
@@ -612,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cmd_k_at_buffer_end_is_noop() {
+    fn test_ctrl_k_at_buffer_end_is_noop() {
         let mut buffer = TextBuffer::from_str("hello");
         buffer.move_to_buffer_end();
         let mut viewport = Viewport::new(16.0);
@@ -625,7 +625,7 @@ mod tests {
             let event = KeyEvent::new(
                 Key::Char('k'),
                 Modifiers {
-                    command: true,
+                    control: true,
                     ..Default::default()
                 },
             );
@@ -637,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cmd_k_from_start_of_line() {
+    fn test_ctrl_k_from_start_of_line() {
         let mut buffer = TextBuffer::from_str("hello");
         buffer.set_cursor(Position::new(0, 0)); // At start
         let mut viewport = Viewport::new(16.0);
@@ -650,7 +650,7 @@ mod tests {
             let event = KeyEvent::new(
                 Key::Char('k'),
                 Modifiers {
-                    command: true,
+                    control: true,
                     ..Default::default()
                 },
             );

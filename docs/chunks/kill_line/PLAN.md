@@ -66,16 +66,16 @@ DeleteToLineEnd,
 
 Location: `crates/editor/src/buffer_target.rs`
 
-### Step 4: Add Cmd+K key binding in `resolve_command`
+### Step 4: Add Ctrl+K key binding in `resolve_command`
 
-Map `Key::Char('k')` with `mods.command && !mods.control` to `Command::DeleteToLineEnd`:
+Map `Key::Char('k')` with `mods.control && !mods.command` to `Command::DeleteToLineEnd`:
 
 ```rust
-// Cmd+K → kill line (delete to end of line)
-Key::Char('k') if mods.command && !mods.control => Some(Command::DeleteToLineEnd),
+// Ctrl+K → kill line (delete to end of line)
+Key::Char('k') if mods.control && !mods.command => Some(Command::DeleteToLineEnd),
 ```
 
-Place this near other Cmd+key bindings in the match.
+Place this near other Ctrl+key bindings in the match.
 
 Location: `crates/editor/src/buffer_target.rs`, in `resolve_command`
 
@@ -94,10 +94,10 @@ This follows the same pattern as `DeleteBackward` and `DeleteForward`.
 
 Location: `crates/editor/src/buffer_target.rs`, in `execute_command`
 
-### Step 6: Add integration tests for Cmd+K via BufferFocusTarget
+### Step 6: Add integration tests for Ctrl+K via BufferFocusTarget
 
 Add tests in `buffer_target.rs` that:
-- Send `KeyEvent` for Cmd+K
+- Send `KeyEvent` for Ctrl+K
 - Verify buffer content after kill
 - Verify dirty region marking
 - Verify `Handled::Yes` is returned

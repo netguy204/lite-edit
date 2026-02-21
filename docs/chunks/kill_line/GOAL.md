@@ -11,7 +11,7 @@ code_references:
   - ref: crates/editor/src/buffer_target.rs#Command::DeleteToLineEnd
     implements: "Command enum variant for kill-line operation"
   - ref: crates/editor/src/buffer_target.rs#resolve_command
-    implements: "Cmd+K key binding resolution to DeleteToLineEnd command"
+    implements: "Ctrl+K key binding resolution to DeleteToLineEnd command"
   - ref: crates/editor/src/buffer_target.rs#BufferFocusTarget::execute_command
     implements: "Execute DeleteToLineEnd command via ctx.buffer.delete_to_line_end()"
 narrative: editor_qol_interactions
@@ -26,11 +26,11 @@ created_after:
 - metal_surface
 - viewport_rendering
 ---
-# Cmd+K Kill Line
+# Ctrl+K Kill Line
 
 ## Minor Goal
 
-Add Cmd+K to delete from the cursor position to the end of the current line. This is a standard editor shortcut (originating from Emacs `C-k`) that provides a fast way to clear the remainder of a line without repeatedly pressing Delete. The cursor stays in place; the text from the cursor to the end of the line is removed.
+Add Ctrl+K to delete from the cursor position to the end of the current line. This is a standard editor shortcut (originating from Emacs `C-k`) that provides a fast way to clear the remainder of a line without repeatedly pressing Delete. The cursor stays in place; the text from the cursor to the end of the line is removed.
 
 ## Success Criteria
 
@@ -43,11 +43,11 @@ Add Cmd+K to delete from the cursor position to the end of the current line. Thi
 
 - **`DeleteToLineEnd` command**: Add `DeleteToLineEnd` to the `Command` enum in `buffer_target.rs`.
 
-- **Key binding**: Map `Key::Char('k')` with `mods.command && !mods.control` to `DeleteToLineEnd` in `resolve_command`.
+- **Key binding**: Map `Key::Char('k')` with `mods.control && !mods.command` to `DeleteToLineEnd` in `resolve_command`.
 
 - **Execute command**: In `execute_command`, call `ctx.buffer.delete_to_line_end()`, mark the result dirty, and ensure cursor visibility.
 
-- **Interaction with selection**: If a selection is active when Cmd+K is pressed, the selection should be cleared first (or ignored), then the kill-line operation proceeds from the cursor position. Kill-line operates on the cursor position, not on the selection. (Alternatively, delete the selection first — but standard Emacs behavior ignores the mark on `C-k`, so clearing the selection and operating from cursor is more consistent.)
+- **Interaction with selection**: If a selection is active when Ctrl+K is pressed, the selection should be cleared first (or ignored), then the kill-line operation proceeds from the cursor position. Kill-line operates on the cursor position, not on the selection. (Alternatively, delete the selection first — but standard Emacs behavior ignores the mark on `C-k`, so clearing the selection and operating from cursor is more consistent.)
 
 - **Unit tests**:
   - Kill from middle of line: `"hello world"` with cursor at col 5 → `"hello"`
