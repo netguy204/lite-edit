@@ -280,4 +280,29 @@ Location: `docs/chunks/clipboard_operations/GOAL.md`
 
 ## Deviations
 
-*To be populated during implementation.*
+### Bug: tests contaminated the system clipboard with "hello"
+
+**Symptom**: After running `cargo test`, pasting into the live editor produced "hello" regardless of what the user had actually copied. The word "hello" is the string used in every unit test fixture, so any test that exercised Cmd+C wrote it to NSPasteboard.
+
+**Root cause**: `execute_command` calls `crate::clipboard::copy_to_clipboard` directly, and unit tests drove `execute_command` without any clipboard abstraction. `copy_to_clipboard` always called the real `NSPasteboard::setString_forType`, overwriting the developer's clipboard.
+
+**Fix**: `clipboard.rs` now uses `#[cfg(not(test))]` / `#[cfg(test)]` to compile two separate implementations of `copy_to_clipboard` and `paste_from_clipboard`. The test implementation stores text in a `thread_local! { static MOCK_CLIPBOARD }`. The production NSPasteboard code is completely absent from test builds.
+
+### Bug: `insert_str` was O(n·m) — paste of large text was extremely slow in debug builds
+
+**Symptom**: Pasting a large body of text (thousands of lines) caused the app to stall for seconds to minutes in debug mode, and appeared to produce no output.
+
+**Root cause**: The original `insert_str` called `insert_char` once per character. Each `insert_char` call:
+1. Called `line_index.insert_char(line)` which iterates over all subsequent line starts — O(lines\_after) per character.
+2. Called `assert_line_index_consistent()` which, every 64 mutations, rebuilds the entire line index from scratch — O(buffer\_length) per check, O(n²/64) over the full paste.
+
+Together these made `insert_str` O(n·m) in release and O(n²) in debug for large multi-line inputs.
+
+**Fix** (`crates/buffer/src/text_buffer.rs`, `crates/buffer/src/line_index.rs`):
+- `insert_str` now calls `GapBuffer::insert_str` once (bulk fill, O(n) amortised with a single `ensure_gap` call).
+- It then does a single O(n + m) line-index update:
+  1. One pass over the inserted string to record the absolute offset of every `\n` and count characters.
+  2. `line_index.line_starts_after_mut(start_line)` — shift all existing line starts after the insertion point by `char_count` in a single slice-mutation loop.
+  3. `line_index.insert_line_starts_after(start_line, &new_line_starts)` — splice the new entries into the sorted array.
+- `assert_line_index_consistent` is called once at the end, not inside the loop.
+- Two new `LineIndex` methods were added: `line_starts_after_mut` and `insert_line_starts_after`.

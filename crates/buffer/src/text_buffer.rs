@@ -748,20 +748,58 @@ impl TextBuffer {
             return DirtyLines::None;
         }
 
-        // Delete selection first if present
+        // Delete any active selection first.
         let mut dirty = self.delete_selection();
+
         let start_line = self.cursor.line;
-        let mut has_newline = false;
+        let start_col = self.cursor.col;
+        let start_offset = self.position_to_offset(self.cursor);
+
+        // ── single-pass scan of the inserted string ───────────────────────
+        // Collect absolute line-start offsets for every '\n' found, and track
+        // how many non-newline characters follow the last newline (for cursor col).
+        let mut new_line_starts: Vec<usize> = Vec::new();
+        let mut char_count: usize = 0;
+        let mut chars_since_last_newline: usize = 0;
 
         for ch in s.chars() {
+            char_count += 1;
             if ch == '\n' {
-                has_newline = true;
+                // The new line begins at the offset immediately after this '\n'.
+                new_line_starts.push(start_offset + char_count);
+                chars_since_last_newline = 0;
+            } else {
+                chars_since_last_newline += 1;
             }
-            // Note: insert_char won't delete selection again since we already cleared it
-            let _ = self.insert_char(ch);
         }
 
-        let insert_dirty = if has_newline {
+        // ── bulk gap-buffer insertion (O(n) amortised) ────────────────────
+        // Move the gap once to the cursor position, then fill it in one pass.
+        // This avoids the O(n·m) cost of calling sync_gap_to_cursor() and
+        // line_index.insert_char() once per character inside a loop.
+        self.sync_gap_to_cursor();
+        self.buffer.insert_str(s);
+
+        // ── bulk line-index update (O(char_count + existing_lines)) ───────
+        // Step 1: shift every existing line start that falls after start_line.
+        for ls in self.line_index.line_starts_after_mut(start_line) {
+            *ls += char_count;
+        }
+        // Step 2: splice in the new line starts produced by '\n' characters.
+        self.line_index.insert_line_starts_after(start_line, &new_line_starts);
+
+        // ── cursor update ─────────────────────────────────────────────────
+        let newline_count = new_line_starts.len();
+        if newline_count > 0 {
+            self.cursor.line = start_line + newline_count;
+            self.cursor.col = chars_since_last_newline;
+        } else {
+            self.cursor.col = start_col + char_count;
+        }
+
+        self.assert_line_index_consistent();
+
+        let insert_dirty = if newline_count > 0 {
             DirtyLines::FromLineToEnd(start_line)
         } else {
             DirtyLines::Single(start_line)
@@ -1547,6 +1585,74 @@ mod tests {
         let dirty = buf.insert_str("");
         assert_eq!(buf.content(), "hello");
         assert_eq!(dirty, DirtyLines::None);
+    }
+
+    #[test]
+    fn test_insert_str_cursor_after_no_newlines() {
+        // Cursor ends at start_col + inserted chars on the same line.
+        let mut buf = TextBuffer::new();
+        buf.insert_str("abc");
+        assert_eq!(buf.cursor_position(), Position::new(0, 3));
+    }
+
+    #[test]
+    fn test_insert_str_cursor_after_newlines() {
+        // Cursor ends at (start_line + newline_count, chars_after_last_newline).
+        let mut buf = TextBuffer::new();
+        buf.insert_str("hello\nworld\nfoo");
+        // 2 newlines → cursor on line 2, col = len("foo") = 3
+        assert_eq!(buf.cursor_position(), Position::new(2, 3));
+    }
+
+    #[test]
+    fn test_insert_str_into_middle_of_multiline_buffer() {
+        // Inserting at the start of an existing multiline buffer must shift
+        // all subsequent line starts correctly.
+        let mut buf = TextBuffer::from_str("beta\ngamma");
+        buf.set_cursor(Position::new(0, 0));
+        buf.insert_str("alpha\n");
+        assert_eq!(buf.content(), "alpha\nbeta\ngamma");
+        assert_eq!(buf.line_count(), 3);
+        assert_eq!(buf.line_content(0), "alpha");
+        assert_eq!(buf.line_content(1), "beta");
+        assert_eq!(buf.line_content(2), "gamma");
+        // Cursor just after the inserted newline → start of line 1, col 0.
+        assert_eq!(buf.cursor_position(), Position::new(1, 0));
+    }
+
+    #[test]
+    fn test_insert_str_replaces_selection() {
+        // If a selection is active, insert_str must delete it first.
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 11));
+        buf.set_selection_anchor(Position::new(0, 6));
+        buf.insert_str("Rust");
+        assert_eq!(buf.content(), "hello Rust");
+        assert!(!buf.has_selection());
+    }
+
+    #[test]
+    fn test_insert_str_large_no_newlines() {
+        // 10 000 character insert — verifies no truncation and correct line index.
+        let big = "x".repeat(10_000);
+        let mut buf = TextBuffer::new();
+        buf.insert_str(&big);
+        assert_eq!(buf.content().len(), 10_000);
+        assert_eq!(buf.line_count(), 1);
+        assert_eq!(buf.cursor_position(), Position::new(0, 10_000));
+    }
+
+    #[test]
+    fn test_insert_str_large_with_newlines() {
+        // 1 000-line insert — verifies line index has the right number of entries.
+        let line = "hello world\n";
+        let big = line.repeat(1_000);
+        let mut buf = TextBuffer::new();
+        buf.insert_str(&big);
+        // Each "hello world\n" adds 1 newline → 1 000 newlines → 1 001 lines
+        // (the last empty line after the trailing newline).
+        assert_eq!(buf.line_count(), 1_001);
+        assert_eq!(buf.cursor_position(), Position::new(1_000, 0));
     }
 
     // ==================== Delete To Line End Tests ====================

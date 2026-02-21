@@ -155,6 +155,34 @@ impl LineIndex {
         }
     }
 
+    /// Returns a mutable slice of all line starts strictly after `after_line`.
+    ///
+    /// Used by `TextBuffer::insert_str` to shift existing line starts in bulk
+    /// when many characters are inserted at once, avoiding O(n·m) updates.
+    pub fn line_starts_after_mut(&mut self, after_line: usize) -> &mut [usize] {
+        let start = (after_line + 1).min(self.line_starts.len());
+        &mut self.line_starts[start..]
+    }
+
+    /// Inserts multiple new line-start offsets after `after_line` in a single
+    /// splice, preserving the ascending sort order of the array.
+    ///
+    /// `new_starts` must already be in ascending order and must logically
+    /// follow `line_starts[after_line]`. Used by `TextBuffer::insert_str`.
+    pub fn insert_line_starts_after(&mut self, after_line: usize, new_starts: &[usize]) {
+        if new_starts.is_empty() {
+            return;
+        }
+        let insert_pos = after_line + 1;
+        let old_len = self.line_starts.len();
+        let add = new_starts.len();
+
+        // Extend storage, then shift the tail right to make room.
+        self.line_starts.resize(old_len + add, 0);
+        self.line_starts.copy_within(insert_pos..old_len, insert_pos + add);
+        self.line_starts[insert_pos..insert_pos + add].copy_from_slice(new_starts);
+    }
+
     /// Returns the raw line_starts array (for debug validation).
     #[cfg(any(debug_assertions, test))]
     pub fn line_starts(&self) -> &[usize] {
