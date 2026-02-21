@@ -1,0 +1,10 @@
+[package]
+name = "alacritty-bench"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+alacritty_terminal = "0.25"
+vte = "0.13"

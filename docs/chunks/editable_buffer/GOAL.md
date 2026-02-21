@@ -1,17 +1,17 @@
 ---
-status: IMPLEMENTING
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
-  - crates/editor/src/input.rs
-  - crates/editor/src/focus.rs
-  - crates/editor/src/context.rs
-  - crates/editor/src/buffer_target.rs
-  - crates/editor/src/editor_state.rs
-  - crates/editor/src/metal_view.rs
-  - crates/editor/src/renderer.rs
-  - crates/editor/src/main.rs
-  - crates/editor/tests/typing_test.rs
+- crates/editor/src/input.rs
+- crates/editor/src/focus.rs
+- crates/editor/src/context.rs
+- crates/editor/src/buffer_target.rs
+- crates/editor/src/editor_state.rs
+- crates/editor/src/metal_view.rs
+- crates/editor/src/renderer.rs
+- crates/editor/src/main.rs
+- crates/editor/tests/typing_test.rs
 code_references: []
 narrative: null
 investigation: editor_core_architecture
