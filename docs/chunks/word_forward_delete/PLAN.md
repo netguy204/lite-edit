@@ -1,177 +1,147 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk adds Alt+D forward word deletion, the forward complement to the existing
+Alt+Backspace (`delete_backward_word`). The implementation follows the established
+pattern for deletion commands in this codebase:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **TextBuffer method** — Add `delete_forward_word()` to `TextBuffer` that uses
+   `word_boundary_right` (from `word_boundary_primitives`) to determine the deletion
+   range. The method is symmetrical to `delete_backward_word()` but operates forward
+   from the cursor position.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **Command enum** — Add `DeleteForwardWord` variant to the `Command` enum in
+   `buffer_target.rs`.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/word_forward_delete/GOAL.md)
-with references to the files that you expect to touch.
--->
+3. **Key binding** — Wire `Option+'d'` → `DeleteForwardWord` in `resolve_command`,
+   placing it before the plain `Key::Char('d')` arm to ensure the modifier is
+   checked first.
 
-## Subsystem Considerations
+4. **Execution** — Call `ctx.buffer.delete_forward_word()` in `execute_command`,
+   mark dirty, and ensure cursor visible.
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+The word model is defined in `docs/trunk/SPEC.md#word-model` (whitespace vs
+non-whitespace runs). This chunk delegates boundary computation to `word_boundary_right`
+rather than reimplementing scan logic.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Per `docs/trunk/TESTING_PHILOSOPHY.md`, tests are goal-driven. Each test verifies
+a success criterion from the GOAL.md: cursor mid-word, cursor on whitespace, cursor
+at line end, cursor at line start, active selection, whitespace-only line.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write unit tests for `delete_forward_word` (TDD red phase)
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add tests to the `mod tests` block in `crates/buffer/src/text_buffer.rs` that
+exercise the success criteria. These tests will fail initially since the method
+does not exist.
 
-Example:
+**Test cases:**
+1. Cursor mid-word on non-whitespace (deletes from cursor to word end)
+2. Cursor on whitespace between words (deletes whitespace run only)
+3. Cursor at line end (no-op, returns `DirtyLines::None`)
+4. Cursor at line start (deletes first run)
+5. Active selection (deletes selection, not word)
+6. Line containing only whitespace (deletes whitespace run)
 
-### Step 1: Define the SegmentHeader struct
+Each test follows the pattern of existing `delete_backward_word` tests: construct
+buffer, set cursor, call method, assert content/cursor/dirty.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+**Location:** `crates/buffer/src/text_buffer.rs` (test module at end of file)
 
-Location: src/segment/format.rs
+### Step 2: Implement `TextBuffer::delete_forward_word`
 
-### Step 2: Implement header serialization
+Add the method to `TextBuffer` impl block, immediately after `delete_backward_word`.
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+**Algorithm:**
+1. If selection is active, delegate to `delete_selection()` (consistent with all
+   other deletion operations)
+2. Get line content as `Vec<char>`
+3. If `cursor.col >= line_len`, return `DirtyLines::None` (no-op at line end)
+4. Call `word_boundary_right(chars, cursor.col)` to find the right edge
+5. Compute `chars_to_delete = boundary - cursor.col`
+6. Sync gap to cursor, then call `buffer.delete_forward()` in a loop
+   (or use `delete_forward` N times with line_index updates)
+7. Update line_index via `remove_char` calls
+8. Return `DirtyLines::Single(cursor.line)`
 
-### Step 3: ...
+**Backreference comments:**
+- `// Chunk: docs/chunks/word_forward_delete - Alt+D forward word deletion`
+- `// Spec: docs/trunk/SPEC.md#word-model`
 
----
+**Location:** `crates/buffer/src/text_buffer.rs`
 
-**BACKREFERENCE COMMENTS**
+### Step 3: Verify tests pass (TDD green phase)
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+Run `cargo test -p lite-edit-buffer` and confirm all new tests pass. The existing
+tests must also remain green.
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+### Step 4: Add `DeleteForwardWord` to `Command` enum
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+Add the new variant to the `Command` enum in `crates/editor/src/buffer_target.rs`,
+placed near `DeleteBackwardWord` for conceptual grouping.
 
-Format (place immediately before the symbol):
+```rust
+// Chunk: docs/chunks/word_forward_delete - Alt+D forward word deletion
+/// Delete forward by one word (Alt+D)
+DeleteForwardWord,
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+
+**Location:** `crates/editor/src/buffer_target.rs` (Command enum around line 36)
+
+### Step 5: Wire `Option+'d'` in `resolve_command`
+
+Add a match arm that maps `Key::Char('d')` with `mods.option && !mods.command` to
+`Command::DeleteForwardWord`. This arm must appear **before** the generic
+`Key::Char(ch)` arm at the top of the function.
+
+The best location is just after the `Option+Backspace` arm (around line 111),
+keeping modifier-based deletions grouped together.
+
+```rust
+// Chunk: docs/chunks/word_forward_delete - Alt+D forward word deletion
+// Option+D → delete forward by word (must come before generic Char)
+Key::Char('d') if mods.option && !mods.command => Some(Command::DeleteForwardWord),
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+**Location:** `crates/editor/src/buffer_target.rs` (resolve_command function)
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 6: Execute `DeleteForwardWord` in `execute_command`
+
+Add a match arm in `execute_command` that calls `ctx.buffer.delete_forward_word()`.
+Follow the pattern of `DeleteBackwardWord`: return the dirty lines and let the
+common tail code call `ctx.mark_dirty(dirty)` and `ctx.ensure_cursor_visible()`.
+
+```rust
+// Chunk: docs/chunks/word_forward_delete - Alt+D forward word deletion
+Command::DeleteForwardWord => ctx.buffer.delete_forward_word(),
+```
+
+**Location:** `crates/editor/src/buffer_target.rs` (execute_command method)
+
+### Step 7: Run full test suite
+
+Run `cargo test` for the entire workspace to verify no regressions. The key
+test targets are:
+- `cargo test -p lite-edit-buffer` — unit tests for `delete_forward_word`
+- `cargo test -p lite-edit-editor` — integration tests if any
+
+### Step 8: Update GOAL.md code_paths
+
+Update the `code_paths` frontmatter in `docs/chunks/word_forward_delete/GOAL.md`
+to list the files touched:
+- `crates/buffer/src/text_buffer.rs`
+- `crates/editor/src/buffer_target.rs`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **word_boundary_primitives** — This chunk declares `depends_on: [word_boundary_primitives]`
+  in the GOAL.md frontmatter. The `word_boundary_right` helper must exist before
+  `delete_forward_word` can be implemented.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
-
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
-
-## Deviations
-
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+- **None identified.** The implementation is straightforward and follows the exact
+  pattern of `delete_backward_word`. The word boundary helper already exists and
+  is tested.

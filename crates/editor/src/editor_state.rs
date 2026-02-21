@@ -1378,7 +1378,7 @@ mod tests {
 
         // Manually set scroll offset
         state.viewport.scroll_to(10, 100);
-        assert_eq!(state.viewport.scroll_offset, 10);
+        assert_eq!(state.viewport.scroll_offset(), 10);
 
         // Create a temporary file
         let temp_dir = std::env::temp_dir();
@@ -1391,7 +1391,7 @@ mod tests {
         state.associate_file(temp_file.clone());
 
         // Scroll offset should be reset to 0
-        assert_eq!(state.viewport.scroll_offset, 0);
+        assert_eq!(state.viewport.scroll_offset(), 0);
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_file);
