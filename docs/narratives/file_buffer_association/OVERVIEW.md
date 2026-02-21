@@ -1,5 +1,5 @@
 ---
-status: ACTIVE
+status: COMPLETED
 advances_trunk_goal: "Required Properties: Standard text editor interaction patterns"
 proposed_chunks:
   - prompt: "Implement a FileIndex: a stateful, background-threaded file index that recursively walks a root directory, caches discovered paths incrementally, watches the filesystem with the notify crate, and answers fuzzy queries instantly from the in-memory cache. Key behaviours: (1) empty query returns recently-selected files first (persisted across sessions in <root>/.lite-edit-recent) then the rest alphabetically; (2) a cache_version() AtomicU64 counter increments on every cache mutation so the file picker can poll for new results and stream them in while the walk is still running; (3) record_selection(path) updates and persists the recency list. Excludes dotfiles, target/, node_modules/. No macOS APIs, no UI."
