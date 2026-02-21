@@ -441,6 +441,42 @@ mod tests {
     }
 
     #[test]
+    fn test_home_moves_to_line_start() {
+        let mut buffer = TextBuffer::from_str("hello world");
+        buffer.set_cursor(Position::new(0, 6));
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let event = KeyEvent::new(Key::Home, Modifiers::default());
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(0, 0));
+    }
+
+    #[test]
+    fn test_end_moves_to_line_end() {
+        let mut buffer = TextBuffer::from_str("hello world");
+        buffer.set_cursor(Position::new(0, 0));
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let event = KeyEvent::new(Key::End, Modifiers::default());
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(0, 11));
+    }
+
+    #[test]
     fn test_cursor_movement_past_viewport_scrolls() {
         // Create a buffer with many lines
         let content = (0..50)

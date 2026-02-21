@@ -298,14 +298,32 @@ impl MetalView {
             _ => {}
         }
 
-        // For character keys, use the characters string
-        // This gives us the correct character accounting for shift state
-        let characters = event.characters()?;
+        // For character keys, we need to get the correct character representation.
+        //
+        // When the Control modifier is held, macOS's event.characters() returns
+        // the *interpreted* control character rather than the underlying key.
+        // For example:
+        //   - Ctrl+A → characters() returns '\x01' (SOH control character)
+        //   - Ctrl+E → characters() returns '\x05' (ENQ control character)
+        //
+        // To correctly handle Ctrl+key combinations like Ctrl+A and Ctrl+E for
+        // Emacs-style line navigation, we use charactersIgnoringModifiers() when
+        // Control is active. This returns the unmodified base character ('a', 'e',
+        // etc.) regardless of what control character macOS would normally produce.
+        let flags = event.modifierFlags();
+        let characters = if flags.contains(NSEventModifierFlags::Control) {
+            event.charactersIgnoringModifiers()?
+        } else {
+            // Normal case: use characters() which accounts for Shift state
+            event.characters()?
+        };
         let chars: Vec<char> = characters.to_string().chars().collect();
 
         if chars.len() == 1 {
             let ch = chars[0];
-            // Filter out control characters that we already handled above
+            // Filter out control characters that we already handled above.
+            // Note: When Control is active, we've already used charactersIgnoringModifiers
+            // so ch will be the base character ('a', 'e', etc.), not a control character.
             if ch.is_control() && ch != '\t' && ch != '\r' && ch != '\n' {
                 return None;
             }
