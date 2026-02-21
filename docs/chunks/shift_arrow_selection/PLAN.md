@@ -1,177 +1,110 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk implements Shift+Arrow key selection by building on the existing text selection model from the `text_selection_model` chunk. The approach follows the same stateless chord resolution pattern used for other key bindings in `buffer_target.rs`.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The key design decision is how to preserve the selection anchor when executing movement operations. The existing `move_*` methods on `TextBuffer` unconditionally clear the selection anchor. Rather than modifying the `TextBuffer` API, we use a save/restore pattern: save the anchor position before the move, execute the move (which clears the anchor), then restore the anchor.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
-
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/shift_arrow_selection/GOAL.md)
-with references to the files that you expect to touch.
--->
+The implementation adds:
+1. New `Select*` command variants to the `Command` enum
+2. Updated `resolve_command` to map Shift+Arrow combinations to Select* commands
+3. A helper method `extend_selection_with_move` that implements the anchor preservation pattern
+4. Execute handlers for each Select* command that use the helper
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems are relevant to this chunk. The implementation follows the existing command resolution pattern established in `buffer_target.rs`.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add Select* command variants
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add selection-extending command variants to the `Command` enum in `buffer_target.rs`:
+- `SelectLeft` — extend selection one character left
+- `SelectRight` — extend selection one character right
+- `SelectUp` — extend selection one line up
+- `SelectDown` — extend selection one line down
+- `SelectToLineStart` — extend selection to beginning of line
+- `SelectToLineEnd` — extend selection to end of line
+- `SelectToBufferStart` — extend selection to buffer start
+- `SelectToBufferEnd` — extend selection to buffer end
 
-Example:
+Location: `crates/editor/src/buffer_target.rs`
 
-### Step 1: Define the SegmentHeader struct
+### Step 2: Update resolve_command for Shift+Arrow bindings
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Update the `resolve_command` function to recognize Shift modifier combinations:
+- Shift+Left → `SelectLeft`
+- Shift+Right → `SelectRight`
+- Shift+Up → `SelectUp`
+- Shift+Down → `SelectDown`
+- Shift+Home → `SelectToLineStart`
+- Shift+End → `SelectToLineEnd`
+- Shift+Cmd+Left → `SelectToLineStart`
+- Shift+Cmd+Right → `SelectToLineEnd`
+- Shift+Cmd+Up → `SelectToBufferStart`
+- Shift+Cmd+Down → `SelectToBufferEnd`
+- Shift+Ctrl+A → `SelectToLineStart` (Emacs-style)
+- Shift+Ctrl+E → `SelectToLineEnd` (Emacs-style)
 
-Location: src/segment/format.rs
+Important: Selection bindings must be matched before movement bindings since Shift+Arrow should resolve to Select*, not Move*.
 
-### Step 2: Implement header serialization
+Location: `crates/editor/src/buffer_target.rs`
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+### Step 3: Implement extend_selection_with_move helper
 
-### Step 3: ...
+Add a helper method to `BufferFocusTarget` that:
+1. Determines the anchor position:
+   - If selection exists, compute anchor from `selection_range()` and cursor
+   - If no selection, anchor is current cursor position
+2. Executes the movement operation (which clears selection)
+3. Restores the anchor using `set_selection_anchor()`
+4. Marks dirty and ensures cursor visible
 
----
+This helper encapsulates the anchor preservation pattern so each Select* command can reuse it.
 
-**BACKREFERENCE COMMENTS**
+Location: `crates/editor/src/buffer_target.rs`
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+### Step 4: Implement execute_command handlers for Select* commands
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+Add match arms for each Select* command that call `extend_selection_with_move` with the appropriate movement closure:
+- `SelectLeft` → `|buf| buf.move_left()`
+- `SelectRight` → `|buf| buf.move_right()`
+- `SelectUp` → `|buf| buf.move_up()`
+- `SelectDown` → `|buf| buf.move_down()`
+- `SelectToLineStart` → `|buf| buf.move_to_line_start()`
+- `SelectToLineEnd` → `|buf| buf.move_to_line_end()`
+- `SelectToBufferStart` → `|buf| buf.move_to_buffer_start()`
+- `SelectToBufferEnd` → `|buf| buf.move_to_buffer_end()`
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+Location: `crates/editor/src/buffer_target.rs`
 
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
+### Step 5: Add unit tests
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Add comprehensive unit tests verifying:
+- Shift+Right from no selection creates selection of 1 character
+- Shift+Right×3 selects 3 characters from starting position
+- Shift+Left after Shift+Right shrinks selection
+- Shift+Down extends selection to next line
+- Plain Right after Shift+Right×3 clears selection and moves cursor
+- Shift+Home selects from cursor to line start
+- Shift+End selects from cursor to line end
+- Selection persists when no keys are pressed
+- Existing selection can be extended with Shift+Arrow
+- Shift+Ctrl+A and Shift+Ctrl+E work for Emacs-style selection
+- Shift+Cmd+Up/Down select to buffer start/end
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Location: `crates/editor/src/buffer_target.rs` (tests module)
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- `text_selection_model` chunk must be complete — provides the anchor/cursor selection API on TextBuffer
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
-
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+None identified. The implementation follows established patterns and the selection model is already well-tested.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+None — implementation followed the planned approach.

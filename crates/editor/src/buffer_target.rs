@@ -51,6 +51,23 @@ enum Command {
     MoveToBufferEnd,
     /// Insert a tab character
     InsertTab,
+    // Chunk: docs/chunks/shift_arrow_selection - Shift+Arrow key selection commands
+    /// Extend selection left by one character (Shift+Left)
+    SelectLeft,
+    /// Extend selection right by one character (Shift+Right)
+    SelectRight,
+    /// Extend selection up by one line (Shift+Up)
+    SelectUp,
+    /// Extend selection down by one line (Shift+Down)
+    SelectDown,
+    /// Extend selection to line start (Shift+Home, Shift+Cmd+Left)
+    SelectToLineStart,
+    /// Extend selection to line end (Shift+End, Shift+Cmd+Right)
+    SelectToLineEnd,
+    /// Extend selection to buffer start (Shift+Cmd+Up)
+    SelectToBufferStart,
+    /// Extend selection to buffer end (Shift+Cmd+Down)
+    SelectToBufferEnd,
     // Chunk: docs/chunks/clipboard_operations - Clipboard command variants
     /// Select the entire buffer (Cmd+A)
     SelectAll,
@@ -65,6 +82,7 @@ enum Command {
 /// This is a pure stateless function: (modifiers, key) → Option<Command>.
 /// Per the H2 investigation finding, all target chords are single-step
 /// modifier+key combinations, so no state machine is needed.
+// Chunk: docs/chunks/shift_arrow_selection - Shift+Arrow key selection
 fn resolve_command(event: &KeyEvent) -> Option<Command> {
     let mods = &event.modifiers;
 
@@ -83,6 +101,41 @@ fn resolve_command(event: &KeyEvent) -> Option<Command> {
 
         // Forward delete
         Key::Delete => Some(Command::DeleteForward),
+
+        // === Selection commands (Shift held) ===
+        // Chunk: docs/chunks/shift_arrow_selection - Shift+Arrow key selection
+
+        // Shift+Arrow keys (without Command) → extend selection
+        Key::Left if mods.shift && !mods.command => Some(Command::SelectLeft),
+        Key::Right if mods.shift && !mods.command => Some(Command::SelectRight),
+        Key::Up if mods.shift && !mods.command => Some(Command::SelectUp),
+        Key::Down if mods.shift && !mods.command => Some(Command::SelectDown),
+
+        // Shift+Cmd+Left or Shift+Home → select to line start
+        Key::Left if mods.shift && mods.command => Some(Command::SelectToLineStart),
+        Key::Home if mods.shift => Some(Command::SelectToLineStart),
+
+        // Shift+Cmd+Right or Shift+End → select to line end
+        Key::Right if mods.shift && mods.command => Some(Command::SelectToLineEnd),
+        Key::End if mods.shift => Some(Command::SelectToLineEnd),
+
+        // Shift+Cmd+Up → select to buffer start
+        Key::Up if mods.shift && mods.command => Some(Command::SelectToBufferStart),
+
+        // Shift+Cmd+Down → select to buffer end
+        Key::Down if mods.shift && mods.command => Some(Command::SelectToBufferEnd),
+
+        // Shift+Ctrl+A → select to line start (Emacs-style)
+        Key::Char('a') if mods.shift && mods.control && !mods.command => {
+            Some(Command::SelectToLineStart)
+        }
+
+        // Shift+Ctrl+E → select to line end (Emacs-style)
+        Key::Char('e') if mods.shift && mods.control && !mods.command => {
+            Some(Command::SelectToLineEnd)
+        }
+
+        // === Movement commands (no Shift) ===
 
         // Arrow keys
         Key::Left if !mods.command => Some(Command::MoveLeft),
@@ -197,6 +250,46 @@ impl BufferFocusTarget {
                 ctx.ensure_cursor_visible();
                 return;
             }
+
+            // Chunk: docs/chunks/shift_arrow_selection - Selection extension commands
+            // For all Select* commands:
+            // 1. If no selection anchor is set, set it at the current cursor position
+            // 2. Save the anchor (since move_* methods clear it)
+            // 3. Move the cursor
+            // 4. Restore the anchor to preserve the selection
+
+            Command::SelectLeft => {
+                self.extend_selection_with_move(ctx, |buf| buf.move_left());
+                return;
+            }
+            Command::SelectRight => {
+                self.extend_selection_with_move(ctx, |buf| buf.move_right());
+                return;
+            }
+            Command::SelectUp => {
+                self.extend_selection_with_move(ctx, |buf| buf.move_up());
+                return;
+            }
+            Command::SelectDown => {
+                self.extend_selection_with_move(ctx, |buf| buf.move_down());
+                return;
+            }
+            Command::SelectToLineStart => {
+                self.extend_selection_with_move(ctx, |buf| buf.move_to_line_start());
+                return;
+            }
+            Command::SelectToLineEnd => {
+                self.extend_selection_with_move(ctx, |buf| buf.move_to_line_end());
+                return;
+            }
+            Command::SelectToBufferStart => {
+                self.extend_selection_with_move(ctx, |buf| buf.move_to_buffer_start());
+                return;
+            }
+            Command::SelectToBufferEnd => {
+                self.extend_selection_with_move(ctx, |buf| buf.move_to_buffer_end());
+                return;
+            }
             // Chunk: docs/chunks/clipboard_operations - Clipboard command execution
             Command::SelectAll => {
                 ctx.buffer.select_all();
@@ -226,6 +319,50 @@ impl BufferFocusTarget {
         ctx.mark_dirty(dirty);
 
         // Ensure cursor is visible after mutation
+        ctx.ensure_cursor_visible();
+    }
+
+    /// Extends the selection by executing a movement operation.
+    ///
+    /// This implements the core selection extension logic:
+    /// 1. If no selection anchor is set, set it at the current cursor position
+    /// 2. Save the anchor position (since move_* methods clear it)
+    /// 3. Execute the movement operation
+    /// 4. Restore the anchor to preserve the selection
+    /// 5. Mark affected lines dirty and ensure cursor is visible
+    // Chunk: docs/chunks/shift_arrow_selection - Selection extension helper
+    fn extend_selection_with_move<F>(&self, ctx: &mut EditorContext, move_fn: F)
+    where
+        F: FnOnce(&mut lite_edit_buffer::TextBuffer),
+    {
+        // Determine the anchor position:
+        // - If there's already a selection, compute anchor from selection_range and cursor
+        // - If no selection, the anchor will be the current cursor position
+        let old_cursor = ctx.buffer.cursor_position();
+        let anchor_pos = match ctx.buffer.selection_range() {
+            Some((start, end)) => {
+                // selection_range returns (start, end) in document order
+                // The anchor is whichever end is NOT the cursor
+                if old_cursor == end {
+                    start
+                } else {
+                    end
+                }
+            }
+            None => {
+                // No selection yet - anchor is the current cursor position
+                old_cursor
+            }
+        };
+
+        // Execute the movement (this will clear the selection)
+        move_fn(ctx.buffer);
+
+        // Restore the anchor to preserve/establish the selection
+        ctx.buffer.set_selection_anchor(anchor_pos);
+
+        // Mark dirty and ensure cursor visible
+        ctx.mark_cursor_dirty();
         ctx.ensure_cursor_visible();
     }
 }
@@ -271,6 +408,7 @@ impl FocusTarget for BufferFocusTarget {
         }
     }
 
+    // Chunk: docs/chunks/mouse_drag_selection - Mouse drag selection
     fn handle_mouse(&mut self, event: MouseEvent, ctx: &mut EditorContext) {
         match event.kind {
             MouseEventKind::Down => {
@@ -284,10 +422,50 @@ impl FocusTarget for BufferFocusTarget {
                     |line| ctx.buffer.line_len(line),
                 );
                 ctx.buffer.set_cursor(position);
+                // Set selection anchor for potential drag selection
+                ctx.buffer.set_selection_anchor_at_cursor();
                 ctx.mark_cursor_dirty();
             }
-            MouseEventKind::Up | MouseEventKind::Moved => {
-                // Selection (drag) is a future concern
+            MouseEventKind::Moved => {
+                // Drag: extend selection from anchor to new position
+                let old_cursor = ctx.buffer.cursor_position();
+
+                // Convert pixel position to buffer position
+                let new_position = pixel_to_buffer_position(
+                    event.position,
+                    ctx.view_height,
+                    &ctx.font_metrics,
+                    ctx.viewport.scroll_offset,
+                    ctx.buffer.line_count(),
+                    |line| ctx.buffer.line_len(line),
+                );
+
+                // Move cursor without clearing selection to extend the selection
+                ctx.buffer.move_cursor_preserving_selection(new_position);
+
+                // Mark dirty region covering both old and new selection extents
+                // Get the anchor position for computing dirty region
+                if let Some((start, end)) = ctx.buffer.selection_range() {
+                    // Compute the range of lines affected:
+                    // min(old_cursor, start, end) to max(old_cursor, start, end)
+                    let min_line = old_cursor.line.min(start.line).min(end.line);
+                    let max_line = old_cursor.line.max(start.line).max(end.line);
+                    ctx.dirty_region.merge(crate::dirty_region::DirtyRegion::line_range(
+                        min_line,
+                        max_line + 1,
+                    ));
+                } else {
+                    // No selection (anchor == cursor), just mark cursor line dirty
+                    ctx.mark_cursor_dirty();
+                }
+            }
+            MouseEventKind::Up => {
+                // Finalize selection: if anchor equals cursor, clear selection (click without drag)
+                if !ctx.buffer.has_selection() {
+                    ctx.buffer.clear_selection();
+                }
+                // Otherwise, leave selection active for subsequent copy/replace operations
+                // No cursor position change on mouse-up
             }
         }
     }
@@ -1118,6 +1296,610 @@ mod tests {
         assert_eq!(buffer.cursor_position(), Position::new(0, 0));
     }
 
+    // ==================== Shift+Arrow Selection Tests ====================
+    // Chunk: docs/chunks/shift_arrow_selection - Unit tests for selection extension
+
+    #[test]
+    fn test_shift_right_creates_selection() {
+        let mut buffer = TextBuffer::from_str("hello");
+        buffer.set_cursor(Position::new(0, 0));
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = KeyEvent::new(
+                Key::Right,
+                Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        // Cursor should have moved right
+        assert_eq!(buffer.cursor_position(), Position::new(0, 1));
+        // Selection should exist from (0, 0) to (0, 1)
+        assert!(buffer.has_selection());
+        assert_eq!(
+            buffer.selection_range(),
+            Some((Position::new(0, 0), Position::new(0, 1)))
+        );
+        assert_eq!(buffer.selected_text(), Some("h".to_string()));
+    }
+
+    #[test]
+    fn test_shift_right_x3_selects_three_chars() {
+        let mut buffer = TextBuffer::from_str("hello");
+        buffer.set_cursor(Position::new(0, 0));
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            // Press Shift+Right 3 times
+            for _ in 0..3 {
+                let event = KeyEvent::new(
+                    Key::Right,
+                    Modifiers {
+                        shift: true,
+                        ..Default::default()
+                    },
+                );
+                target.handle_key(event, &mut ctx);
+            }
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(0, 3));
+        assert!(buffer.has_selection());
+        assert_eq!(
+            buffer.selection_range(),
+            Some((Position::new(0, 0), Position::new(0, 3)))
+        );
+        assert_eq!(buffer.selected_text(), Some("hel".to_string()));
+    }
+
+    #[test]
+    fn test_shift_left_after_shift_right_shrinks_selection() {
+        let mut buffer = TextBuffer::from_str("hello");
+        buffer.set_cursor(Position::new(0, 0));
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            // Shift+Right 3 times
+            for _ in 0..3 {
+                let event = KeyEvent::new(
+                    Key::Right,
+                    Modifiers {
+                        shift: true,
+                        ..Default::default()
+                    },
+                );
+                target.handle_key(event, &mut ctx);
+            }
+            // Now Shift+Left once
+            let event = KeyEvent::new(
+                Key::Left,
+                Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(0, 2));
+        assert!(buffer.has_selection());
+        assert_eq!(
+            buffer.selection_range(),
+            Some((Position::new(0, 0), Position::new(0, 2)))
+        );
+        assert_eq!(buffer.selected_text(), Some("he".to_string()));
+    }
+
+    #[test]
+    fn test_shift_down_extends_selection_multiline() {
+        let mut buffer = TextBuffer::from_str("hello\nworld");
+        buffer.set_cursor(Position::new(0, 2)); // At "l" in "hello"
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = KeyEvent::new(
+                Key::Down,
+                Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(1, 2));
+        assert!(buffer.has_selection());
+        // Selection from (0, 2) to (1, 2) which is "llo\nwo"
+        assert_eq!(buffer.selected_text(), Some("llo\nwo".to_string()));
+    }
+
+    #[test]
+    fn test_plain_right_after_selection_clears_selection() {
+        let mut buffer = TextBuffer::from_str("hello");
+        buffer.set_cursor(Position::new(0, 0));
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            // Shift+Right 3 times to select "hel"
+            for _ in 0..3 {
+                let event = KeyEvent::new(
+                    Key::Right,
+                    Modifiers {
+                        shift: true,
+                        ..Default::default()
+                    },
+                );
+                target.handle_key(event, &mut ctx);
+            }
+            // Plain Right (no shift) should clear selection and move cursor
+            let event = KeyEvent::new(Key::Right, Modifiers::default());
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(0, 4));
+        assert!(!buffer.has_selection());
+    }
+
+    #[test]
+    fn test_shift_home_selects_to_line_start() {
+        let mut buffer = TextBuffer::from_str("hello world");
+        buffer.set_cursor(Position::new(0, 6)); // At "w" in "world"
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = KeyEvent::new(
+                Key::Home,
+                Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(0, 0));
+        assert!(buffer.has_selection());
+        assert_eq!(buffer.selected_text(), Some("hello ".to_string()));
+    }
+
+    #[test]
+    fn test_shift_end_selects_to_line_end() {
+        let mut buffer = TextBuffer::from_str("hello world");
+        buffer.set_cursor(Position::new(0, 5)); // At space
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = KeyEvent::new(
+                Key::End,
+                Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(0, 11));
+        assert!(buffer.has_selection());
+        assert_eq!(buffer.selected_text(), Some(" world".to_string()));
+    }
+
+    #[test]
+    fn test_selection_persists_on_shift_release() {
+        // This test verifies that selection persists when no keys are pressed
+        // In practice, this is handled by not clearing the selection until
+        // a non-shift movement happens
+        let mut buffer = TextBuffer::from_str("hello");
+        buffer.set_cursor(Position::new(0, 0));
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            // Shift+Right twice
+            for _ in 0..2 {
+                let event = KeyEvent::new(
+                    Key::Right,
+                    Modifiers {
+                        shift: true,
+                        ..Default::default()
+                    },
+                );
+                target.handle_key(event, &mut ctx);
+            }
+        }
+
+        // Selection should still exist (simulates "shift release")
+        assert!(buffer.has_selection());
+        assert_eq!(buffer.selected_text(), Some("he".to_string()));
+    }
+
+    #[test]
+    fn test_existing_selection_can_be_extended() {
+        // Test that an existing selection (e.g., from mouse drag) can be extended with Shift+Arrow
+        let mut buffer = TextBuffer::from_str("hello world");
+        // Simulate existing selection from (0, 0) to (0, 5)
+        buffer.set_selection_anchor(Position::new(0, 0));
+        buffer.set_cursor(Position::new(0, 5));
+        // Need to re-set the anchor since set_cursor clears it
+        buffer.set_selection_anchor(Position::new(0, 0));
+
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            // Shift+Right to extend selection
+            let event = KeyEvent::new(
+                Key::Right,
+                Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        // Selection should extend from (0, 0) to (0, 6)
+        assert_eq!(buffer.cursor_position(), Position::new(0, 6));
+        assert!(buffer.has_selection());
+        assert_eq!(buffer.selected_text(), Some("hello ".to_string()));
+    }
+
+    #[test]
+    fn test_shift_ctrl_a_selects_to_line_start() {
+        let mut buffer = TextBuffer::from_str("hello");
+        buffer.set_cursor(Position::new(0, 3));
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = KeyEvent::new(
+                Key::Char('a'),
+                Modifiers {
+                    shift: true,
+                    control: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(0, 0));
+        assert!(buffer.has_selection());
+        assert_eq!(buffer.selected_text(), Some("hel".to_string()));
+    }
+
+    #[test]
+    fn test_shift_ctrl_e_selects_to_line_end() {
+        let mut buffer = TextBuffer::from_str("hello");
+        buffer.set_cursor(Position::new(0, 2));
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = KeyEvent::new(
+                Key::Char('e'),
+                Modifiers {
+                    shift: true,
+                    control: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(0, 5));
+        assert!(buffer.has_selection());
+        assert_eq!(buffer.selected_text(), Some("llo".to_string()));
+    }
+
+    #[test]
+    fn test_shift_cmd_up_selects_to_buffer_start() {
+        let mut buffer = TextBuffer::from_str("hello\nworld\ntest");
+        buffer.set_cursor(Position::new(1, 3)); // At 'l' in "world"
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = KeyEvent::new(
+                Key::Up,
+                Modifiers {
+                    shift: true,
+                    command: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(0, 0));
+        assert!(buffer.has_selection());
+        assert_eq!(buffer.selected_text(), Some("hello\nwor".to_string()));
+    }
+
+    #[test]
+    fn test_shift_cmd_down_selects_to_buffer_end() {
+        let mut buffer = TextBuffer::from_str("hello\nworld\ntest");
+        buffer.set_cursor(Position::new(0, 2)); // At 'l' in "hello"
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = KeyEvent::new(
+                Key::Down,
+                Modifiers {
+                    shift: true,
+                    command: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(2, 4)); // End of "test"
+        assert!(buffer.has_selection());
+        assert_eq!(buffer.selected_text(), Some("llo\nworld\ntest".to_string()));
+    }
+
+    #[test]
+    fn test_shift_left_creates_selection() {
+        let mut buffer = TextBuffer::from_str("hello");
+        buffer.set_cursor(Position::new(0, 3)); // At second 'l'
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = KeyEvent::new(
+                Key::Left,
+                Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(0, 2));
+        assert!(buffer.has_selection());
+        // Anchor was at (0, 3), cursor moved to (0, 2)
+        assert_eq!(buffer.selected_text(), Some("l".to_string()));
+    }
+
+    #[test]
+    fn test_shift_up_creates_selection() {
+        let mut buffer = TextBuffer::from_str("hello\nworld");
+        buffer.set_cursor(Position::new(1, 3)); // At 'l' in "world"
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = KeyEvent::new(
+                Key::Up,
+                Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(0, 3));
+        assert!(buffer.has_selection());
+        // Selection from (0, 3) to (1, 3) which is "lo\nwor"
+        assert_eq!(buffer.selected_text(), Some("lo\nwor".to_string()));
+    }
+
+    #[test]
+    fn test_shift_cmd_left_selects_to_line_start() {
+        let mut buffer = TextBuffer::from_str("hello world");
+        buffer.set_cursor(Position::new(0, 8)); // At 'r' in "world"
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = KeyEvent::new(
+                Key::Left,
+                Modifiers {
+                    shift: true,
+                    command: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(0, 0));
+        assert!(buffer.has_selection());
+        assert_eq!(buffer.selected_text(), Some("hello wo".to_string()));
+    }
+
+    #[test]
+    fn test_shift_cmd_right_selects_to_line_end() {
+        let mut buffer = TextBuffer::from_str("hello world");
+        buffer.set_cursor(Position::new(0, 3)); // At second 'l' in "hello"
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = KeyEvent::new(
+                Key::Right,
+                Modifiers {
+                    shift: true,
+                    command: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(0, 11));
+        assert!(buffer.has_selection());
+        assert_eq!(buffer.selected_text(), Some("lo world".to_string()));
+    }
+
     // ==================== Clipboard Operations Tests ====================
     // Chunk: docs/chunks/clipboard_operations - Tests for Cmd+A, Cmd+C, Cmd+V
 
@@ -1493,5 +2275,611 @@ mod tests {
         // Should remain at 0 since 7/16 rounds to 0
         assert_eq!(viewport.scroll_offset, 0);
         assert_eq!(dirty, DirtyRegion::None); // No change, no dirty
+    }
+
+    // ==================== Mouse Drag Selection Tests ====================
+    // Chunk: docs/chunks/mouse_drag_selection - Mouse drag selection
+
+    #[test]
+    fn test_mouse_down_sets_selection_anchor() {
+        // After a mouse down event, the selection anchor should be set at the clicked position
+        let mut buffer = TextBuffer::from_str("hello\nworld\nfoo");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Click on "world" at column 2 (character 'r')
+        // line 1 is at flipped_y in [16, 32), y = 160 - 20 = 140 for flipped_y = 20
+        // x = 16 for column 2 (8 * 2)
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Down,
+                position: (16.0, 140.0),
+                modifiers: Modifiers::default(),
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        // Cursor should be at clicked position
+        assert_eq!(buffer.cursor_position(), Position::new(1, 2));
+        // Selection anchor should be set at the same position
+        assert!(!buffer.has_selection()); // anchor == cursor means no selection yet
+        // But anchor should be Some
+        buffer.move_cursor_preserving_selection(Position::new(1, 4));
+        assert!(buffer.has_selection()); // now anchor != cursor
+    }
+
+    #[test]
+    fn test_mouse_drag_extends_selection() {
+        // Simulate down → moved → moved sequence and verify selection
+        let mut buffer = TextBuffer::from_str("hello\nworld\nfoo");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Mouse down at line 0, column 1 (character 'e')
+        // line 0 is at flipped_y in [0, 16), y = 160 - 5 = 155 for flipped_y = 5
+        // x = 8 for column 1
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Down,
+                position: (8.0, 155.0),
+                modifiers: Modifiers::default(),
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(0, 1));
+        dirty = DirtyRegion::None;
+
+        // Drag to line 1, column 3
+        // line 1 is at flipped_y in [16, 32), y = 160 - 20 = 140
+        // x = 24 for column 3
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Moved,
+                position: (24.0, 140.0),
+                modifiers: Modifiers::default(),
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        // Cursor should be at new position
+        assert_eq!(buffer.cursor_position(), Position::new(1, 3));
+        // Selection should span from anchor to cursor
+        assert!(buffer.has_selection());
+        let range = buffer.selection_range().unwrap();
+        assert_eq!(range, (Position::new(0, 1), Position::new(1, 3)));
+        // Selected text should be "ello\nwor"
+        assert_eq!(buffer.selected_text(), Some("ello\nwor".to_string()));
+        // Dirty region should cover affected lines
+        assert!(dirty.is_dirty());
+
+        // Drag further to line 2, column 2
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Moved,
+                position: (16.0, 124.0), // flipped_y = 36, line 2, x = 16 for col 2
+                modifiers: Modifiers::default(),
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(2, 2));
+        assert_eq!(buffer.selected_text(), Some("ello\nworld\nfo".to_string()));
+    }
+
+    #[test]
+    fn test_click_without_drag_clears_selection() {
+        // Set up an existing selection, then click without drag - should clear selection
+        let mut buffer = TextBuffer::from_str("hello\nworld");
+        buffer.select_all();
+        assert!(buffer.has_selection());
+
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Mouse down at some position
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Down,
+                position: (16.0, 155.0),
+                modifiers: Modifiers::default(),
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        // Mouse up at same position (no drag)
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Up,
+                position: (16.0, 155.0),
+                modifiers: Modifiers::default(),
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        // Selection should be cleared (anchor == cursor means no selection)
+        assert!(!buffer.has_selection());
+    }
+
+    #[test]
+    fn test_drag_then_release_preserves_selection() {
+        // Drag to create selection, then release - selection should remain
+        let mut buffer = TextBuffer::from_str("hello");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Mouse down at column 1
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Down,
+                position: (8.0, 155.0),
+                modifiers: Modifiers::default(),
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        // Drag to column 4
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Moved,
+                position: (32.0, 155.0), // x = 32 for column 4
+                modifiers: Modifiers::default(),
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        // Mouse up
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Up,
+                position: (32.0, 155.0),
+                modifiers: Modifiers::default(),
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        // Selection should remain
+        assert!(buffer.has_selection());
+        assert_eq!(buffer.selected_text(), Some("ell".to_string()));
+    }
+
+    #[test]
+    fn test_drag_past_line_end_clamps_column() {
+        // Click, drag past line end, verify column clamped
+        let mut buffer = TextBuffer::from_str("hi\nworld");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Mouse down at line 0, column 0
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Down,
+                position: (0.0, 155.0),
+                modifiers: Modifiers::default(),
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        // Drag to x = 80 (would be column 10, but "hi" is only 2 chars)
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Moved,
+                position: (80.0, 155.0),
+                modifiers: Modifiers::default(),
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        // Column should be clamped to 2 (end of "hi")
+        assert_eq!(buffer.cursor_position(), Position::new(0, 2));
+        assert_eq!(buffer.selected_text(), Some("hi".to_string()));
+    }
+
+    #[test]
+    fn test_drag_below_last_line_clamps_to_last_line() {
+        // Drag below buffer, verify line clamped
+        let mut buffer = TextBuffer::from_str("hello\nworld");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Mouse down at line 0, column 0
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Down,
+                position: (0.0, 155.0),
+                modifiers: Modifiers::default(),
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        // Drag to y = 60 (flipped_y = 100, which would be line 6)
+        // But buffer only has 2 lines
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Moved,
+                position: (0.0, 60.0), // flipped_y = 100, line 6 if existed
+                modifiers: Modifiers::default(),
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        // Line should be clamped to last line (1)
+        assert_eq!(buffer.cursor_position(), Position::new(1, 0));
+    }
+
+    #[test]
+    fn test_drag_above_first_line_clamps_to_first_line() {
+        // Drag with y that results in negative screen line (above view)
+        let mut buffer = TextBuffer::from_str("hello\nworld");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Mouse down at line 1
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Down,
+                position: (0.0, 140.0), // line 1
+                modifiers: Modifiers::default(),
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        // Drag to y > view_height (below the coordinate origin, i.e., above the view)
+        // NSView uses bottom-left origin, so y > view_height means above the top of the view
+        // flipped_y = view_height - y would be negative
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Moved,
+                position: (0.0, 200.0), // y > view_height, flipped_y < 0
+                modifiers: Modifiers::default(),
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        // Line should be clamped to first line (0)
+        assert_eq!(buffer.cursor_position(), Position::new(0, 0));
+    }
+
+    #[test]
+    fn test_mouse_sequence_down_moved_up() {
+        // Full lifecycle test: down → moved → moved → up
+        let mut buffer = TextBuffer::from_str("hello\nworld\nfoo\nbar");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Mouse down at line 0, column 1
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            target.handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down,
+                    position: (8.0, 155.0),
+                    modifiers: Modifiers::default(),
+                },
+                &mut ctx,
+            );
+        }
+        assert_eq!(buffer.cursor_position(), Position::new(0, 1));
+        assert!(!buffer.has_selection());
+
+        // Drag to line 1, column 2
+        dirty = DirtyRegion::None;
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            target.handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    position: (16.0, 140.0),
+                    modifiers: Modifiers::default(),
+                },
+                &mut ctx,
+            );
+        }
+        assert_eq!(buffer.cursor_position(), Position::new(1, 2));
+        assert!(buffer.has_selection());
+        assert_eq!(buffer.selected_text(), Some("ello\nwo".to_string()));
+        assert!(dirty.is_dirty());
+
+        // Drag to line 2, column 1
+        dirty = DirtyRegion::None;
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            target.handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    position: (8.0, 124.0),
+                    modifiers: Modifiers::default(),
+                },
+                &mut ctx,
+            );
+        }
+        assert_eq!(buffer.cursor_position(), Position::new(2, 1));
+        assert_eq!(buffer.selected_text(), Some("ello\nworld\nf".to_string()));
+        assert!(dirty.is_dirty());
+
+        // Mouse up
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            target.handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Up,
+                    position: (8.0, 124.0),
+                    modifiers: Modifiers::default(),
+                },
+                &mut ctx,
+            );
+        }
+        // Selection should remain after mouse up
+        assert!(buffer.has_selection());
+        assert_eq!(buffer.selected_text(), Some("ello\nworld\nf".to_string()));
+    }
+
+    #[test]
+    fn test_selection_range_during_drag() {
+        // Verify selection_range() returns correct ordered range at each step
+        let mut buffer = TextBuffer::from_str("hello");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Mouse down at column 4
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            target.handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down,
+                    position: (32.0, 155.0),
+                    modifiers: Modifiers::default(),
+                },
+                &mut ctx,
+            );
+        }
+        // No selection yet (anchor == cursor)
+        assert!(buffer.selection_range().is_none());
+
+        // Drag backward to column 1 (backward selection)
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            target.handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    position: (8.0, 155.0),
+                    modifiers: Modifiers::default(),
+                },
+                &mut ctx,
+            );
+        }
+        // selection_range() should return ordered (start, end)
+        let range = buffer.selection_range().unwrap();
+        assert_eq!(range.0, Position::new(0, 1)); // start
+        assert_eq!(range.1, Position::new(0, 4)); // end
+
+        // Selected text should be "ell"
+        assert_eq!(buffer.selected_text(), Some("ell".to_string()));
+    }
+
+    #[test]
+    fn test_drag_updates_dirty_region() {
+        // Verify correct lines are marked dirty during drag
+        let mut buffer = TextBuffer::from_str("line0\nline1\nline2\nline3");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Mouse down at line 1
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            target.handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down,
+                    position: (0.0, 140.0), // line 1
+                    modifiers: Modifiers::default(),
+                },
+                &mut ctx,
+            );
+        }
+        assert_eq!(buffer.cursor_position(), Position::new(1, 0));
+
+        // Reset dirty
+        dirty = DirtyRegion::None;
+
+        // Drag to line 3
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            target.handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    position: (16.0, 108.0), // flipped_y = 52, line 3
+                    modifiers: Modifiers::default(),
+                },
+                &mut ctx,
+            );
+        }
+
+        // Dirty region should cover lines 1 through 3 (the selection span)
+        // DirtyRegion::Lines uses [from, to) half-open interval
+        match dirty {
+            DirtyRegion::Lines { from, to } => {
+                assert!(from <= 1, "dirty from should include line 1");
+                assert!(to > 3, "dirty to should be past line 3");
+            }
+            DirtyRegion::FullViewport => {
+                // Also acceptable
+            }
+            DirtyRegion::None => {
+                panic!("Expected dirty region after drag");
+            }
+        }
     }
 }

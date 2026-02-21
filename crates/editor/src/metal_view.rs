@@ -190,6 +190,30 @@ define_class!(
             }
         }
 
+        // Chunk: docs/chunks/mouse_drag_selection - Mouse drag selection
+        /// Handle mouse dragged events
+        #[unsafe(method(mouseDragged:))]
+        fn __mouse_dragged(&self, event: &NSEvent) {
+            if let Some(mouse_event) = self.convert_mouse_event(event, MouseEventKind::Moved) {
+                let handler = self.ivars().mouse_handler.borrow();
+                if let Some(handler) = handler.as_ref() {
+                    handler(mouse_event);
+                }
+            }
+        }
+
+        // Chunk: docs/chunks/mouse_drag_selection - Mouse drag selection
+        /// Handle mouse up events
+        #[unsafe(method(mouseUp:))]
+        fn __mouse_up(&self, event: &NSEvent) {
+            if let Some(mouse_event) = self.convert_mouse_event(event, MouseEventKind::Up) {
+                let handler = self.ivars().mouse_handler.borrow();
+                if let Some(handler) = handler.as_ref() {
+                    handler(mouse_event);
+                }
+            }
+        }
+
         /// Handle scroll wheel events (trackpad, mouse wheel)
         #[unsafe(method(scrollWheel:))]
         fn __scroll_wheel(&self, event: &NSEvent) {
