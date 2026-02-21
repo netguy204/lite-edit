@@ -23,6 +23,9 @@ proposed_chunks:
   - prompt: "Add Cmd+K to delete from cursor to end of line (kill-line). Add a delete_to_line_end method on TextBuffer that removes characters from the cursor to the end of the current line and returns DirtyLines. Wire it through the Command enum and resolve_command in BufferFocusTarget."
     chunk_directory: kill_line
     depends_on: []
+  - prompt: "Add Shift+Arrow key selection: holding Shift with arrow keys drops an anchor and extends selection. Shift+Left/Right/Up/Down, Shift+Home/End, Shift+Cmd+arrows all extend selection. Selection persists after Shift release until dismissed by plain movement, click, or mutation."
+    chunk_directory: shift_arrow_selection
+    depends_on: [2]
 created_after:
   - editable_buffer
   - viewport_rendering
@@ -59,6 +62,8 @@ lite-edit currently supports basic typing, arrow key movement, and Emacs-style C
 6. **Cmd+A, Cmd+C, Cmd+V (select-all, copy, paste)** — Cmd+A selects entire buffer. Cmd+C copies selection to NSPasteboard. Cmd+V pastes at cursor (replacing selection). Depends on chunk 3.
 
 7. **Cmd+K kill-line** — Delete from cursor to end of line. Add `delete_to_line_end` to TextBuffer, wire through Command enum.
+
+8. **Shift+Arrow key selection** — Holding Shift with arrow keys drops an anchor and extends the selection. Selection persists after Shift release until dismissed by plain movement, click, or mutation. Depends on chunk 3.
 
 ## Completion Criteria
 
