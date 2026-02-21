@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // Chunk: docs/chunks/metal_surface - macOS window + Metal surface foundation
 // Chunk: docs/chunks/glyph_rendering - Monospace glyph atlas + text rendering
 // Chunk: docs/chunks/viewport_rendering - Viewport + Buffer-to-Screen Rendering
