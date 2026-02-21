@@ -8,170 +8,209 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk adds Metal rendering for the `SelectorWidget` overlay. The strategy is to extend the existing `Renderer` with a dedicated method that draws the selector panel on top of the editor content. We build on:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+- **Existing glyph atlas** (`GlyphAtlas`) for text rendering
+- **Existing glyph buffer patterns** (`GlyphBuffer`, `GlyphVertex`, `QuadRange`) for vertex/index construction
+- **Existing solid glyph** (`atlas.solid_glyph()`) for opaque rectangles (background, selection highlight)
+- **Existing dirty region system** (`DirtyRegion::FullViewport`) for triggering redraws
+- **Existing cursor blink timer** in `EditorState` for the query input cursor
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+Per the TESTING_PHILOSOPHY.md Humble View Architecture, the renderer is a humble object — we don't unit-test GPU output. However, we'll extract testable layout math into a pure function for panel geometry calculations.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/selector_rendering/GOAL.md)
-with references to the files that you expect to touch.
--->
+The rendering approach:
+1. Draw the editor content first (existing render path)
+2. Overlay the selector panel on top when active (new code)
+
+The overlay consists of:
+- Background rect (solid opaque dark grey)
+- Query row with blinking cursor
+- Separator line (1px horizontal line)
+- Item list with selection highlight
+
+All quads use the same shader pipeline and atlas — only the colors differ per draw call.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems are documented in this codebase yet. This chunk may contribute to an emergent "overlay rendering" pattern if future features (command palette, tooltips) follow the same approach.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Define overlay layout constants and geometry helper
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create a new module `selector_overlay.rs` (or extend `glyph_buffer.rs`) with:
 
-Example:
+- Layout constants:
+  - `OVERLAY_WIDTH_RATIO: f32 = 0.6` (60% of window width)
+  - `OVERLAY_MIN_WIDTH: f32 = 400.0` (minimum width in pixels)
+  - `OVERLAY_MAX_HEIGHT_RATIO: f32 = 0.5` (50% of window height)
+  - `OVERLAY_TOP_OFFSET_RATIO: f32 = 0.2` (top edge at 20% from top)
+  - `OVERLAY_BACKGROUND_COLOR: [f32; 4] = [0.165, 0.165, 0.165, 1.0]` (#2a2a2a)
+  - `OVERLAY_SELECTION_COLOR: [f32; 4] = [0.0, 0.314, 0.627, 1.0]` (#0050a0)
 
-### Step 1: Define the SegmentHeader struct
+- Pure function `calculate_overlay_geometry`:
+  ```rust
+  pub struct OverlayGeometry {
+      pub panel_x: f32,       // left edge
+      pub panel_y: f32,       // top edge
+      pub panel_width: f32,   // computed width
+      pub panel_height: f32,  // computed height (dynamic based on items)
+      pub query_row_y: f32,   // y for query text
+      pub separator_y: f32,   // y for 1px separator
+      pub list_origin_y: f32, // y where item list starts
+      pub item_height: f32,   // height per item (line_height)
+      pub visible_items: usize, // how many items fit
+  }
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+  pub fn calculate_overlay_geometry(
+      view_width: f32,
+      view_height: f32,
+      line_height: f32,
+      item_count: usize,
+  ) -> OverlayGeometry
+  ```
 
-Location: src/segment/format.rs
+This function is pure and testable.
 
-### Step 2: Implement header serialization
+Location: `crates/editor/src/selector_overlay.rs`
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+### Step 2: Add unit tests for `calculate_overlay_geometry`
 
-### Step 3: ...
+Write tests verifying:
+- Panel width is 60% of view width when view is large enough
+- Panel width clamps to minimum 400px when view is too narrow
+- Panel height caps at 50% of view height when many items
+- Visible items count is computed correctly
+- Panel is positioned at 20% from top vertically
+- Panel is horizontally centered
 
----
+Location: `crates/editor/src/selector_overlay.rs` (in `#[cfg(test)]` module)
 
-**BACKREFERENCE COMMENTS**
+### Step 3: Create `SelectorGlyphBuffer` for overlay vertex construction
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+Create a struct analogous to `GlyphBuffer` but specialized for the selector overlay:
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
+```rust
+pub struct SelectorGlyphBuffer {
+    vertex_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
+    index_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
+    index_count: usize,
+    layout: GlyphLayout,
+    // Quad ranges for different draw phases
+    background_range: QuadRange,    // opaque background
+    query_text_range: QuadRange,    // query string glyphs
+    query_cursor_range: QuadRange,  // blinking cursor
+    separator_range: QuadRange,     // 1px horizontal line
+    selection_bg_range: QuadRange,  // selected item background
+    item_text_range: QuadRange,     // item list glyphs
+}
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+
+Method:
+```rust
+pub fn update_from_widget(
+    &mut self,
+    device: &ProtocolObject<dyn MTLDevice>,
+    atlas: &GlyphAtlas,
+    widget: &SelectorWidget,
+    geometry: &OverlayGeometry,
+    cursor_visible: bool,
+)
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+This builds vertex data in order:
+1. Background rect (single quad covering entire panel)
+2. Selection highlight quad (for selected item row)
+3. Separator line quad (1px tall)
+4. Query text glyphs
+5. Query cursor quad (if visible)
+6. Item text glyphs (clipped to panel width — just don't emit glyphs past the edge)
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Location: `crates/editor/src/selector_overlay.rs`
+
+### Step 4: Add `draw_selector_overlay` method to `Renderer`
+
+Add to `Renderer`:
+```rust
+pub fn draw_selector_overlay(
+    &mut self,
+    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    view: &MetalView,
+    widget: &SelectorWidget,
+    cursor_visible: bool,
+)
+```
+
+This method:
+1. Calculates geometry via `calculate_overlay_geometry`
+2. Updates the `SelectorGlyphBuffer` via `update_from_widget`
+3. Issues draw calls for each quad range with appropriate colors:
+   - Background range → `OVERLAY_BACKGROUND_COLOR`
+   - Selection background range → `OVERLAY_SELECTION_COLOR`
+   - Separator range → `TEXT_COLOR` (or a subdued grey)
+   - Query text + cursor → `TEXT_COLOR`
+   - Item text → `TEXT_COLOR`
+
+Store the `SelectorGlyphBuffer` as a field in `Renderer` (lazy-initialized).
+
+Location: `crates/editor/src/renderer.rs`
+
+### Step 5: Integrate overlay rendering into main render path
+
+Modify `Renderer::render()` to accept an optional `&SelectorWidget`:
+
+```rust
+pub fn render(&mut self, view: &MetalView, selector: Option<&SelectorWidget>, cursor_visible: bool)
+```
+
+After drawing the editor content (existing code), if `selector.is_some()`, call `draw_selector_overlay`.
+
+Alternative: Keep `render()` unchanged and add a separate entry point `render_with_selector()`. Either way, the overlay is drawn after the editor content so it appears on top.
+
+Location: `crates/editor/src/renderer.rs`
+
+### Step 6: Wire dirty region for selector state changes
+
+When the selector opens, closes, or its state changes (query, selected_index), the caller must mark `DirtyRegion::FullViewport`. This ensures the overlay and underlying editor are both redrawn.
+
+The caller (future `file_picker` chunk) will be responsible for this. For now, document the contract in comments/docs.
+
+Location: N/A (documentation only in this chunk; actual wiring happens in `file_picker` chunk)
+
+### Step 7: Manual smoke test
+
+Since this chunk involves visual output, verify manually:
+1. Create a test harness or temporary code in `main.rs` that opens a `SelectorWidget` with demo items
+2. Verify:
+   - Panel appears centered horizontally
+   - Panel positioned in upper third of window
+   - Background is visible and opaque
+   - Query row shows text with blinking cursor
+   - Separator line visible below query
+   - Items render correctly
+   - Selected item has highlight background
+   - Long items are clipped (not wrapped)
+   - Resizing window updates overlay geometry
+
+Remove test harness code after verification (the `file_picker` chunk will provide real integration).
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **selector_widget chunk** (ACTIVE): Provides `SelectorWidget` struct with `query()`, `items()`, `selected_index()` accessors.
+- No new external crates required — all Metal/glyph infrastructure exists.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Cursor blink coordination**: The overlay's query cursor should share the same blink state as the main editor cursor. The `cursor_visible` parameter passed to `draw_selector_overlay` should come from the same `EditorState.cursor_visible` flag. This is straightforward but needs attention during integration.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Text clipping**: The plan says "just don't emit glyphs past the edge" for long item names. This is simple but slightly imprecise — a glyph whose left edge is inside but right edge is outside will be omitted entirely. For MVP this is acceptable; pixel-perfect clipping could use a scissor rect in a future iteration.
+
+3. **Separator rendering**: A 1px line using a full-height glyph quad with squashed UVs might look fine, but could also look blurry due to texture filtering. Alternative: use a 1-pixel-tall quad sampling from the solid glyph region. Will evaluate visually.
+
+4. **Performance**: Building vertex buffers every frame for the overlay is acceptable given the small quad count (< 100 quads typically). No optimization needed for MVP.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

@@ -34,6 +34,7 @@ mod input;
 mod metal_view;
 mod renderer;
 mod selector;
+mod selector_overlay;
 mod shader;
 mod viewport;
 

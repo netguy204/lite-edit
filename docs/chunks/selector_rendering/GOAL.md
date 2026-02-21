@@ -1,18 +1,23 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/editor/src/selector_overlay.rs
+  - crates/editor/src/renderer.rs
+  - crates/editor/src/main.rs
 code_references: []
 narrative: file_buffer_association
 investigation: null
 subsystems: []
 friction_entries: []
 bug_type: null
-depends_on: ["selector_widget"]
-created_after: ["delete_to_line_start", "ibeam_cursor"]
+depends_on:
+- selector_widget
+created_after:
+- delete_to_line_start
+- ibeam_cursor
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

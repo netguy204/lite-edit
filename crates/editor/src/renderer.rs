@@ -2,6 +2,7 @@
 // Chunk: docs/chunks/glyph_rendering - Monospace glyph atlas + text rendering
 // Chunk: docs/chunks/viewport_rendering - Viewport + Buffer-to-Screen Rendering
 // Chunk: docs/chunks/text_selection_rendering - Selection highlight rendering
+// Chunk: docs/chunks/selector_rendering - Selector overlay rendering
 //!
 //! Metal rendering pipeline
 //!
@@ -11,6 +12,9 @@
 //!
 //! The renderer manages a Viewport for determining which buffer lines are visible
 //! and supports rendering from a TextBuffer with cursor display.
+//!
+//! When a selector (e.g., file picker, command palette) is active, the renderer
+//! draws an overlay panel on top of the editor content.
 
 use std::ptr::NonNull;
 
@@ -26,8 +30,13 @@ use objc2_quartz_core::CAMetalDrawable;
 use crate::dirty_region::DirtyRegion;
 use crate::font::Font;
 use crate::glyph_atlas::GlyphAtlas;
-use crate::glyph_buffer::GlyphBuffer;
+use crate::glyph_buffer::{GlyphBuffer, GlyphLayout};
 use crate::metal_view::MetalView;
+use crate::selector::SelectorWidget;
+use crate::selector_overlay::{
+    calculate_overlay_geometry, SelectorGlyphBuffer, OVERLAY_BACKGROUND_COLOR,
+    OVERLAY_SELECTION_COLOR, OVERLAY_SEPARATOR_COLOR,
+};
 use crate::shader::GlyphPipeline;
 use crate::viewport::Viewport;
 use lite_edit_buffer::{DirtyLines, TextBuffer};
@@ -98,6 +107,8 @@ pub struct Renderer {
     buffer: Option<TextBuffer>,
     /// Whether the cursor should be visible
     cursor_visible: bool,
+    /// The glyph buffer for selector overlay rendering (lazy-initialized)
+    selector_buffer: Option<SelectorGlyphBuffer>,
 }
 
 impl Renderer {
@@ -149,6 +160,7 @@ impl Renderer {
             viewport,
             buffer: None,
             cursor_visible: true,
+            selector_buffer: None,
         }
     }
 
@@ -454,6 +466,337 @@ impl Renderer {
                 encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
                     MTLPrimitiveType::Triangle,
                     cursor_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+    }
+
+    /// Renders a frame with an optional selector overlay
+    ///
+    /// This is the primary entry point when a selector (file picker, command palette)
+    /// may be active. It renders the editor content first, then overlays the selector
+    /// panel if one is provided.
+    ///
+    /// # Arguments
+    /// * `view` - The Metal view to render to
+    /// * `selector` - Optional selector widget to render as an overlay
+    /// * `selector_cursor_visible` - Whether the selector's query cursor should be visible
+    ///
+    /// # Dirty Region Contract
+    /// When the selector opens, closes, or its state changes (query, selected_index),
+    /// the caller must mark `DirtyRegion::FullViewport` to ensure both the overlay
+    /// and the editor content beneath are redrawn correctly.
+    pub fn render_with_selector(
+        &mut self,
+        view: &MetalView,
+        selector: Option<&SelectorWidget>,
+        selector_cursor_visible: bool,
+    ) {
+        // Update glyph buffer from TextBuffer if available
+        self.update_glyph_buffer();
+        let metal_layer = view.metal_layer();
+
+        // Get the next drawable from the layer
+        let drawable = match metal_layer.nextDrawable() {
+            Some(d) => d,
+            None => {
+                eprintln!("Failed to get next drawable");
+                return;
+            }
+        };
+
+        // Create a render pass descriptor
+        let render_pass_descriptor = MTLRenderPassDescriptor::new();
+
+        // Configure the color attachment
+        let color_attachments = render_pass_descriptor.colorAttachments();
+        let color_attachment = unsafe { color_attachments.objectAtIndexedSubscript(0) };
+
+        // Set the drawable's texture as the render target
+        color_attachment.setTexture(Some(drawable.texture().as_ref()));
+
+        // Clear to our background color
+        color_attachment.setLoadAction(MTLLoadAction::Clear);
+        color_attachment.setClearColor(BACKGROUND_COLOR);
+
+        // Store the result
+        color_attachment.setStoreAction(MTLStoreAction::Store);
+
+        // Create a command buffer
+        let command_buffer = match self.command_queue.commandBuffer() {
+            Some(cb) => cb,
+            None => {
+                eprintln!("Failed to create command buffer");
+                return;
+            }
+        };
+
+        // Create a render command encoder
+        let encoder =
+            match command_buffer.renderCommandEncoderWithDescriptor(&render_pass_descriptor) {
+                Some(e) => e,
+                None => {
+                    eprintln!("Failed to create render command encoder");
+                    return;
+                }
+            };
+
+        // Render editor text content first (background layer)
+        if self.glyph_buffer.index_count() > 0 {
+            self.render_text(&encoder, view);
+        }
+
+        // Render selector overlay on top if active
+        if let Some(widget) = selector {
+            self.draw_selector_overlay(&encoder, view, widget, selector_cursor_visible);
+        }
+
+        // End encoding
+        encoder.endEncoding();
+
+        // Present the drawable
+        let mtl_drawable: &ProtocolObject<dyn MTLDrawable> = ProtocolObject::from_ref(&*drawable);
+        command_buffer.presentDrawable(mtl_drawable);
+
+        // Commit the command buffer
+        command_buffer.commit();
+    }
+
+    /// Draws the selector overlay panel
+    ///
+    /// This method renders the selector as a floating panel overlay on top of
+    /// the editor content. The panel contains:
+    /// - Background rect
+    /// - Query row with blinking cursor
+    /// - Separator line
+    /// - Item list with selection highlight
+    ///
+    /// # Arguments
+    /// * `encoder` - The active render command encoder
+    /// * `view` - The Metal view (for viewport dimensions)
+    /// * `widget` - The selector widget state
+    /// * `cursor_visible` - Whether to render the query cursor
+    fn draw_selector_overlay(
+        &mut self,
+        encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        view: &MetalView,
+        widget: &SelectorWidget,
+        cursor_visible: bool,
+    ) {
+        let frame = view.frame();
+        let scale = view.scale_factor();
+        let view_width = (frame.size.width * scale) as f32;
+        let view_height = (frame.size.height * scale) as f32;
+        let line_height = self.font.metrics.line_height as f32;
+
+        // Calculate overlay geometry
+        let geometry = calculate_overlay_geometry(
+            view_width,
+            view_height,
+            line_height,
+            widget.items().len(),
+        );
+
+        // Ensure selector buffer is initialized
+        if self.selector_buffer.is_none() {
+            let layout = GlyphLayout::from_metrics(&self.font.metrics);
+            self.selector_buffer = Some(SelectorGlyphBuffer::new(layout));
+        }
+
+        // Update the selector buffer with current widget state
+        let selector_buffer = self.selector_buffer.as_mut().unwrap();
+        selector_buffer.update_from_widget(
+            &self.device,
+            &self.atlas,
+            widget,
+            &geometry,
+            cursor_visible,
+        );
+
+        // Get buffers
+        let vertex_buffer = match selector_buffer.vertex_buffer() {
+            Some(b) => b,
+            None => return,
+        };
+        let index_buffer = match selector_buffer.index_buffer() {
+            Some(b) => b,
+            None => return,
+        };
+
+        // Set the render pipeline state (same pipeline as text rendering)
+        encoder.setRenderPipelineState(self.pipeline.pipeline_state());
+
+        // Set the vertex buffer
+        unsafe {
+            encoder.setVertexBuffer_offset_atIndex(Some(vertex_buffer), 0, 0);
+        }
+
+        // Set uniforms (viewport size)
+        let uniforms = Uniforms {
+            viewport_size: [view_width, view_height],
+        };
+        let uniforms_ptr =
+            NonNull::new(&uniforms as *const Uniforms as *mut std::ffi::c_void).unwrap();
+        unsafe {
+            encoder.setVertexBytes_length_atIndex(
+                uniforms_ptr,
+                std::mem::size_of::<Uniforms>(),
+                1,
+            );
+        }
+
+        // Set the atlas texture
+        unsafe {
+            encoder.setFragmentTexture_atIndex(Some(self.atlas.texture()), 0);
+        }
+
+        // ==================== Draw Background ====================
+        let bg_range = selector_buffer.background_range();
+        if !bg_range.is_empty() {
+            let color_ptr =
+                NonNull::new(OVERLAY_BACKGROUND_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(
+                    color_ptr,
+                    std::mem::size_of::<[f32; 4]>(),
+                    0,
+                );
+            }
+
+            let index_offset = bg_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    bg_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
+        // ==================== Draw Selection Highlight ====================
+        let sel_range = selector_buffer.selection_range();
+        if !sel_range.is_empty() {
+            let color_ptr =
+                NonNull::new(OVERLAY_SELECTION_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(
+                    color_ptr,
+                    std::mem::size_of::<[f32; 4]>(),
+                    0,
+                );
+            }
+
+            let index_offset = sel_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    sel_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
+        // ==================== Draw Separator Line ====================
+        let sep_range = selector_buffer.separator_range();
+        if !sep_range.is_empty() {
+            let color_ptr =
+                NonNull::new(OVERLAY_SEPARATOR_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(
+                    color_ptr,
+                    std::mem::size_of::<[f32; 4]>(),
+                    0,
+                );
+            }
+
+            let index_offset = sep_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    sep_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
+        // ==================== Draw Query Text ====================
+        let query_range = selector_buffer.query_text_range();
+        if !query_range.is_empty() {
+            let color_ptr =
+                NonNull::new(TEXT_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(
+                    color_ptr,
+                    std::mem::size_of::<[f32; 4]>(),
+                    0,
+                );
+            }
+
+            let index_offset = query_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    query_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
+        // ==================== Draw Query Cursor ====================
+        let cursor_range = selector_buffer.query_cursor_range();
+        if !cursor_range.is_empty() {
+            // Cursor uses text color
+            let color_ptr =
+                NonNull::new(TEXT_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(
+                    color_ptr,
+                    std::mem::size_of::<[f32; 4]>(),
+                    0,
+                );
+            }
+
+            let index_offset = cursor_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    cursor_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
+        // ==================== Draw Item Text ====================
+        let item_range = selector_buffer.item_text_range();
+        if !item_range.is_empty() {
+            let color_ptr =
+                NonNull::new(TEXT_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(
+                    color_ptr,
+                    std::mem::size_of::<[f32; 4]>(),
+                    0,
+                );
+            }
+
+            let index_offset = item_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    item_range.count,
                     MTLIndexType::UInt32,
                     index_buffer,
                     index_offset,
