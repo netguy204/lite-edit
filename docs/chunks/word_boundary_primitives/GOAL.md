@@ -1,8 +1,9 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/buffer/src/text_buffer.rs
 code_references: []
 narrative: word_nav
 investigation: null
@@ -10,9 +11,13 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["delete_backward_word", "file_picker", "fuzzy_file_matcher", "selector_rendering", "selector_widget"]
+created_after:
+- delete_backward_word
+- file_picker
+- fuzzy_file_matcher
+- selector_rendering
+- selector_widget
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
