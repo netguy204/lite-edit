@@ -1,0 +1,12 @@
+[package]
+name = "lite-edit-buffer"
+version = "0.1.0"
+edition = "2021"
+description = "Text buffer implementation for lite-edit"
+license = "MIT"
+
+[dependencies]
+# No dependencies - standard library only
+
+[dev-dependencies]
+# No dev dependencies needed

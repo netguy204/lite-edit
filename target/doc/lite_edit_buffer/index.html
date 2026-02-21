@@ -1,0 +1,37 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="lite-edit-buffer: A text buffer implementation for the lite-edit editor."><title>lite_edit_buffer - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-e56847b5.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="lite_edit_buffer" data-themes="" data-resource-suffix="" data-rustdoc-version="1.91.1 (ed61e7d7e 2025-11-07)" data-channel="1.91.1" data-search-js="search-e256b49e.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../static.files/storage-e2aeef58.js"></script><script defer src="../crates.js"></script><script defer src="../static.files/main-6dc2a7f3.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc mod crate"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Crate lite_edit_buffer</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../lite_edit_buffer/index.html">lite_<wbr>edit_<wbr>buffer</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><ul class="block"><li><a id="all-types" href="all.html">All Items</a></li></ul><section id="rustdoc-toc"><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#overview" title="Overview">Overview</a></li><li><a href="#example" title="Example">Example</a></li><li><a href="#dirty-line-tracking" title="Dirty Line Tracking">Dirty Line Tracking</a></li></ul><h3><a href="#structs">Crate Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><h1>Crate <span>lite_<wbr>edit_<wbr>buffer</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/lite_edit_buffer/lib.rs.html#3-52">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>lite-edit-buffer: A text buffer implementation for the lite-edit editor.</p>
+<p>This crate provides a gap buffer-backed text buffer with cursor tracking
+and dirty line reporting. It is designed for efficient text editing operations
+with minimal rendering overhead.</p>
+<h2 id="overview"><a class="doc-anchor" href="#overview">§</a>Overview</h2>
+<p>The main type is <a href="struct.TextBuffer.html" title="struct lite_edit_buffer::TextBuffer"><code>TextBuffer</code></a>, which provides:</p>
+<ul>
+<li>Character insertion and deletion at the cursor position</li>
+<li>Line-based access for efficient rendering</li>
+<li>Dirty line tracking to minimize redraws</li>
+<li>Cursor movement operations</li>
+</ul>
+<h2 id="example"><a class="doc-anchor" href="#example">§</a>Example</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>lite_edit_buffer::{TextBuffer, DirtyLines, Position};
+
+<span class="kw">let </span><span class="kw-2">mut </span>buffer = TextBuffer::new();
+
+<span class="comment">// Insert some text
+</span>buffer.insert_str(<span class="string">"Hello, world!"</span>);
+<span class="macro">assert_eq!</span>(buffer.line_count(), <span class="number">1</span>);
+<span class="macro">assert_eq!</span>(buffer.line_content(<span class="number">0</span>), <span class="string">"Hello, world!"</span>);
+
+<span class="comment">// Split into multiple lines
+</span>buffer.set_cursor(Position::new(<span class="number">0</span>, <span class="number">6</span>));
+<span class="kw">let </span>dirty = buffer.insert_newline();
+<span class="macro">assert_eq!</span>(dirty, DirtyLines::FromLineToEnd(<span class="number">0</span>));
+<span class="macro">assert_eq!</span>(buffer.line_count(), <span class="number">2</span>);</code></pre></div><h2 id="dirty-line-tracking"><a class="doc-anchor" href="#dirty-line-tracking">§</a>Dirty Line Tracking</h2>
+<p>Each mutation operation returns a <a href="enum.DirtyLines.html" title="enum lite_edit_buffer::DirtyLines"><code>DirtyLines</code></a> value indicating which lines
+were affected. This enables downstream rendering to minimize redraws:</p>
+<ul>
+<li><code>DirtyLines::None</code> - No visual change (e.g., no-op at buffer boundary)</li>
+<li><code>DirtyLines::Single(line)</code> - Only one line changed</li>
+<li><code>DirtyLines::FromLineToEnd(line)</code> - All lines from <code>line</code> to the end changed
+(used when lines are split or joined)</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.Position.html" title="struct lite_edit_buffer::Position">Position</a></dt><dd>Position in the buffer as (line, column) where both are 0-indexed.</dd><dt><a class="struct" href="struct.TextBuffer.html" title="struct lite_edit_buffer::TextBuffer">Text<wbr>Buffer</a></dt><dd>A text buffer with cursor tracking and dirty line reporting.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.DirtyLines.html" title="enum lite_edit_buffer::DirtyLines">Dirty<wbr>Lines</a></dt><dd>Information about which lines were dirtied by a mutation.
+Used by the render loop to compute DirtyRegion.</dd></dl></section></div></main></body></html>
