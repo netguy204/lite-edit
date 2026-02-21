@@ -33,6 +33,7 @@ mod glyph_buffer;
 mod input;
 mod metal_view;
 mod renderer;
+mod selector;
 mod shader;
 mod viewport;
 
