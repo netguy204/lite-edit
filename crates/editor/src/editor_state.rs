@@ -27,6 +27,7 @@ const CURSOR_BLINK_INTERVAL_MS: u64 = 500;
 /// - The active focus target
 /// - Cursor visibility state
 /// - Dirty region tracking
+/// - Application quit flag
 pub struct EditorState {
     /// The text buffer being edited
     pub buffer: TextBuffer,
@@ -40,6 +41,8 @@ pub struct EditorState {
     pub cursor_visible: bool,
     /// Time of the last keystroke (for cursor blink reset)
     pub last_keystroke: Instant,
+    /// Whether the app should quit (set by Cmd+Q)
+    pub should_quit: bool,
 }
 
 impl EditorState {
@@ -52,6 +55,7 @@ impl EditorState {
             focus_target: BufferFocusTarget::new(),
             cursor_visible: true,
             last_keystroke: Instant::now(),
+            should_quit: false,
         }
     }
 
@@ -69,7 +73,21 @@ impl EditorState {
     ///
     /// This records the keystroke time (for cursor blink reset) and
     /// ensures the cursor is visible after any keystroke.
+    ///
+    /// App-level shortcuts (like Cmd+Q for quit) are intercepted here
+    /// before being forwarded to the focus target.
     pub fn handle_key(&mut self, event: KeyEvent) {
+        use crate::input::Key;
+
+        // Check for app-level shortcuts before delegating to focus target
+        // Cmd+Q (without Ctrl) triggers quit
+        if event.modifiers.command && !event.modifiers.control {
+            if let Key::Char('q') = event.key {
+                self.should_quit = true;
+                return;
+            }
+        }
+
         // Record keystroke time for cursor blink reset
         self.last_keystroke = Instant::now();
 
@@ -152,6 +170,7 @@ impl Default for EditorState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::{Key, Modifiers};
     use std::time::Duration;
 
     #[test]
@@ -160,6 +179,7 @@ mod tests {
         assert!(state.buffer.is_empty());
         assert!(!state.is_dirty());
         assert!(state.cursor_visible);
+        assert!(!state.should_quit);
     }
 
     #[test]
@@ -231,5 +251,118 @@ mod tests {
         state.update_viewport_size(320.0);
 
         assert_eq!(state.viewport.visible_lines(), 20); // 320 / 16 = 20
+    }
+
+    // =========================================================================
+    // Quit flag tests (Cmd+Q behavior)
+    // =========================================================================
+
+    #[test]
+    fn test_cmd_q_sets_quit_flag() {
+        let mut state = EditorState::empty(16.0);
+        state.update_viewport_size(160.0);
+
+        // Cmd+Q should set should_quit
+        let cmd_q = KeyEvent::new(
+            Key::Char('q'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_q);
+
+        assert!(state.should_quit);
+    }
+
+    #[test]
+    fn test_cmd_q_does_not_modify_buffer() {
+        let mut state = EditorState::empty(16.0);
+        state.update_viewport_size(160.0);
+
+        // Type some content first
+        state.handle_key(KeyEvent::char('a'));
+        assert_eq!(state.buffer.content(), "a");
+
+        // Cmd+Q should NOT add 'q' to the buffer
+        let cmd_q = KeyEvent::new(
+            Key::Char('q'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_q);
+
+        // Buffer should be unchanged
+        assert_eq!(state.buffer.content(), "a");
+        assert!(state.should_quit);
+    }
+
+    #[test]
+    fn test_ctrl_q_does_not_set_quit_flag() {
+        let mut state = EditorState::empty(16.0);
+        state.update_viewport_size(160.0);
+
+        // Ctrl+Q should NOT set should_quit (different binding)
+        let ctrl_q = KeyEvent::new(
+            Key::Char('q'),
+            Modifiers {
+                control: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(ctrl_q);
+
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn test_cmd_ctrl_q_does_not_set_quit_flag() {
+        let mut state = EditorState::empty(16.0);
+        state.update_viewport_size(160.0);
+
+        // Cmd+Ctrl+Q should NOT set should_quit (we explicitly check !control)
+        let cmd_ctrl_q = KeyEvent::new(
+            Key::Char('q'),
+            Modifiers {
+                command: true,
+                control: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_ctrl_q);
+
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn test_cmd_z_does_not_set_quit_flag() {
+        let mut state = EditorState::empty(16.0);
+        state.update_viewport_size(160.0);
+
+        // Other Cmd+ combinations should NOT set should_quit
+        let cmd_z = KeyEvent::new(
+            Key::Char('z'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_z);
+
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn test_plain_q_does_not_set_quit_flag() {
+        let mut state = EditorState::empty(16.0);
+        state.update_viewport_size(160.0);
+
+        // Plain 'q' should type 'q', not quit
+        state.handle_key(KeyEvent::char('q'));
+
+        assert!(!state.should_quit);
+        assert_eq!(state.buffer.content(), "q");
     }
 }
