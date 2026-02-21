@@ -246,6 +246,33 @@ impl TextBuffer {
         self.cursor = Position::new(last_line, last_col);
     }
 
+    // Chunk: docs/chunks/word_double_click_select - Double-click word selection
+    // Spec: docs/trunk/SPEC.md#word-model
+    /// Selects the word or whitespace run at the given column on the current line.
+    ///
+    /// Sets the selection anchor at the word start and the cursor at the word end.
+    /// Returns `true` if a selection was made, `false` if the line is empty.
+    ///
+    /// If `col` is past the end of the line, the last run on that line is selected.
+    pub fn select_word_at(&mut self, col: usize) -> bool {
+        let line_content = self.line_content(self.cursor.line);
+        let line_chars: Vec<char> = line_content.chars().collect();
+
+        if line_chars.is_empty() {
+            return false;
+        }
+
+        // Clamp col to valid range (select last character's run if col past end)
+        let col = col.min(line_chars.len().saturating_sub(1));
+
+        let word_start = word_boundary_left(&line_chars, col + 1);
+        let word_end = word_boundary_right(&line_chars, col);
+
+        self.selection_anchor = Some(Position::new(self.cursor.line, word_start));
+        self.cursor.col = word_end;
+        true
+    }
+
     /// Deletes the selected text and places the cursor at the start of the former selection.
     ///
     /// Returns `DirtyLines::None` if there is no active selection.
@@ -2544,5 +2571,130 @@ mod tests {
         assert_eq!(buf.content(), "hello");
         assert_eq!(buf.cursor_position(), Position::new(0, 0));
         assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    // ==================== Select Word At Tests ====================
+    // Chunk: docs/chunks/word_double_click_select - Double-click word selection
+
+    #[test]
+    fn test_select_word_at_mid_word() {
+        // "hello world" with col at middle of "hello" → selects "hello"
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 2));
+        let result = buf.select_word_at(2);
+        assert!(result);
+        assert!(buf.has_selection());
+        let (start, end) = buf.selection_range().unwrap();
+        assert_eq!(start, Position::new(0, 0)); // word start
+        assert_eq!(end, Position::new(0, 5)); // word end
+        assert_eq!(buf.selected_text(), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_select_word_at_word_start() {
+        // "hello world" with col at start of "hello" → selects "hello"
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 0));
+        let result = buf.select_word_at(0);
+        assert!(result);
+        assert!(buf.has_selection());
+        let (start, end) = buf.selection_range().unwrap();
+        assert_eq!(start, Position::new(0, 0));
+        assert_eq!(end, Position::new(0, 5));
+        assert_eq!(buf.selected_text(), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_select_word_at_whitespace() {
+        // "hello  world" with col at whitespace → selects whitespace run
+        let mut buf = TextBuffer::from_str("hello  world");
+        buf.set_cursor(Position::new(0, 5));
+        let result = buf.select_word_at(5);
+        assert!(result);
+        assert!(buf.has_selection());
+        let (start, end) = buf.selection_range().unwrap();
+        assert_eq!(start, Position::new(0, 5));
+        assert_eq!(end, Position::new(0, 7));
+        assert_eq!(buf.selected_text(), Some("  ".to_string()));
+    }
+
+    #[test]
+    fn test_select_word_at_empty_line() {
+        // Empty line → returns false, no selection
+        let mut buf = TextBuffer::from_str("");
+        buf.set_cursor(Position::new(0, 0));
+        let result = buf.select_word_at(0);
+        assert!(!result);
+        assert!(!buf.has_selection());
+    }
+
+    #[test]
+    fn test_select_word_at_col_zero() {
+        // "  hello" with col 0 → selects leading whitespace
+        let mut buf = TextBuffer::from_str("  hello");
+        buf.set_cursor(Position::new(0, 0));
+        let result = buf.select_word_at(0);
+        assert!(result);
+        assert!(buf.has_selection());
+        let (start, end) = buf.selection_range().unwrap();
+        assert_eq!(start, Position::new(0, 0));
+        assert_eq!(end, Position::new(0, 2));
+        assert_eq!(buf.selected_text(), Some("  ".to_string()));
+    }
+
+    #[test]
+    fn test_select_word_at_end_of_line() {
+        // "hello world" with col at last char → selects last word
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 10)); // 'd' in "world"
+        let result = buf.select_word_at(10);
+        assert!(result);
+        assert!(buf.has_selection());
+        let (start, end) = buf.selection_range().unwrap();
+        assert_eq!(start, Position::new(0, 6));
+        assert_eq!(end, Position::new(0, 11));
+        assert_eq!(buf.selected_text(), Some("world".to_string()));
+    }
+
+    #[test]
+    fn test_select_word_at_past_line_end() {
+        // "hello" with col past line end → selects last run
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 10)); // Past end
+        let result = buf.select_word_at(10);
+        assert!(result);
+        assert!(buf.has_selection());
+        let (start, end) = buf.selection_range().unwrap();
+        assert_eq!(start, Position::new(0, 0));
+        assert_eq!(end, Position::new(0, 5));
+        assert_eq!(buf.selected_text(), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_select_word_at_second_word() {
+        // "hello world" with col at "world" → selects "world"
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 8));
+        let result = buf.select_word_at(8);
+        assert!(result);
+        assert!(buf.has_selection());
+        let (start, end) = buf.selection_range().unwrap();
+        assert_eq!(start, Position::new(0, 6));
+        assert_eq!(end, Position::new(0, 11));
+        assert_eq!(buf.selected_text(), Some("world".to_string()));
+    }
+
+    #[test]
+    fn test_select_word_at_multiline() {
+        // Select word on second line
+        let mut buf = TextBuffer::from_str("first\nsecond word");
+        buf.set_cursor(Position::new(1, 0));
+        let result = buf.select_word_at(0);
+        assert!(result);
+        assert!(buf.has_selection());
+        let (start, end) = buf.selection_range().unwrap();
+        assert_eq!(start, Position::new(1, 0));
+        assert_eq!(end, Position::new(1, 6));
+        assert_eq!(buf.selected_text(), Some("second".to_string()));
     }
 }
