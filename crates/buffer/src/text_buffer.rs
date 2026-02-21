@@ -656,6 +656,56 @@ impl TextBuffer {
         DirtyLines::Single(self.cursor.line)
     }
 
+    // Chunk: docs/chunks/word_forward_delete - Alt+D forward word deletion
+    // Spec: docs/trunk/SPEC.md#word-model
+    /// Deletes forward by one word (Alt+D).
+    ///
+    /// The word boundary rule is character-class based:
+    /// - **Non-whitespace class**: If the character at the cursor is non-whitespace,
+    ///   delete forward through contiguous non-whitespace characters until hitting whitespace or
+    ///   the end of the line.
+    /// - **Whitespace class**: If the character at the cursor is whitespace,
+    ///   delete forward through contiguous whitespace characters until hitting non-whitespace or
+    ///   the end of the line.
+    ///
+    /// If there is an active selection, deletes the selection instead (consistent with delete_forward).
+    /// If at the end of the line (`cursor.col >= line_len`), does nothing (returns `DirtyLines::None`).
+    /// Does not delete the newline or join lines.
+    ///
+    /// Returns `DirtyLines::Single(line)` for the affected line.
+    pub fn delete_forward_word(&mut self) -> DirtyLines {
+        // If there's a selection, delete it and return
+        if self.has_selection() {
+            return self.delete_selection();
+        }
+
+        // Get the current line content to analyze character classes
+        let line_content = self.line_content(self.cursor.line);
+        let line_chars: Vec<char> = line_content.chars().collect();
+
+        // At line end, no-op
+        if self.cursor.col >= line_chars.len() {
+            return DirtyLines::None;
+        }
+
+        // Use word_boundary_right to find the end of the run
+        let word_end = word_boundary_right(&line_chars, self.cursor.col);
+        let chars_to_delete = word_end - self.cursor.col;
+
+        self.sync_gap_to_cursor();
+
+        // Delete characters forward
+        for _ in 0..chars_to_delete {
+            self.buffer.delete_forward();
+            self.line_index.remove_char(self.cursor.line);
+        }
+
+        // Cursor stays in place (forward deletion doesn't move cursor)
+
+        self.assert_line_index_consistent();
+        DirtyLines::Single(self.cursor.line)
+    }
+
     // Chunk: docs/chunks/kill_line - Delete from cursor to end of line (Ctrl+K)
     /// Deletes all characters from the cursor to the end of the current line.
     ///
@@ -2103,5 +2153,110 @@ mod tests {
         // "hello world" cursor at col 2 (middle of "hello") → returns col 5
         let chars: Vec<char> = "hello world".chars().collect();
         assert_eq!(word_boundary_right(&chars, 2), 5);
+    }
+
+    // ==================== Delete Forward Word Tests ====================
+    // Chunk: docs/chunks/word_forward_delete - Alt+D forward word deletion
+
+    #[test]
+    fn test_delete_forward_word_mid_word_non_whitespace() {
+        // "hello world" with cursor at col 2 (mid-word on non-whitespace)
+        // Deletes from cursor to word end → "he world"
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 2)); // At 'l' in "hello"
+        let dirty = buf.delete_forward_word();
+        assert_eq!(buf.content(), "he world");
+        assert_eq!(buf.cursor_position(), Position::new(0, 2));
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_forward_word_on_whitespace() {
+        // "hello  world" with cursor at col 5 (on whitespace between words)
+        // Deletes whitespace run only → "helloworld"
+        let mut buf = TextBuffer::from_str("hello  world");
+        buf.set_cursor(Position::new(0, 5)); // On first space
+        let dirty = buf.delete_forward_word();
+        assert_eq!(buf.content(), "helloworld");
+        assert_eq!(buf.cursor_position(), Position::new(0, 5));
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_forward_word_at_line_end() {
+        // Cursor at end of line → no-op, returns DirtyLines::None
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 5)); // At line end
+        let dirty = buf.delete_forward_word();
+        assert_eq!(buf.content(), "hello");
+        assert_eq!(buf.cursor_position(), Position::new(0, 5));
+        assert_eq!(dirty, DirtyLines::None);
+    }
+
+    #[test]
+    fn test_delete_forward_word_at_line_start() {
+        // Cursor at line start → deletes first run
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 0)); // At line start
+        let dirty = buf.delete_forward_word();
+        assert_eq!(buf.content(), " world");
+        assert_eq!(buf.cursor_position(), Position::new(0, 0));
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_forward_word_with_selection() {
+        // With an active selection, delete the selection instead of word
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 8)); // At 'r' in "world"
+        buf.set_selection_anchor(Position::new(0, 6)); // Selects "wo"
+        let dirty = buf.delete_forward_word();
+        assert_eq!(buf.content(), "hello rld");
+        assert_eq!(buf.cursor_position(), Position::new(0, 6)); // At start of former selection
+        assert!(!buf.has_selection());
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_forward_word_whitespace_only_line() {
+        // Line containing only whitespace → deletes entire whitespace run
+        let mut buf = TextBuffer::from_str("     ");
+        buf.set_cursor(Position::new(0, 0)); // At line start
+        let dirty = buf.delete_forward_word();
+        assert_eq!(buf.content(), "");
+        assert_eq!(buf.cursor_position(), Position::new(0, 0));
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_forward_word_multiline() {
+        // Test on second line of multiline buffer
+        let mut buf = TextBuffer::from_str("first\nsecond line\nthird");
+        buf.set_cursor(Position::new(1, 7)); // After "second ", on 'l' in "line"
+        let dirty = buf.delete_forward_word();
+        assert_eq!(buf.line_content(1), "second ");
+        assert_eq!(buf.cursor_position(), Position::new(1, 7));
+        assert_eq!(dirty, DirtyLines::Single(1));
+    }
+
+    #[test]
+    fn test_delete_forward_word_cursor_past_line_len() {
+        // Edge case: cursor.col >= line_len (should be no-op)
+        let mut buf = TextBuffer::from_str("hi");
+        buf.set_cursor(Position::new(0, 2)); // At line end
+        let dirty = buf.delete_forward_word();
+        assert_eq!(buf.content(), "hi");
+        assert_eq!(dirty, DirtyLines::None);
+    }
+
+    #[test]
+    fn test_delete_forward_word_leading_whitespace() {
+        // "  hello" with cursor at col 0 → deletes leading whitespace
+        let mut buf = TextBuffer::from_str("  hello");
+        buf.set_cursor(Position::new(0, 0));
+        let dirty = buf.delete_forward_word();
+        assert_eq!(buf.content(), "hello");
+        assert_eq!(buf.cursor_position(), Position::new(0, 0));
+        assert_eq!(dirty, DirtyLines::Single(0));
     }
 }

@@ -34,6 +34,9 @@ enum Command {
     // Chunk: docs/chunks/delete_backward_word - Alt+Backspace word deletion
     /// Delete backward by one word (Alt+Backspace)
     DeleteBackwardWord,
+    // Chunk: docs/chunks/word_forward_delete - Alt+D forward word deletion
+    /// Delete forward by one word (Alt+D)
+    DeleteForwardWord,
     // Chunk: docs/chunks/kill_line - Delete from cursor to end of line (Ctrl+K)
     /// Delete from cursor to end of line (kill-line)
     DeleteToLineEnd,
@@ -109,6 +112,10 @@ fn resolve_command(event: &KeyEvent) -> Option<Command> {
         // Chunk: docs/chunks/delete_backward_word - Alt+Backspace word deletion
         // Option+Backspace → delete backward by word (must come before generic Backspace)
         Key::Backspace if mods.option && !mods.command => Some(Command::DeleteBackwardWord),
+
+        // Chunk: docs/chunks/word_forward_delete - Alt+D forward word deletion
+        // Option+D → delete forward by word (must come before generic Char)
+        Key::Char('d') if mods.option && !mods.command => Some(Command::DeleteForwardWord),
 
         // Backspace (Delete backward)
         Key::Backspace => Some(Command::DeleteBackward),
@@ -220,6 +227,8 @@ impl BufferFocusTarget {
             Command::DeleteForward => ctx.buffer.delete_forward(),
             // Chunk: docs/chunks/delete_backward_word - Alt+Backspace word deletion
             Command::DeleteBackwardWord => ctx.buffer.delete_backward_word(),
+            // Chunk: docs/chunks/word_forward_delete - Alt+D forward word deletion
+            Command::DeleteForwardWord => ctx.buffer.delete_forward_word(),
             // Chunk: docs/chunks/kill_line - Execute DeleteToLineEnd command
             Command::DeleteToLineEnd => ctx.buffer.delete_to_line_end(),
             Command::DeleteToLineStart => ctx.buffer.delete_to_line_start(),
