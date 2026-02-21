@@ -1,19 +1,25 @@
 // Chunk: docs/chunks/metal_surface - macOS window + Metal surface foundation
+// Chunk: docs/chunks/editable_buffer - Main loop + input events + editable buffer
 //!
 //! Metal-backed NSView implementation
 //!
 //! This module provides a custom NSView subclass that uses a CAMetalLayer
 //! as its backing layer, enabling GPU-accelerated Metal rendering.
+//!
+//! The view also handles keyboard input and converts NSEvent key events
+//! to our Rust-native KeyEvent type.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
-use objc2_app_kit::NSView;
+use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSView};
 use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSRect, NSSize};
 use objc2_metal::MTLDevice;
 use objc2_quartz_core::{CALayer, CAMetalLayer};
+
+use crate::input::{Key, KeyEvent, Modifiers};
 
 // CGFloat is a type alias for f64 on 64-bit systems
 type CGFloat = f64;
@@ -21,6 +27,9 @@ type CGFloat = f64;
 // =============================================================================
 // MetalView
 // =============================================================================
+
+/// Type alias for key event handler callback
+pub type KeyHandler = Box<dyn Fn(KeyEvent)>;
 
 /// Internal state for MetalView
 pub struct MetalViewIvars {
@@ -30,6 +39,8 @@ pub struct MetalViewIvars {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     /// Current backing scale factor (for retina support)
     scale_factor: Cell<CGFloat>,
+    /// Key event handler callback
+    key_handler: RefCell<Option<KeyHandler>>,
 }
 
 impl Default for MetalViewIvars {
@@ -57,6 +68,7 @@ impl Default for MetalViewIvars {
             metal_layer,
             device,
             scale_factor: Cell::new(1.0),
+            key_handler: RefCell::new(None),
         }
     }
 }
@@ -122,6 +134,36 @@ define_class!(
             // Update drawable size for the new dimensions
             self.update_drawable_size_internal();
         }
+
+        /// Returns YES to accept first responder status (receive key events)
+        #[unsafe(method(acceptsFirstResponder))]
+        fn __accepts_first_responder(&self) -> bool {
+            true
+        }
+
+        /// Returns YES because our view can become key
+        #[unsafe(method(canBecomeKeyView))]
+        fn __can_become_key_view(&self) -> bool {
+            true
+        }
+
+        /// Handle key down events
+        #[unsafe(method(keyDown:))]
+        fn __key_down(&self, event: &NSEvent) {
+            if let Some(key_event) = self.convert_key_event(event) {
+                let handler = self.ivars().key_handler.borrow();
+                if let Some(handler) = handler.as_ref() {
+                    handler(key_event);
+                }
+            }
+        }
+
+        /// Handle flags changed events (modifier key changes)
+        #[unsafe(method(flagsChanged:))]
+        fn __flags_changed(&self, _event: &NSEvent) {
+            // For future use: capture modifier key state changes
+            // Currently not needed since we capture modifiers with each key event
+        }
     }
 );
 
@@ -173,6 +215,87 @@ impl MetalView {
             // NSSize is the same as CGSize
             let drawable_size = NSSize::new(width, height);
             self.ivars().metal_layer.setDrawableSize(drawable_size);
+        }
+    }
+
+    /// Sets the key event handler callback
+    ///
+    /// The handler will be called for each keyDown event, with the
+    /// NSEvent converted to our Rust-native KeyEvent type.
+    pub fn set_key_handler(&self, handler: impl Fn(KeyEvent) + 'static) {
+        *self.ivars().key_handler.borrow_mut() = Some(Box::new(handler));
+    }
+
+    /// Converts an NSEvent to our KeyEvent type
+    fn convert_key_event(&self, event: &NSEvent) -> Option<KeyEvent> {
+        let modifiers = self.convert_modifiers(event);
+        let key = self.convert_key(event)?;
+        Some(KeyEvent::new(key, modifiers))
+    }
+
+    /// Converts NSEvent modifier flags to our Modifiers type
+    fn convert_modifiers(&self, event: &NSEvent) -> Modifiers {
+        let flags = event.modifierFlags();
+
+        Modifiers {
+            shift: flags.contains(NSEventModifierFlags::Shift),
+            command: flags.contains(NSEventModifierFlags::Command),
+            option: flags.contains(NSEventModifierFlags::Option),
+            control: flags.contains(NSEventModifierFlags::Control),
+        }
+    }
+
+    /// Converts an NSEvent to our Key type
+    fn convert_key(&self, event: &NSEvent) -> Option<Key> {
+        // First check key code for special keys
+        let key_code = event.keyCode();
+
+        // macOS virtual key codes for special keys
+        const KEY_RETURN: u16 = 0x24;
+        const KEY_TAB: u16 = 0x30;
+        const KEY_DELETE: u16 = 0x33; // Backspace
+        const KEY_ESCAPE: u16 = 0x35;
+        const KEY_FORWARD_DELETE: u16 = 0x75;
+        const KEY_LEFT_ARROW: u16 = 0x7B;
+        const KEY_RIGHT_ARROW: u16 = 0x7C;
+        const KEY_DOWN_ARROW: u16 = 0x7D;
+        const KEY_UP_ARROW: u16 = 0x7E;
+        const KEY_HOME: u16 = 0x73;
+        const KEY_END: u16 = 0x77;
+        const KEY_PAGE_UP: u16 = 0x74;
+        const KEY_PAGE_DOWN: u16 = 0x79;
+
+        match key_code {
+            KEY_RETURN => return Some(Key::Return),
+            KEY_TAB => return Some(Key::Tab),
+            KEY_DELETE => return Some(Key::Backspace),
+            KEY_ESCAPE => return Some(Key::Escape),
+            KEY_FORWARD_DELETE => return Some(Key::Delete),
+            KEY_LEFT_ARROW => return Some(Key::Left),
+            KEY_RIGHT_ARROW => return Some(Key::Right),
+            KEY_DOWN_ARROW => return Some(Key::Down),
+            KEY_UP_ARROW => return Some(Key::Up),
+            KEY_HOME => return Some(Key::Home),
+            KEY_END => return Some(Key::End),
+            KEY_PAGE_UP => return Some(Key::PageUp),
+            KEY_PAGE_DOWN => return Some(Key::PageDown),
+            _ => {}
+        }
+
+        // For character keys, use the characters string
+        // This gives us the correct character accounting for shift state
+        let characters = event.characters()?;
+        let chars: Vec<char> = characters.to_string().chars().collect();
+
+        if chars.len() == 1 {
+            let ch = chars[0];
+            // Filter out control characters that we already handled above
+            if ch.is_control() && ch != '\t' && ch != '\r' && ch != '\n' {
+                return None;
+            }
+            Some(Key::Char(ch))
+        } else {
+            None
         }
     }
 }
