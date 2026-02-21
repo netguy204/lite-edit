@@ -8,170 +8,242 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk adds a text selection model to `TextBuffer` using the anchor-cursor approach described in the goal. The implementation follows the existing patterns in `text_buffer.rs`:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Selection Model**: An optional `selection_anchor: Option<Position>` field represents the start of a selection. When `Some`, the range between anchor and cursor defines the selected text. The selection can be in either direction (anchor before or after cursor) — `selection_range()` normalizes this to document order.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+**Integration with Mutations**: Following the principle that mutations are the critical path, all mutation operations (`insert_char`, `insert_newline`, `insert_str`, `delete_backward`, `delete_forward`) are modified to delete the selection first when one exists. This uses a `delete_selection()` helper that removes the selected range, places the cursor at the start, and clears the anchor.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/text_selection_model/GOAL.md)
-with references to the files that you expect to touch.
--->
+**Clearing Selection on Movement**: All `move_*` methods and `set_cursor` clear the selection when called. This is standard editor behavior where arrow keys collapse the selection. Shift+movement for extending selection is explicitly out of scope (future chunk).
+
+**TDD Approach**: Per TESTING_PHILOSOPHY.md, we write failing tests first for meaningful behavior. Selection operations have clear semantics that can be tested without platform dependencies.
+
+**Dirty Line Tracking**: `delete_selection()` returns `DirtyLines` covering the affected range. Multi-line deletions return `FromLineToEnd(start_line)` since subsequent lines shift up.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No documented subsystems exist yet. The `text_*` cluster is small (2 chunks), so no subsystem documentation is warranted at this stage.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write tests for selection anchor and basic API
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+**TDD red phase.** Before implementing, add tests to the existing `#[cfg(test)] mod tests` in `text_buffer.rs`:
 
-Example:
+- `test_set_selection_anchor` — set anchor, verify it's stored
+- `test_set_selection_anchor_at_cursor` — convenience method sets anchor to current cursor
+- `test_clear_selection` — clears the anchor
+- `test_has_selection_false_when_no_anchor` — `has_selection()` returns false when anchor is None
+- `test_has_selection_false_when_anchor_equals_cursor` — edge case: anchor == cursor means no selection
+- `test_has_selection_true_when_selection_exists` — anchor != cursor returns true
 
-### Step 1: Define the SegmentHeader struct
+Location: `crates/buffer/src/text_buffer.rs`
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Add selection_anchor field and basic methods
 
-Location: src/segment/format.rs
+**TDD green phase.** Add the field and methods to make the tests pass:
 
-### Step 2: Implement header serialization
+```rust
+pub struct TextBuffer {
+    // ... existing fields ...
+    selection_anchor: Option<Position>,
+}
+```
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Methods:
+- `set_selection_anchor(pos: Position)` — clamps pos to valid bounds and sets anchor
+- `set_selection_anchor_at_cursor()` — sets anchor to current cursor position
+- `clear_selection()` — sets anchor to None
+- `has_selection() -> bool` — returns true if anchor is Some and differs from cursor
 
-### Step 3: ...
+Location: `crates/buffer/src/text_buffer.rs`
+
+### Step 3: Write tests for selection_range and selected_text
+
+**TDD red phase.** Add tests:
+
+- `test_selection_range_forward` — anchor at (0,0), cursor at (0,5), returns Some((start, end)) in order
+- `test_selection_range_backward` — anchor after cursor, still returns (start, end) in document order
+- `test_selection_range_multiline` — selection spans multiple lines
+- `test_selection_range_none_when_no_anchor` — returns None
+- `test_selected_text_single_line` — returns the correct substring
+- `test_selected_text_multiline` — returns text including newlines across lines
+- `test_selected_text_empty_when_anchor_equals_cursor` — returns None
+
+Location: `crates/buffer/src/text_buffer.rs`
+
+### Step 4: Implement selection_range and selected_text
+
+**TDD green phase.**
+
+- `selection_range() -> Option<(Position, Position)>` — returns `(start, end)` in document order by comparing anchor and cursor
+- `selected_text() -> Option<String>` — extracts text between the two positions using the gap buffer
+
+For `selected_text`, we need to convert positions to offsets and extract the slice. This may require using `position_to_offset` (already exists) and the gap buffer's `slice` method.
+
+Location: `crates/buffer/src/text_buffer.rs`
+
+### Step 5: Write tests for select_all
+
+**TDD red phase.** Add tests:
+
+- `test_select_all_empty_buffer` — anchor at (0,0), cursor at (0,0), has_selection is false
+- `test_select_all_single_line` — anchor at buffer start, cursor at buffer end
+- `test_select_all_multiline` — anchor at (0,0), cursor at last line end
+
+Location: `crates/buffer/src/text_buffer.rs`
+
+### Step 6: Implement select_all
+
+**TDD green phase.**
+
+`select_all()` — sets anchor to Position(0, 0), then moves cursor to buffer end using `move_to_buffer_end` logic but without clearing selection.
+
+Note: `move_to_buffer_end` will be modified in Step 11 to clear selection, so `select_all` should directly set both anchor and cursor.
+
+Location: `crates/buffer/src/text_buffer.rs`
+
+### Step 7: Write tests for delete_selection helper
+
+**TDD red phase.** Add tests:
+
+- `test_delete_selection_single_line` — deletes selected chars within one line
+- `test_delete_selection_multiline` — deletes across lines, joining remaining content
+- `test_delete_selection_backward_selection` — anchor after cursor, same result
+- `test_delete_selection_clears_anchor` — after deletion, anchor is None
+- `test_delete_selection_cursor_at_start` — cursor moves to start of former selection
+- `test_delete_selection_no_op_when_no_selection` — returns DirtyLines::None if no selection
+
+Location: `crates/buffer/src/text_buffer.rs`
+
+### Step 8: Implement delete_selection helper
+
+**TDD green phase.**
+
+`delete_selection() -> DirtyLines` — if no selection, return `DirtyLines::None`. Otherwise:
+1. Get selection range (start, end) in document order
+2. Delete characters from end back to start (or use a batch operation)
+3. Set cursor to start position
+4. Clear anchor
+5. Return appropriate DirtyLines (single line if within one line, FromLineToEnd if multiline)
+
+Implementation detail: Deleting a multi-line selection requires removing the text between two offsets. We can:
+- Position cursor at end of selection
+- Repeatedly call delete_backward until cursor reaches start offset
+- OR implement a batch deletion method on the gap buffer
+
+The simpler approach (repeated delete_backward) may be inefficient for large selections but is correct and matches existing patterns. For this foundational chunk, correctness is primary; optimization can be a follow-up.
+
+Location: `crates/buffer/src/text_buffer.rs`
+
+### Step 9: Write tests for mutations deleting selection first
+
+**TDD red phase.** Add tests:
+
+- `test_insert_char_with_selection_replaces` — select "ell", insert 'X', result is "hXo"
+- `test_insert_newline_with_selection_replaces` — select text, insert newline, selection replaced with newline
+- `test_insert_str_with_selection_replaces` — select "world", insert "universe", result has "universe"
+- `test_delete_backward_with_selection_deletes_selection` — select "ell", backspace once deletes only selection
+- `test_delete_forward_with_selection_deletes_selection` — select "ell", delete once deletes only selection
+
+Location: `crates/buffer/src/text_buffer.rs`
+
+### Step 10: Modify mutation methods to delete selection first
+
+**TDD green phase.** Update:
+
+- `insert_char` — at the start, if `has_selection()`, call `delete_selection()`, merge dirty lines
+- `insert_newline` — same pattern
+- `insert_str` — same pattern
+- `delete_backward` — if `has_selection()`, call `delete_selection()` and return its dirty lines (don't delete additional char)
+- `delete_forward` — same pattern
+
+Location: `crates/buffer/src/text_buffer.rs`
+
+### Step 11: Write tests for cursor movement clearing selection
+
+**TDD red phase.** Add tests:
+
+- `test_move_left_clears_selection` — has selection, move_left, selection is cleared
+- `test_move_right_clears_selection`
+- `test_move_up_clears_selection`
+- `test_move_down_clears_selection`
+- `test_move_to_line_start_clears_selection`
+- `test_move_to_line_end_clears_selection`
+- `test_move_to_buffer_start_clears_selection`
+- `test_move_to_buffer_end_clears_selection`
+- `test_set_cursor_clears_selection`
+
+Location: `crates/buffer/src/text_buffer.rs`
+
+### Step 12: Modify movement methods to clear selection
+
+**TDD green phase.** Add `self.clear_selection()` at the start of:
+
+- `move_left`
+- `move_right`
+- `move_up`
+- `move_down`
+- `move_to_line_start`
+- `move_to_line_end`
+- `move_to_buffer_start`
+- `move_to_buffer_end`
+- `set_cursor`
+
+Location: `crates/buffer/src/text_buffer.rs`
+
+### Step 13: Update constructors to initialize selection_anchor
+
+Ensure `TextBuffer::new()` and `TextBuffer::from_str()` initialize `selection_anchor: None`.
+
+Location: `crates/buffer/src/text_buffer.rs`
+
+### Step 14: Run full test suite and verify
+
+Run `cargo test -p buffer` to confirm all tests pass. Fix any issues.
+
+### Step 15: Update GOAL.md code_paths
+
+Update the chunk's GOAL.md frontmatter with the code paths touched:
+
+```yaml
+code_paths:
+  - crates/buffer/src/text_buffer.rs
+```
 
 ---
 
 **BACKREFERENCE COMMENTS**
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+Add a chunk backreference at the selection-related methods:
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
+```rust
+// Chunk: docs/chunks/text_selection_model - Selection anchor and range API
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
-
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
-
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+This chunk depends on the chunks listed in `created_after`:
+- `editable_buffer` — provides the basic TextBuffer with cursor and mutations
+- `glyph_rendering` — not directly required but part of the editor foundation
+- `metal_surface` — not directly required but part of the editor foundation
+- `viewport_rendering` — not directly required but part of the editor foundation
 
-If there are no dependencies, delete this section.
--->
+The primary dependency is the existing `TextBuffer` implementation in `crates/buffer/src/text_buffer.rs` which provides:
+- `Position` type
+- `DirtyLines` type
+- Gap buffer backing store with `slice` method
+- Cursor tracking and movement
+- Mutation methods (`insert_char`, `delete_backward`, etc.)
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Multi-line deletion efficiency**: The plan uses repeated `delete_backward` calls for multi-line selections. This is O(n) in selection size. For large selections (thousands of lines), this may be slow. Mitigation: Accept this for correctness now; the gap buffer design supports efficient batch operations that could be added later if profiling shows a bottleneck.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Dirty line tracking for multi-line deletions**: When deleting a selection spanning lines 5-10, the dirty region should be `FromLineToEnd(5)` since all subsequent lines shift up. Need to ensure this is correctly computed.
+
+3. **Selection and movement interaction with downstream chunks**: The `mouse_drag_selection` chunk expects `set_selection_anchor_at_cursor()` to exist. The `clipboard_operations` chunk expects `selected_text()` and `select_all()`. This chunk provides the foundation they depend on.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- Populate during implementation -->
