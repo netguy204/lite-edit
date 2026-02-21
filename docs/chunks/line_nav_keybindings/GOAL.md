@@ -1,11 +1,17 @@
 ---
-status: IMPLEMENTING
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
 - crates/editor/src/metal_view.rs
 - crates/editor/src/buffer_target.rs
-code_references: []
+code_references:
+  - ref: crates/editor/src/metal_view.rs#MetalView::convert_key
+    implements: "Control-key handling in NSEvent conversion - uses charactersIgnoringModifiers when Control is held to get base character instead of control character"
+  - ref: crates/editor/src/buffer_target.rs#resolve_command
+    implements: "Maps Home/End keys and Ctrl+A/Ctrl+E to MoveToLineStart/MoveToLineEnd commands"
+  - ref: crates/editor/src/buffer_target.rs#BufferFocusTarget::execute_command
+    implements: "Executes MoveToLineStart/MoveToLineEnd commands via TextBuffer methods"
 narrative: editor_qol_interactions
 investigation: null
 subsystems: []
