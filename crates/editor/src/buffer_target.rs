@@ -1,4 +1,5 @@
 // Chunk: docs/chunks/editable_buffer - Main loop + input events + editable buffer
+// Chunk: docs/chunks/mouse_click_cursor - Mouse click cursor positioning
 //!
 //! Buffer focus target implementation.
 //!
@@ -6,10 +7,15 @@
 //! editing keystrokes: printable characters, backspace, delete, arrow keys,
 //! etc. Chord resolution is a stateless pure function per the investigation's
 //! H2 findings — all target chords are single-step modifier+key combinations.
+//!
+//! Also handles mouse click events for cursor positioning, converting pixel
+//! coordinates to buffer positions using font metrics and viewport scroll offset.
 
 use crate::context::EditorContext;
 use crate::focus::{FocusTarget, Handled};
-use crate::input::{Key, KeyEvent, MouseEvent, ScrollDelta};
+use crate::font::FontMetrics;
+use crate::input::{Key, KeyEvent, MouseEvent, MouseEventKind, ScrollDelta};
+use lite_edit_buffer::Position;
 
 /// Commands that can be executed on the buffer.
 ///
@@ -264,19 +270,118 @@ impl FocusTarget for BufferFocusTarget {
         }
     }
 
-    fn handle_mouse(&mut self, _event: MouseEvent, _ctx: &mut EditorContext) {
-        // Mouse handling is a future concern - stub for now
-        // Future: cursor placement, selection
+    fn handle_mouse(&mut self, event: MouseEvent, ctx: &mut EditorContext) {
+        match event.kind {
+            MouseEventKind::Down => {
+                // Convert pixel position to buffer position and set cursor
+                let position = pixel_to_buffer_position(
+                    event.position,
+                    ctx.view_height,
+                    &ctx.font_metrics,
+                    ctx.viewport.scroll_offset,
+                    ctx.buffer.line_count(),
+                    |line| ctx.buffer.line_len(line),
+                );
+                ctx.buffer.set_cursor(position);
+                ctx.mark_cursor_dirty();
+            }
+            MouseEventKind::Up | MouseEventKind::Moved => {
+                // Selection (drag) is a future concern
+            }
+        }
     }
+}
+
+/// Converts pixel coordinates to buffer position.
+///
+/// This is the core math for mouse click → cursor positioning:
+/// 1. Flip y-coordinate (macOS uses bottom-left origin, buffer uses top-left)
+/// 2. Compute line from y: `line = (flipped_y / line_height) + scroll_offset`
+/// 3. Compute column from x: `col = x / char_width`
+/// 4. Clamp to valid buffer bounds
+///
+/// # Arguments
+/// * `position` - Pixel position (x, y) in view coordinates
+/// * `view_height` - Total view height in pixels
+/// * `font_metrics` - Font metrics for character dimensions
+/// * `scroll_offset` - Current viewport scroll offset (first visible buffer line)
+/// * `line_count` - Total number of lines in the buffer
+/// * `line_len_fn` - Closure to get the length of a specific line
+///
+/// # Returns
+/// A buffer `Position` with line and column clamped to valid ranges.
+fn pixel_to_buffer_position<F>(
+    position: (f64, f64),
+    view_height: f32,
+    font_metrics: &FontMetrics,
+    scroll_offset: usize,
+    line_count: usize,
+    line_len_fn: F,
+) -> Position
+where
+    F: Fn(usize) -> usize,
+{
+    let (x, y) = position;
+    let line_height = font_metrics.line_height;
+    let char_width = font_metrics.advance_width;
+
+    // Flip y-coordinate: macOS uses bottom-left origin, buffer uses top-left
+    let flipped_y = (view_height as f64) - y;
+
+    // Compute screen line (which line on screen, 0-indexed from top)
+    // Use truncation (floor for positive values) so clicking in the top half
+    // of a line targets that line
+    let screen_line = if flipped_y >= 0.0 && line_height > 0.0 {
+        (flipped_y / line_height).floor() as usize
+    } else {
+        0
+    };
+
+    // Convert screen line to buffer line
+    let buffer_line = scroll_offset.saturating_add(screen_line);
+
+    // Clamp to valid line range (0..line_count, but line_count could be 0)
+    let clamped_line = if line_count == 0 {
+        0
+    } else {
+        buffer_line.min(line_count - 1)
+    };
+
+    // Compute column from x position
+    // Use truncation so clicking in the left half of a character targets that column
+    let col = if x >= 0.0 && char_width > 0.0 {
+        (x / char_width).floor() as usize
+    } else {
+        0
+    };
+
+    // Clamp column to line length (can't position cursor past end of line)
+    let line_len = line_len_fn(clamped_line);
+    let clamped_col = col.min(line_len);
+
+    Position::new(clamped_line, clamped_col)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dirty_region::DirtyRegion;
+    use crate::font::FontMetrics;
     use crate::input::Modifiers;
     use crate::viewport::Viewport;
     use lite_edit_buffer::{Position, TextBuffer};
+
+    /// Creates test font metrics with known values
+    fn test_font_metrics() -> FontMetrics {
+        FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        }
+    }
 
     fn create_test_context() -> (TextBuffer, Viewport, DirtyRegion) {
         let buffer = TextBuffer::new();
@@ -292,7 +397,13 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             target.handle_key(KeyEvent::char('H'), &mut ctx);
             target.handle_key(KeyEvent::char('i'), &mut ctx);
         }
@@ -308,7 +419,13 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             target.handle_key(KeyEvent::char('a'), &mut ctx);
             target.handle_key(KeyEvent::char('b'), &mut ctx);
             target.handle_key(KeyEvent::char('c'), &mut ctx);
@@ -329,28 +446,52 @@ mod tests {
 
         // Move right
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             target.handle_key(KeyEvent::new(Key::Right, Modifiers::default()), &mut ctx);
         }
         assert_eq!(buffer.cursor_position(), Position::new(0, 1));
 
         // Move down
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             target.handle_key(KeyEvent::new(Key::Down, Modifiers::default()), &mut ctx);
         }
         assert_eq!(buffer.cursor_position(), Position::new(1, 1));
 
         // Move left
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             target.handle_key(KeyEvent::new(Key::Left, Modifiers::default()), &mut ctx);
         }
         assert_eq!(buffer.cursor_position(), Position::new(1, 0));
 
         // Move up
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             target.handle_key(KeyEvent::new(Key::Up, Modifiers::default()), &mut ctx);
         }
         assert_eq!(buffer.cursor_position(), Position::new(0, 0));
@@ -362,7 +503,13 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             target.handle_key(KeyEvent::char('a'), &mut ctx);
             target.handle_key(KeyEvent::new(Key::Return, Modifiers::default()), &mut ctx);
             target.handle_key(KeyEvent::char('b'), &mut ctx);
@@ -383,7 +530,13 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             target.handle_key(KeyEvent::new(Key::Delete, Modifiers::default()), &mut ctx);
         }
 
@@ -400,7 +553,13 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             let event = KeyEvent::new(
                 Key::Left,
                 Modifiers {
@@ -424,7 +583,13 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             let event = KeyEvent::new(
                 Key::Right,
                 Modifiers {
@@ -448,7 +613,13 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             let event = KeyEvent::new(
                 Key::Char('a'),
                 Modifiers {
@@ -472,7 +643,13 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             let event = KeyEvent::new(
                 Key::Char('e'),
                 Modifiers {
@@ -496,7 +673,13 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             let event = KeyEvent::new(Key::Home, Modifiers::default());
             target.handle_key(event, &mut ctx);
         }
@@ -514,7 +697,13 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             let event = KeyEvent::new(Key::End, Modifiers::default());
             target.handle_key(event, &mut ctx);
         }
@@ -537,7 +726,13 @@ mod tests {
 
         // Move cursor to line 15 (beyond viewport)
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             for _ in 0..15 {
                 target.handle_key(KeyEvent::new(Key::Down, Modifiers::default()), &mut ctx);
             }
@@ -555,7 +750,13 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         let result = {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             // Cmd+Z is not handled
             target.handle_key(
                 KeyEvent::new(
@@ -581,7 +782,13 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
 
             // Type on line 0
             target.handle_key(KeyEvent::char('x'), &mut ctx);
@@ -596,6 +803,191 @@ mod tests {
         assert!(dirty.is_dirty());
     }
 
+    // ==================== Pixel to Position Tests ====================
+
+    #[test]
+    fn test_pixel_to_position_first_character() {
+        // Click at top-left corner (first character of first line)
+        // View height = 160, line_height = 16, char_width = 8
+        // macOS y-coordinate is from bottom, so clicking at the top means y = 160 - small
+        // To hit line 0 (top line), we need flipped_y in [0, 16)
+        // flipped_y = 160 - y, so y should be in (144, 160]
+        let metrics = test_font_metrics();
+        let position = super::pixel_to_buffer_position(
+            (0.0, 155.0), // x=0, y near top (160-155=5, which is in first line)
+            160.0,
+            &metrics,
+            0, // no scroll
+            5, // 5 lines
+            |_| 10, // all lines have 10 chars
+        );
+        assert_eq!(position, Position::new(0, 0));
+    }
+
+    #[test]
+    fn test_pixel_to_position_second_line() {
+        // Click on second line
+        // line_height = 16, so line 1 is at flipped_y in [16, 32)
+        // To get flipped_y = 20, we need y = 160 - 20 = 140
+        let metrics = test_font_metrics();
+        let position = super::pixel_to_buffer_position(
+            (0.0, 140.0), // flipped_y = 20, line 1
+            160.0,
+            &metrics,
+            0,
+            5,
+            |_| 10,
+        );
+        assert_eq!(position, Position::new(1, 0));
+    }
+
+    #[test]
+    fn test_pixel_to_position_column_calculation() {
+        // Click at x = 24 pixels with char_width = 8
+        // col = floor(24 / 8) = 3
+        let metrics = test_font_metrics();
+        let position = super::pixel_to_buffer_position(
+            (24.0, 155.0), // x=24, line 0
+            160.0,
+            &metrics,
+            0,
+            5,
+            |_| 10,
+        );
+        assert_eq!(position, Position::new(0, 3));
+    }
+
+    #[test]
+    fn test_pixel_to_position_past_line_end() {
+        // Click past end of line (line has 5 chars, click at col 10)
+        let metrics = test_font_metrics();
+        let position = super::pixel_to_buffer_position(
+            (80.0, 155.0), // x=80, would be col 10, but line only has 5 chars
+            160.0,
+            &metrics,
+            0,
+            5,
+            |_| 5, // lines have 5 chars
+        );
+        // Should clamp to column 5 (end of line)
+        assert_eq!(position, Position::new(0, 5));
+    }
+
+    #[test]
+    fn test_pixel_to_position_below_last_line() {
+        // Click below last line (buffer has 3 lines, click on what would be line 5)
+        // line_height = 16, line 5 is at flipped_y in [80, 96)
+        // flipped_y = 85 means y = 160 - 85 = 75
+        let metrics = test_font_metrics();
+        let position = super::pixel_to_buffer_position(
+            (0.0, 75.0), // would be line 5 if it existed
+            160.0,
+            &metrics,
+            0,
+            3, // only 3 lines
+            |line| if line < 3 { 10 } else { 0 },
+        );
+        // Should clamp to last line (line 2)
+        assert_eq!(position, Position::new(2, 0));
+    }
+
+    #[test]
+    fn test_pixel_to_position_with_scroll_offset() {
+        // Viewport is scrolled down 5 lines
+        // Click on screen line 0, which should map to buffer line 5
+        let metrics = test_font_metrics();
+        let position = super::pixel_to_buffer_position(
+            (0.0, 155.0), // screen line 0
+            160.0,
+            &metrics,
+            5, // scrolled 5 lines
+            20, // 20 lines total
+            |_| 10,
+        );
+        assert_eq!(position, Position::new(5, 0));
+    }
+
+    #[test]
+    fn test_pixel_to_position_empty_buffer() {
+        // Click on empty buffer
+        let metrics = test_font_metrics();
+        let position = super::pixel_to_buffer_position(
+            (50.0, 100.0),
+            160.0,
+            &metrics,
+            0,
+            0, // empty buffer
+            |_| 0,
+        );
+        // Should return (0, 0) for empty buffer
+        assert_eq!(position, Position::new(0, 0));
+    }
+
+    #[test]
+    fn test_pixel_to_position_negative_x() {
+        // Click with negative x (shouldn't happen but handle gracefully)
+        let metrics = test_font_metrics();
+        let position = super::pixel_to_buffer_position(
+            (-10.0, 155.0),
+            160.0,
+            &metrics,
+            0,
+            5,
+            |_| 10,
+        );
+        assert_eq!(position, Position::new(0, 0));
+    }
+
+    #[test]
+    fn test_pixel_to_position_fractional_coordinates() {
+        // Click at x = 12.7 (between col 1 and 2 with char_width=8)
+        // Should use floor/truncation to target col 1
+        let metrics = test_font_metrics();
+        let position = super::pixel_to_buffer_position(
+            (12.7, 155.0),
+            160.0,
+            &metrics,
+            0,
+            5,
+            |_| 10,
+        );
+        // floor(12.7 / 8) = floor(1.5875) = 1
+        assert_eq!(position, Position::new(0, 1));
+    }
+
+    #[test]
+    fn test_mouse_click_positions_cursor() {
+        // Integration test: click event positions cursor
+        let mut buffer = TextBuffer::from_str("hello\nworld\nfoo");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Click on "world" at column 2 (character 'r')
+        // line 1 is at flipped_y in [16, 32)
+        // y = 160 - 20 = 140 for flipped_y = 20
+        // x = 16 for column 2 (8 * 2)
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Down,
+                position: (16.0, 140.0),
+                modifiers: Modifiers::default(),
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(1, 2));
+        assert!(dirty.is_dirty()); // Should have marked cursor line dirty
+    }
+
     // ==================== Ctrl+K Kill Line Tests ====================
 
     #[test]
@@ -608,7 +1000,13 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         let result = {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             let event = KeyEvent::new(
                 Key::Char('k'),
                 Modifiers {
@@ -635,7 +1033,13 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             let event = KeyEvent::new(
                 Key::Char('k'),
                 Modifiers {
@@ -661,7 +1065,13 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             let event = KeyEvent::new(
                 Key::Char('k'),
                 Modifiers {
@@ -686,7 +1096,13 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             let event = KeyEvent::new(
                 Key::Char('k'),
                 Modifiers {

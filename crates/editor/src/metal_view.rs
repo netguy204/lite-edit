@@ -1,13 +1,14 @@
 // Chunk: docs/chunks/metal_surface - macOS window + Metal surface foundation
 // Chunk: docs/chunks/editable_buffer - Main loop + input events + editable buffer
+// Chunk: docs/chunks/mouse_click_cursor - Mouse click cursor positioning
 //!
 //! Metal-backed NSView implementation
 //!
 //! This module provides a custom NSView subclass that uses a CAMetalLayer
 //! as its backing layer, enabling GPU-accelerated Metal rendering.
 //!
-//! The view also handles keyboard input and converts NSEvent key events
-//! to our Rust-native KeyEvent type.
+//! The view also handles keyboard and mouse input, converting NSEvent events
+//! to our Rust-native KeyEvent and MouseEvent types.
 
 use std::cell::{Cell, RefCell};
 
@@ -19,7 +20,7 @@ use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSRect, NSSize};
 use objc2_metal::MTLDevice;
 use objc2_quartz_core::{CALayer, CAMetalLayer};
 
-use crate::input::{Key, KeyEvent, Modifiers};
+use crate::input::{Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind};
 
 // CGFloat is a type alias for f64 on 64-bit systems
 type CGFloat = f64;
@@ -31,6 +32,9 @@ type CGFloat = f64;
 /// Type alias for key event handler callback
 pub type KeyHandler = Box<dyn Fn(KeyEvent)>;
 
+/// Type alias for mouse event handler callback
+pub type MouseHandler = Box<dyn Fn(MouseEvent)>;
+
 /// Internal state for MetalView
 pub struct MetalViewIvars {
     /// The CAMetalLayer for Metal rendering
@@ -41,6 +45,8 @@ pub struct MetalViewIvars {
     scale_factor: Cell<CGFloat>,
     /// Key event handler callback
     key_handler: RefCell<Option<KeyHandler>>,
+    /// Mouse event handler callback
+    mouse_handler: RefCell<Option<MouseHandler>>,
 }
 
 impl Default for MetalViewIvars {
@@ -69,6 +75,7 @@ impl Default for MetalViewIvars {
             device,
             scale_factor: Cell::new(1.0),
             key_handler: RefCell::new(None),
+            mouse_handler: RefCell::new(None),
         }
     }
 }
@@ -164,6 +171,17 @@ define_class!(
             // For future use: capture modifier key state changes
             // Currently not needed since we capture modifiers with each key event
         }
+
+        /// Handle mouse down events
+        #[unsafe(method(mouseDown:))]
+        fn __mouse_down(&self, event: &NSEvent) {
+            if let Some(mouse_event) = self.convert_mouse_event(event, MouseEventKind::Down) {
+                let handler = self.ivars().mouse_handler.borrow();
+                if let Some(handler) = handler.as_ref() {
+                    handler(mouse_event);
+                }
+            }
+        }
     }
 );
 
@@ -242,11 +260,57 @@ impl MetalView {
         *self.ivars().key_handler.borrow_mut() = Some(Box::new(handler));
     }
 
+    /// Sets the mouse event handler callback
+    ///
+    /// The handler will be called for each mouseDown event, with the
+    /// NSEvent converted to our Rust-native MouseEvent type.
+    pub fn set_mouse_handler(&self, handler: impl Fn(MouseEvent) + 'static) {
+        *self.ivars().mouse_handler.borrow_mut() = Some(Box::new(handler));
+    }
+
     /// Converts an NSEvent to our KeyEvent type
     fn convert_key_event(&self, event: &NSEvent) -> Option<KeyEvent> {
         let modifiers = self.convert_modifiers(event);
         let key = self.convert_key(event)?;
         Some(KeyEvent::new(key, modifiers))
+    }
+
+    /// Converts an NSEvent to our MouseEvent type
+    ///
+    /// # Arguments
+    /// * `event` - The NSEvent containing mouse information
+    /// * `kind` - The kind of mouse event (Down, Up, Moved)
+    ///
+    /// # Returns
+    /// A MouseEvent with position in pixel coordinates (view space, origin at top-left
+    /// after y-flip applied by consumer) and modifier flags.
+    fn convert_mouse_event(&self, event: &NSEvent, kind: MouseEventKind) -> Option<MouseEvent> {
+        // Get location in window coordinates
+        let location_in_window = event.locationInWindow();
+
+        // Convert to view coordinates
+        // NSView's convertPoint:fromView: with nil converts from window coordinates
+        let location_in_view: objc2_foundation::NSPoint =
+            unsafe { msg_send![self, convertPoint: location_in_window, fromView: std::ptr::null::<NSView>()] };
+
+        // Get the scale factor for pixel conversion
+        let scale = self.ivars().scale_factor.get();
+
+        // NSEvent coordinates are in points. Convert to pixels by multiplying by scale.
+        // Note: NSView uses bottom-left origin. The consumer (buffer_target) will flip
+        // the y-coordinate using view_height.
+        let position = (
+            location_in_view.x * scale,
+            location_in_view.y * scale, // This is from bottom-left, will be flipped later
+        );
+
+        let modifiers = self.convert_modifiers(event);
+
+        Some(MouseEvent {
+            kind,
+            position,
+            modifiers,
+        })
     }
 
     /// Converts NSEvent modifier flags to our Modifiers type

@@ -2,6 +2,7 @@
 // Chunk: docs/chunks/glyph_rendering - Monospace glyph atlas + text rendering
 // Chunk: docs/chunks/viewport_rendering - Viewport + Buffer-to-Screen Rendering
 // Chunk: docs/chunks/editable_buffer - Main loop + input events + editable buffer
+// Chunk: docs/chunks/mouse_click_cursor - Mouse click cursor positioning
 //!
 //! lite-edit: A lightweight, GPU-accelerated text editor for macOS
 //!
@@ -52,7 +53,7 @@ use objc2_foundation::{
 use lite_edit_buffer::TextBuffer;
 
 use crate::editor_state::EditorState;
-use crate::input::KeyEvent;
+use crate::input::{KeyEvent, MouseEvent};
 use crate::metal_view::MetalView;
 use crate::renderer::Renderer;
 
@@ -185,6 +186,12 @@ impl EditorController {
     /// Handles a key event by forwarding to the editor state.
     fn handle_key(&mut self, event: KeyEvent) {
         self.state.handle_key(event);
+        self.render_if_dirty();
+    }
+
+    /// Handles a mouse event by forwarding to the editor state.
+    fn handle_mouse(&mut self, event: MouseEvent) {
+        self.state.handle_mouse(event);
         self.render_if_dirty();
     }
 
@@ -379,15 +386,15 @@ impl AppDelegate {
         // Create the renderer
         let mut renderer = Renderer::new(&metal_view);
 
-        // Get font metrics for line height
-        let line_height = renderer.viewport().line_height();
+        // Get font metrics from the renderer
+        let font_metrics = renderer.font_metrics();
 
         // Create a TextBuffer with demo content
         let demo_content = generate_demo_content();
         let buffer = TextBuffer::from_str(&demo_content);
 
-        // Create the editor state
-        let mut state = EditorState::new(buffer, line_height);
+        // Create the editor state with font metrics
+        let mut state = EditorState::new(buffer, font_metrics);
 
         // Update viewport size based on window dimensions
         let frame = metal_view.frame();
@@ -411,6 +418,12 @@ impl AppDelegate {
         let key_controller = controller.clone();
         metal_view.set_key_handler(move |event| {
             key_controller.borrow_mut().handle_key(event);
+        });
+
+        // Set up mouse handler
+        let mouse_controller = controller.clone();
+        metal_view.set_mouse_handler(move |event| {
+            mouse_controller.borrow_mut().handle_mouse(event);
         });
 
         // Make the view first responder to receive key events

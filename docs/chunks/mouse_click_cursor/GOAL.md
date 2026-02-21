@@ -1,18 +1,40 @@
 ---
-status: FUTURE
+status: ACTIVE
 ticket: null
 parent_chunk: null
-code_paths: []
-code_references: []
+code_paths:
+  - crates/editor/src/metal_view.rs
+  - crates/editor/src/buffer_target.rs
+  - crates/editor/src/editor_state.rs
+  - crates/editor/src/context.rs
+  - crates/editor/src/main.rs
+code_references:
+  - ref: crates/editor/src/buffer_target.rs#pixel_to_buffer_position
+    implements: "Core pixel-to-buffer coordinate conversion (y-flip, line/column calculation, clamping)"
+  - ref: crates/editor/src/buffer_target.rs#BufferFocusTarget::handle_mouse
+    implements: "Mouse event handling: converts click coordinates to cursor position"
+  - ref: crates/editor/src/metal_view.rs#MetalView::__mouse_down
+    implements: "NSView mouseDown: override - receives macOS mouse events"
+  - ref: crates/editor/src/metal_view.rs#MetalView::convert_mouse_event
+    implements: "NSEvent to MouseEvent conversion with scale factor handling"
+  - ref: crates/editor/src/metal_view.rs#MetalView::set_mouse_handler
+    implements: "Mouse handler callback registration (parallel to set_key_handler)"
+  - ref: crates/editor/src/editor_state.rs#EditorState::handle_mouse
+    implements: "Mouse event routing from controller to focus target via EditorContext"
+  - ref: crates/editor/src/context.rs#EditorContext
+    implements: "Font metrics (char_width, line_height) and view_height for pixel-to-position conversion"
 narrative: editor_qol_interactions
 investigation: null
 subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["editable_buffer", "glyph_rendering", "metal_surface", "viewport_rendering"]
+created_after:
+- editable_buffer
+- glyph_rendering
+- metal_surface
+- viewport_rendering
 ---
-
 # Mouse Click Cursor Positioning
 
 ## Minor Goal
