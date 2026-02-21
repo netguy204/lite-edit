@@ -24,7 +24,7 @@ code_references:
   - ref: crates/editor/src/focus.rs#Handled
     implements: "Result enum for focus target key handling"
   - ref: crates/editor/src/context.rs#EditorContext
-    implements: "Mutable context providing access to buffer, viewport, and dirty region"
+    implements: "Mutable context providing access to buffer, viewport, dirty region, and font metrics"
   - ref: crates/editor/src/buffer_target.rs#BufferFocusTarget
     implements: "Buffer focus target handling editing commands (insert, delete, cursor movement)"
   - ref: crates/editor/src/buffer_target.rs#Command
