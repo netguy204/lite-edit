@@ -98,6 +98,7 @@ pub enum Key {
     PageDown,
 }
 
+// Chunk: docs/chunks/viewport_scrolling - Scroll event handling
 /// Scroll delta from trackpad or mouse wheel.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScrollDelta {

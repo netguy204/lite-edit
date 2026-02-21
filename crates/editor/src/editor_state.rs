@@ -915,14 +915,14 @@ mod tests {
         state.update_viewport_size(160.0); // 10 visible lines
 
         // Initial scroll offset should be 0
-        assert_eq!(state.viewport.scroll_offset, 0);
+        assert_eq!(state.viewport.first_visible_line(), 0);
 
         // Scroll down by 5 lines (positive dy = scroll down)
         // line_height is 16.0, so 5 lines = 80 pixels
         state.handle_scroll(ScrollDelta::new(0.0, 80.0));
 
         // Viewport should have scrolled
-        assert_eq!(state.viewport.scroll_offset, 5);
+        assert_eq!(state.viewport.first_visible_line(), 5);
         assert!(state.is_dirty()); // Should be dirty after scroll
     }
 
@@ -970,7 +970,7 @@ mod tests {
 
         // Scroll down so cursor is off-screen (scroll to show lines 15-24)
         state.handle_scroll(ScrollDelta::new(0.0, 15.0 * 16.0)); // 15 lines * 16 pixels
-        assert_eq!(state.viewport.scroll_offset, 15);
+        assert_eq!(state.viewport.first_visible_line(), 15);
 
         // Clear dirty flag
         let _ = state.take_dirty_region();
@@ -981,7 +981,7 @@ mod tests {
         // Cursor should still be at line 0, and viewport should have scrolled
         // back to make line 0 visible
         assert_eq!(state.buffer.cursor_position().line, 0);
-        assert_eq!(state.viewport.scroll_offset, 0);
+        assert_eq!(state.viewport.first_visible_line(), 0);
         assert!(state.is_dirty()); // Should be dirty after snap-back
     }
 
@@ -1003,7 +1003,7 @@ mod tests {
 
         // Scroll to make line 15 visible (show lines 10-19)
         state.viewport.scroll_to(10, 50);
-        assert_eq!(state.viewport.scroll_offset, 10);
+        assert_eq!(state.viewport.first_visible_line(), 10);
 
         // Clear dirty flag
         let _ = state.take_dirty_region();
@@ -1012,7 +1012,7 @@ mod tests {
         state.handle_key(KeyEvent::char('X'));
 
         // Scroll offset should remain at 10
-        assert_eq!(state.viewport.scroll_offset, 10);
+        assert_eq!(state.viewport.first_visible_line(), 10);
     }
 
     // =========================================================================
@@ -1198,7 +1198,7 @@ mod tests {
         state.update_viewport_dimensions(800.0, 160.0); // 10 visible lines
 
         // Initial scroll offset should be 0
-        assert_eq!(state.viewport.scroll_offset, 0);
+        assert_eq!(state.viewport.scroll_offset(), 0);
 
         // Open the selector
         let cmd_p = KeyEvent::new(
@@ -1215,7 +1215,7 @@ mod tests {
         state.handle_scroll(ScrollDelta::new(0.0, 80.0));
 
         // Viewport should NOT have scrolled (scroll ignored when selector open)
-        assert_eq!(state.viewport.scroll_offset, 0);
+        assert_eq!(state.viewport.scroll_offset(), 0);
     }
 
     #[test]
@@ -1378,7 +1378,7 @@ mod tests {
 
         // Manually set scroll offset
         state.viewport.scroll_to(10, 100);
-        assert_eq!(state.viewport.scroll_offset, 10);
+        assert_eq!(state.viewport.scroll_offset(), 10);
 
         // Create a temporary file
         let temp_dir = std::env::temp_dir();
@@ -1391,7 +1391,7 @@ mod tests {
         state.associate_file(temp_file.clone());
 
         // Scroll offset should be reset to 0
-        assert_eq!(state.viewport.scroll_offset, 0);
+        assert_eq!(state.viewport.scroll_offset(), 0);
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_file);

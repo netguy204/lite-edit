@@ -304,10 +304,13 @@ impl EditorController {
         }
     }
 
+    // Chunk: docs/chunks/text_selection_rendering - Syncs selection anchor from edit buffer to renderer buffer
     /// Syncs the renderer's buffer with the editor state's buffer.
     fn sync_renderer_buffer(&mut self) {
-        // Update viewport on renderer
-        self.renderer.viewport_mut().scroll_offset = self.state.viewport.scroll_offset;
+        // Update viewport on renderer - sync the pixel offset for smooth scrolling
+        let buffer_line_count = self.state.buffer.line_count();
+        let state_scroll_px = self.state.viewport.scroll_offset_px();
+        self.renderer.viewport_mut().set_scroll_offset_px(state_scroll_px, buffer_line_count);
 
         // Sync buffer content
         // The renderer needs the buffer to render from, so we need to give it

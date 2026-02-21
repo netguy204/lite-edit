@@ -93,6 +93,18 @@ impl GlyphLayout {
         (x, y)
     }
 
+    // Chunk: docs/chunks/viewport_fractional_scroll - Position with Y offset for smooth scrolling
+    /// Calculates the screen position for a character at (row, col) with Y offset
+    ///
+    /// Returns (x, y) where the Y coordinate is shifted by `-y_offset` pixels.
+    /// This is used for smooth scrolling where content is shifted up by the
+    /// fractional scroll amount.
+    pub fn position_for_with_offset(&self, row: usize, col: usize, y_offset: f32) -> (f32, f32) {
+        let x = col as f32 * self.glyph_width;
+        let y = row as f32 * self.line_height - y_offset;
+        (x, y)
+    }
+
     /// Generates the four vertices for a glyph quad at (row, col)
     ///
     /// The quad covers the glyph cell with the given UV coordinates.
@@ -102,7 +114,24 @@ impl GlyphLayout {
         col: usize,
         glyph: &GlyphInfo,
     ) -> [GlyphVertex; 4] {
-        let (x, y) = self.position_for(row, col);
+        self.quad_vertices_with_offset(row, col, glyph, 0.0)
+    }
+
+    // Chunk: docs/chunks/viewport_fractional_scroll - Quad vertices with Y offset for smooth scrolling
+    /// Generates the four vertices for a glyph quad at (row, col) with Y offset
+    ///
+    /// The Y coordinate is shifted by `-y_offset` pixels for smooth scrolling.
+    /// When scrolled to a fractional position, the fractional remainder is passed
+    /// as `y_offset` to shift all content up, causing the top line to be partially
+    /// clipped and producing smooth sub-pixel scroll animation.
+    pub fn quad_vertices_with_offset(
+        &self,
+        row: usize,
+        col: usize,
+        glyph: &GlyphInfo,
+        y_offset: f32,
+    ) -> [GlyphVertex; 4] {
+        let (x, y) = self.position_for_with_offset(row, col, y_offset);
 
         // Quad dimensions match the glyph cell size
         let w = glyph.width;
@@ -334,7 +363,7 @@ impl GlyphBuffer {
         buffer: &TextBuffer,
         viewport: &Viewport,
     ) {
-        self.update_from_buffer_with_cursor(device, atlas, buffer, viewport, true);
+        self.update_from_buffer_with_cursor(device, atlas, buffer, viewport, true, 0.0);
     }
 
     /// Updates the buffers with content from a TextBuffer, including cursor and selection rendering
@@ -353,6 +382,10 @@ impl GlyphBuffer {
     /// * `buffer` - The text buffer to render from
     /// * `viewport` - The viewport defining which lines are visible
     /// * `cursor_visible` - Whether to render the cursor (for future blink support)
+    /// * `y_offset` - Vertical offset in pixels for smooth scrolling. When scrolled to a
+    ///   fractional position (e.g., 2.5 lines), pass the fractional remainder (e.g., 0.5 * line_height)
+    ///   to shift all content up, causing the top line to be partially clipped.
+    // Chunk: docs/chunks/viewport_fractional_scroll - Y offset parameter for smooth scrolling
     pub fn update_from_buffer_with_cursor(
         &mut self,
         device: &ProtocolObject<dyn MTLDevice>,
@@ -360,6 +393,7 @@ impl GlyphBuffer {
         buffer: &TextBuffer,
         viewport: &Viewport,
         cursor_visible: bool,
+        y_offset: f32,
     ) {
         let visible_range = viewport.visible_range(buffer.line_count());
 
@@ -404,7 +438,7 @@ impl GlyphBuffer {
                     continue;
                 }
 
-                let screen_row = buffer_line - viewport.scroll_offset;
+                let screen_row = buffer_line - viewport.first_visible_line();
                 let line_len = buffer.line_len(buffer_line);
 
                 // Calculate selection columns for this line
@@ -426,7 +460,7 @@ impl GlyphBuffer {
                 }
 
                 // Emit a single selection quad covering the selected range
-                let quad = self.create_selection_quad(screen_row, start_col, end_col, solid_glyph);
+                let quad = self.create_selection_quad_with_offset(screen_row, start_col, end_col, solid_glyph, y_offset);
                 vertices.extend_from_slice(&quad);
 
                 // Generate indices for the selection quad
@@ -448,7 +482,7 @@ impl GlyphBuffer {
         let glyph_start_index = indices.len();
 
         for buffer_line in visible_range.clone() {
-            let screen_row = buffer_line - viewport.scroll_offset;
+            let screen_row = buffer_line - viewport.first_visible_line();
             let line_content = buffer.line_content(buffer_line);
 
             for (col, c) in line_content.chars().enumerate() {
@@ -466,8 +500,8 @@ impl GlyphBuffer {
                     }
                 };
 
-                // Generate the quad vertices
-                let quad = self.layout.quad_vertices(screen_row, col, glyph);
+                // Generate the quad vertices with y_offset for smooth scrolling
+                let quad = self.layout.quad_vertices_with_offset(screen_row, col, glyph, y_offset);
                 vertices.extend_from_slice(&quad);
 
                 // Generate indices for two triangles
@@ -494,10 +528,11 @@ impl GlyphBuffer {
                 // Render cursor as a block cursor using the solid (fully opaque)
                 // atlas region so the fragment shader produces a visible quad.
                 let solid_glyph = atlas.solid_glyph();
-                let cursor_quad = self.create_cursor_quad(
+                let cursor_quad = self.create_cursor_quad_with_offset(
                     screen_line,
                     cursor_pos.col,
                     solid_glyph,
+                    y_offset,
                 );
                 vertices.extend_from_slice(&cursor_quad);
 
@@ -568,8 +603,21 @@ impl GlyphBuffer {
         end_col: usize,
         solid_glyph: &GlyphInfo,
     ) -> [GlyphVertex; 4] {
-        let (start_x, y) = self.layout.position_for(screen_row, start_col);
-        let (end_x, _) = self.layout.position_for(screen_row, end_col);
+        self.create_selection_quad_with_offset(screen_row, start_col, end_col, solid_glyph, 0.0)
+    }
+
+    // Chunk: docs/chunks/viewport_fractional_scroll - Selection quad with Y offset for smooth scrolling
+    /// Creates a selection highlight quad with Y offset for smooth scrolling
+    fn create_selection_quad_with_offset(
+        &self,
+        screen_row: usize,
+        start_col: usize,
+        end_col: usize,
+        solid_glyph: &GlyphInfo,
+        y_offset: f32,
+    ) -> [GlyphVertex; 4] {
+        let (start_x, y) = self.layout.position_for_with_offset(screen_row, start_col, y_offset);
+        let (end_x, _) = self.layout.position_for_with_offset(screen_row, end_col, y_offset);
 
         // Selection height matches the line height
         let selection_height = self.layout.line_height;
@@ -597,7 +645,19 @@ impl GlyphBuffer {
         col: usize,
         reference_glyph: &GlyphInfo,
     ) -> [GlyphVertex; 4] {
-        let (x, y) = self.layout.position_for(screen_row, col);
+        self.create_cursor_quad_with_offset(screen_row, col, reference_glyph, 0.0)
+    }
+
+    // Chunk: docs/chunks/viewport_fractional_scroll - Cursor quad with Y offset for smooth scrolling
+    /// Creates a cursor quad at the specified screen position with Y offset
+    fn create_cursor_quad_with_offset(
+        &self,
+        screen_row: usize,
+        col: usize,
+        reference_glyph: &GlyphInfo,
+        y_offset: f32,
+    ) -> [GlyphVertex; 4] {
+        let (x, y) = self.layout.position_for_with_offset(screen_row, col, y_offset);
 
         // Cursor width is a thin bar (2 pixels) for line cursor
         // For now we use a block cursor that's the full glyph width

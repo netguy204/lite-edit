@@ -238,15 +238,19 @@ impl Renderer {
         }
     }
 
+    // Chunk: docs/chunks/viewport_fractional_scroll - Pass y_offset for smooth scrolling
     /// Updates the glyph buffer from the current buffer and viewport
     fn update_glyph_buffer(&mut self) {
         if let Some(buffer) = &self.buffer {
+            // Get the fractional scroll offset for smooth scrolling
+            let y_offset = self.viewport.scroll_fraction_px();
             self.glyph_buffer.update_from_buffer_with_cursor(
                 &self.device,
                 &self.atlas,
                 buffer,
                 &self.viewport,
                 self.cursor_visible,
+                y_offset,
             );
         }
     }

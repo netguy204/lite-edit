@@ -34,6 +34,9 @@ enum Command {
     // Chunk: docs/chunks/delete_backward_word - Alt+Backspace word deletion
     /// Delete backward by one word (Alt+Backspace)
     DeleteBackwardWord,
+    // Chunk: docs/chunks/word_forward_delete - Alt+D forward word deletion
+    /// Delete forward by one word (Alt+D)
+    DeleteForwardWord,
     // Chunk: docs/chunks/kill_line - Delete from cursor to end of line (Ctrl+K)
     /// Delete from cursor to end of line (kill-line)
     DeleteToLineEnd,
@@ -114,6 +117,10 @@ fn resolve_command(event: &KeyEvent) -> Option<Command> {
         // Chunk: docs/chunks/delete_backward_word - Alt+Backspace word deletion
         // Option+Backspace → delete backward by word (must come before generic Backspace)
         Key::Backspace if mods.option && !mods.command => Some(Command::DeleteBackwardWord),
+
+        // Chunk: docs/chunks/word_forward_delete - Alt+D forward word deletion
+        // Option+D → delete forward by word (must come before generic Char)
+        Key::Char('d') if mods.option && !mods.command => Some(Command::DeleteForwardWord),
 
         // Backspace (Delete backward)
         Key::Backspace => Some(Command::DeleteBackward),
@@ -232,6 +239,8 @@ impl BufferFocusTarget {
             Command::DeleteForward => ctx.buffer.delete_forward(),
             // Chunk: docs/chunks/delete_backward_word - Alt+Backspace word deletion
             Command::DeleteBackwardWord => ctx.buffer.delete_backward_word(),
+            // Chunk: docs/chunks/word_forward_delete - Alt+D forward word deletion
+            Command::DeleteForwardWord => ctx.buffer.delete_forward_word(),
             // Chunk: docs/chunks/kill_line - Execute DeleteToLineEnd command
             Command::DeleteToLineEnd => ctx.buffer.delete_to_line_end(),
             Command::DeleteToLineStart => ctx.buffer.delete_to_line_start(),
@@ -424,32 +433,20 @@ impl FocusTarget for BufferFocusTarget {
         }
     }
 
+    // Chunk: docs/chunks/viewport_fractional_scroll - Smooth scrolling with pixel-level precision
     fn handle_scroll(&mut self, delta: ScrollDelta, ctx: &mut EditorContext) {
-        // Convert scroll delta to line offset
+        // Accumulate raw pixel deltas for smooth scrolling
         // Positive dy = scroll down (content moves up, scroll_offset increases)
         // Negative dy = scroll up (content moves down, scroll_offset decreases)
-        let line_height = ctx.viewport.line_height();
-        let lines_to_scroll = (delta.dy / line_height as f64).round() as i32;
-
-        if lines_to_scroll == 0 {
-            return;
-        }
+        let current_px = ctx.viewport.scroll_offset_px();
+        let new_px = current_px + delta.dy as f32;
 
         let line_count = ctx.buffer.line_count();
-        let current_offset = ctx.viewport.scroll_offset;
-
-        let new_offset = if lines_to_scroll > 0 {
-            // Scroll down
-            current_offset.saturating_add(lines_to_scroll as usize)
-        } else {
-            // Scroll up
-            current_offset.saturating_sub((-lines_to_scroll) as usize)
-        };
-
-        ctx.viewport.scroll_to(new_offset, line_count);
+        ctx.viewport.set_scroll_offset_px(new_px, line_count);
 
         // Mark full viewport dirty if we actually scrolled
-        if ctx.viewport.scroll_offset != current_offset {
+        // Any scroll (even sub-pixel) requires a redraw for smooth animation
+        if (ctx.viewport.scroll_offset_px() - current_px).abs() > 0.001 {
             ctx.dirty_region.merge(crate::dirty_region::DirtyRegion::FullViewport);
         }
     }
@@ -463,7 +460,7 @@ impl FocusTarget for BufferFocusTarget {
                     event.position,
                     ctx.view_height,
                     &ctx.font_metrics,
-                    ctx.viewport.scroll_offset,
+                    ctx.viewport.first_visible_line(),
                     ctx.buffer.line_count(),
                     |line| ctx.buffer.line_len(line),
                 );
@@ -481,7 +478,7 @@ impl FocusTarget for BufferFocusTarget {
                     event.position,
                     ctx.view_height,
                     &ctx.font_metrics,
-                    ctx.viewport.scroll_offset,
+                    ctx.viewport.first_visible_line(),
                     ctx.buffer.line_count(),
                     |line| ctx.buffer.line_len(line),
                 );
@@ -964,7 +961,7 @@ mod tests {
         }
 
         // Viewport should have scrolled
-        assert!(viewport.scroll_offset > 0);
+        assert!(viewport.first_visible_line() > 0);
         // Should have marked full viewport dirty for the scroll
         assert_eq!(dirty, DirtyRegion::FullViewport);
     }
@@ -2188,7 +2185,7 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         // Initial offset
-        assert_eq!(viewport.scroll_offset, 0);
+        assert_eq!(viewport.first_visible_line(), 0);
 
         {
             let mut ctx = EditorContext::new(
@@ -2203,7 +2200,7 @@ mod tests {
             target.handle_scroll(ScrollDelta::new(0.0, 48.0), &mut ctx);
         }
 
-        assert_eq!(viewport.scroll_offset, 3);
+        assert_eq!(viewport.first_visible_line(), 3);
         assert_eq!(dirty, DirtyRegion::FullViewport);
     }
 
@@ -2232,7 +2229,7 @@ mod tests {
             target.handle_scroll(ScrollDelta::new(0.0, -48.0), &mut ctx);
         }
 
-        assert_eq!(viewport.scroll_offset, 7); // 10 - 3 = 7
+        assert_eq!(viewport.first_visible_line(), 7); // 10 - 3 = 7
         assert_eq!(dirty, DirtyRegion::FullViewport);
     }
 
@@ -2261,7 +2258,7 @@ mod tests {
         }
 
         // Should be clamped to max (20 - 10 = 10)
-        assert_eq!(viewport.scroll_offset, 10);
+        assert_eq!(viewport.first_visible_line(), 10);
     }
 
     #[test]
@@ -2294,8 +2291,9 @@ mod tests {
         assert_eq!(buffer.cursor_position(), original_cursor);
     }
 
+    // Chunk: docs/chunks/viewport_fractional_scroll - Sub-pixel scroll accumulates
     #[test]
-    fn test_small_scroll_delta_ignored() {
+    fn test_small_scroll_delta_accumulates() {
         let content = (0..50)
             .map(|i| format!("line {}", i))
             .collect::<Vec<_>>()
@@ -2314,13 +2312,47 @@ mod tests {
                 test_font_metrics(),
                 160.0,
             );
-            // Scroll by less than half a line (won't round to a full line)
+            // Scroll by less than half a line - now accumulates in pixel space
             target.handle_scroll(ScrollDelta::new(0.0, 7.0), &mut ctx);
         }
 
-        // Should remain at 0 since 7/16 rounds to 0
-        assert_eq!(viewport.scroll_offset, 0);
-        assert_eq!(dirty, DirtyRegion::None); // No change, no dirty
+        // First visible line should still be 0, but we've scrolled 7 pixels
+        assert_eq!(viewport.first_visible_line(), 0);
+        assert!((viewport.scroll_offset_px() - 7.0).abs() < 0.001);
+        assert!((viewport.scroll_fraction_px() - 7.0).abs() < 0.001);
+        // Even sub-pixel scrolls mark dirty for smooth animation
+        assert_eq!(dirty, DirtyRegion::FullViewport);
+    }
+
+    // Chunk: docs/chunks/viewport_fractional_scroll - Accumulated sub-pixel scrolls cross line boundary
+    #[test]
+    fn test_accumulated_scroll_crosses_line_boundary() {
+        let content = (0..50)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut buffer = TextBuffer::from_str(&content);
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut target = BufferFocusTarget::new();
+
+        // Scroll 7 pixels three times = 21 pixels = 1 line + 5 pixels
+        for _ in 0..3 {
+            let mut dirty = DirtyRegion::None;
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            target.handle_scroll(ScrollDelta::new(0.0, 7.0), &mut ctx);
+        }
+
+        // Should now be on line 1 with 5 pixel remainder
+        assert_eq!(viewport.first_visible_line(), 1);
+        assert!((viewport.scroll_offset_px() - 21.0).abs() < 0.001);
+        assert!((viewport.scroll_fraction_px() - 5.0).abs() < 0.001);
     }
 
     // ==================== Mouse Drag Selection Tests ====================
