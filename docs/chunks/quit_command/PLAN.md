@@ -8,170 +8,107 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+Implement Cmd+Q as a quit action that cleanly terminates the macOS application. The design follows the existing input handling architecture established in `editable_buffer` and `line_nav_keybindings` chunks.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Architecture Decision**: Handle quit at the `EditorState`/`EditorController` level rather than in `BufferFocusTarget.resolve_command()`. Rationale:
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. **Quit is an app-level concern**, not a buffer command. The `Command` enum in `buffer_target.rs` contains editing operations (insert, delete, move). Adding `Quit` there would mix concerns.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/quit_command/GOAL.md)
-with references to the files that you expect to touch.
--->
+2. **Signal propagation is cleaner**. The `EditorState.handle_key()` method returns `void` today, while `FocusTarget.handle_key()` returns `Handled`. We have two options:
 
-## Subsystem Considerations
+   - **Option A (chosen)**: Intercept Cmd+Q in `EditorState.handle_key()` *before* forwarding to the focus target. When detected, set a flag (e.g., `should_quit: bool`) that the `EditorController` checks after each key event. This keeps the focus target's responsibility clear (buffer editing) and handles quit as a global shortcut.
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+   - **Option B**: Add a `Quit` variant to the `Handled` enum (e.g., `Handled::Quit`). This requires changing the return signature and checking for quit at every call site. More invasive.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
+3. **`NSApplication::terminate:`** is called from the Objective-C side. The quit flag bridges the Rust signal to the Cocoa termination. We already have `NSApplication::sharedApplication(mtm)` accessible in `main.rs`.
 
-If no subsystems are relevant, delete this section.
+**Testing Strategy** (per TESTING_PHILOSOPHY.md):
 
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+- Unit test that Cmd+Q sets the quit flag in `EditorState`
+- Unit test that other Cmd+key combinations (e.g., Cmd+Z) do NOT set the quit flag
+- The actual `NSApplication::terminate:` call is platform code (humble view) and cannot be unit tested
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add `should_quit` flag to `EditorState`
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add a `pub should_quit: bool` field to `EditorState`, initialized to `false`. This flag signals that the app should terminate.
 
-Example:
+**Location**: `crates/editor/src/editor_state.rs`
 
-### Step 1: Define the SegmentHeader struct
+### Step 2: Intercept Cmd+Q in `EditorState.handle_key()`
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+At the top of `EditorState.handle_key()`, before forwarding to the focus target, check for Cmd+Q:
 
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+// Check for app-level shortcuts before delegating to focus target
+if event.modifiers.command && !event.modifiers.control {
+    if let Key::Char('q') = event.key {
+        self.should_quit = true;
+        return;
+    }
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+This intercepts the quit shortcut globally, regardless of which focus target is active.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+**Location**: `crates/editor/src/editor_state.rs`
+
+### Step 3: Add unit tests for quit flag behavior
+
+Write tests verifying:
+
+1. `Cmd+Q` sets `should_quit` to `true`
+2. `Cmd+Q` does NOT modify the buffer (the key event is consumed)
+3. `Ctrl+Q` does NOT set the quit flag (Ctrl+Q is a different binding)
+4. `Cmd+Z` does NOT set the quit flag (other Cmd+ combinations are unaffected)
+
+**Location**: `crates/editor/src/editor_state.rs` (in the `#[cfg(test)]` module)
+
+### Step 4: Check quit flag in `EditorController.handle_key()`
+
+After `self.state.handle_key(event)`, check `self.state.should_quit` and call `NSApplication::terminate:` if true:
+
+```rust
+fn handle_key(&mut self, event: KeyEvent) {
+    self.state.handle_key(event);
+
+    // Check for quit request
+    if self.state.should_quit {
+        self.terminate_app();
+        return;
+    }
+
+    self.render_if_dirty();
+}
+```
+
+Implement `terminate_app()` as a helper method that calls `NSApplication::sharedApplication(mtm).terminate(None)`. Getting the `MainThreadMarker` requires passing it in or obtaining it fresh—since `EditorController` runs on the main thread, `MainThreadMarker::new()` should succeed.
+
+**Location**: `crates/editor/src/main.rs` (in the `EditorController` impl)
+
+### Step 5: Verify clean shutdown
+
+Manually test (cargo run) that:
+- Cmd+Q closes the window and terminates the process
+- No warnings or errors appear in the console
+- The behavior matches clicking the window's close button
+
+This is visual/manual verification since `NSApplication::terminate:` cannot be exercised in a unit test context.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- `line_nav_keybindings` chunk: Establishes the pattern of intercepting modifier+key combinations in `resolve_command`. We diverge slightly by handling quit in `EditorState` rather than `BufferFocusTarget`, but the modifier check pattern (`mods.command && !mods.control`) is consistent.
+- `editable_buffer` chunk: Provides the `EditorState`, `EditorController`, and key event flow that this chunk extends.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **MainThreadMarker in `terminate_app()`**: We need a `MainThreadMarker` to call `NSApplication::sharedApplication(mtm)`. Since `EditorController` is only accessed from the main thread (via callbacks from the run loop), `MainThreadMarker::new().unwrap()` should work. If not, we may need to store the marker or pass it through the callback chain.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Unsaved changes warning**: Currently there's no dirty-file tracking, so quit always succeeds immediately. A future chunk might add "save changes?" confirmation. The quit flag approach supports this—instead of calling `terminate_app()` immediately, we could show a dialog first.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->
