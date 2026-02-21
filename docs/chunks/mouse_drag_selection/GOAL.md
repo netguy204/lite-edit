@@ -1,8 +1,11 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/editor/src/metal_view.rs
+  - crates/editor/src/buffer_target.rs
+  - crates/buffer/src/text_buffer.rs
 code_references: []
 narrative: editor_qol_interactions
 investigation: null
@@ -10,11 +13,14 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on:
-  - mouse_click_cursor
-  - text_selection_model
-created_after: ["editable_buffer", "glyph_rendering", "metal_surface", "viewport_rendering"]
+- mouse_click_cursor
+- text_selection_model
+created_after:
+- editable_buffer
+- glyph_rendering
+- metal_surface
+- viewport_rendering
 ---
-
 # Mouse Drag Selection
 
 ## Minor Goal
