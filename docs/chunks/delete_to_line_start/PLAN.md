@@ -26,28 +26,34 @@ Add unit tests to `crates/buffer/src/text_buffer.rs` in the `#[cfg(test)]` modul
 
 1. **delete_to_line_start_from_middle**: Cursor at col 5 in `"hello world"` → deletes `"hello"`, leaves `" world"` with cursor at col 0
 2. **delete_to_line_start_from_end**: Cursor at end of `"hello world"` (col 11) → deletes entire line content, leaves `""` with cursor at col 0
-3. **delete_to_line_start_at_col_0**: Cursor at col 0 → no-op, returns `DirtyLines::None`
+3. **delete_to_line_start_at_col_0**: Cursor at col 0 on line 0 → no-op, returns `DirtyLines::None`
 4. **delete_to_line_start_with_selection**: Active selection → deletes selection (not line-start), delegates to `delete_selection()`
-5. **delete_to_line_start_multiline**: In a multi-line buffer, only affects current line, does not join with previous line
-6. **delete_to_line_start_empty_line**: Cursor at col 0 on empty line → no-op
+5. **delete_to_line_start_multiline**: In a multi-line buffer, cursor mid-line → only affects current line content, does not join
+6. **delete_to_line_start_at_col_0_joins_prev_line**: Cursor at col 0 on line > 0 → deletes the preceding newline, joining with the previous line; cursor moves to `(prev_line, prev_line_len)`; returns `DirtyLines::FromLineToEnd(prev_line)`
+7. **delete_to_line_start_empty_line_joins**: Cursor at col 0 on an empty intermediate line → joins with the previous line, line disappears
 
 Location: `crates/buffer/src/text_buffer.rs`
 
 ### Step 2: Implement delete_to_line_start in TextBuffer
 
-Add the `delete_to_line_start` method to `TextBuffer` that:
+Update the `delete_to_line_start` method in `TextBuffer`:
 
-1. If there's an active selection, delegate to `delete_selection()` and return its result
-2. If cursor is at column 0, return `DirtyLines::None` (no-op)
-3. Otherwise:
-   - Calculate the number of characters to delete: `cursor.col`
-   - Position the gap at cursor
-   - Delete backward `cursor.col` times using `buffer.delete_backward()`
-   - Update `line_index.remove_char()` for each deletion
-   - Set cursor to column 0
+1. If there's an active selection, delegate to `delete_selection()` and return its result.
+2. If cursor is at column 0 **and** on line 0 → return `DirtyLines::None` (no-op; already at buffer start).
+3. If cursor is at column 0 **and** on line > 0 → join with the previous line:
+   - Record `prev_line = cursor.line - 1` and `prev_line_len = self.line_len(prev_line)`
+   - Call `self.sync_gap_to_cursor()` then `self.buffer.delete_backward()` (deletes the `\n`)
+   - Call `self.line_index.remove_newline(prev_line)`
+   - Set `cursor.line = prev_line`, `cursor.col = prev_line_len`
+   - Return `DirtyLines::FromLineToEnd(prev_line)`
+4. Otherwise (cursor mid-line):
+   - Calculate `chars_to_delete = cursor.col`
+   - Call `self.sync_gap_to_cursor()`
+   - Delete backward `chars_to_delete` times, calling `self.line_index.remove_char(current_line)` each time
+   - Set `cursor.col = 0`
    - Return `DirtyLines::Single(cursor.line)`
 
-The method signature: `pub fn delete_to_line_start(&mut self) -> DirtyLines`
+The method signature is unchanged: `pub fn delete_to_line_start(&mut self) -> DirtyLines`
 
 Location: `crates/buffer/src/text_buffer.rs`
 
