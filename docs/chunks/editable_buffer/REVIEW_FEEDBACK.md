@@ -1,19 +1,19 @@
 # Review Feedback
 
-**Iteration:** 2
+**Iteration:** 3
 **Decision:** FEEDBACK
 
 ## Summary
 
-15 of 16 success criteria satisfied. One functional gap: Cmd-A (select all) is not implemented despite being explicitly required in GOAL.md. This was flagged in iteration 1 and remains unaddressed in iteration 2.
+All core editing functionality implemented except Cmd-A (select all) handler required by GOAL.md. 15 of 16 success criteria satisfied; one functional gap needs resolution.
 
 ## Issues to Address
 
 ### Issue 1: crates/editor/src/buffer_target.rs:52-100
 
-**Concern:** Cmd-A (select all) is not implemented. GOAL.md explicitly requires 'Cmd-A → select all (selection state not required for this chunk — just move cursor to start/end as a placeholder)'. This was flagged in iteration 1 and remains unaddressed.
+**Concern:** GOAL.md explicitly requires 'Cmd-A → select all (selection state not required for this chunk — just move cursor to start/end as a placeholder)'. The implementation has Ctrl-A for Emacs-style line start but lacks Cmd-A handling entirely.
 
-**Suggestion:** Add handler for Key::Char('a') if mods.command && !mods.control that maps to MoveToBufferEnd as a placeholder. Example: Key::Char('a') if mods.command && !mods.control => Some(Command::MoveToBufferEnd)
+**Suggestion:** Add a handler for Key::Char('a') if mods.command && !mods.control that maps to a SelectAll or MoveToBufferEnd command as placeholder behavior.
 
 
 ---
