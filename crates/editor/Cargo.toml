@@ -1,4 +1,5 @@
 # Chunk: docs/chunks/metal_surface - macOS window + Metal surface foundation
+# Chunk: docs/chunks/glyph_rendering - Monospace glyph atlas + text rendering
 
 [package]
 name = "lite-edit"
@@ -21,6 +22,12 @@ objc2-metal = "0.3"
 objc2-quartz-core = "0.3"
 # Objective-C block support
 block2 = "0.6"
+# Core Text framework (font loading, glyph rasterization)
+objc2-core-text = "0.3"
+# Core Graphics framework (bitmap contexts for glyph rendering)
+objc2-core-graphics = "0.3"
+# Core Foundation framework (CFString, CGFloat, etc.)
+objc2-core-foundation = "0.3"
 
 [build-dependencies]
 

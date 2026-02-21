@@ -150,6 +150,11 @@ impl MetalView {
         &self.ivars().metal_layer
     }
 
+    /// Returns the current scale factor (1.0 for standard, 2.0 for Retina)
+    pub fn scale_factor(&self) -> f64 {
+        self.ivars().scale_factor.get()
+    }
+
     /// Updates the drawable size based on current frame and scale factor
     pub fn update_drawable_size(&self) {
         self.update_drawable_size_internal();

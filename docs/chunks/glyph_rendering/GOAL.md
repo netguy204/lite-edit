@@ -1,18 +1,29 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/editor/Cargo.toml
+  - crates/editor/build.rs
+  - crates/editor/src/main.rs
+  - crates/editor/src/renderer.rs
+  - crates/editor/src/font.rs
+  - crates/editor/src/glyph_atlas.rs
+  - crates/editor/src/glyph_buffer.rs
+  - crates/editor/src/shader.rs
+  - crates/editor/shaders/glyph.metal
+  - crates/editor/tests/smoke_test.rs
+  - crates/editor/tests/glyph_layout_test.rs
 code_references: []
 narrative: null
 investigation: editor_core_architecture
 subsystems: []
 friction_entries: []
 bug_type: null
-depends_on: ["metal_surface"]
+depends_on:
+- metal_surface
 created_after: []
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

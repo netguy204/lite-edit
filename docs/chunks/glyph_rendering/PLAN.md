@@ -8,170 +8,152 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk builds the text rendering pipeline on top of the existing Metal infrastructure from `metal_surface`. The pipeline has three major components:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Font loading + metrics** — Use Core Text to load a monospace font (Menlo) and extract critical metrics: glyph advance width, line height, ascent, descent. These metrics drive layout.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **Glyph atlas** — A Metal texture that caches rasterized glyphs. Each glyph is rasterized on demand via Core Text and packed into the atlas. UV coordinates map character codes to atlas regions.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/glyph_rendering/GOAL.md)
-with references to the files that you expect to touch.
--->
+3. **Textured quad rendering** — A Metal shader that renders screen-aligned quads with glyph textures. Each glyph is a quad positioned at `(col * glyph_width, row * line_height)` with UVs into the atlas.
+
+### Key design choices
+
+- **Monospace simplifies everything**: No complex text shaping, no kerning, no ligatures. `x = col * advance_width` is the entire layout algorithm.
+- **On-demand glyph rasterization**: We pre-populate printable ASCII (0x20-0x7E) at startup for predictable performance, but the atlas can grow for extended characters.
+- **Single texture atlas**: Start with a fixed-size atlas (e.g., 1024×1024). If we exceed capacity, fail loudly for now — this is a code editor, not a Unicode explorer.
+- **Humble view architecture**: The glyph layout math (computing positions and UVs) is pure Rust and fully testable. Only the Core Text rasterization and Metal draw calls are platform-dependent.
+
+### Building on metal_surface
+
+The existing `Renderer` creates a command queue and performs clear operations. This chunk extends it with:
+- A texture atlas (`MTLTexture`)
+- A render pipeline state with vertex/fragment shaders
+- Vertex/index buffers for glyph quads
+
+The existing `MetalView` provides device access and Retina scale factor — both needed for correct glyph rendering.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No existing subsystems documented yet. This chunk may seed a future `text_rendering` subsystem if glyph atlas patterns recur across the codebase.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Create the font module with Core Text integration
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create `crates/editor/src/font.rs` that:
+- Loads a monospace font by name via Core Text (`CTFontCreateWithName`)
+- Extracts metrics: advance width (from any glyph, e.g., 'M'), line height, ascent, descent
+- Accounts for display scale factor (metrics are in points, we need pixels)
+- Provides a `Font` struct holding the CTFont reference and computed metrics
 
-Example:
+**Location**: `crates/editor/src/font.rs`
 
-### Step 1: Define the SegmentHeader struct
+**Key APIs**: `CTFontCreateWithName`, `CTFontGetAdvancesForGlyphs`, `CTFontGetAscent`, `CTFontGetDescent`, `CTFontGetLeading`
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+**Note**: Add `objc2-core-text` dependency to Cargo.toml and link CoreText framework in build.rs.
 
-Location: src/segment/format.rs
+### Step 2: Implement the glyph atlas
 
-### Step 2: Implement header serialization
+Create `crates/editor/src/glyph_atlas.rs` that:
+- Creates a Metal texture (R8Unorm for grayscale glyphs) at a fixed size (1024×1024)
+- Maintains a mapping from character → (UV rect in atlas)
+- Rasterizes glyphs on demand via Core Text (`CTFontDrawGlyphs` into a CGContext)
+- Uses a simple row-based packer: fill rows left-to-right, move to next row when full
+- Pre-populates all printable ASCII characters (0x20-0x7E) at construction time
+- Provides `get_glyph(char) -> Option<GlyphInfo>` where `GlyphInfo` contains UV coordinates and glyph metrics
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+**Location**: `crates/editor/src/glyph_atlas.rs`
 
-### Step 3: ...
+**Key insight**: Glyph rasterization happens into a CPU buffer (via CGContext), then we upload to the Metal texture. Core Text gives us alpha coverage, which we store in the R channel.
 
----
+### Step 3: Create Metal shaders for textured quad rendering
 
-**BACKREFERENCE COMMENTS**
+Create `crates/editor/shaders/glyph.metal`:
+- **Vertex shader**: Takes per-vertex position and UV, applies orthographic projection to convert screen coordinates to NDC
+- **Fragment shader**: Samples the atlas texture at the interpolated UV, outputs glyph alpha as text color (foreground) blended over background
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+Create `crates/editor/src/shader.rs` that:
+- Compiles the shader source at runtime via `MTLDevice::newLibraryWithSource`
+- Creates a render pipeline state with the vertex/fragment functions
+- Configures blending (source alpha, one minus source alpha) for anti-aliased glyphs
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+**Location**: `crates/editor/shaders/glyph.metal`, `crates/editor/src/shader.rs`
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+### Step 4: Build the glyph vertex buffer
 
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
+Create `crates/editor/src/glyph_buffer.rs` that:
+- Takes an array of (row, col, char) and produces a vertex buffer of quads
+- Each quad is 4 vertices: position (x, y) and UV (u, v)
+- Position is computed as: `x = col * glyph_width`, `y = viewport_height - (row * line_height) - ascent` (flip Y for Metal's coordinate system)
+- Uses an index buffer for efficient rendering (6 indices per quad: 2 triangles)
+- Provides `update(lines: &[&str])` to rebuild the buffer from text content
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+**Location**: `crates/editor/src/glyph_buffer.rs`
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+**Testing note**: The layout math (`col * width`, `row * height`, UV computation) is pure and testable. The buffer creation is Metal-dependent.
+
+### Step 5: Integrate glyph rendering into the Renderer
+
+Extend `crates/editor/src/renderer.rs`:
+- On construction: create `Font`, `GlyphAtlas`, shader pipeline, buffers
+- On `render()`:
+  1. Clear to background (existing)
+  2. Set the glyph pipeline state
+  3. Bind the atlas texture
+  4. Bind the vertex/index buffers
+  5. Draw indexed primitives
+- Add `set_content(lines: &[&str])` to update the glyph buffer with new text
+
+**Location**: `crates/editor/src/renderer.rs`
+
+### Step 6: Wire up hardcoded text display in main.rs
+
+Modify `crates/editor/src/main.rs`:
+- After creating the renderer, call `renderer.set_content(DEMO_TEXT)` with ~20 lines of hardcoded text
+- Ensure the initial render displays the text
+- Verify text remains visible after window resize
+
+**Location**: `crates/editor/src/main.rs`
+
+**Demo text**: A recognizable multi-line string (e.g., a Rust hello-world, a lorem ipsum, or the editor's own source code snippet).
+
+### Step 7: Add unit tests for testable components
+
+Create tests for the pure/testable portions of the pipeline:
+- `font.rs`: Test metric extraction (advance > 0, line_height > advance, ascent + descent ≈ line_height)
+- `glyph_buffer.rs`: Test position/UV calculations without Metal (mock the buffer creation, verify computed values)
+- Test that ASCII range 0x20-0x7E is fully covered by the atlas
+
+**Location**: `crates/editor/src/font.rs` (inline tests), `crates/editor/tests/glyph_layout_test.rs`
+
+### Step 8: Add smoke test and performance validation
+
+Create/extend `crates/editor/tests/smoke_test.rs`:
+- Visual verification: launch the editor and confirm text is displayed (manual, documented in test comments)
+- Performance test: measure time to render 50 lines × 120 columns (~6,000 glyphs). Assert < 2ms total (layout + GPU submission). This validates H3 from the investigation.
+
+**Location**: `crates/editor/tests/smoke_test.rs`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **metal_surface chunk** (ACTIVE): Provides `MetalView`, `Renderer`, device access, Retina scale factor handling
+- **Core Text framework**: System framework, no external crate needed beyond `objc2-core-text`
+- **Core Graphics framework**: For CGContext-based glyph rasterization
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Core Text API via objc2**: The `objc2-core-text` crate may have gaps or require manual FFI for some functions (especially `CTFontDrawGlyphs`). Fallback: use raw `objc2` FFI if needed.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Glyph rasterization into Metal texture**: The flow is Core Text → CGContext (CPU) → MTLTexture. This involves a pixel format conversion (BGRA CGContext to R8 texture). May need to extract the alpha channel explicitly.
+
+3. **Coordinate system flips**: Metal's NDC has Y up, Core Text's coordinate system has Y up, but NSView/CAMetalLayer may flip. Need careful testing at Retina scales.
+
+4. **Atlas sizing**: A 1024×1024 R8 texture is 1MB and fits ~16K glyphs at 8×16 cell size. More than enough for ASCII, but extended Unicode could exhaust it. For this chunk, we fail loudly if exhausted — proper atlas management is future work.
+
+5. **Shader compilation latency**: Compiling MSL at runtime on first launch adds latency. Acceptable for this chunk; precompiled metallib is a future optimization.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->
