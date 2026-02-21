@@ -195,8 +195,11 @@ impl AppDelegate {
         window.makeKeyAndOrderFront(None);
 
         // Activate the application (bring to front)
+        // activateIgnoringOtherApps is deprecated but required when launching
+        // unbundled (i.e., from cargo run / terminal without an app bundle).
         let app = NSApplication::sharedApplication(mtm);
-        app.activate();
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
     }
 }
 
