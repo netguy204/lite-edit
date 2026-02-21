@@ -1,10 +1,12 @@
 ---
-status: IMPLEMENTING
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
 - crates/editor/src/metal_view.rs
-code_references: []
+code_references:
+  - ref: crates/editor/src/metal_view.rs#MetalView::__reset_cursor_rects
+    implements: "I-beam cursor setup via resetCursorRects NSView override"
 narrative: editor_ux_refinements
 investigation: null
 subsystems: []
