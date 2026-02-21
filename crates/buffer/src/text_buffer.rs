@@ -148,6 +148,11 @@ impl TextBuffer {
         self.selection_anchor = None;
     }
 
+    /// Returns the selection anchor position, if any.
+    pub fn selection_anchor(&self) -> Option<Position> {
+        self.selection_anchor
+    }
+
     /// Returns true if there is an active selection (anchor is set and differs from cursor).
     pub fn has_selection(&self) -> bool {
         match self.selection_anchor {

@@ -273,6 +273,11 @@ impl EditorController {
             // Clear and rebuild (not ideal but works for now)
             *render_buffer = TextBuffer::from_str(&content);
             render_buffer.set_cursor(cursor_pos);
+
+            // Sync selection anchor (set_cursor clears selection, so do this after)
+            if let Some(anchor) = self.state.buffer.selection_anchor() {
+                render_buffer.set_selection_anchor(anchor);
+            }
         }
     }
 
