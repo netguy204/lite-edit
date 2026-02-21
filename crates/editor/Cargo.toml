@@ -1,0 +1,29 @@
+# Chunk: docs/chunks/metal_surface - macOS window + Metal surface foundation
+
+[package]
+name = "lite-edit"
+version.workspace = true
+edition.workspace = true
+description = "A lightweight, GPU-accelerated text editor for macOS"
+license.workspace = true
+repository = "https://github.com/example/lite-edit"
+
+[dependencies]
+# Core Objective-C runtime bindings
+objc2 = "0.6"
+# Foundation framework (NSString, NSRunLoop, etc.)
+objc2-foundation = "0.3"
+# AppKit framework (NSApplication, NSWindow, NSView)
+objc2-app-kit = "0.3"
+# Metal framework bindings
+objc2-metal = "0.3"
+# Core Animation (CAMetalLayer)
+objc2-quartz-core = "0.3"
+# Objective-C block support
+block2 = "0.6"
+
+[build-dependencies]
+
+[[bin]]
+name = "lite-edit"
+path = "src/main.rs"

@@ -46,6 +46,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lite-edit-buffer"
+version = "0.1.0"
+
+[[package]]
 name = "objc2"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

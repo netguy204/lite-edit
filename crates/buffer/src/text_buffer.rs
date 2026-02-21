@@ -1,0 +1,713 @@
+// Chunk: docs/chunks/text_buffer - Text buffer data structure with gap buffer backing
+
+//! TextBuffer is the main public API for text editing operations.
+//!
+//! It combines a gap buffer (for efficient character storage) with a line index
+//! (for O(1) line access) and tracks cursor position as (line, column).
+//!
+//! Each mutation operation returns `DirtyLines` indicating which lines changed,
+//! enabling downstream rendering to minimize redraws.
+
+use crate::gap_buffer::GapBuffer;
+use crate::line_index::LineIndex;
+use crate::types::{DirtyLines, Position};
+
+/// A text buffer with cursor tracking and dirty line reporting.
+///
+/// The buffer maintains:
+/// - Content storage via a gap buffer
+/// - Line boundary tracking for efficient line-based access
+/// - Cursor position as (line, column)
+///
+/// All mutation operations return `DirtyLines` to enable efficient rendering.
+#[derive(Debug)]
+pub struct TextBuffer {
+    buffer: GapBuffer,
+    line_index: LineIndex,
+    cursor: Position,
+}
+
+impl TextBuffer {
+    /// Creates a new empty text buffer.
+    pub fn new() -> Self {
+        Self {
+            buffer: GapBuffer::new(),
+            line_index: LineIndex::new(),
+            cursor: Position::default(),
+        }
+    }
+
+    /// Creates a text buffer initialized with the given content.
+    ///
+    /// Note: We don't implement `FromStr` because it requires returning `Result`,
+    /// but parsing a string into a TextBuffer cannot fail.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(content: &str) -> Self {
+        let buffer = GapBuffer::from_str(content);
+        let mut line_index = LineIndex::new();
+        line_index.rebuild(content.chars());
+
+        Self {
+            buffer,
+            line_index,
+            cursor: Position::default(),
+        }
+    }
+
+    // ==================== Accessors ====================
+
+    /// Returns the current cursor position.
+    pub fn cursor_position(&self) -> Position {
+        self.cursor
+    }
+
+    /// Returns the number of lines in the buffer.
+    ///
+    /// Always at least 1 (even for an empty buffer).
+    pub fn line_count(&self) -> usize {
+        self.line_index.line_count()
+    }
+
+    /// Returns the content of the specified line as a String.
+    ///
+    /// The returned string does not include the trailing newline (if any).
+    /// Returns an empty string if the line index is out of bounds.
+    pub fn line_content(&self, line: usize) -> String {
+        let total_len = self.buffer.len();
+
+        let start = match self.line_index.line_start(line) {
+            Some(s) => s,
+            None => return String::new(),
+        };
+
+        let end = match self.line_index.line_end(line, total_len) {
+            Some(e) => e,
+            None => return String::new(),
+        };
+
+        self.buffer.slice(start, end)
+    }
+
+    /// Returns the length of the specified line (excluding newline).
+    pub fn line_len(&self, line: usize) -> usize {
+        self.line_index
+            .line_len(line, self.buffer.len())
+            .unwrap_or(0)
+    }
+
+    /// Returns the total character count in the buffer.
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// Returns true if the buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+
+    /// Returns the entire buffer content as a String.
+    pub fn content(&self) -> String {
+        self.buffer.to_string()
+    }
+
+    // ==================== Cursor Movement ====================
+
+    /// Converts a (line, col) position to a buffer offset.
+    fn position_to_offset(&self, pos: Position) -> usize {
+        let line_start = self.line_index.line_start(pos.line).unwrap_or(0);
+        line_start + pos.col
+    }
+
+    /// Moves the cursor left by one character.
+    ///
+    /// If at the beginning of a line, moves to the end of the previous line.
+    /// If at the beginning of the buffer, does nothing.
+    pub fn move_left(&mut self) {
+        if self.cursor.col > 0 {
+            self.cursor.col -= 1;
+        } else if self.cursor.line > 0 {
+            self.cursor.line -= 1;
+            self.cursor.col = self.line_len(self.cursor.line);
+        }
+    }
+
+    /// Moves the cursor right by one character.
+    ///
+    /// If at the end of a line, moves to the beginning of the next line.
+    /// If at the end of the buffer, does nothing.
+    pub fn move_right(&mut self) {
+        let line_len = self.line_len(self.cursor.line);
+
+        if self.cursor.col < line_len {
+            self.cursor.col += 1;
+        } else if self.cursor.line + 1 < self.line_count() {
+            self.cursor.line += 1;
+            self.cursor.col = 0;
+        }
+    }
+
+    /// Moves the cursor up by one line.
+    ///
+    /// The column is clamped to the length of the target line.
+    /// If at the first line, does nothing.
+    pub fn move_up(&mut self) {
+        if self.cursor.line > 0 {
+            self.cursor.line -= 1;
+            let line_len = self.line_len(self.cursor.line);
+            self.cursor.col = self.cursor.col.min(line_len);
+        }
+    }
+
+    /// Moves the cursor down by one line.
+    ///
+    /// The column is clamped to the length of the target line.
+    /// If at the last line, does nothing.
+    pub fn move_down(&mut self) {
+        if self.cursor.line + 1 < self.line_count() {
+            self.cursor.line += 1;
+            let line_len = self.line_len(self.cursor.line);
+            self.cursor.col = self.cursor.col.min(line_len);
+        }
+    }
+
+    /// Moves the cursor to the start of the current line.
+    pub fn move_to_line_start(&mut self) {
+        self.cursor.col = 0;
+    }
+
+    /// Moves the cursor to the end of the current line.
+    pub fn move_to_line_end(&mut self) {
+        self.cursor.col = self.line_len(self.cursor.line);
+    }
+
+    /// Moves the cursor to the start of the buffer (line 0, column 0).
+    pub fn move_to_buffer_start(&mut self) {
+        self.cursor = Position::new(0, 0);
+    }
+
+    /// Moves the cursor to the end of the buffer.
+    pub fn move_to_buffer_end(&mut self) {
+        let last_line = self.line_count().saturating_sub(1);
+        let last_col = self.line_len(last_line);
+        self.cursor = Position::new(last_line, last_col);
+    }
+
+    /// Sets the cursor to an arbitrary position.
+    ///
+    /// The position is clamped to valid bounds.
+    pub fn set_cursor(&mut self, pos: Position) {
+        let line = pos.line.min(self.line_count().saturating_sub(1));
+        let col = pos.col.min(self.line_len(line));
+        self.cursor = Position::new(line, col);
+    }
+
+    // ==================== Mutations ====================
+
+    /// Ensures the gap buffer's gap is at the cursor position.
+    fn sync_gap_to_cursor(&mut self) {
+        let offset = self.position_to_offset(self.cursor);
+        self.buffer.move_gap_to(offset);
+    }
+
+    /// Inserts a character at the cursor position.
+    ///
+    /// Returns the dirty lines affected by this operation.
+    pub fn insert_char(&mut self, ch: char) -> DirtyLines {
+        if ch == '\n' {
+            return self.insert_newline();
+        }
+
+        self.sync_gap_to_cursor();
+        self.buffer.insert(ch);
+        self.line_index.insert_char(self.cursor.line);
+
+        let dirty_line = self.cursor.line;
+        self.cursor.col += 1;
+
+        DirtyLines::Single(dirty_line)
+    }
+
+    /// Inserts a newline at the cursor position, splitting the current line.
+    ///
+    /// Returns the dirty lines affected by this operation.
+    pub fn insert_newline(&mut self) -> DirtyLines {
+        self.sync_gap_to_cursor();
+        let offset = self.position_to_offset(self.cursor);
+
+        self.buffer.insert('\n');
+        self.line_index.insert_newline(offset);
+
+        let dirty_from = self.cursor.line;
+
+        // Move cursor to the start of the new line
+        self.cursor.line += 1;
+        self.cursor.col = 0;
+
+        DirtyLines::FromLineToEnd(dirty_from)
+    }
+
+    /// Deletes the character before the cursor (Backspace).
+    ///
+    /// Returns the dirty lines affected by this operation.
+    /// If at the beginning of the buffer, returns `DirtyLines::None`.
+    pub fn delete_backward(&mut self) -> DirtyLines {
+        if self.cursor.col == 0 && self.cursor.line == 0 {
+            // At the very beginning of the buffer
+            return DirtyLines::None;
+        }
+
+        self.sync_gap_to_cursor();
+
+        if self.cursor.col == 0 {
+            // At the beginning of a line - delete the newline, joining with previous line
+            let deleted = self.buffer.delete_backward();
+            if deleted != Some('\n') {
+                // Should not happen, but handle gracefully
+                return DirtyLines::None;
+            }
+
+            let prev_line = self.cursor.line - 1;
+            let prev_line_len = self.line_len(prev_line);
+
+            self.line_index.remove_newline(prev_line);
+
+            self.cursor.line = prev_line;
+            self.cursor.col = prev_line_len;
+
+            DirtyLines::FromLineToEnd(prev_line)
+        } else {
+            // Delete a regular character within the line
+            let deleted = self.buffer.delete_backward();
+            if deleted.is_none() {
+                return DirtyLines::None;
+            }
+
+            self.line_index.remove_char(self.cursor.line);
+            self.cursor.col -= 1;
+
+            DirtyLines::Single(self.cursor.line)
+        }
+    }
+
+    /// Deletes the character after the cursor (Delete key).
+    ///
+    /// Returns the dirty lines affected by this operation.
+    /// If at the end of the buffer, returns `DirtyLines::None`.
+    pub fn delete_forward(&mut self) -> DirtyLines {
+        let line_len = self.line_len(self.cursor.line);
+        let is_last_line = self.cursor.line + 1 >= self.line_count();
+
+        if self.cursor.col >= line_len && is_last_line {
+            // At the very end of the buffer
+            return DirtyLines::None;
+        }
+
+        self.sync_gap_to_cursor();
+
+        if self.cursor.col >= line_len {
+            // At the end of a line (but not last line) - delete the newline, joining lines
+            let deleted = self.buffer.delete_forward();
+            if deleted != Some('\n') {
+                // Should not happen, but handle gracefully
+                return DirtyLines::None;
+            }
+
+            self.line_index.remove_newline(self.cursor.line);
+
+            // Cursor stays in place
+            DirtyLines::FromLineToEnd(self.cursor.line)
+        } else {
+            // Delete a regular character within the line
+            let deleted = self.buffer.delete_forward();
+            if deleted.is_none() {
+                return DirtyLines::None;
+            }
+
+            self.line_index.remove_char(self.cursor.line);
+
+            // Cursor stays in place
+            DirtyLines::Single(self.cursor.line)
+        }
+    }
+
+    /// Inserts a string at the cursor position.
+    ///
+    /// This is a convenience method that inserts each character in sequence.
+    /// Returns the combined dirty region.
+    pub fn insert_str(&mut self, s: &str) -> DirtyLines {
+        if s.is_empty() {
+            return DirtyLines::None;
+        }
+
+        let start_line = self.cursor.line;
+        let mut has_newline = false;
+
+        for ch in s.chars() {
+            if ch == '\n' {
+                has_newline = true;
+            }
+            let _ = self.insert_char(ch);
+        }
+
+        if has_newline {
+            DirtyLines::FromLineToEnd(start_line)
+        } else {
+            DirtyLines::Single(start_line)
+        }
+    }
+}
+
+impl Default for TextBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ==================== Basic Tests ====================
+
+    #[test]
+    fn test_new_empty() {
+        let buf = TextBuffer::new();
+        assert!(buf.is_empty());
+        assert_eq!(buf.line_count(), 1);
+        assert_eq!(buf.cursor_position(), Position::new(0, 0));
+    }
+
+    #[test]
+    fn test_from_str() {
+        let buf = TextBuffer::from_str("hello\nworld");
+        assert_eq!(buf.len(), 11);
+        assert_eq!(buf.line_count(), 2);
+        assert_eq!(buf.line_content(0), "hello");
+        assert_eq!(buf.line_content(1), "world");
+    }
+
+    #[test]
+    fn test_line_content_empty_buffer() {
+        let buf = TextBuffer::new();
+        assert_eq!(buf.line_content(0), "");
+    }
+
+    #[test]
+    fn test_line_content_out_of_bounds() {
+        let buf = TextBuffer::from_str("hello");
+        assert_eq!(buf.line_content(99), "");
+    }
+
+    // ==================== Insert Tests ====================
+
+    #[test]
+    fn test_insert_at_empty_buffer() {
+        let mut buf = TextBuffer::new();
+        let dirty = buf.insert_char('a');
+        assert_eq!(buf.content(), "a");
+        assert_eq!(buf.cursor_position(), Position::new(0, 1));
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_insert_at_beginning_of_line() {
+        let mut buf = TextBuffer::from_str("hello");
+        let dirty = buf.insert_char('x');
+        assert_eq!(buf.content(), "xhello");
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_insert_at_middle_of_line() {
+        let mut buf = TextBuffer::from_str("hllo");
+        buf.set_cursor(Position::new(0, 1));
+        let dirty = buf.insert_char('e');
+        assert_eq!(buf.content(), "hello");
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_insert_at_end_of_line() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.move_to_line_end();
+        let dirty = buf.insert_char('!');
+        assert_eq!(buf.content(), "hello!");
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_insert_newline() {
+        let mut buf = TextBuffer::from_str("helloworld");
+        buf.set_cursor(Position::new(0, 5));
+        let dirty = buf.insert_newline();
+        assert_eq!(buf.line_count(), 2);
+        assert_eq!(buf.line_content(0), "hello");
+        assert_eq!(buf.line_content(1), "world");
+        assert_eq!(buf.cursor_position(), Position::new(1, 0));
+        assert_eq!(dirty, DirtyLines::FromLineToEnd(0));
+    }
+
+    #[test]
+    fn test_insert_newline_at_end() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.move_to_line_end();
+        let dirty = buf.insert_newline();
+        assert_eq!(buf.line_count(), 2);
+        assert_eq!(buf.line_content(0), "hello");
+        assert_eq!(buf.line_content(1), "");
+        assert_eq!(dirty, DirtyLines::FromLineToEnd(0));
+    }
+
+    #[test]
+    fn test_insert_newline_at_beginning() {
+        let mut buf = TextBuffer::from_str("hello");
+        let dirty = buf.insert_newline();
+        assert_eq!(buf.line_count(), 2);
+        assert_eq!(buf.line_content(0), "");
+        assert_eq!(buf.line_content(1), "hello");
+        assert_eq!(dirty, DirtyLines::FromLineToEnd(0));
+    }
+
+    // ==================== Delete Backward Tests ====================
+
+    #[test]
+    fn test_delete_backward_at_start() {
+        let mut buf = TextBuffer::from_str("hello");
+        let dirty = buf.delete_backward();
+        assert_eq!(buf.content(), "hello");
+        assert_eq!(dirty, DirtyLines::None);
+    }
+
+    #[test]
+    fn test_delete_backward_middle_of_line() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 3));
+        let dirty = buf.delete_backward();
+        assert_eq!(buf.content(), "helo");
+        assert_eq!(buf.cursor_position(), Position::new(0, 2));
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_backward_end_of_line() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.move_to_line_end();
+        let dirty = buf.delete_backward();
+        assert_eq!(buf.content(), "hell");
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_backward_joins_lines() {
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.set_cursor(Position::new(1, 0));
+        let dirty = buf.delete_backward();
+        assert_eq!(buf.content(), "helloworld");
+        assert_eq!(buf.line_count(), 1);
+        assert_eq!(buf.cursor_position(), Position::new(0, 5));
+        assert_eq!(dirty, DirtyLines::FromLineToEnd(0));
+    }
+
+    // ==================== Delete Forward Tests ====================
+
+    #[test]
+    fn test_delete_forward_at_end() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.move_to_buffer_end();
+        let dirty = buf.delete_forward();
+        assert_eq!(buf.content(), "hello");
+        assert_eq!(dirty, DirtyLines::None);
+    }
+
+    #[test]
+    fn test_delete_forward_middle_of_line() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 2));
+        let dirty = buf.delete_forward();
+        assert_eq!(buf.content(), "helo");
+        assert_eq!(buf.cursor_position(), Position::new(0, 2));
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_forward_beginning_of_line() {
+        let mut buf = TextBuffer::from_str("hello");
+        let dirty = buf.delete_forward();
+        assert_eq!(buf.content(), "ello");
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_forward_joins_lines() {
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.set_cursor(Position::new(0, 5)); // At end of "hello"
+        let dirty = buf.delete_forward();
+        assert_eq!(buf.content(), "helloworld");
+        assert_eq!(buf.line_count(), 1);
+        assert_eq!(buf.cursor_position(), Position::new(0, 5));
+        assert_eq!(dirty, DirtyLines::FromLineToEnd(0));
+    }
+
+    // ==================== Cursor Movement Tests ====================
+
+    #[test]
+    fn test_move_left_at_buffer_start() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.move_left();
+        assert_eq!(buf.cursor_position(), Position::new(0, 0));
+    }
+
+    #[test]
+    fn test_move_left_within_line() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 3));
+        buf.move_left();
+        assert_eq!(buf.cursor_position(), Position::new(0, 2));
+    }
+
+    #[test]
+    fn test_move_left_wraps_to_previous_line() {
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.set_cursor(Position::new(1, 0));
+        buf.move_left();
+        assert_eq!(buf.cursor_position(), Position::new(0, 5));
+    }
+
+    #[test]
+    fn test_move_right_at_buffer_end() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.move_to_buffer_end();
+        buf.move_right();
+        assert_eq!(buf.cursor_position(), Position::new(0, 5));
+    }
+
+    #[test]
+    fn test_move_right_within_line() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.move_right();
+        assert_eq!(buf.cursor_position(), Position::new(0, 1));
+    }
+
+    #[test]
+    fn test_move_right_wraps_to_next_line() {
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.set_cursor(Position::new(0, 5));
+        buf.move_right();
+        assert_eq!(buf.cursor_position(), Position::new(1, 0));
+    }
+
+    #[test]
+    fn test_move_up_at_first_line() {
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.set_cursor(Position::new(0, 3));
+        buf.move_up();
+        assert_eq!(buf.cursor_position(), Position::new(0, 3));
+    }
+
+    #[test]
+    fn test_move_up() {
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.set_cursor(Position::new(1, 3));
+        buf.move_up();
+        assert_eq!(buf.cursor_position(), Position::new(0, 3));
+    }
+
+    #[test]
+    fn test_move_up_clamps_column() {
+        let mut buf = TextBuffer::from_str("hi\nworld");
+        buf.set_cursor(Position::new(1, 4));
+        buf.move_up();
+        assert_eq!(buf.cursor_position(), Position::new(0, 2)); // "hi" is only 2 chars
+    }
+
+    #[test]
+    fn test_move_down_at_last_line() {
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.set_cursor(Position::new(1, 3));
+        buf.move_down();
+        assert_eq!(buf.cursor_position(), Position::new(1, 3));
+    }
+
+    #[test]
+    fn test_move_down() {
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.set_cursor(Position::new(0, 3));
+        buf.move_down();
+        assert_eq!(buf.cursor_position(), Position::new(1, 3));
+    }
+
+    #[test]
+    fn test_move_down_clamps_column() {
+        let mut buf = TextBuffer::from_str("hello\nhi");
+        buf.set_cursor(Position::new(0, 4));
+        buf.move_down();
+        assert_eq!(buf.cursor_position(), Position::new(1, 2)); // "hi" is only 2 chars
+    }
+
+    #[test]
+    fn test_move_to_line_start() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 3));
+        buf.move_to_line_start();
+        assert_eq!(buf.cursor_position(), Position::new(0, 0));
+    }
+
+    #[test]
+    fn test_move_to_line_end() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.move_to_line_end();
+        assert_eq!(buf.cursor_position(), Position::new(0, 5));
+    }
+
+    #[test]
+    fn test_move_to_buffer_start() {
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.set_cursor(Position::new(1, 3));
+        buf.move_to_buffer_start();
+        assert_eq!(buf.cursor_position(), Position::new(0, 0));
+    }
+
+    #[test]
+    fn test_move_to_buffer_end() {
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.move_to_buffer_end();
+        assert_eq!(buf.cursor_position(), Position::new(1, 5));
+    }
+
+    #[test]
+    fn test_cursor_on_empty_line() {
+        let mut buf = TextBuffer::from_str("hello\n\nworld");
+        buf.set_cursor(Position::new(1, 0));
+        buf.move_to_line_end();
+        assert_eq!(buf.cursor_position(), Position::new(1, 0)); // Empty line has length 0
+        buf.move_to_line_start();
+        assert_eq!(buf.cursor_position(), Position::new(1, 0));
+    }
+
+    // ==================== Insert String Tests ====================
+
+    #[test]
+    fn test_insert_str_simple() {
+        let mut buf = TextBuffer::new();
+        let dirty = buf.insert_str("hello");
+        assert_eq!(buf.content(), "hello");
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_insert_str_with_newlines() {
+        let mut buf = TextBuffer::new();
+        let dirty = buf.insert_str("hello\nworld");
+        assert_eq!(buf.content(), "hello\nworld");
+        assert_eq!(buf.line_count(), 2);
+        assert_eq!(dirty, DirtyLines::FromLineToEnd(0));
+    }
+
+    #[test]
+    fn test_insert_str_empty() {
+        let mut buf = TextBuffer::from_str("hello");
+        let dirty = buf.insert_str("");
+        assert_eq!(buf.content(), "hello");
+        assert_eq!(dirty, DirtyLines::None);
+    }
+}
