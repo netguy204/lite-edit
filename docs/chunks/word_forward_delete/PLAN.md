@@ -90,14 +90,37 @@ DeleteForwardWord,
 
 **Location:** `crates/editor/src/buffer_target.rs` (Command enum around line 36)
 
+### Step 4b: Fix `convert_key` in `metal_view.rs` to use `charactersIgnoringModifiers` for Option
+
+**Root cause of the "inserts whitespace" bug:** On macOS, `event.characters()` for
+Option+D returns the *composed* Unicode character — on a US keyboard layout this is
+`'ð'` (eth, U+00F0), which the macOS text system treats as a whitespace-adjacent glyph
+and renders as something whitespace-like. The `Key::Char('d') if mods.option` arm in
+`resolve_command` therefore never fires; instead `InsertChar('ð')` matches first.
+
+The fix mirrors the existing Control modifier handling: when `NSEventModifierFlags::Option`
+is set, use `event.charactersIgnoringModifiers()` to recover the base key character `'d'`.
+
+```rust
+let characters = if flags.contains(NSEventModifierFlags::Control)
+    || flags.contains(NSEventModifierFlags::Option)
+{
+    event.charactersIgnoringModifiers()?
+} else {
+    event.characters()?
+};
+```
+
+**Location:** `crates/editor/src/metal_view.rs` (`convert_key` method, after the
+special-key match block)
+
 ### Step 5: Wire `Option+'d'` in `resolve_command`
 
-Add a match arm that maps `Key::Char('d')` with `mods.option && !mods.command` to
-`Command::DeleteForwardWord`. This arm must appear **before** the generic
-`Key::Char(ch)` arm at the top of the function.
+The `Key::Char('d') if mods.option && !mods.command` arm already exists in
+`resolve_command`. With the `convert_key` fix in place, Option+D now correctly
+arrives as `Key::Char('d')` with `mods.option=true`, and this arm fires as intended.
 
-The best location is just after the `Option+Backspace` arm (around line 111),
-keeping modifier-based deletions grouped together.
+The arm must appear **before** the generic `Key::Char(ch)` arm (it already does).
 
 ```rust
 // Chunk: docs/chunks/word_forward_delete - Alt+D forward word deletion
@@ -133,6 +156,7 @@ Update the `code_paths` frontmatter in `docs/chunks/word_forward_delete/GOAL.md`
 to list the files touched:
 - `crates/buffer/src/text_buffer.rs`
 - `crates/editor/src/buffer_target.rs`
+- `crates/editor/src/metal_view.rs`
 
 ## Dependencies
 
