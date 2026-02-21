@@ -12,6 +12,53 @@ use crate::gap_buffer::GapBuffer;
 use crate::line_index::LineIndex;
 use crate::types::{DirtyLines, Position};
 
+// Chunk: docs/chunks/word_boundary_primitives - Word boundary scanning primitives
+// Spec: docs/trunk/SPEC.md#word-model
+/// Returns the start column of the contiguous run containing `chars[col - 1]`.
+///
+/// Uses `char::is_whitespace()` as the sole classifier. A "run" is a maximal
+/// contiguous sequence of same-class characters.
+///
+/// Returns `col` unchanged when `col == 0` or `chars` is empty.
+fn word_boundary_left(chars: &[char], col: usize) -> usize {
+    if col == 0 || chars.is_empty() {
+        return col;
+    }
+    let col = col.min(chars.len()); // clamp to valid range
+    let target_is_whitespace = chars[col - 1].is_whitespace();
+    let mut boundary = col;
+    while boundary > 0 {
+        if chars[boundary - 1].is_whitespace() != target_is_whitespace {
+            break;
+        }
+        boundary -= 1;
+    }
+    boundary
+}
+
+// Chunk: docs/chunks/word_boundary_primitives - Word boundary scanning primitives
+// Spec: docs/trunk/SPEC.md#word-model
+/// Returns the first column past the end of the contiguous run starting at `chars[col]`.
+///
+/// Uses `char::is_whitespace()` as the sole classifier. A "run" is a maximal
+/// contiguous sequence of same-class characters.
+///
+/// Returns `col` unchanged when `col >= chars.len()` or `chars` is empty.
+fn word_boundary_right(chars: &[char], col: usize) -> usize {
+    if col >= chars.len() || chars.is_empty() {
+        return col;
+    }
+    let target_is_whitespace = chars[col].is_whitespace();
+    let mut boundary = col;
+    while boundary < chars.len() {
+        if chars[boundary].is_whitespace() != target_is_whitespace {
+            break;
+        }
+        boundary += 1;
+    }
+    boundary
+}
+
 /// A text buffer with cursor tracking and dirty line reporting.
 ///
 /// The buffer maintains:
@@ -591,29 +638,8 @@ impl TextBuffer {
         let line_content = self.line_content(self.cursor.line);
         let line_chars: Vec<char> = line_content.chars().collect();
 
-        // Determine the character class of the char immediately before the cursor
-        // cursor.col is 1-indexed from the perspective of "chars before cursor"
-        let char_before = line_chars[self.cursor.col - 1];
-        let delete_whitespace = char_before.is_whitespace();
-
-        // Scan backward to find the word start
-        let mut word_start = self.cursor.col;
-        while word_start > 0 {
-            let ch = line_chars[word_start - 1];
-            if delete_whitespace {
-                // Deleting whitespace: stop when we hit non-whitespace
-                if !ch.is_whitespace() {
-                    break;
-                }
-            } else {
-                // Deleting non-whitespace: stop when we hit whitespace
-                if ch.is_whitespace() {
-                    break;
-                }
-            }
-            word_start -= 1;
-        }
-
+        // Use word_boundary_left to find the start of the run
+        let word_start = word_boundary_left(&line_chars, self.cursor.col);
         let chars_to_delete = self.cursor.col - word_start;
 
         self.sync_gap_to_cursor();
@@ -1909,5 +1935,173 @@ mod tests {
         assert_eq!(buf.line_content(1), "second ");
         assert_eq!(buf.cursor_position(), Position::new(1, 7));
         assert_eq!(dirty, DirtyLines::Single(1));
+    }
+
+    // ==================== Word Boundary Left Tests ====================
+    // Chunk: docs/chunks/word_boundary_primitives - Word boundary scanning primitives
+
+    #[test]
+    fn test_word_boundary_left_empty_slice() {
+        // Empty slice → returns col unchanged
+        let chars: Vec<char> = vec![];
+        assert_eq!(word_boundary_left(&chars, 0), 0);
+        assert_eq!(word_boundary_left(&chars, 5), 5);
+    }
+
+    #[test]
+    fn test_word_boundary_left_col_zero() {
+        // col == 0 → returns 0
+        let chars: Vec<char> = "hello".chars().collect();
+        assert_eq!(word_boundary_left(&chars, 0), 0);
+    }
+
+    #[test]
+    fn test_word_boundary_left_single_char_non_whitespace() {
+        // Single non-whitespace char, col at 1 → returns 0
+        let chars: Vec<char> = "x".chars().collect();
+        assert_eq!(word_boundary_left(&chars, 1), 0);
+    }
+
+    #[test]
+    fn test_word_boundary_left_single_char_whitespace() {
+        // Single whitespace char, col at 1 → returns 0
+        let chars: Vec<char> = " ".chars().collect();
+        assert_eq!(word_boundary_left(&chars, 1), 0);
+    }
+
+    #[test]
+    fn test_word_boundary_left_full_line_non_whitespace() {
+        // All non-whitespace, col at end → returns 0
+        let chars: Vec<char> = "hello".chars().collect();
+        assert_eq!(word_boundary_left(&chars, 5), 0);
+    }
+
+    #[test]
+    fn test_word_boundary_left_full_line_whitespace() {
+        // All whitespace, col at end → returns 0
+        let chars: Vec<char> = "     ".chars().collect();
+        assert_eq!(word_boundary_left(&chars, 5), 0);
+    }
+
+    #[test]
+    fn test_word_boundary_left_non_whitespace_surrounded_by_whitespace() {
+        // "  hello  " with cursor mid-word → returns start of word
+        let chars: Vec<char> = "  hello  ".chars().collect();
+        // cursor at col 5 (after "hel") → boundary at col 2 (start of "hello")
+        assert_eq!(word_boundary_left(&chars, 5), 2);
+        // cursor at col 7 (after "hello") → boundary at col 2
+        assert_eq!(word_boundary_left(&chars, 7), 2);
+    }
+
+    #[test]
+    fn test_word_boundary_left_whitespace_surrounded_by_non_whitespace() {
+        // "hello  world" with cursor in whitespace → returns start of whitespace
+        let chars: Vec<char> = "hello  world".chars().collect();
+        // cursor at col 6 (in whitespace between words) → boundary at col 5
+        assert_eq!(word_boundary_left(&chars, 6), 5);
+        // cursor at col 7 (at end of whitespace) → boundary at col 5
+        assert_eq!(word_boundary_left(&chars, 7), 5);
+    }
+
+    #[test]
+    fn test_word_boundary_left_col_at_end_of_slice() {
+        // col at chars.len() (boundary condition)
+        let chars: Vec<char> = "hello".chars().collect();
+        assert_eq!(word_boundary_left(&chars, 5), 0);
+    }
+
+    #[test]
+    fn test_word_boundary_left_col_beyond_slice() {
+        // col > chars.len() should clamp
+        let chars: Vec<char> = "hello".chars().collect();
+        assert_eq!(word_boundary_left(&chars, 10), 0);
+    }
+
+    #[test]
+    fn test_word_boundary_left_mid_run() {
+        // "hello world" cursor at col 8 (middle of "world") → returns col 6
+        let chars: Vec<char> = "hello world".chars().collect();
+        assert_eq!(word_boundary_left(&chars, 8), 6);
+    }
+
+    // ==================== Word Boundary Right Tests ====================
+    // Chunk: docs/chunks/word_boundary_primitives - Word boundary scanning primitives
+
+    #[test]
+    fn test_word_boundary_right_empty_slice() {
+        // Empty slice → returns col unchanged
+        let chars: Vec<char> = vec![];
+        assert_eq!(word_boundary_right(&chars, 0), 0);
+        assert_eq!(word_boundary_right(&chars, 5), 5);
+    }
+
+    #[test]
+    fn test_word_boundary_right_col_at_end() {
+        // col >= chars.len() → returns col
+        let chars: Vec<char> = "hello".chars().collect();
+        assert_eq!(word_boundary_right(&chars, 5), 5);
+        assert_eq!(word_boundary_right(&chars, 10), 10);
+    }
+
+    #[test]
+    fn test_word_boundary_right_single_char_non_whitespace() {
+        // Single non-whitespace char, col at 0 → returns 1
+        let chars: Vec<char> = "x".chars().collect();
+        assert_eq!(word_boundary_right(&chars, 0), 1);
+    }
+
+    #[test]
+    fn test_word_boundary_right_single_char_whitespace() {
+        // Single whitespace char, col at 0 → returns 1
+        let chars: Vec<char> = " ".chars().collect();
+        assert_eq!(word_boundary_right(&chars, 0), 1);
+    }
+
+    #[test]
+    fn test_word_boundary_right_full_line_non_whitespace() {
+        // All non-whitespace, col at start → returns chars.len()
+        let chars: Vec<char> = "hello".chars().collect();
+        assert_eq!(word_boundary_right(&chars, 0), 5);
+    }
+
+    #[test]
+    fn test_word_boundary_right_full_line_whitespace() {
+        // All whitespace, col at start → returns chars.len()
+        let chars: Vec<char> = "     ".chars().collect();
+        assert_eq!(word_boundary_right(&chars, 0), 5);
+    }
+
+    #[test]
+    fn test_word_boundary_right_non_whitespace_surrounded_by_whitespace() {
+        // "  hello  " with cursor at start of word → returns end of word
+        let chars: Vec<char> = "  hello  ".chars().collect();
+        // cursor at col 2 (start of "hello") → boundary at col 7 (end of "hello")
+        assert_eq!(word_boundary_right(&chars, 2), 7);
+        // cursor at col 4 (middle of "hello") → boundary at col 7
+        assert_eq!(word_boundary_right(&chars, 4), 7);
+    }
+
+    #[test]
+    fn test_word_boundary_right_whitespace_surrounded_by_non_whitespace() {
+        // "hello  world" with cursor in whitespace → returns end of whitespace
+        let chars: Vec<char> = "hello  world".chars().collect();
+        // cursor at col 5 (start of whitespace) → boundary at col 7
+        assert_eq!(word_boundary_right(&chars, 5), 7);
+        // cursor at col 6 (middle of whitespace) → boundary at col 7
+        assert_eq!(word_boundary_right(&chars, 6), 7);
+    }
+
+    #[test]
+    fn test_word_boundary_right_col_at_start() {
+        // col at 0 (boundary condition)
+        let chars: Vec<char> = "hello".chars().collect();
+        assert_eq!(word_boundary_right(&chars, 0), 5);
+    }
+
+    #[test]
+    fn test_word_boundary_right_mid_run() {
+        // "hello world" cursor at col 2 (middle of "hello") → returns col 5
+        let chars: Vec<char> = "hello world".chars().collect();
+        assert_eq!(word_boundary_right(&chars, 2), 5);
     }
 }

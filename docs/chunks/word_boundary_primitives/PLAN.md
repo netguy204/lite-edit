@@ -1,177 +1,147 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+Extract the inline character-class scan logic from `delete_backward_word` into two
+private helper functions (`word_boundary_left` and `word_boundary_right`) in
+`crates/buffer/src/text_buffer.rs`. Following TDD (per TESTING_PHILOSOPHY.md),
+write failing tests for each helper before implementation, then refactor
+`delete_backward_word` to use the new `word_boundary_left` helper.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
-
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
-
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/word_boundary_primitives/GOAL.md)
-with references to the files that you expect to touch.
--->
-
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+The word model is simple: `char::is_whitespace()` is the sole classifier. A "run"
+is a maximal contiguous sequence of same-class characters. The helpers operate on
+a `&[char]` slice and a column index, returning the boundary column. This keeps
+them pure, stateless, and independently testable — no buffer access, no cursor
+state.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing tests for `word_boundary_left`
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create tests covering all cases from the success criteria:
+- Empty slice → returns `col`
+- `col == 0` → returns 0
+- Single-character run (both whitespace and non-whitespace)
+- Full-line run of one class
+- Non-whitespace run surrounded by whitespace (cursor mid-run)
+- Whitespace run surrounded by non-whitespace (cursor mid-run)
+- `col` at end of slice (boundary condition)
 
-Example:
+Since the function doesn't exist yet, the tests will fail to compile. This is the
+TDD "red" phase.
 
-### Step 1: Define the SegmentHeader struct
+Location: `crates/buffer/src/text_buffer.rs` in the `#[cfg(test)] mod tests` block
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Implement `word_boundary_left`
 
-Location: src/segment/format.rs
+Add the private function:
 
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+// Spec: docs/trunk/SPEC.md#word-model
+fn word_boundary_left(chars: &[char], col: usize) -> usize {
+    if col == 0 || chars.is_empty() {
+        return col;
+    }
+    let col = col.min(chars.len());  // clamp to valid range
+    let target_is_whitespace = chars[col - 1].is_whitespace();
+    let mut boundary = col;
+    while boundary > 0 {
+        if chars[boundary - 1].is_whitespace() != target_is_whitespace {
+            break;
+        }
+        boundary -= 1;
+    }
+    boundary
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+All tests from Step 1 should now pass.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Location: `crates/buffer/src/text_buffer.rs`, before the `impl TextBuffer` block
 
-## Dependencies
+### Step 3: Write failing tests for `word_boundary_right`
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+Create tests mirroring Step 1's coverage but for rightward scanning:
+- Empty slice → returns `col`
+- `col >= chars.len()` → returns `col`
+- Single-character run
+- Full-line run of one class
+- Non-whitespace run surrounded by whitespace
+- Whitespace run surrounded by non-whitespace
+- `col` at start of slice
 
-If there are no dependencies, delete this section.
--->
+Location: `crates/buffer/src/text_buffer.rs` in the `#[cfg(test)] mod tests` block
+
+### Step 4: Implement `word_boundary_right`
+
+Add the private function:
+
+```rust
+// Spec: docs/trunk/SPEC.md#word-model
+fn word_boundary_right(chars: &[char], col: usize) -> usize {
+    if col >= chars.len() || chars.is_empty() {
+        return col;
+    }
+    let target_is_whitespace = chars[col].is_whitespace();
+    let mut boundary = col;
+    while boundary < chars.len() {
+        if chars[boundary].is_whitespace() != target_is_whitespace {
+            break;
+        }
+        boundary += 1;
+    }
+    boundary
+}
+```
+
+All tests from Step 3 should now pass.
+
+Location: `crates/buffer/src/text_buffer.rs`, immediately after `word_boundary_left`
+
+### Step 5: Refactor `delete_backward_word` to use `word_boundary_left`
+
+Replace the inline scan loop in `delete_backward_word` (lines 599-615 in the
+current implementation) with a call to `word_boundary_left`:
+
+```rust
+let word_start = word_boundary_left(&line_chars, self.cursor.col);
+let chars_to_delete = self.cursor.col - word_start;
+```
+
+Remove the now-unused `char_before` and `delete_whitespace` variables.
+
+Verify that all existing `delete_backward_word` tests pass unchanged.
+
+Location: `crates/buffer/src/text_buffer.rs`, `delete_backward_word` method
+
+### Step 6: Add chunk backreference and spec comment
+
+Add a chunk backreference comment above `word_boundary_left`:
+
+```rust
+// Chunk: docs/chunks/word_boundary_primitives - Word boundary scanning primitives
+// Spec: docs/trunk/SPEC.md#word-model
+fn word_boundary_left(chars: &[char], col: usize) -> usize { ... }
+```
+
+And similarly for `word_boundary_right`.
+
+### Step 7: Run full test suite and verify
+
+Run `cargo test` in the `crates/buffer` directory. All tests (both the new helper
+tests and the existing `delete_backward_word` tests) should pass.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **SPEC.md word-model section**: The GOAL.md references `docs/trunk/SPEC.md#word-model`
+  but that section doesn't exist yet in SPEC.md (it's a template). The helpers will
+  carry the comment pointing to where the spec *should* define the word model.
+  A future chunk may need to populate that section.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Unicode edge cases**: Using `char::is_whitespace()` handles Unicode whitespace
+  correctly, but multi-codepoint grapheme clusters are not considered. This matches
+  the current behaviour and is consistent with character-level cursor movement.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- POPULATE DURING IMPLEMENTATION -->
