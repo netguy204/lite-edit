@@ -23,6 +23,9 @@ proposed_chunks:
   - prompt: "Content tab bar within workspace. Horizontal tab bar at top of content area for the active workspace's open tabs. Heterogeneous tabs (file, terminal, diff) unified through BufferView. Keyboard: Cmd+Shift+]/[ to cycle, Cmd+W to close. Unread badges on terminal tabs with new output since last viewed."
     chunk_directory: null
     depends_on: [5]
+  - prompt: "Agent lifecycle management. Implement AgentHandle wrapping a TerminalBuffer with state inference (Starting, Running, NeedsInput, Stale, Exited, Errored). PTY idle detection for Running->NeedsInput transition. Wire agent state to workspace left-rail indicators. Support agent launch, restart, and graceful termination within a workspace."
+    chunk_directory: null
+    depends_on: [2, 5]
 created_after: ["editor_core_architecture"]
 ---
 
@@ -77,7 +80,7 @@ This investigation explores whether lite-edit can unify these concepts:
 
 - **Rationale**: An agent working in a worktree has a lifecycle: start, run, need input, produce output, complete. This should map to tab states (active, needs-attention, completed). But edge cases abound — what happens when an agent crashes? When it spawns sub-processes?
 - **Test**: Enumerate agent lifecycle states and map each to tab behavior
-- **Status**: UNTESTED
+- **Status**: VERIFIED — Seven lifecycle states identified (Empty → Starting → Running → NeedsInput → Stale → Exited → Errored), each mapping to distinct left-rail indicators and content behaviors. The agent IS its terminal — state is inferred from PTY behavior. See exploration log.
 
 ## Exploration Log
 
@@ -228,6 +231,174 @@ The `Interactive + selective grid read` benchmark (which reads only damaged line
 Cell size is 24 bytes. For agent workspaces, 10K scrollback (27.6 MB per terminal) is reasonable. With 10 agent workspaces that's ~276 MB for terminal grids — acceptable for a development tool but worth noting. 100K scrollback would be excessive. We should default to 10K and make it configurable.
 
 **Borrow checker note:** `term.damage()` borrows `&mut self`, which conflicts with `term.grid()` (`&self`). The pattern is: collect damage info first, drop the borrow, then read the grid. This is a minor ergonomic annoyance but not a real problem.
+
+### 2026-02-21: Agent workspace lifecycle exploration (H4)
+
+**What is an "agent" concretely?** In the near term, it's a CLI process — Claude Code, aider, copilot-cli — running in a PTY within a Git worktree. The agent reads from stdin (for user input/approval), writes to stdout (its output stream), edits files in the worktree, and eventually exits. From our perspective, the agent IS a terminal session. The workspace wraps that terminal session plus the worktree's files.
+
+**Agent lifecycle states:**
+
+Mapped out every state a CLI agent process can be in, and what the workspace should do:
+
+```
+                ┌─────────────┐
+                │   EMPTY     │  Workspace exists, no agent attached
+                │   (idle)    │  User can edit files, open terminals
+                └──────┬──────┘
+                       │ user launches agent
+                       ▼
+                ┌─────────────┐
+                │  STARTING   │  PTY spawned, process initializing
+                │  (brief)    │  Show spinner in left rail
+                └──────┬──────┘
+                       │ agent begins producing output
+                       ▼
+                ┌─────────────┐
+         ┌─────│  RUNNING     │◄────────────────┐
+         │     │  (autonomous)│                  │
+         │     └──────┬──────┘                  │
+         │            │ agent asks question /    │
+         │            │ needs approval           │
+         │            ▼                          │
+         │     ┌─────────────┐                  │
+         │     │  NEEDS INPUT │  user provides   │
+         │     │  (waiting)   │──────────────────┘
+         │     └──────┬──────┘
+         │            │ (timeout / user ignores)
+         │            ▼
+         │     ┌─────────────┐
+         │     │  STALE       │  Agent still waiting but user
+         │     │  (aged wait) │  hasn't responded in a while
+         │     └─────────────┘
+         │
+         │ agent process exits
+         ▼
+    ┌─────────────┐
+    │  EXITED      │───┐
+    │  (exit code) │   │ exit code != 0
+    └──────┬──────┘   ▼
+           │     ┌─────────────┐
+           │     │  ERRORED     │
+           │     │  (crashed)   │
+           │     └─────────────┘
+           │ exit code == 0
+           ▼
+    ┌─────────────┐
+    │  COMPLETED   │  Agent finished its task successfully
+    │  (done)      │  Workspace persists for review
+    └─────────────┘
+```
+
+**Mapping to workspace/tab behavior:**
+
+| Agent State | Left Rail Indicator | Content Area Behavior | Notification |
+|------------|--------------------|-----------------------|--------------|
+| **EMPTY** | ⚪ Gray | Normal editor — files and manual terminals | None |
+| **STARTING** | ⏳ Spinner | Agent terminal tab created, shows startup output | None |
+| **RUNNING** | 🟢 Green | Agent terminal shows streaming output. Files agent edits can be opened in other tabs | Badge if not viewing this workspace |
+| **NEEDS_INPUT** | 🟡 Yellow (pulsing) | Agent terminal shows the prompt/question. Cursor is active in terminal for user to type response | **Strong notification** — this blocks agent progress |
+| **STALE** | 🟠 Orange | Same as NEEDS_INPUT but visually escalated | Optional OS notification |
+| **EXITED(0)** | ✅ Checkmark | Terminal shows final output + exit. Scrollback preserved. Files available for review | Subtle notification |
+| **ERRORED** | 🔴 Red | Terminal shows error output. Scrollback preserved for debugging | Strong notification |
+| **COMPLETED** | ✅ Checkmark (faded) | Same as EXITED(0) after user has reviewed | None |
+
+**The critical transition: RUNNING → NEEDS_INPUT**
+
+This is the most important lifecycle event. It's why Composer exists — to surface when an agent needs human attention across many parallel agents. How do we detect it?
+
+For Claude Code specifically, the detection heuristic is:
+1. **Output pattern matching**: Claude Code prints a distinctive prompt when asking for input (e.g., permission requests, clarification questions). We could watch the terminal output for patterns.
+2. **PTY idle detection**: When an agent is waiting for stdin, the PTY output stops and the process is blocking on read(). We could detect "output stopped + process still alive" as a signal.
+3. **Process-specific signals**: Some agents might support a sideband notification protocol (e.g., OSC escape sequences signaling "I need input").
+4. **Heuristic combination**: Output stops for >N seconds + process is still alive + last output line looks like a prompt → probably needs input.
+
+**Practical approach**: Start with PTY idle detection (option 2) as the primary signal, with output pattern matching as a refinement. This is agent-agnostic — it works for Claude Code, aider, or any interactive CLI tool. Agent-specific integrations can layer on top later.
+
+**The EXITED → workspace-persists question:**
+
+When an agent finishes, what happens to the workspace? Options:
+
+- **A: Workspace stays until user closes it.** The terminal tab shows the final output (scrollback preserved). File tabs remain open. User can review the agent's work, run tests, etc. This is the right default.
+- **B: Auto-close after review.** If user switches away and comes back, maybe offer to close. Or auto-close after N minutes of inactivity post-completion.
+- **C: Collapse to summary.** Replace the full workspace with a compact summary in the left rail (e.g., "auth-refactor: completed ✅"). User can expand to see the terminal scrollback and files.
+
+Leaning toward **A** with the workspace rail showing a faded ✅. The user explicitly closes when they're done reviewing. This matches how Composer works — completed sessions stick around.
+
+**Agent restart:**
+
+From ERRORED or COMPLETED, the user should be able to restart the agent in the same workspace. This means:
+- The terminal tab gets a new PTY (old scrollback preserved above the new session, or in a separate "previous run" tab)
+- The worktree is already set up
+- State transitions back to STARTING
+
+**Multiple agents in one workspace?**
+
+Probably not. One workspace = one worktree = one agent. If you want two agents, that's two worktrees and two workspaces. This keeps the model simple and avoids conflicts.
+
+**The "agent handle" abstraction:**
+
+```rust
+struct AgentHandle {
+    /// The PTY process
+    process: Child,
+    /// The terminal buffer for agent I/O
+    terminal: TerminalBuffer,
+    /// Current lifecycle state
+    state: AgentState,
+    /// When the current state was entered
+    state_changed_at: Instant,
+    /// Configuration for this agent
+    config: AgentConfig,
+}
+
+enum AgentState {
+    Starting,
+    Running,
+    NeedsInput { prompt: Option<String> },
+    Stale { waiting_since: Instant },
+    Exited { code: i32 },
+}
+
+struct AgentConfig {
+    /// The command to run (e.g., "claude", "aider")
+    command: String,
+    /// Arguments
+    args: Vec<String>,
+    /// Working directory (the worktree root)
+    cwd: PathBuf,
+    /// Idle timeout before RUNNING → STALE
+    idle_timeout: Duration,
+}
+```
+
+**Relationship to the Workspace data model (from H2):**
+
+```rust
+struct Workspace {
+    id: WorkspaceId,
+    label: String,
+    root_path: PathBuf,
+    agent: Option<AgentHandle>,  // ← the agent lifecycle lives here
+    tabs: Vec<Tab>,
+    active_tab: usize,
+}
+```
+
+The workspace owns the agent. The agent's terminal is one of the workspace's tabs (typically the first/pinned tab). The agent state drives the workspace's left-rail indicator.
+
+**Key insight: the agent IS its terminal.** There's no separate "agent protocol" — the agent is a process in a PTY, and all interaction happens through the terminal. The agent's state is inferred from the terminal's behavior (output flowing, output stopped, process exited). This means the agent handle is really a thin wrapper around a TerminalBuffer with state-inference logic.
+
+**What about non-CLI agents?**
+
+Future agents might communicate via LSP-like protocols, HTTP APIs, or custom IPC. The current model (agent = PTY process) doesn't preclude this — the AgentHandle could be made into a trait with different implementations. But for the initial design, PTY-based CLI agents are the target.
+
+**Unresolved questions:**
+
+1. **NEEDS_INPUT detection reliability.** PTY idle detection is heuristic — the agent might be doing slow computation (not waiting for input). False positives would be annoying (pulsing yellow when the agent is just thinking). Need to tune the idle timeout, and potentially combine with output pattern matching.
+
+2. **Scrollback across agent restarts.** When restarting an agent in the same workspace, should the previous session's scrollback be preserved? If yes, where does the boundary go? A visual separator ("── Previous session ──") in the terminal scrollback? Or a separate "history" tab?
+
+3. **Agent-initiated file opens.** Can the agent tell the editor "open this file"? Claude Code doesn't have this capability today, but a future integration could use OSC escape sequences or a sideband channel to request file opens, diff views, etc.
 
 ### 2026-02-21: Hierarchical tabs exploration (H2)
 
@@ -565,7 +736,9 @@ At 10 workspaces: ~66 MB total. That's a 4x reduction vs. 10K in-memory scrollba
 
 8. **The two-level tab hierarchy (left rail for workspaces, top bar for content) is validated by prior art and maps cleanly to the editor data model.** Arc Browser and Discord prove that a vertical left rail for top-level grouping + horizontal tabs for content within a group is immediately legible and scales to 10+ groups. The spatial separation (different axes) creates cognitive separation matching usage frequency: workspace switches are infrequent (minutes), content tab switches are constant (seconds). The data model maps cleanly: `Editor → Vec<Workspace> → Vec<Tab>`, where each Tab holds a `Box<dyn BufferView>`. (Evidence: prior art survey, interaction flow analysis, data model sketch.)
 
-9. **The current renderer coupling is minimal.** The renderer takes `&[&str]` today via `set_content()`. Migrating to a `BufferView` trait is straightforward and doesn't require reworking the Metal pipeline — just changing what produces the line data. (Evidence: code review of `renderer.rs`.)
+9. **Agent lifecycle maps cleanly to workspace state, and the agent IS its terminal.** Seven states identified (Empty, Starting, Running, NeedsInput, Stale, Exited, Errored), each with a distinct left-rail indicator and content behavior. The critical transition is Running → NeedsInput, detectable via PTY idle heuristic (output stops, process alive). No separate "agent protocol" needed — the agent is a process in a PTY, state is inferred from terminal behavior, and the AgentHandle is a thin wrapper around a TerminalBuffer with state-inference logic. (Evidence: lifecycle state enumeration, mapping to UI behavior, data model sketch.)
+
+10. **The current renderer coupling is minimal.** The renderer takes `&[&str]` today via `set_content()`. Migrating to a `BufferView` trait is straightforward and doesn't require reworking the Metal pipeline — just changing what produces the line data. (Evidence: code review of `renderer.rs`.)
 
 ### Hypotheses/Opinions
 
@@ -610,6 +783,11 @@ At 10 workspaces: ~66 MB total. That's a 4x reduction vs. 10K in-memory scrollba
 7. **Content tab bar** (index 6): Horizontal tab bar at the top of the content area showing open tabs within the active workspace. Tabs are heterogeneous (file, terminal, diff). Support Cmd+Shift+]/[ for cycling, Cmd+W for close, unread badges on terminal tabs with new output.
    - Priority: High
    - Dependencies: Workspace model chunk
+
+8. **Agent lifecycle management** (index 7): Implement `AgentHandle` wrapping a `TerminalBuffer` with state inference (Starting, Running, NeedsInput, Stale, Exited, Errored). PTY idle detection for the Running → NeedsInput transition. Wire agent state to workspace left-rail indicators. Support agent launch, restart, and graceful termination within a workspace.
+   - Priority: Medium
+   - Dependencies: Terminal emulator integration chunk, Workspace model chunk
+   - Notes: The agent IS its terminal — AgentHandle is a thin wrapper around TerminalBuffer with state-inference logic. Start with PTY idle detection as the primary NeedsInput signal, refine with output pattern matching. One agent per workspace. Workspace persists after agent exits for review.
 
 ## Resolution Rationale
 
