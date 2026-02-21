@@ -1,3 +1,4 @@
 .artifact-order.json
 .ve/
 target/
+*.swp
