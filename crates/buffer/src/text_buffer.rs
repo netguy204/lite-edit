@@ -684,20 +684,40 @@ impl TextBuffer {
     ///
     /// This implements Cmd+Backspace (macOS standard) behavior:
     /// - If there is an active selection, deletes the selection (consistent with other delete operations)
-    /// - If the cursor is at column 0, does nothing (returns `DirtyLines::None`)
-    /// - Otherwise, deletes all characters from cursor position back to column 0
-    ///
-    /// Unlike `delete_to_line_end`, this operation does NOT join lines - it only affects
-    /// content on the current line. The cursor moves to column 0 after the operation.
+    /// - If the cursor is at column 0 on line 0, does nothing (already at buffer start)
+    /// - If the cursor is at column 0 on line > 0, joins the current line with the previous line
+    ///   by deleting the preceding newline, mirroring `delete_to_line_end`'s join behaviour at
+    ///   end-of-line. The cursor moves to `(prev_line, prev_line_len)`.
+    /// - Otherwise, deletes all characters from cursor position back to column 0 on the same line.
     pub fn delete_to_line_start(&mut self) -> DirtyLines {
         // If there's a selection, delete it and return
         if self.has_selection() {
             return self.delete_selection();
         }
 
-        // At column 0 - nothing to delete
+        // At column 0: either a no-op (line 0) or a line join (line > 0)
         if self.cursor.col == 0 {
-            return DirtyLines::None;
+            if self.cursor.line == 0 {
+                return DirtyLines::None;
+            }
+
+            // Join with the previous line by deleting the preceding newline
+            let prev_line = self.cursor.line - 1;
+            let prev_line_len = self.line_len(prev_line);
+
+            self.sync_gap_to_cursor();
+            let deleted = self.buffer.delete_backward();
+            if deleted != Some('\n') {
+                // Should not happen, but handle gracefully
+                return DirtyLines::None;
+            }
+
+            self.line_index.remove_newline(prev_line);
+            self.cursor.line = prev_line;
+            self.cursor.col = prev_line_len;
+
+            self.assert_line_index_consistent();
+            return DirtyLines::FromLineToEnd(prev_line);
         }
 
         let chars_to_delete = self.cursor.col;
@@ -1657,7 +1677,7 @@ mod tests {
 
     #[test]
     fn test_delete_to_line_start_multiline() {
-        // In a multi-line buffer, only affects current line, does not join with previous line
+        // In a multi-line buffer, cursor mid-line: only deletes within the current line
         let mut buf = TextBuffer::from_str("first\nsecond line\nthird");
         buf.set_cursor(Position::new(1, 7)); // In "second line" at col 7
         let dirty = buf.delete_to_line_start();
@@ -1670,14 +1690,27 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_to_line_start_empty_line() {
-        // Cursor at col 0 on empty line → no-op
+    fn test_delete_to_line_start_at_col_0_joins_prev_line() {
+        // Cursor at col 0, line > 0 → joins with previous line (deletes the newline)
+        let mut buf = TextBuffer::from_str("first\nsecond");
+        buf.set_cursor(Position::new(1, 0)); // At start of "second"
+        let dirty = buf.delete_to_line_start();
+        assert_eq!(buf.content(), "firstsecond");
+        assert_eq!(buf.cursor_position(), Position::new(0, 5)); // end of "first"
+        assert_eq!(buf.line_count(), 1);
+        assert_eq!(dirty, DirtyLines::FromLineToEnd(0));
+    }
+
+    #[test]
+    fn test_delete_to_line_start_empty_line_joins() {
+        // Cursor at col 0 on an empty intermediate line → joins with the previous line
         let mut buf = TextBuffer::from_str("first\n\nthird");
         buf.set_cursor(Position::new(1, 0)); // On the empty line
         let dirty = buf.delete_to_line_start();
-        assert_eq!(buf.content(), "first\n\nthird");
-        assert_eq!(buf.cursor_position(), Position::new(1, 0));
-        assert_eq!(dirty, DirtyLines::None);
+        assert_eq!(buf.content(), "first\nthird");
+        assert_eq!(buf.cursor_position(), Position::new(0, 5)); // end of "first"
+        assert_eq!(buf.line_count(), 2);
+        assert_eq!(dirty, DirtyLines::FromLineToEnd(0));
     }
 
     // ==================== Delete Backward Word Tests ====================

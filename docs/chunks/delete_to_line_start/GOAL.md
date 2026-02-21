@@ -30,10 +30,10 @@ created_after:
 
 ## Minor Goal
 
-Add Cmd+Backspace to delete from the cursor to the beginning of the current line. This is a standard macOS text editing shortcut that deletes everything on the current line to the left of the cursor, leaving the cursor at column 0. It does not join lines — it only affects content on the current line.
+Add Cmd+Backspace to delete from the cursor to the beginning of the current line. When the cursor is mid-line this deletes everything to the left of the cursor, leaving the cursor at column 0. When the cursor is already at column 0 on a non-first line, it joins the current line with the previous line (deletes the newline), mirroring the symmetric behaviour of `delete_to_line_end` at end-of-line.
 
 This requires:
-1. A `delete_to_line_start` method on `TextBuffer` (in the `buffer` crate) that deletes from the cursor position back to column 0 of the current line, returning `DirtyLines`.
+1. A `delete_to_line_start` method on `TextBuffer` (in the `buffer` crate) that deletes from the cursor position back to column 0, or joins with the previous line when already at column 0, returning `DirtyLines`.
 2. A `DeleteToLineStart` variant in the `Command` enum in `buffer_target.rs`.
 3. A match arm in `resolve_command` mapping `Key::Backspace` with `command: true` to `DeleteToLineStart`.
 4. Execution wiring in `execute_command` to call the new buffer method.
@@ -44,8 +44,9 @@ If a selection is active when Cmd+Backspace is pressed, the selection should be 
 
 - Cmd+Backspace with cursor at col 5 in `"hello world"` deletes `"hello"`, leaving `" world"` with cursor at col 0
 - Cmd+Backspace with cursor at end of `"hello world"` (col 11) deletes the entire line content, leaving `""` with cursor at col 0
-- Cmd+Backspace at col 0 (start of line) is a no-op
+- Cmd+Backspace at col 0 on line 0 is a no-op (already at the very start of the buffer)
+- Cmd+Backspace at col 0 on line > 0 joins the current line with the previous line: the newline at the end of the previous line is deleted, the cursor moves to `(prev_line, prev_line_len)`, and `DirtyLines::FromLineToEnd(prev_line)` is returned
+- Cmd+Backspace at col 0 on an empty line (e.g. line 1 in `"first\n\nthird"`) joins it with the previous line, leaving `"first\nthird"` with cursor at `(0, 5)`
 - Cmd+Backspace with an active selection deletes the selection (does not perform line-start deletion)
-- In a multi-line buffer, Cmd+Backspace only affects the current line — it does not join with the previous line
-- The method returns appropriate `DirtyLines` for the affected line
+- The method returns `DirtyLines::Single(line)` for mid-line deletion, `DirtyLines::FromLineToEnd(prev_line)` for a line-join, and `DirtyLines::None` for the no-op case
 - Existing Cmd+Left (move to line start) and plain Backspace behaviors are unchanged
