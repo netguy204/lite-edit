@@ -62,17 +62,63 @@ The interesting bugs live at boundaries. Prioritize testing:
 - Line boundaries (backspace joining lines, newline splitting lines)
 - Edge cases explicitly mentioned in success criteria
 
+### Humble View Architecture
+
+lite-edit follows a variant of the Elm Architecture (Model-View-Update) adapted for Rust's ownership model:
+
+- **Model**: Mutable application state owned by the main thread — `TextBuffer`, `Viewport`, `DirtyRegion`, cursor(s), focus stack. Plain Rust structs with no platform dependencies.
+- **Update**: `FocusTarget.handle_key(event, &mut EditorContext)` — takes an input event and a mutable reference to state, mutates it, and accumulates dirty regions. This is the Elm `update` function with mutable state instead of immutable return values. Mutable state is safe here because the entire critical path is single-threaded by design.
+- **View**: The Metal render loop — reads the model (buffer content, viewport, dirty region) and produces pixels. This is the **humble object**: it contains no logic, makes no decisions, and is not unit-tested. It just projects state onto the screen.
+
+This architecture makes the application testable by construction:
+
+```rust
+// The entire editing pipeline is testable without a window, GPU, or macOS:
+let mut ctx = EditorContext::new(buffer, viewport);
+let mut target = BufferFocusTarget::new();
+
+target.handle_key(KeyEvent::char('H'), &mut ctx);
+target.handle_key(KeyEvent::char('i'), &mut ctx);
+target.handle_key(KeyEvent::backspace(), &mut ctx);
+target.handle_key(KeyEvent::char('o'), &mut ctx);
+
+assert_eq!(ctx.buffer.line_content(0), "Ho");
+assert_eq!(ctx.buffer.cursor_position(), (0, 2));
+assert_eq!(ctx.dirty_region, DirtyRegion::Lines { from: 0, to: 1 });
+```
+
+No mocking, no platform dependencies, no test harness. Just construct state, call the update function, and assert on the result.
+
+**The architectural rule**: if you find yourself unable to test a behavior without spinning up a window or a Metal device, the logic is in the wrong place. Extract it into pure state manipulation and push the platform interaction to the edges.
+
 ### Separate Testable Logic from Platform Code
 
-The core architectural insight — that the critical path is single-threaded and platform-bound (macOS/Metal) — creates a testing challenge. The solution is to keep testable logic in pure Rust modules with no platform dependencies:
+Apply the humble view principle concretely: keep testable logic in pure Rust modules, and make platform code a thin shell.
 
-- **Text buffer**: Pure Rust, fully unit-testable on any platform.
-- **Dirty region computation**: Pure Rust, fully unit-testable.
-- **Viewport calculations**: Pure Rust, fully unit-testable.
-- **Chord resolution**: Pure function `(modifiers, key) → Option<Command>`, trivially testable.
-- **Glyph layout math**: Pure arithmetic (`col * glyph_width`, `row * line_height`), trivially testable.
+**Testable (pure Rust, no platform dependencies):**
 
-Platform-dependent code (NSView event handling, Metal rendering, Core Text font loading) should be thin wrappers that delegate to testable pure logic as quickly as possible.
+- **Text buffer**: Insert, delete, cursor movement, line access, dirty tracking.
+- **Dirty region computation**: Merge, promotion (`Lines` → `FullViewport`).
+- **Viewport calculations**: Visible range, scroll clamping, cursor-follows-viewport.
+- **Command resolution**: Pure function `(modifiers, key) → Option<Command>`.
+- **Glyph layout math**: `col * glyph_width`, `row * line_height`.
+- **Focus target logic**: Keystroke → buffer mutation → dirty region.
+
+**Humble (platform shell, not unit-tested):**
+
+- NSView/NSWindow setup and event forwarding.
+- Metal device, command queue, pipeline state creation.
+- Glyph rasterization via Core Text (we test that we request the right glyphs, not that Core Text renders them correctly).
+- `CAMetalLayer` drawable acquisition and presentation.
+- `NSRunLoop` drain loop (the loop itself is trivial; what it calls is tested).
+
+### Plugins Get Copies, Not References
+
+When plugins need buffer state (for syntax highlighting, LSP `didChange`, search), the main thread copies the affected content into notifications sent via channels. Plugins work on their own copies. This preserves:
+
+- **Single-owner mutability**: The main thread is the sole owner of mutable state. No `Arc<RwLock<Buffer>>`, no shared mutable access.
+- **Testability**: Plugin logic can be tested by feeding it copied content directly, without simulating the channel or the main loop.
+- **Safety**: A misbehaving plugin cannot block the main thread by holding a lock.
 
 ## Test Categories
 
