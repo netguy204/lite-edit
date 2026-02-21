@@ -561,6 +561,7 @@ impl TextBuffer {
         }
     }
 
+    // Chunk: docs/chunks/kill_line - Delete from cursor to end of line (Ctrl+K)
     /// Deletes all characters from the cursor to the end of the current line.
     ///
     /// This implements kill-line (Emacs `C-k`) behavior:
@@ -608,6 +609,44 @@ impl TextBuffer {
             self.assert_line_index_consistent();
             DirtyLines::Single(self.cursor.line)
         }
+    }
+
+    /// Deletes all characters from the cursor to the start of the current line.
+    ///
+    /// This implements Cmd+Backspace (macOS standard) behavior:
+    /// - If there is an active selection, deletes the selection (consistent with other delete operations)
+    /// - If the cursor is at column 0, does nothing (returns `DirtyLines::None`)
+    /// - Otherwise, deletes all characters from cursor position back to column 0
+    ///
+    /// Unlike `delete_to_line_end`, this operation does NOT join lines - it only affects
+    /// content on the current line. The cursor moves to column 0 after the operation.
+    pub fn delete_to_line_start(&mut self) -> DirtyLines {
+        // If there's a selection, delete it and return
+        if self.has_selection() {
+            return self.delete_selection();
+        }
+
+        // At column 0 - nothing to delete
+        if self.cursor.col == 0 {
+            return DirtyLines::None;
+        }
+
+        let chars_to_delete = self.cursor.col;
+        let current_line = self.cursor.line;
+
+        self.sync_gap_to_cursor();
+
+        // Delete backward from cursor to column 0
+        for _ in 0..chars_to_delete {
+            let _ = self.buffer.delete_backward();
+            self.line_index.remove_char(current_line);
+        }
+
+        // Move cursor to column 0
+        self.cursor.col = 0;
+
+        self.assert_line_index_consistent();
+        DirtyLines::Single(current_line)
     }
 
     /// Inserts a string at the cursor position.
@@ -1497,5 +1536,78 @@ mod tests {
         assert_eq!(buf.line_content(1), "second ");
         assert_eq!(buf.cursor_position(), Position::new(1, 7));
         assert_eq!(dirty, DirtyLines::Single(1));
+    }
+
+    // ==================== Delete To Line Start Tests ====================
+
+    #[test]
+    fn test_delete_to_line_start_from_middle() {
+        // Cursor at col 5 in "hello world" → deletes "hello", leaves " world" with cursor at col 0
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 5));
+        let dirty = buf.delete_to_line_start();
+        assert_eq!(buf.content(), " world");
+        assert_eq!(buf.cursor_position(), Position::new(0, 0));
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_to_line_start_from_end() {
+        // Cursor at end of "hello world" (col 11) → deletes entire line content, leaves "" with cursor at col 0
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 11));
+        let dirty = buf.delete_to_line_start();
+        assert_eq!(buf.content(), "");
+        assert_eq!(buf.cursor_position(), Position::new(0, 0));
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_to_line_start_at_col_0() {
+        // Cursor at col 0 → no-op, returns DirtyLines::None
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 0));
+        let dirty = buf.delete_to_line_start();
+        assert_eq!(buf.content(), "hello world");
+        assert_eq!(buf.cursor_position(), Position::new(0, 0));
+        assert_eq!(dirty, DirtyLines::None);
+    }
+
+    #[test]
+    fn test_delete_to_line_start_with_selection() {
+        // Active selection → deletes selection (not line-start), delegates to delete_selection()
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 8));
+        buf.set_selection_anchor(Position::new(0, 6)); // selects "wo"
+        let dirty = buf.delete_to_line_start();
+        assert_eq!(buf.content(), "hello rld");
+        assert_eq!(buf.cursor_position(), Position::new(0, 6));
+        assert!(!buf.has_selection());
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_to_line_start_multiline() {
+        // In a multi-line buffer, only affects current line, does not join with previous line
+        let mut buf = TextBuffer::from_str("first\nsecond line\nthird");
+        buf.set_cursor(Position::new(1, 7)); // In "second line" at col 7
+        let dirty = buf.delete_to_line_start();
+        assert_eq!(buf.line_content(0), "first");
+        assert_eq!(buf.line_content(1), "line");
+        assert_eq!(buf.line_content(2), "third");
+        assert_eq!(buf.line_count(), 3);
+        assert_eq!(buf.cursor_position(), Position::new(1, 0));
+        assert_eq!(dirty, DirtyLines::Single(1));
+    }
+
+    #[test]
+    fn test_delete_to_line_start_empty_line() {
+        // Cursor at col 0 on empty line → no-op
+        let mut buf = TextBuffer::from_str("first\n\nthird");
+        buf.set_cursor(Position::new(1, 0)); // On the empty line
+        let dirty = buf.delete_to_line_start();
+        assert_eq!(buf.content(), "first\n\nthird");
+        assert_eq!(buf.cursor_position(), Position::new(1, 0));
+        assert_eq!(dirty, DirtyLines::None);
     }
 }

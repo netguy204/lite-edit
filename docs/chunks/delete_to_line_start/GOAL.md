@@ -1,18 +1,31 @@
 ---
-status: FUTURE
+status: ACTIVE
 ticket: null
 parent_chunk: null
-code_paths: []
-code_references: []
+code_paths:
+- crates/buffer/src/text_buffer.rs
+- crates/editor/src/buffer_target.rs
+code_references:
+  - ref: crates/buffer/src/text_buffer.rs#TextBuffer::delete_to_line_start
+    implements: "Delete from cursor to line start method in TextBuffer"
+  - ref: crates/editor/src/buffer_target.rs#Command::DeleteToLineStart
+    implements: "Command enum variant for Cmd+Backspace action"
+  - ref: crates/editor/src/buffer_target.rs#resolve_command
+    implements: "Key binding mapping Cmd+Backspace to DeleteToLineStart command"
+  - ref: crates/editor/src/buffer_target.rs#execute_command
+    implements: "Command execution dispatch to buffer.delete_to_line_start()"
 narrative: editor_ux_refinements
 investigation: null
 subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["mouse_drag_selection", "shift_arrow_selection", "text_selection_rendering", "viewport_scrolling"]
+created_after:
+- mouse_drag_selection
+- shift_arrow_selection
+- text_selection_rendering
+- viewport_scrolling
 ---
-
 # Chunk Goal
 
 ## Minor Goal
