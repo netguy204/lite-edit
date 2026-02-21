@@ -408,6 +408,7 @@ impl MetalView {
     }
 
     /// Converts an NSEvent to our Key type
+    // Chunk: docs/chunks/line_nav_keybindings - Control-key handling with charactersIgnoringModifiers
     fn convert_key(&self, event: &NSEvent) -> Option<Key> {
         // First check key code for special keys
         let key_code = event.keyCode();

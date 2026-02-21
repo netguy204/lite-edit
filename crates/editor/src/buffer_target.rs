@@ -31,6 +31,7 @@ enum Command {
     DeleteBackward,
     /// Delete the character after the cursor (Delete key)
     DeleteForward,
+    // Chunk: docs/chunks/kill_line - Delete from cursor to end of line (Ctrl+K)
     /// Delete from cursor to end of line (kill-line)
     DeleteToLineEnd,
     /// Delete from cursor to start of line (Cmd+Backspace)
@@ -85,6 +86,7 @@ enum Command {
 /// Per the H2 investigation finding, all target chords are single-step
 /// modifier+key combinations, so no state machine is needed.
 // Chunk: docs/chunks/shift_arrow_selection - Shift+Arrow key selection
+// Chunk: docs/chunks/line_nav_keybindings - Home/End and Ctrl+A/Ctrl+E line navigation
 fn resolve_command(event: &KeyEvent) -> Option<Command> {
     let mods = &event.modifiers;
 
@@ -178,6 +180,7 @@ fn resolve_command(event: &KeyEvent) -> Option<Command> {
         // Ctrl+E → end of line (Emacs-style)
         Key::Char('e') if mods.control && !mods.command => Some(Command::MoveToLineEnd),
 
+        // Chunk: docs/chunks/kill_line - Ctrl+K key binding
         // Ctrl+K → kill line (delete to end of line)
         Key::Char('k') if mods.control && !mods.command => Some(Command::DeleteToLineEnd),
 
@@ -199,6 +202,7 @@ impl BufferFocusTarget {
     }
 
     /// Executes a command on the buffer through the editor context.
+    // Chunk: docs/chunks/line_nav_keybindings - MoveToLineStart/MoveToLineEnd execution
     fn execute_command(&self, cmd: Command, ctx: &mut EditorContext) {
         let dirty = match cmd {
             Command::InsertChar(ch) => ctx.buffer.insert_char(ch),

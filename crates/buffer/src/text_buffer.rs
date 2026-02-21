@@ -561,6 +561,7 @@ impl TextBuffer {
         }
     }
 
+    // Chunk: docs/chunks/kill_line - Delete from cursor to end of line (Ctrl+K)
     /// Deletes all characters from the cursor to the end of the current line.
     ///
     /// This implements kill-line (Emacs `C-k`) behavior:
