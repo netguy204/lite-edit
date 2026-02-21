@@ -26,6 +26,7 @@ mod clipboard;
 mod context;
 mod dirty_region;
 mod editor_state;
+pub mod file_index;
 mod focus;
 mod font;
 mod glyph_atlas;
@@ -35,6 +36,8 @@ mod metal_view;
 mod renderer;
 mod shader;
 mod viewport;
+
+pub use file_index::FileIndex;
 
 use std::cell::RefCell;
 use std::ptr::NonNull;

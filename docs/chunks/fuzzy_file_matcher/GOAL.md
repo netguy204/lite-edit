@@ -1,8 +1,11 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/editor/src/file_index.rs
+  - crates/editor/src/main.rs
+  - crates/editor/Cargo.toml
 code_references: []
 narrative: file_buffer_association
 investigation: null
@@ -10,9 +13,10 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["delete_to_line_start", "ibeam_cursor"]
+created_after:
+- delete_to_line_start
+- ibeam_cursor
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
