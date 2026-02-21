@@ -1113,7 +1113,7 @@ mod tests {
         state.update_viewport_dimensions(800.0, 160.0); // 10 visible lines
 
         // Initial scroll offset should be 0
-        assert_eq!(state.viewport.scroll_offset, 0);
+        assert_eq!(state.viewport.scroll_offset(), 0);
 
         // Open the selector
         let cmd_p = KeyEvent::new(
@@ -1130,7 +1130,7 @@ mod tests {
         state.handle_scroll(ScrollDelta::new(0.0, 80.0));
 
         // Viewport should NOT have scrolled (scroll ignored when selector open)
-        assert_eq!(state.viewport.scroll_offset, 0);
+        assert_eq!(state.viewport.scroll_offset(), 0);
     }
 
     #[test]
