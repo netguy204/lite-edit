@@ -60,7 +60,7 @@ use objc2_foundation::{
 
 use lite_edit_buffer::TextBuffer;
 
-use crate::editor_state::EditorState;
+use crate::editor_state::{EditorFocus, EditorState};
 use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
 use crate::metal_view::MetalView;
 use crate::renderer::Renderer;
@@ -235,13 +235,22 @@ impl EditorController {
         app.terminate(None);
     }
 
-    /// Toggles cursor blink and re-renders if needed.
+    /// Toggles cursor blink, checks for picker updates, and re-renders if needed.
     fn toggle_cursor_blink(&mut self) {
-        let dirty = self.state.toggle_cursor_blink();
-        if dirty.is_dirty() {
-            self.state.dirty_region.merge(dirty);
-            self.render_if_dirty();
+        // Toggle cursor blink
+        let cursor_dirty = self.state.toggle_cursor_blink();
+        if cursor_dirty.is_dirty() {
+            self.state.dirty_region.merge(cursor_dirty);
         }
+
+        // Check for picker streaming updates
+        let picker_dirty = self.state.tick_picker();
+        if picker_dirty.is_dirty() {
+            self.state.dirty_region.merge(picker_dirty);
+        }
+
+        // Render if anything is dirty
+        self.render_if_dirty();
     }
 
     /// Renders if there's a dirty region.
@@ -255,9 +264,21 @@ impl EditorController {
             // For now, we'll create a fresh buffer each time (not ideal, but correct)
             self.sync_renderer_buffer();
 
-            // Take the dirty region and render
-            let dirty = self.state.take_dirty_region();
-            self.renderer.render_dirty(&self.metal_view, &dirty);
+            // Take the dirty region
+            let _dirty = self.state.take_dirty_region();
+
+            // Use render_with_selector when selector is active
+            if self.state.focus == EditorFocus::Selector {
+                let selector = self.state.active_selector.as_ref();
+                self.renderer.render_with_selector(
+                    &self.metal_view,
+                    selector,
+                    self.state.cursor_visible, // cursor blink affects selector cursor too
+                );
+            } else {
+                // Normal render when selector is not active
+                self.renderer.render(&self.metal_view);
+            }
         }
     }
 
@@ -292,9 +313,10 @@ impl EditorController {
         self.metal_view.update_drawable_size();
         let frame = self.metal_view.frame();
         let scale = self.metal_view.scale_factor();
+        let width = (frame.size.width * scale) as f32;
         let height = (frame.size.height * scale) as f32;
 
-        self.state.update_viewport_size(height);
+        self.state.update_viewport_dimensions(width, height);
         self.renderer.update_viewport_size(height);
 
         // Mark full viewport dirty and render
@@ -444,8 +466,9 @@ impl AppDelegate {
         // Update viewport size based on window dimensions
         let frame = metal_view.frame();
         let scale = metal_view.scale_factor();
+        let width = (frame.size.width * scale) as f32;
         let height = (frame.size.height * scale) as f32;
-        state.update_viewport_size(height);
+        state.update_viewport_dimensions(width, height);
         renderer.update_viewport_size(height);
 
         // Set the initial buffer in the renderer

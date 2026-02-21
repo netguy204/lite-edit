@@ -2,6 +2,7 @@
 // Chunk: docs/chunks/mouse_click_cursor - Mouse click cursor positioning
 // Chunk: docs/chunks/viewport_scrolling - Scroll event handling
 // Chunk: docs/chunks/quit_command - Cmd+Q quit flag and key interception
+// Chunk: docs/chunks/file_picker - File picker (Cmd+P) integration
 //!
 //! Editor state container.
 //!
@@ -9,19 +10,33 @@
 //! that the main loop can work with. It provides the EditorContext for
 //! focus target event handling.
 
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::buffer_target::BufferFocusTarget;
 use crate::context::EditorContext;
 use crate::dirty_region::DirtyRegion;
+use crate::file_index::FileIndex;
 use crate::focus::FocusTarget;
 use crate::font::FontMetrics;
 use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
+use crate::selector::{SelectorOutcome, SelectorWidget};
+use crate::selector_overlay::calculate_overlay_geometry;
 use crate::viewport::Viewport;
 use lite_edit_buffer::TextBuffer;
 
 /// Duration in milliseconds for cursor blink interval
 const CURSOR_BLINK_INTERVAL_MS: u64 = 500;
+
+/// Which UI element currently owns keyboard/mouse focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EditorFocus {
+    /// Normal buffer editing mode
+    #[default]
+    Buffer,
+    /// Selector overlay is active (file picker, command palette, etc.)
+    Selector,
+}
 
 /// Consolidated editor state.
 ///
@@ -33,6 +48,7 @@ const CURSOR_BLINK_INTERVAL_MS: u64 = 500;
 /// - Dirty region tracking
 /// - Font metrics for pixel-to-position conversion
 /// - Application quit flag
+/// - File picker state (focus, selector widget, file index)
 pub struct EditorState {
     /// The text buffer being edited
     pub buffer: TextBuffer,
@@ -50,8 +66,21 @@ pub struct EditorState {
     font_metrics: FontMetrics,
     /// View height in pixels (for y-coordinate flipping in mouse events)
     view_height: f32,
+    /// View width in pixels (for selector overlay geometry)
+    view_width: f32,
     /// Whether the app should quit (set by Cmd+Q)
     pub should_quit: bool,
+    /// Which UI element currently owns focus
+    pub focus: EditorFocus,
+    /// The active selector widget (when focus == Selector)
+    pub active_selector: Option<SelectorWidget>,
+    /// The file index for fuzzy file matching
+    file_index: Option<FileIndex>,
+    /// The cache version at the last query (for streaming refresh)
+    last_cache_version: u64,
+    /// The resolved path from the last selector confirmation
+    /// (consumed by file_save chunk for buffer association)
+    pub resolved_path: Option<PathBuf>,
 }
 
 impl EditorState {
@@ -71,7 +100,13 @@ impl EditorState {
             last_keystroke: Instant::now(),
             font_metrics,
             view_height: 0.0,
+            view_width: 0.0,
             should_quit: false,
+            focus: EditorFocus::Buffer,
+            active_selector: None,
+            file_index: None,
+            last_cache_version: 0,
+            resolved_path: None,
         }
     }
 
@@ -85,12 +120,22 @@ impl EditorState {
         &self.font_metrics
     }
 
-    /// Updates the viewport size based on window height in pixels.
+    /// Updates the viewport size based on window dimensions in pixels.
     ///
-    /// This also updates the stored view_height for mouse event coordinate flipping.
+    /// This also updates the stored view_height and view_width for
+    /// mouse event coordinate flipping and selector overlay geometry.
     pub fn update_viewport_size(&mut self, window_height: f32) {
         self.viewport.update_size(window_height);
         self.view_height = window_height;
+    }
+
+    /// Updates the viewport size with both width and height.
+    ///
+    /// This is the preferred method when both dimensions are available.
+    pub fn update_viewport_dimensions(&mut self, window_width: f32, window_height: f32) {
+        self.viewport.update_size(window_height);
+        self.view_height = window_height;
+        self.view_width = window_width;
     }
 
     /// Handles a key event by forwarding to the active focus target.
@@ -98,8 +143,8 @@ impl EditorState {
     /// This records the keystroke time (for cursor blink reset) and
     /// ensures the cursor is visible after any keystroke.
     ///
-    /// App-level shortcuts (like Cmd+Q for quit) are intercepted here
-    /// before being forwarded to the focus target.
+    /// App-level shortcuts (like Cmd+Q for quit, Cmd+P for file picker) are
+    /// intercepted here before being forwarded to the focus target.
     ///
     /// If the cursor has been scrolled off-screen, we snap the viewport back
     /// to make the cursor visible BEFORE processing the keystroke.
@@ -113,8 +158,180 @@ impl EditorState {
                 self.should_quit = true;
                 return;
             }
+
+            // Cmd+P (without Ctrl) toggles file picker
+            if let Key::Char('p') = event.key {
+                self.handle_cmd_p();
+                return;
+            }
         }
 
+        // Route based on current focus
+        match self.focus {
+            EditorFocus::Selector => {
+                self.handle_key_selector(event);
+            }
+            EditorFocus::Buffer => {
+                self.handle_key_buffer(event);
+            }
+        }
+    }
+
+    /// Handles Cmd+P to toggle the file picker.
+    fn handle_cmd_p(&mut self) {
+        match self.focus {
+            EditorFocus::Buffer => {
+                // Open the file picker
+                self.open_file_picker();
+            }
+            EditorFocus::Selector => {
+                // Close the file picker (toggle behavior)
+                self.close_selector();
+            }
+        }
+    }
+
+    /// Opens the file picker selector.
+    fn open_file_picker(&mut self) {
+        // Get the current working directory
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+        // Initialize file_index if needed
+        if self.file_index.is_none() {
+            self.file_index = Some(FileIndex::start(cwd.clone()));
+        }
+
+        // Query with empty string to get initial results
+        let results = self.file_index.as_ref().unwrap().query("");
+
+        // Create a new selector widget
+        let mut selector = SelectorWidget::new();
+
+        // Map results to display strings
+        let items: Vec<String> = results
+            .iter()
+            .map(|r| r.path.display().to_string())
+            .collect();
+        selector.set_items(items);
+
+        // Store the selector and update focus
+        self.active_selector = Some(selector);
+        self.focus = EditorFocus::Selector;
+        self.last_cache_version = self.file_index.as_ref().unwrap().cache_version();
+
+        // Mark full viewport dirty for overlay rendering
+        self.dirty_region.merge(DirtyRegion::FullViewport);
+    }
+
+    /// Closes the active selector.
+    fn close_selector(&mut self) {
+        self.active_selector = None;
+        self.focus = EditorFocus::Buffer;
+        self.dirty_region.merge(DirtyRegion::FullViewport);
+    }
+
+    /// Handles a key event when the selector is focused.
+    fn handle_key_selector(&mut self, event: KeyEvent) {
+        let selector = match self.active_selector.as_mut() {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Capture the previous query for change detection
+        let prev_query = selector.query().to_string();
+
+        // Forward to the selector widget
+        let outcome = selector.handle_key(&event);
+
+        match outcome {
+            SelectorOutcome::Pending => {
+                // Check if query changed
+                let current_query = selector.query();
+                if current_query != prev_query {
+                    // Re-query the file index with the new query
+                    if let Some(ref file_index) = self.file_index {
+                        let results = file_index.query(current_query);
+                        let items: Vec<String> = results
+                            .iter()
+                            .map(|r| r.path.display().to_string())
+                            .collect();
+                        // Need to reborrow selector mutably
+                        if let Some(ref mut sel) = self.active_selector {
+                            sel.set_items(items);
+                        }
+                        self.last_cache_version = file_index.cache_version();
+                    }
+                }
+                // Mark dirty for any visual update (selection, query, etc.)
+                self.dirty_region.merge(DirtyRegion::FullViewport);
+            }
+            SelectorOutcome::Confirmed(idx) => {
+                // Resolve the path and handle confirmation
+                self.handle_selector_confirm(idx);
+            }
+            SelectorOutcome::Cancelled => {
+                self.close_selector();
+            }
+        }
+    }
+
+    /// Handles selector confirmation (Enter pressed).
+    fn handle_selector_confirm(&mut self, idx: usize) {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+        // Get items and query from selector
+        let (items, query) = if let Some(ref selector) = self.active_selector {
+            (selector.items().to_vec(), selector.query().to_string())
+        } else {
+            return;
+        };
+
+        // Resolve the path
+        let resolved = self.resolve_picker_path(idx, &items, &query, &cwd);
+
+        // Record the selection for recency
+        if let Some(ref file_index) = self.file_index {
+            file_index.record_selection(&resolved);
+        }
+
+        // Store the resolved path for file_save chunk to consume
+        self.resolved_path = Some(resolved);
+
+        // Close the selector
+        self.close_selector();
+    }
+
+    /// Resolves the path from a selector confirmation.
+    ///
+    /// If `idx < items.len()`: returns `cwd / items[idx]`
+    /// If `idx == usize::MAX` or query doesn't match: returns `cwd / query` (new file)
+    /// If the resolved file doesn't exist, creates it as an empty file.
+    fn resolve_picker_path(
+        &self,
+        idx: usize,
+        items: &[String],
+        query: &str,
+        cwd: &Path,
+    ) -> PathBuf {
+        let resolved = if idx < items.len() {
+            cwd.join(&items[idx])
+        } else {
+            // idx == usize::MAX (empty items) or out of range
+            // Use the query as the new filename
+            cwd.join(query)
+        };
+
+        // Create the file if it doesn't exist
+        if !resolved.exists() && !query.is_empty() {
+            // Attempt to create the file (ignore errors for now)
+            let _ = std::fs::File::create(&resolved);
+        }
+
+        resolved
+    }
+
+    /// Handles a key event when the buffer is focused.
+    fn handle_key_buffer(&mut self, event: KeyEvent) {
         // Record keystroke time for cursor blink reset
         self.last_keystroke = Instant::now();
 
@@ -163,7 +380,65 @@ impl EditorState {
     ///
     /// This records the event time (for cursor blink reset) and
     /// ensures the cursor is visible after any mouse interaction.
+    ///
+    /// When the selector is focused, mouse events are forwarded to the selector
+    /// widget using the overlay geometry.
     pub fn handle_mouse(&mut self, event: MouseEvent) {
+        // Route based on current focus
+        match self.focus {
+            EditorFocus::Selector => {
+                self.handle_mouse_selector(event);
+            }
+            EditorFocus::Buffer => {
+                self.handle_mouse_buffer(event);
+            }
+        }
+    }
+
+    /// Handles a mouse event when the selector is focused.
+    fn handle_mouse_selector(&mut self, event: MouseEvent) {
+        let selector = match self.active_selector.as_mut() {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Calculate overlay geometry to map mouse coordinates
+        let line_height = self.font_metrics.line_height as f32;
+        let geometry = calculate_overlay_geometry(
+            self.view_width,
+            self.view_height,
+            line_height,
+            selector.items().len(),
+        );
+
+        // Convert mouse position to the format expected by selector
+        // Mouse events arrive in view coordinates (y=0 at top)
+        let position = event.position;
+
+        // Forward to selector widget
+        let outcome = selector.handle_mouse(
+            position,
+            event.kind,
+            geometry.item_height as f64,
+            geometry.list_origin_y as f64,
+        );
+
+        match outcome {
+            SelectorOutcome::Pending => {
+                // Mark dirty for visual update
+                self.dirty_region.merge(DirtyRegion::FullViewport);
+            }
+            SelectorOutcome::Confirmed(idx) => {
+                self.handle_selector_confirm(idx);
+            }
+            SelectorOutcome::Cancelled => {
+                self.close_selector();
+            }
+        }
+    }
+
+    /// Handles a mouse event when the buffer is focused.
+    fn handle_mouse_buffer(&mut self, event: MouseEvent) {
         // Record event time for cursor blink reset (same as keystroke)
         self.last_keystroke = Instant::now();
 
@@ -194,7 +469,14 @@ impl EditorState {
     ///
     /// Scroll events only affect the viewport, not the cursor position or buffer.
     /// The cursor may end up off-screen after scrolling, which is intentional.
+    ///
+    /// When the selector is open, scroll events are ignored.
     pub fn handle_scroll(&mut self, delta: ScrollDelta) {
+        // Ignore scroll events when selector is open
+        if self.focus == EditorFocus::Selector {
+            return;
+        }
+
         // Create context and forward to focus target
         let mut ctx = EditorContext::new(
             &mut self.buffer,
@@ -209,6 +491,54 @@ impl EditorState {
     /// Returns true if any screen region needs re-rendering.
     pub fn is_dirty(&self) -> bool {
         self.dirty_region.is_dirty()
+    }
+
+    /// Called periodically to check for streaming file index updates.
+    ///
+    /// When the selector is open and the file index has discovered new paths,
+    /// this re-queries the index with the current query and updates the selector's
+    /// item list. This is the mechanism by which results stream in during the
+    /// initial directory walk.
+    ///
+    /// Returns `DirtyRegion::FullViewport` if items were updated, `None` otherwise.
+    pub fn tick_picker(&mut self) -> DirtyRegion {
+        // Only relevant when selector is active
+        if self.focus != EditorFocus::Selector {
+            return DirtyRegion::None;
+        }
+
+        let file_index = match &self.file_index {
+            Some(idx) => idx,
+            None => return DirtyRegion::None,
+        };
+
+        // Check if cache version has changed
+        let current_version = file_index.cache_version();
+        if current_version <= self.last_cache_version {
+            return DirtyRegion::None;
+        }
+
+        // Re-query with current query
+        let query = self
+            .active_selector
+            .as_ref()
+            .map(|s| s.query().to_string())
+            .unwrap_or_default();
+
+        let results = file_index.query(&query);
+        let items: Vec<String> = results
+            .iter()
+            .map(|r| r.path.display().to_string())
+            .collect();
+
+        // Update the selector items
+        if let Some(ref mut widget) = self.active_selector {
+            widget.set_items(items);
+        }
+
+        self.last_cache_version = current_version;
+
+        DirtyRegion::FullViewport
     }
 
     /// Takes the dirty region, leaving `DirtyRegion::None` in its place.
@@ -598,5 +928,245 @@ mod tests {
 
         // Scroll offset should remain at 10
         assert_eq!(state.viewport.scroll_offset, 10);
+    }
+
+    // =========================================================================
+    // File Picker Tests (Cmd+P behavior)
+    // =========================================================================
+
+    #[test]
+    fn test_initial_focus_is_buffer() {
+        let state = EditorState::empty(test_font_metrics());
+        assert_eq!(state.focus, EditorFocus::Buffer);
+    }
+
+    #[test]
+    fn test_initial_active_selector_is_none() {
+        let state = EditorState::empty(test_font_metrics());
+        assert!(state.active_selector.is_none());
+    }
+
+    #[test]
+    fn test_cmd_p_transitions_to_selector_focus() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        let cmd_p = KeyEvent::new(
+            Key::Char('p'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_p);
+
+        assert_eq!(state.focus, EditorFocus::Selector);
+    }
+
+    #[test]
+    fn test_cmd_p_opens_selector() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        let cmd_p = KeyEvent::new(
+            Key::Char('p'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_p);
+
+        assert!(state.active_selector.is_some());
+    }
+
+    #[test]
+    fn test_cmd_p_does_not_insert_p() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        let cmd_p = KeyEvent::new(
+            Key::Char('p'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_p);
+
+        // Buffer should remain empty - 'p' should not be inserted
+        assert!(state.buffer.is_empty());
+    }
+
+    #[test]
+    fn test_cmd_p_when_selector_open_closes_selector() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        let cmd_p = KeyEvent::new(
+            Key::Char('p'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+
+        // Open the selector
+        state.handle_key(cmd_p.clone());
+        assert_eq!(state.focus, EditorFocus::Selector);
+
+        // Press Cmd+P again - should close
+        state.handle_key(cmd_p);
+        assert_eq!(state.focus, EditorFocus::Buffer);
+        assert!(state.active_selector.is_none());
+    }
+
+    #[test]
+    fn test_escape_closes_selector() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Open selector
+        let cmd_p = KeyEvent::new(
+            Key::Char('p'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_p);
+        assert_eq!(state.focus, EditorFocus::Selector);
+
+        // Press Escape
+        let escape = KeyEvent::new(Key::Escape, Modifiers::default());
+        state.handle_key(escape);
+
+        assert_eq!(state.focus, EditorFocus::Buffer);
+        assert!(state.active_selector.is_none());
+    }
+
+    #[test]
+    fn test_typing_in_selector_appends_to_query() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Open selector
+        let cmd_p = KeyEvent::new(
+            Key::Char('p'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_p);
+
+        // Type some characters
+        state.handle_key(KeyEvent::char('t'));
+        state.handle_key(KeyEvent::char('e'));
+        state.handle_key(KeyEvent::char('s'));
+        state.handle_key(KeyEvent::char('t'));
+
+        // Check query
+        let query = state.active_selector.as_ref().unwrap().query();
+        assert_eq!(query, "test");
+    }
+
+    #[test]
+    fn test_down_arrow_moves_selection_in_selector() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Open selector
+        let cmd_p = KeyEvent::new(
+            Key::Char('p'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_p);
+
+        // Set some items manually for testing
+        if let Some(ref mut selector) = state.active_selector {
+            selector.set_items(vec!["file1.rs".into(), "file2.rs".into(), "file3.rs".into()]);
+            assert_eq!(selector.selected_index(), 0);
+        }
+
+        // Press Down
+        state.handle_key(KeyEvent::new(Key::Down, Modifiers::default()));
+
+        let selected = state.active_selector.as_ref().unwrap().selected_index();
+        assert_eq!(selected, 1);
+    }
+
+    #[test]
+    fn test_scroll_ignored_when_selector_open() {
+        // Create a buffer with many lines
+        let content = (0..50)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut state = EditorState::new(
+            lite_edit_buffer::TextBuffer::from_str(&content),
+            test_font_metrics(),
+        );
+        state.update_viewport_dimensions(800.0, 160.0); // 10 visible lines
+
+        // Initial scroll offset should be 0
+        assert_eq!(state.viewport.scroll_offset, 0);
+
+        // Open the selector
+        let cmd_p = KeyEvent::new(
+            Key::Char('p'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_p);
+        assert_eq!(state.focus, EditorFocus::Selector);
+
+        // Try to scroll
+        state.handle_scroll(ScrollDelta::new(0.0, 80.0));
+
+        // Viewport should NOT have scrolled (scroll ignored when selector open)
+        assert_eq!(state.viewport.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_tick_picker_returns_none_when_buffer_focused() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Focus is Buffer, tick_picker should return None
+        let dirty = state.tick_picker();
+        assert!(!dirty.is_dirty());
+    }
+
+    #[test]
+    fn test_tick_picker_returns_none_when_no_version_change() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Open selector
+        let cmd_p = KeyEvent::new(
+            Key::Char('p'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_p);
+        assert_eq!(state.focus, EditorFocus::Selector);
+
+        // Clear dirty region from opening
+        let _ = state.take_dirty_region();
+
+        // First tick - might update if cache changed
+        let _first = state.tick_picker();
+
+        // Second tick immediately - should return None (no change)
+        let dirty = state.tick_picker();
+        assert!(!dirty.is_dirty());
     }
 }
