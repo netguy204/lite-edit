@@ -1,6 +1,7 @@
 // Chunk: docs/chunks/editable_buffer - Main loop + input events + editable buffer
 // Chunk: docs/chunks/mouse_click_cursor - Mouse click cursor positioning
 // Chunk: docs/chunks/viewport_scrolling - Scroll event handling
+// Chunk: docs/chunks/quit_command - Cmd+Q quit flag and key interception
 //!
 //! Editor state container.
 //!
