@@ -9,9 +9,7 @@ investigation: null
 subsystems: []
 friction_entries: []
 bug_type: null
-depends_on:
-- viewport_rendering
-- editable_buffer
+depends_on: []
 created_after: ["clipboard_operations", "mouse_click_cursor", "text_selection_model", "quit_command"]
 ---
 
