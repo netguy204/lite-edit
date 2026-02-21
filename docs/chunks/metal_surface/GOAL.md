@@ -1,8 +1,14 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - Cargo.toml
+  - build.rs
+  - src/main.rs
+  - src/metal_view.rs
+  - src/renderer.rs
+  - README.md
 code_references: []
 narrative: null
 investigation: editor_core_architecture
@@ -12,7 +18,6 @@ bug_type: null
 depends_on: []
 created_after: []
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

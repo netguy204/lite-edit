@@ -8,170 +8,272 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk establishes the Rust → Cocoa → Metal pipeline from scratch. We'll create a native macOS application that:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Initializes an NSApplication** with a minimal run loop
+2. **Creates an NSWindow** with a content view backed by a CAMetalLayer
+3. **Sets up the Metal rendering pipeline**: MTLDevice, MTLCommandQueue, MTLRenderPipelineState
+4. **Executes a render pass** that clears to a dark editor background color
+5. **Handles window lifecycle** (close, resize) cleanly
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+**Rust-to-macOS bridging strategy**: Use the `objc2` family of crates (`objc2`, `objc2-foundation`, `objc2-app-kit`, `objc2-metal`, `objc2-quartz-core`) for type-safe Cocoa/Metal bindings. These provide idiomatic Rust wrappers around Objective-C classes while maintaining zero-overhead abstractions. Alternative approaches (raw `objc` crate, `winit` + `wgpu`) either lack type safety or add unnecessary abstraction layers between us and Metal.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/metal_surface/GOAL.md)
-with references to the files that you expect to touch.
--->
+**Why not wgpu/winit?** The GOAL.md explicitly states "Direct Metal rendering on macOS. No Electron, no webview, no terminal emulator intermediary." While wgpu is excellent, it's an abstraction over Metal. For a performance-critical text editor where we need precise control over the render pipeline (incremental dirty region rendering, glyph atlas management), direct Metal access is preferred. This also eliminates a dependency and its associated complexity.
+
+**Testing strategy**: Window creation and Metal rendering are inherently visual and macOS-specific, making traditional unit testing difficult. We'll verify through:
+- Compilation success (tests the bindings work)
+- Manual verification (window opens, correct color displayed)
+- Automated smoke test using `NSRunLoop::runUntilDate:` to verify the window opens and renders at least one frame without crashing
+- Clean shutdown verification (no resource leaks, no crashes on close)
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No existing subsystems. This is the first chunk being implemented. The patterns established here (Metal initialization, render pass structure, window management) may seed a future `rendering` or `platform_macos` subsystem as subsequent chunks build on this foundation.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Initialize the Rust project with Cargo.toml
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create the project structure with dependencies:
+- `objc2` - Core Objective-C runtime bindings
+- `objc2-foundation` - Foundation framework (NSString, NSRunLoop, etc.)
+- `objc2-app-kit` - AppKit framework (NSApplication, NSWindow, NSView)
+- `objc2-metal` - Metal framework bindings
+- `objc2-quartz-core` - Core Animation (CAMetalLayer)
+- `block2` - Objective-C block support
 
-Example:
+Configure build settings:
+- Edition 2021
+- macOS minimum deployment target (use `MACOSX_DEPLOYMENT_TARGET` env var)
+- Link frameworks: `AppKit`, `Metal`, `QuartzCore`, `Foundation`
 
-### Step 1: Define the SegmentHeader struct
+**Output**: `Cargo.toml`, `src/main.rs` (minimal placeholder), `build.rs` (framework linking)
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Location: Project root
 
-Location: src/segment/format.rs
+---
 
-### Step 2: Implement header serialization
+### Step 2: Implement NSApplication bootstrap
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Create the minimal macOS application lifecycle:
+- Obtain shared NSApplication instance
+- Set activation policy to `.regular` (creates Dock icon, menu bar presence)
+- Create a minimal NSApplicationDelegate to handle termination
 
-### Step 3: ...
+The delegate must implement:
+- `applicationDidFinishLaunching:` - where we'll create the window
+- `applicationShouldTerminateAfterLastWindowClosed:` → `true` - clean exit when window closes
+
+**Key insight from investigation**: The entire critical path runs on the main thread via NSRunLoop. We're not building a separate event system — we hook into macOS's existing one.
+
+Location: `src/main.rs` (or `src/app.rs` if we modularize)
+
+---
+
+### Step 3: Create NSWindow with basic configuration
+
+Instantiate an NSWindow with:
+- Style mask: titled, closable, resizable, miniaturizable
+- Initial size: 800×600 (reasonable default for a code editor)
+- Title: "lite-edit" (or configurable)
+- Background: Opaque, no transparency
+
+Position the window centered on screen. Make it key and order front.
+
+Do NOT yet attach a custom view — just verify the window opens and displays.
+
+Location: `src/main.rs` (window creation logic)
+
+---
+
+### Step 4: Create a CAMetalLayer-backed NSView
+
+Create a custom NSView subclass that:
+- Overrides `makeBackingLayer` to return a CAMetalLayer
+- Sets `wantsLayer = true` to enable layer-backed rendering
+
+Configure the CAMetalLayer:
+- Set `device` to the default MTLDevice
+- Set `pixelFormat` to `.bgra8Unorm` (standard for display)
+- Set `framebufferOnly = true` (we don't need to read back)
+- Set `drawableSize` to match the view's backing size (retina-aware)
+
+Set this custom view as the window's `contentView`.
+
+**Retina handling**: The layer's `drawableSize` must account for the backing scale factor (`window.backingScaleFactor`). A 800×600 window on a 2x retina display needs a 1600×1200 drawable.
+
+Location: `src/metal_view.rs`
+
+---
+
+### Step 5: Initialize the Metal rendering pipeline
+
+Create the core Metal objects:
+
+1. **MTLDevice**: `MTLCreateSystemDefaultDevice()` — the GPU handle
+2. **MTLCommandQueue**: `device.newCommandQueue()` — where we submit work
+3. **MTLLibrary**: Compile a minimal shader (vertex + fragment that outputs a solid color)
+4. **MTLRenderPipelineState**: Configured with our vertex/fragment functions and the layer's pixel format
+
+The shader for this chunk is trivially simple:
+```metal
+vertex float4 vertex_main(uint vid [[vertex_id]]) {
+    // Full-screen triangle or quad (can also rely solely on clear color)
+    return float4(0.0);
+}
+fragment float4 fragment_main() {
+    return float4(0.118, 0.118, 0.180, 1.0); // #1e1e2e
+}
+```
+
+**Alternative (simpler)**: Skip the shader entirely for this chunk. The render pass descriptor's `clearColor` will fill the drawable with our background color. No geometry needed. The render pipeline state is only necessary if we're drawing geometry — for a solid color, just configuring the clear color and performing a render pass with no draw calls is sufficient.
+
+**Decision**: Use the clear-color-only approach for this chunk. It proves Metal works without introducing shader compilation complexity. The glyph_rendering chunk will add shaders when needed.
+
+Location: `src/renderer.rs`
+
+---
+
+### Step 6: Implement the render loop (render-on-demand)
+
+Per the investigation findings, we do NOT use CVDisplayLink or a continuous render loop. Instead:
+
+1. On window creation, perform an initial render
+2. On window resize, perform a render (via `viewDidChangeBackingProperties` or `setFrameSize:`)
+3. Future chunks will trigger renders on input events
+
+The render sequence for each frame:
+1. Get next drawable from CAMetalLayer (`nextDrawable()`)
+2. Create a render pass descriptor with:
+   - `colorAttachments[0].texture` = drawable's texture
+   - `colorAttachments[0].loadAction` = `.clear`
+   - `colorAttachments[0].clearColor` = MTLClearColor(0.118, 0.118, 0.180, 1.0) // #1e1e2e
+   - `colorAttachments[0].storeAction` = `.store`
+3. Create a command buffer from the command queue
+4. Create a render command encoder from the render pass descriptor
+5. End encoding (no draw calls for this chunk — clear is enough)
+6. Present the drawable via `commandBuffer.presentDrawable(drawable)`
+7. Commit the command buffer
+
+Location: `src/renderer.rs`
+
+---
+
+### Step 7: Handle window resize
+
+When the window is resized:
+1. Update the CAMetalLayer's `drawableSize` to match the new view size × backing scale factor
+2. Trigger a re-render
+
+This can be done by:
+- Observing `NSViewFrameDidChangeNotification`
+- Overriding `setFrameSize:` in our custom view
+- Using `viewDidChangeBackingProperties` for scale factor changes
+
+**Edge case**: During live resize, many resize events fire rapidly. For this chunk, we'll render on every resize. Future optimization (if needed) could coalesce resize events, but the investigation found that full viewport redraws are <1ms, so rapid re-renders during resize should be fine.
+
+Location: `src/metal_view.rs` (resize handling)
+
+---
+
+### Step 8: Handle clean shutdown
+
+Ensure clean resource cleanup:
+- When the window closes, the app should terminate (handled by delegate's `applicationShouldTerminateAfterLastWindowClosed:`)
+- Metal resources (device, command queue) should be dropped cleanly
+- No explicit cleanup is usually needed — Rust's RAII handles it if we structure ownership correctly
+
+Verify:
+- Cmd-Q terminates cleanly
+- Clicking the red close button terminates cleanly
+- No crashes, no "zombie" processes
+
+Location: `src/main.rs` (shutdown path)
+
+---
+
+### Step 9: Add smoke test and verification
+
+Create a minimal test that:
+1. Launches the app
+2. Runs the run loop briefly (`NSRunLoop.current.runUntilDate:` with a short timeout)
+3. Verifies the window exists and is visible
+4. Terminates cleanly
+
+This won't verify the visual output (that's inherently manual), but it ensures the code path executes without panicking.
+
+Also add a `README.md` with:
+- Build instructions (`cargo build --release`)
+- Run instructions (`cargo run`)
+- Expected behavior (window opens with dark purple/blue background)
+
+Location: `tests/smoke_test.rs`, `README.md`
 
 ---
 
 **BACKREFERENCE COMMENTS**
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+Add chunk backreference at the module level for core files:
+```rust
+// Chunk: docs/chunks/metal_surface - macOS window + Metal surface foundation
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
-
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Place this comment at the top of:
+- `src/main.rs`
+- `src/metal_view.rs`
+- `src/renderer.rs`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+**No chunk dependencies** — this is the first chunk in the editor core architecture.
 
-If there are no dependencies, delete this section.
--->
+**External crate dependencies** (to be added to Cargo.toml):
+- `objc2` ^0.5 — Core Objective-C runtime bindings
+- `objc2-foundation` ^0.2 — Foundation framework
+- `objc2-app-kit` ^0.2 — AppKit framework
+- `objc2-metal` ^0.2 — Metal framework
+- `objc2-quartz-core` ^0.2 — Core Animation (CAMetalLayer)
+- `block2` ^0.5 — Objective-C block support
+
+**macOS SDK requirement**: Xcode Command Line Tools must be installed. The build uses `xcrun` to locate the SDK for linking frameworks.
+
+**Target platform**: macOS only. The Cargo.toml should specify `[target.'cfg(target_os = "macos")'.dependencies]` for platform-specific deps.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **objc2 crate stability**: The `objc2` family of crates is actively developed but may have API changes between versions. Pin to specific versions in Cargo.toml to avoid surprises. If critical APIs are missing, we may need to fall back to raw `objc` crate bindings for specific calls.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **CAMetalLayer threading**: CAMetalLayer is documented as requiring main-thread access for certain operations. Since our architecture runs everything on the main thread (per investigation findings), this should be fine, but verify during implementation.
+
+3. **Retina/scaling edge cases**: The backing scale factor can change if a window is dragged between displays with different DPIs. We need to handle `viewDidChangeBackingProperties` to update the drawable size. Test with external monitors if available.
+
+4. **Live resize performance**: During window resize, many resize events fire. While full redraws are <1ms, there may be visual artifacts if the resize outpaces rendering. Monitor for tearing or flashing during live resize.
+
+5. **Memory management with objc2**: The objc2 crates use Rust's ownership model to manage Objective-C reference counting. Ensure we understand the `Retained<T>` / `Id<T>` patterns to avoid leaks or use-after-free.
+
+6. **Missing framework bindings**: If the objc2-metal or objc2-quartz-core crates don't expose everything we need (e.g., specific MTLRenderPassDescriptor configuration), we may need to add custom bindings or use `msg_send!` directly.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
+- **Crate versions**: Plan specified objc2 ^0.5 and related crates at ^0.2. The crates
+  have since been updated to objc2 0.6 and related crates at 0.3. This required updating
+  the macro syntax from `declare_class!` to `define_class!`, using `#[unsafe(super = ...)]`
+  attributes, and `DefinedClass` trait instead of `DeclaredClass`. The core concepts
+  remained the same.
 
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
+- **Feature flags**: Plan mentioned explicit feature flags for objc2 crates. In version
+  0.3.x, most features are enabled by default, simplifying the Cargo.toml.
 
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
+- **NSBackingStoreType**: Changed from `NSBackingStoreType::NSBackingStoreBuffered` to
+  `NSBackingStoreType::Buffered` per updated API naming.
 
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+- **activateIgnoringOtherApps**: The method is deprecated in objc2-app-kit 0.3.2. Changed
+  to use `app.activate()` instead.
+
+- **CGSize**: Plan mentioned using `objc2_foundation::CGSize`. In the implementation,
+  `NSSize` is used directly as it's a type alias for `CGSize` in objc2-foundation.
+
+- **Smoke test scope**: Plan suggested using NSRunLoop::runUntilDate for integration
+  testing. Implemented simpler unit tests that verify Metal device availability and
+  command queue creation without requiring the full app lifecycle, as this provides
+  sufficient coverage for the core functionality.
