@@ -1,11 +1,25 @@
 ---
-status: IMPLEMENTING
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
   - crates/editor/src/renderer.rs
   - crates/editor/src/glyph_buffer.rs
-code_references: []
+code_references:
+  - ref: crates/editor/src/glyph_buffer.rs#QuadRange
+    implements: "Index range tracking for selection/glyph/cursor quad categories"
+  - ref: crates/editor/src/glyph_buffer.rs#GlyphBuffer::create_selection_quad
+    implements: "Selection highlight quad geometry covering selected columns on a row"
+  - ref: crates/editor/src/glyph_buffer.rs#GlyphBuffer::update_from_buffer_with_cursor
+    implements: "Three-phase quad emission: selection → glyphs → cursor with per-category index ranges"
+  - ref: crates/editor/src/renderer.rs#SELECTION_COLOR
+    implements: "Selection highlight color constant (Catppuccin surface2 at 40% alpha)"
+  - ref: crates/editor/src/renderer.rs#Renderer::render_text
+    implements: "Three-pass draw with separate fragment color uniforms per quad category"
+  - ref: crates/buffer/src/text_buffer.rs#TextBuffer::selection_anchor
+    implements: "Exposes selection anchor for renderer buffer sync"
+  - ref: crates/editor/src/main.rs#EditorController::sync_renderer_buffer
+    implements: "Syncs selection anchor from edit buffer to renderer buffer"
 narrative: editor_qol_interactions
 investigation: null
 subsystems: []
