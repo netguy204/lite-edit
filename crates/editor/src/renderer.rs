@@ -1,6 +1,7 @@
 // Chunk: docs/chunks/metal_surface - macOS window + Metal surface foundation
 // Chunk: docs/chunks/glyph_rendering - Monospace glyph atlas + text rendering
 // Chunk: docs/chunks/viewport_rendering - Viewport + Buffer-to-Screen Rendering
+// Chunk: docs/chunks/text_selection_rendering - Selection highlight rendering
 //!
 //! Metal rendering pipeline
 //!
@@ -51,6 +52,15 @@ const TEXT_COLOR: [f32; 4] = [
     0.839, // 0xd6 / 255
     0.957, // 0xf4 / 255
     1.0,
+];
+
+/// The selection highlight color: #585b70 (Catppuccin Mocha surface2) at 40% alpha
+/// This provides a visible background for selected text without overwhelming it.
+const SELECTION_COLOR: [f32; 4] = [
+    0.345, // 0x58 / 255
+    0.357, // 0x5b / 255
+    0.439, // 0x70 / 255
+    0.4,   // 40% opacity
 ];
 
 // =============================================================================
@@ -316,6 +326,11 @@ impl Renderer {
     }
 
     /// Renders the text content using the glyph pipeline
+    ///
+    /// Draws quads in three passes with different colors:
+    /// 1. Selection highlight quads (SELECTION_COLOR)
+    /// 2. Glyph quads (TEXT_COLOR)
+    /// 3. Cursor quad (TEXT_COLOR)
     fn render_text(
         &self,
         encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
@@ -360,31 +375,90 @@ impl Renderer {
             );
         }
 
-        // Set the text color at fragment buffer index 0
-        let text_color_ptr =
-            NonNull::new(TEXT_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
-        unsafe {
-            encoder.setFragmentBytes_length_atIndex(
-                text_color_ptr,
-                std::mem::size_of::<[f32; 4]>(),
-                0,
-            );
-        }
-
         // Set the atlas texture at texture index 0
         unsafe {
             encoder.setFragmentTexture_atIndex(Some(self.atlas.texture()), 0);
         }
 
-        // Draw indexed primitives
-        unsafe {
-            encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
-                MTLPrimitiveType::Triangle,
-                self.glyph_buffer.index_count(),
-                MTLIndexType::UInt32,
-                index_buffer,
-                0,
-            );
+        // ==================== Draw Selection Quads ====================
+        let selection_range = self.glyph_buffer.selection_range();
+        if !selection_range.is_empty() {
+            // Set selection color
+            let selection_color_ptr =
+                NonNull::new(SELECTION_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(
+                    selection_color_ptr,
+                    std::mem::size_of::<[f32; 4]>(),
+                    0,
+                );
+            }
+
+            // Draw selection quads
+            let index_offset = selection_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    selection_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
+        // ==================== Draw Glyph Quads ====================
+        let glyph_range = self.glyph_buffer.glyph_range();
+        if !glyph_range.is_empty() {
+            // Set text color
+            let text_color_ptr =
+                NonNull::new(TEXT_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(
+                    text_color_ptr,
+                    std::mem::size_of::<[f32; 4]>(),
+                    0,
+                );
+            }
+
+            // Draw glyph quads
+            let index_offset = glyph_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    glyph_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
+        // ==================== Draw Cursor Quad ====================
+        let cursor_range = self.glyph_buffer.cursor_range();
+        if !cursor_range.is_empty() {
+            // Cursor uses text color (already set from glyph phase, but set again for safety)
+            let text_color_ptr =
+                NonNull::new(TEXT_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(
+                    text_color_ptr,
+                    std::mem::size_of::<[f32; 4]>(),
+                    0,
+                );
+            }
+
+            // Draw cursor quad
+            let index_offset = cursor_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    cursor_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
         }
     }
 }

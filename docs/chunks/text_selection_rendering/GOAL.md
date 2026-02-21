@@ -1,8 +1,10 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/editor/src/renderer.rs
+  - crates/editor/src/glyph_buffer.rs
 code_references: []
 narrative: editor_qol_interactions
 investigation: null
@@ -10,10 +12,13 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on:
-  - text_selection_model
-created_after: ["editable_buffer", "glyph_rendering", "metal_surface", "viewport_rendering"]
+- text_selection_model
+created_after:
+- editable_buffer
+- glyph_rendering
+- metal_surface
+- viewport_rendering
 ---
-
 # Selection Rendering
 
 ## Minor Goal

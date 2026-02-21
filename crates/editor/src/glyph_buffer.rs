@@ -1,5 +1,6 @@
 // Chunk: docs/chunks/glyph_rendering - Monospace glyph atlas + text rendering
 // Chunk: docs/chunks/viewport_rendering - Viewport + Buffer-to-Screen Rendering
+// Chunk: docs/chunks/text_selection_rendering - Selection highlight rendering
 //!
 //! Glyph vertex buffer construction
 //!
@@ -12,7 +13,17 @@
 //! - y = row * line_height
 //!
 //! The viewport-aware rendering methods allow rendering a subset of buffer lines
-//! (visible in the viewport) and include cursor rendering support.
+//! (visible in the viewport) and include cursor and selection rendering support.
+//!
+//! ## Quad Categories
+//!
+//! The buffer emits three types of quads in a specific order:
+//! 1. **Selection quads** - Semi-transparent background highlights for selected text
+//! 2. **Glyph quads** - The actual text characters
+//! 3. **Cursor quad** - The block cursor at the current position
+//!
+//! Each category has its own index range tracked separately, allowing the renderer
+//! to draw each with different colors via separate draw calls.
 
 use std::ptr::NonNull;
 
@@ -115,6 +126,27 @@ impl GlyphLayout {
 // Glyph Buffer
 // =============================================================================
 
+/// Index range for a category of quads (start index, count)
+#[derive(Debug, Clone, Copy, Default)]
+pub struct QuadRange {
+    /// Starting index in the index buffer
+    pub start: usize,
+    /// Number of indices in this range
+    pub count: usize,
+}
+
+impl QuadRange {
+    /// Creates a new QuadRange
+    pub fn new(start: usize, count: usize) -> Self {
+        Self { start, count }
+    }
+
+    /// Returns true if this range is empty (no quads)
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+}
+
 /// Manages vertex and index buffers for rendering text
 pub struct GlyphBuffer {
     /// The vertex buffer containing glyph quad vertices
@@ -125,6 +157,12 @@ pub struct GlyphBuffer {
     index_count: usize,
     /// Layout calculator
     layout: GlyphLayout,
+    /// Index range for selection highlight quads
+    selection_range: QuadRange,
+    /// Index range for glyph (text character) quads
+    glyph_range: QuadRange,
+    /// Index range for cursor quad
+    cursor_range: QuadRange,
 }
 
 impl GlyphBuffer {
@@ -135,6 +173,9 @@ impl GlyphBuffer {
             index_buffer: None,
             index_count: 0,
             layout: GlyphLayout::from_metrics(metrics),
+            selection_range: QuadRange::default(),
+            glyph_range: QuadRange::default(),
+            cursor_range: QuadRange::default(),
         }
     }
 
@@ -156,6 +197,21 @@ impl GlyphBuffer {
     /// Returns the layout calculator
     pub fn layout(&self) -> &GlyphLayout {
         &self.layout
+    }
+
+    /// Returns the index range for selection highlight quads
+    pub fn selection_range(&self) -> QuadRange {
+        self.selection_range
+    }
+
+    /// Returns the index range for glyph (text character) quads
+    pub fn glyph_range(&self) -> QuadRange {
+        self.glyph_range
+    }
+
+    /// Returns the index range for the cursor quad
+    pub fn cursor_range(&self) -> QuadRange {
+        self.cursor_range
     }
 
     /// Updates the buffers with new text content
@@ -281,7 +337,15 @@ impl GlyphBuffer {
         self.update_from_buffer_with_cursor(device, atlas, buffer, viewport, true);
     }
 
-    /// Updates the buffers with content from a TextBuffer, including cursor rendering
+    /// Updates the buffers with content from a TextBuffer, including cursor and selection rendering
+    ///
+    /// Emits quads in this order:
+    /// 1. Selection highlight quads (drawn first, behind text)
+    /// 2. Glyph quads (text characters)
+    /// 3. Cursor quad (drawn last, on top)
+    ///
+    /// Each category's index range is tracked separately to allow the renderer
+    /// to draw each with different colors.
     ///
     /// # Arguments
     /// * `device` - The Metal device for buffer creation
@@ -300,27 +364,89 @@ impl GlyphBuffer {
         let visible_range = viewport.visible_range(buffer.line_count());
 
         // Estimate character count for buffer sizing
-        // Add 1 for cursor quad
+        // Add extra for selection quads (one per visible line in selection)
+        // and 1 for cursor quad
         let mut estimated_chars: usize = 0;
         for line in visible_range.clone() {
             estimated_chars += buffer.line_content(line).chars().count();
         }
+        let selection_lines = visible_range.len(); // Max selection quads
         let cursor_quads = if cursor_visible { 1 } else { 0 };
+        let total_estimated = estimated_chars + selection_lines + cursor_quads;
 
-        if estimated_chars == 0 && cursor_quads == 0 {
+        // Reset quad ranges
+        self.selection_range = QuadRange::default();
+        self.glyph_range = QuadRange::default();
+        self.cursor_range = QuadRange::default();
+
+        if estimated_chars == 0 && cursor_quads == 0 && buffer.selection_range().is_none() {
             self.vertex_buffer = None;
             self.index_buffer = None;
             self.index_count = 0;
             return;
         }
 
-        // Allocate vertex and index data with capacity for chars + cursor
-        let mut vertices: Vec<GlyphVertex> = Vec::with_capacity((estimated_chars + cursor_quads) * 4);
-        let mut indices: Vec<u32> = Vec::with_capacity((estimated_chars + cursor_quads) * 6);
-
+        // Allocate vertex and index data
+        let mut vertices: Vec<GlyphVertex> = Vec::with_capacity(total_estimated * 4);
+        let mut indices: Vec<u32> = Vec::with_capacity(total_estimated * 6);
         let mut vertex_offset: u32 = 0;
 
-        // Render visible lines
+        // ==================== Phase 1: Selection Quads ====================
+        let selection_start_index = indices.len();
+
+        if let Some((sel_start, sel_end)) = buffer.selection_range() {
+            let solid_glyph = atlas.solid_glyph();
+
+            // For each visible line that intersects the selection
+            for buffer_line in visible_range.clone() {
+                // Check if this line intersects the selection
+                if buffer_line < sel_start.line || buffer_line > sel_end.line {
+                    continue;
+                }
+
+                let screen_row = buffer_line - viewport.scroll_offset;
+                let line_len = buffer.line_len(buffer_line);
+
+                // Calculate selection columns for this line
+                let start_col = if buffer_line == sel_start.line {
+                    sel_start.col
+                } else {
+                    0
+                };
+                let end_col = if buffer_line == sel_end.line {
+                    sel_end.col
+                } else {
+                    // Include space for newline character visualization
+                    line_len + 1
+                };
+
+                // Skip if no columns are selected on this line
+                if start_col >= end_col {
+                    continue;
+                }
+
+                // Emit a single selection quad covering the selected range
+                let quad = self.create_selection_quad(screen_row, start_col, end_col, solid_glyph);
+                vertices.extend_from_slice(&quad);
+
+                // Generate indices for the selection quad
+                indices.push(vertex_offset);
+                indices.push(vertex_offset + 1);
+                indices.push(vertex_offset + 2);
+                indices.push(vertex_offset);
+                indices.push(vertex_offset + 2);
+                indices.push(vertex_offset + 3);
+
+                vertex_offset += 4;
+            }
+        }
+
+        let selection_index_count = indices.len() - selection_start_index;
+        self.selection_range = QuadRange::new(selection_start_index, selection_index_count);
+
+        // ==================== Phase 2: Glyph Quads ====================
+        let glyph_start_index = indices.len();
+
         for buffer_line in visible_range.clone() {
             let screen_row = buffer_line - viewport.scroll_offset;
             let line_content = buffer.line_content(buffer_line);
@@ -356,32 +482,39 @@ impl GlyphBuffer {
             }
         }
 
-        // Render cursor if visible and in viewport
+        let glyph_index_count = indices.len() - glyph_start_index;
+        self.glyph_range = QuadRange::new(glyph_start_index, glyph_index_count);
+
+        // ==================== Phase 3: Cursor Quad ====================
+        let cursor_start_index = indices.len();
+
         if cursor_visible {
             let cursor_pos = buffer.cursor_position();
             if let Some(screen_line) = viewport.buffer_line_to_screen_line(cursor_pos.line) {
                 // Render cursor as a block cursor using the solid (fully opaque)
                 // atlas region so the fragment shader produces a visible quad.
-                {
-                    let solid_glyph = atlas.solid_glyph();
-                    let cursor_quad = self.create_cursor_quad(
-                        screen_line,
-                        cursor_pos.col,
-                        solid_glyph,
-                    );
-                    vertices.extend_from_slice(&cursor_quad);
+                let solid_glyph = atlas.solid_glyph();
+                let cursor_quad = self.create_cursor_quad(
+                    screen_line,
+                    cursor_pos.col,
+                    solid_glyph,
+                );
+                vertices.extend_from_slice(&cursor_quad);
 
-                    // Generate indices for the cursor quad
-                    indices.push(vertex_offset);
-                    indices.push(vertex_offset + 1);
-                    indices.push(vertex_offset + 2);
-                    indices.push(vertex_offset);
-                    indices.push(vertex_offset + 2);
-                    indices.push(vertex_offset + 3);
-                }
+                // Generate indices for the cursor quad
+                indices.push(vertex_offset);
+                indices.push(vertex_offset + 1);
+                indices.push(vertex_offset + 2);
+                indices.push(vertex_offset);
+                indices.push(vertex_offset + 2);
+                indices.push(vertex_offset + 3);
             }
         }
 
+        let cursor_index_count = indices.len() - cursor_start_index;
+        self.cursor_range = QuadRange::new(cursor_start_index, cursor_index_count);
+
+        // ==================== Create GPU Buffers ====================
         if vertices.is_empty() {
             self.vertex_buffer = None;
             self.index_buffer = None;
@@ -422,6 +555,35 @@ impl GlyphBuffer {
         self.vertex_buffer = Some(vertex_buffer);
         self.index_buffer = Some(index_buffer);
         self.index_count = indices.len();
+    }
+
+    /// Creates a selection highlight quad covering columns [start_col, end_col) on the given row
+    ///
+    /// The quad uses the solid glyph from the atlas so the fragment shader produces
+    /// a fully opaque result (the selection color alpha provides transparency).
+    fn create_selection_quad(
+        &self,
+        screen_row: usize,
+        start_col: usize,
+        end_col: usize,
+        solid_glyph: &GlyphInfo,
+    ) -> [GlyphVertex; 4] {
+        let (start_x, y) = self.layout.position_for(screen_row, start_col);
+        let (end_x, _) = self.layout.position_for(screen_row, end_col);
+
+        // Selection height matches the line height
+        let selection_height = self.layout.line_height;
+
+        // Use the solid glyph's UVs (guaranteed to be opaque white)
+        let (u0, v0) = solid_glyph.uv_min;
+        let (u1, v1) = solid_glyph.uv_max;
+
+        [
+            GlyphVertex::new(start_x, y, u0, v0),                       // top-left
+            GlyphVertex::new(end_x, y, u1, v0),                         // top-right
+            GlyphVertex::new(end_x, y + selection_height, u1, v1),      // bottom-right
+            GlyphVertex::new(start_x, y + selection_height, u0, v1),    // bottom-left
+        ]
     }
 
     /// Creates a cursor quad at the specified screen position
@@ -540,5 +702,91 @@ mod tests {
             VERTEX_SIZE,
             "GlyphVertex size should match VERTEX_SIZE"
         );
+    }
+
+    // ==================== Selection Quad Tests ====================
+
+    fn test_solid_glyph() -> GlyphInfo {
+        GlyphInfo {
+            uv_min: (0.5, 0.5),
+            uv_max: (0.6, 0.6),
+            width: 10.0,
+            height: 18.0,
+            bearing_x: 0.0,
+            bearing_y: 0.0,
+        }
+    }
+
+    #[test]
+    fn test_selection_quad_single_char() {
+        let glyph_buffer = GlyphBuffer::new(&test_metrics());
+        let solid = test_solid_glyph();
+
+        // Selection covering one character at row 0, col 0
+        let quad = glyph_buffer.create_selection_quad(0, 0, 1, &solid);
+
+        // Selection should span from x=0 to x=8 (one glyph width)
+        assert_eq!(quad[0].position, [0.0, 0.0]);    // top-left
+        assert_eq!(quad[1].position, [8.0, 0.0]);    // top-right (1 * 8)
+        assert_eq!(quad[2].position, [8.0, 16.0]);   // bottom-right
+        assert_eq!(quad[3].position, [0.0, 16.0]);   // bottom-left
+    }
+
+    #[test]
+    fn test_selection_quad_multiple_chars() {
+        let glyph_buffer = GlyphBuffer::new(&test_metrics());
+        let solid = test_solid_glyph();
+
+        // Selection covering cols 2-5 (3 characters) on row 1
+        let quad = glyph_buffer.create_selection_quad(1, 2, 5, &solid);
+
+        // x: col 2 = 16, col 5 = 40
+        // y: row 1 = 16
+        assert_eq!(quad[0].position, [16.0, 16.0]);  // top-left
+        assert_eq!(quad[1].position, [40.0, 16.0]);  // top-right
+        assert_eq!(quad[2].position, [40.0, 32.0]);  // bottom-right (y + line_height)
+        assert_eq!(quad[3].position, [16.0, 32.0]);  // bottom-left
+    }
+
+    #[test]
+    fn test_selection_quad_uses_solid_glyph_uvs() {
+        let glyph_buffer = GlyphBuffer::new(&test_metrics());
+        let solid = test_solid_glyph();
+
+        let quad = glyph_buffer.create_selection_quad(0, 0, 3, &solid);
+
+        // UVs should be from the solid glyph
+        assert_eq!(quad[0].uv, [0.5, 0.5]);  // top-left
+        assert_eq!(quad[1].uv, [0.6, 0.5]);  // top-right
+        assert_eq!(quad[2].uv, [0.6, 0.6]);  // bottom-right
+        assert_eq!(quad[3].uv, [0.5, 0.6]);  // bottom-left
+    }
+
+    #[test]
+    fn test_selection_quad_height_matches_line_height() {
+        let glyph_buffer = GlyphBuffer::new(&test_metrics());
+        let solid = test_solid_glyph();
+
+        let quad = glyph_buffer.create_selection_quad(0, 0, 1, &solid);
+
+        // Height should be line_height (16.0), not glyph height
+        let height = quad[2].position[1] - quad[0].position[1];
+        assert_eq!(height, 16.0);
+    }
+
+    #[test]
+    fn test_quad_range_default() {
+        let range = QuadRange::default();
+        assert_eq!(range.start, 0);
+        assert_eq!(range.count, 0);
+        assert!(range.is_empty());
+    }
+
+    #[test]
+    fn test_quad_range_non_empty() {
+        let range = QuadRange::new(10, 24);
+        assert_eq!(range.start, 10);
+        assert_eq!(range.count, 24);
+        assert!(!range.is_empty());
     }
 }
