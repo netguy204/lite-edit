@@ -55,6 +55,11 @@ enum Command {
     MoveToBufferStart,
     /// Move cursor to the end of the buffer
     MoveToBufferEnd,
+    // Chunk: docs/chunks/word_jump_navigation - Word jump navigation
+    /// Move cursor left by one word (Option+Left)
+    MoveWordLeft,
+    /// Move cursor right by one word (Option+Right)
+    MoveWordRight,
     /// Insert a tab character
     InsertTab,
     // Chunk: docs/chunks/shift_arrow_selection - Shift+Arrow key selection commands
@@ -150,6 +155,13 @@ fn resolve_command(event: &KeyEvent) -> Option<Command> {
         }
 
         // === Movement commands (no Shift) ===
+
+        // Chunk: docs/chunks/word_jump_navigation - Word jump navigation
+        // Option+Left → move word left (must come before plain Left)
+        Key::Left if mods.option && !mods.command && !mods.shift => Some(Command::MoveWordLeft),
+
+        // Option+Right → move word right (must come before plain Right)
+        Key::Right if mods.option && !mods.command && !mods.shift => Some(Command::MoveWordRight),
 
         // Arrow keys
         Key::Left if !mods.command => Some(Command::MoveLeft),
@@ -267,6 +279,19 @@ impl BufferFocusTarget {
             }
             Command::MoveToBufferEnd => {
                 ctx.buffer.move_to_buffer_end();
+                ctx.mark_cursor_dirty();
+                ctx.ensure_cursor_visible();
+                return;
+            }
+            // Chunk: docs/chunks/word_jump_navigation - Word jump navigation
+            Command::MoveWordLeft => {
+                ctx.buffer.move_word_left();
+                ctx.mark_cursor_dirty();
+                ctx.ensure_cursor_visible();
+                return;
+            }
+            Command::MoveWordRight => {
+                ctx.buffer.move_word_right();
                 ctx.mark_cursor_dirty();
                 ctx.ensure_cursor_visible();
                 return;

@@ -398,6 +398,80 @@ impl TextBuffer {
         self.cursor = Position::new(last_line, last_col);
     }
 
+    // Chunk: docs/chunks/word_jump_navigation - Word jump navigation
+    // Spec: docs/trunk/SPEC.md#word-model
+    /// Moves the cursor to the right edge of the current word.
+    ///
+    /// If the cursor is on whitespace, or at the right edge of a non-whitespace run,
+    /// the jump continues past the whitespace to the end of the next non-whitespace run.
+    /// Stops at line end. Clears any active selection.
+    pub fn move_word_right(&mut self) {
+        self.clear_selection();
+
+        let line_content = self.line_content(self.cursor.line);
+        let line_chars: Vec<char> = line_content.chars().collect();
+
+        if self.cursor.col >= line_chars.len() {
+            // At line end, no-op
+            return;
+        }
+
+        let cursor_on_whitespace = line_chars[self.cursor.col].is_whitespace();
+
+        if cursor_on_whitespace {
+            // Started on whitespace: skip whitespace, then skip to end of next word
+            let past_ws = word_boundary_right(&line_chars, self.cursor.col);
+            if past_ws < line_chars.len() {
+                let word_end = word_boundary_right(&line_chars, past_ws);
+                self.cursor.col = word_end;
+            } else {
+                self.cursor.col = past_ws;
+            }
+        } else {
+            // Started on non-whitespace: go to end of current word
+            let word_end = word_boundary_right(&line_chars, self.cursor.col);
+            self.cursor.col = word_end;
+        }
+    }
+
+    // Chunk: docs/chunks/word_jump_navigation - Word jump navigation
+    // Spec: docs/trunk/SPEC.md#word-model
+    /// Moves the cursor to the left edge of the current word.
+    ///
+    /// If the cursor is on whitespace, or at the left edge of a non-whitespace run,
+    /// the jump continues past the whitespace to the start of the preceding non-whitespace run.
+    /// Stops at column 0. Clears any active selection.
+    pub fn move_word_left(&mut self) {
+        self.clear_selection();
+
+        if self.cursor.col == 0 {
+            // At line start, no-op
+            return;
+        }
+
+        let line_content = self.line_content(self.cursor.line);
+        let line_chars: Vec<char> = line_content.chars().collect();
+
+        // Check char immediately before cursor to determine if we're on whitespace
+        // (word_boundary_left looks at chars[col-1])
+        let prev_char_is_whitespace = line_chars[self.cursor.col - 1].is_whitespace();
+
+        if prev_char_is_whitespace {
+            // Started on whitespace (or just after it): skip whitespace, then go to start of preceding word
+            let past_ws = word_boundary_left(&line_chars, self.cursor.col);
+            if past_ws > 0 {
+                let word_start = word_boundary_left(&line_chars, past_ws);
+                self.cursor.col = word_start;
+            } else {
+                self.cursor.col = past_ws;
+            }
+        } else {
+            // Started on non-whitespace: go to start of current word
+            let word_start = word_boundary_left(&line_chars, self.cursor.col);
+            self.cursor.col = word_start;
+        }
+    }
+
     /// Sets the cursor to an arbitrary position.
     ///
     /// The position is clamped to valid bounds.
@@ -2103,5 +2177,215 @@ mod tests {
         // "hello world" cursor at col 2 (middle of "hello") → returns col 5
         let chars: Vec<char> = "hello world".chars().collect();
         assert_eq!(word_boundary_right(&chars, 2), 5);
+    }
+
+    // ==================== Move Word Right Tests ====================
+    // Chunk: docs/chunks/word_jump_navigation - Word jump navigation
+
+    #[test]
+    fn test_move_word_right_mid_word() {
+        // Cursor mid-word → lands at word end (right edge of non-whitespace run)
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 2)); // In "hello" at col 2
+        buf.move_word_right();
+        assert_eq!(buf.cursor_position(), Position::new(0, 5)); // End of "hello"
+    }
+
+    #[test]
+    fn test_move_word_right_at_word_start() {
+        // Cursor at word start → lands at same word's end
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 0)); // Start of "hello"
+        buf.move_word_right();
+        assert_eq!(buf.cursor_position(), Position::new(0, 5)); // End of "hello"
+    }
+
+    #[test]
+    fn test_move_word_right_at_word_end() {
+        // Cursor at word end → jumps past whitespace to next word's end
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 5)); // End of "hello"
+        buf.move_word_right();
+        assert_eq!(buf.cursor_position(), Position::new(0, 11)); // End of "world"
+    }
+
+    #[test]
+    fn test_move_word_right_on_whitespace() {
+        // Cursor on whitespace between words → jumps to end of next non-whitespace run
+        let mut buf = TextBuffer::from_str("hello   world");
+        buf.set_cursor(Position::new(0, 6)); // In whitespace
+        buf.move_word_right();
+        assert_eq!(buf.cursor_position(), Position::new(0, 13)); // End of "world"
+    }
+
+    #[test]
+    fn test_move_word_right_at_line_start() {
+        // Cursor at line start → jumps to end of first word
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 0)); // Line start
+        buf.move_word_right();
+        assert_eq!(buf.cursor_position(), Position::new(0, 5)); // End of "hello"
+    }
+
+    #[test]
+    fn test_move_word_right_at_line_end() {
+        // Cursor at line end → stays at line end (no-op)
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 5)); // Line end
+        buf.move_word_right();
+        assert_eq!(buf.cursor_position(), Position::new(0, 5)); // Unchanged
+    }
+
+    #[test]
+    fn test_move_word_right_empty_line() {
+        // Empty line → stays at column 0 (no-op)
+        let mut buf = TextBuffer::from_str("");
+        buf.set_cursor(Position::new(0, 0));
+        buf.move_word_right();
+        assert_eq!(buf.cursor_position(), Position::new(0, 0));
+    }
+
+    #[test]
+    fn test_move_word_right_single_char_word() {
+        // Single-character word → lands at column 1
+        let mut buf = TextBuffer::from_str("a b c");
+        buf.set_cursor(Position::new(0, 0)); // Start of "a"
+        buf.move_word_right();
+        assert_eq!(buf.cursor_position(), Position::new(0, 1)); // End of "a"
+    }
+
+    #[test]
+    fn test_move_word_right_clears_selection() {
+        // All cases clear any active selection
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 5));
+        buf.set_selection_anchor(Position::new(0, 0));
+        assert!(buf.has_selection());
+        buf.move_word_right();
+        assert!(!buf.has_selection());
+        assert_eq!(buf.selection_anchor(), None);
+    }
+
+    #[test]
+    fn test_move_word_right_multiple_whitespace() {
+        // Multiple whitespace chars treated as one run
+        let mut buf = TextBuffer::from_str("hello    world");
+        buf.set_cursor(Position::new(0, 5)); // End of "hello"
+        buf.move_word_right();
+        assert_eq!(buf.cursor_position(), Position::new(0, 14)); // End of "world"
+    }
+
+    #[test]
+    fn test_move_word_right_trailing_whitespace() {
+        // Trailing whitespace: cursor at last word end → jumps to line end
+        let mut buf = TextBuffer::from_str("hello   ");
+        buf.set_cursor(Position::new(0, 5)); // End of "hello"
+        buf.move_word_right();
+        assert_eq!(buf.cursor_position(), Position::new(0, 8)); // Line end
+    }
+
+    // ==================== Move Word Left Tests ====================
+    // Chunk: docs/chunks/word_jump_navigation - Word jump navigation
+
+    #[test]
+    fn test_move_word_left_mid_word() {
+        // Cursor mid-word → lands at word start (left edge of non-whitespace run)
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 8)); // In "world" at col 8
+        buf.move_word_left();
+        assert_eq!(buf.cursor_position(), Position::new(0, 6)); // Start of "world"
+    }
+
+    #[test]
+    fn test_move_word_left_at_word_end() {
+        // Cursor at word end → lands at same word's start
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 11)); // End of "world" (past last char)
+        buf.move_word_left();
+        assert_eq!(buf.cursor_position(), Position::new(0, 6)); // Start of "world"
+    }
+
+    #[test]
+    fn test_move_word_left_at_word_start() {
+        // Cursor at word start → jumps past preceding whitespace to previous word's start
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 6)); // Start of "world"
+        buf.move_word_left();
+        assert_eq!(buf.cursor_position(), Position::new(0, 0)); // Start of "hello"
+    }
+
+    #[test]
+    fn test_move_word_left_on_whitespace() {
+        // Cursor on whitespace between words → jumps to start of preceding non-whitespace run
+        let mut buf = TextBuffer::from_str("hello   world");
+        buf.set_cursor(Position::new(0, 6)); // In whitespace
+        buf.move_word_left();
+        assert_eq!(buf.cursor_position(), Position::new(0, 0)); // Start of "hello"
+    }
+
+    #[test]
+    fn test_move_word_left_at_line_start() {
+        // Cursor at line start → stays at column 0 (no-op)
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 0)); // Line start
+        buf.move_word_left();
+        assert_eq!(buf.cursor_position(), Position::new(0, 0)); // Unchanged
+    }
+
+    #[test]
+    fn test_move_word_left_at_line_end() {
+        // Cursor at line end → jumps to start of last word
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 11)); // Line end (past "world")
+        buf.move_word_left();
+        assert_eq!(buf.cursor_position(), Position::new(0, 6)); // Start of "world"
+    }
+
+    #[test]
+    fn test_move_word_left_empty_line() {
+        // Empty line → stays at column 0 (no-op)
+        let mut buf = TextBuffer::from_str("");
+        buf.set_cursor(Position::new(0, 0));
+        buf.move_word_left();
+        assert_eq!(buf.cursor_position(), Position::new(0, 0));
+    }
+
+    #[test]
+    fn test_move_word_left_single_char_word() {
+        // Single-character word → lands at column 0
+        let mut buf = TextBuffer::from_str("a b c");
+        buf.set_cursor(Position::new(0, 1)); // End of "a" (on space)
+        buf.move_word_left();
+        assert_eq!(buf.cursor_position(), Position::new(0, 0)); // Start of "a"
+    }
+
+    #[test]
+    fn test_move_word_left_clears_selection() {
+        // All cases clear any active selection
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 11));
+        buf.set_selection_anchor(Position::new(0, 0));
+        assert!(buf.has_selection());
+        buf.move_word_left();
+        assert!(!buf.has_selection());
+        assert_eq!(buf.selection_anchor(), None);
+    }
+
+    #[test]
+    fn test_move_word_left_multiple_whitespace() {
+        // Multiple whitespace chars treated as one run
+        let mut buf = TextBuffer::from_str("hello    world");
+        buf.set_cursor(Position::new(0, 9)); // Start of "world"
+        buf.move_word_left();
+        assert_eq!(buf.cursor_position(), Position::new(0, 0)); // Start of "hello"
+    }
+
+    #[test]
+    fn test_move_word_left_leading_whitespace() {
+        // Leading whitespace: cursor at first word start → jumps to column 0
+        let mut buf = TextBuffer::from_str("   hello");
+        buf.set_cursor(Position::new(0, 3)); // Start of "hello"
+        buf.move_word_left();
+        assert_eq!(buf.cursor_position(), Position::new(0, 0)); // Line start
     }
 }

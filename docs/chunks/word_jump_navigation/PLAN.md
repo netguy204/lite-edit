@@ -1,177 +1,256 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+Wire Alt+Left and Alt+Right word-jump navigation through the existing Command dispatch
+pipeline, building on the `word_boundary_left` and `word_boundary_right` helpers
+extracted in `word_boundary_primitives`.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The implementation has three layers:
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. **Buffer layer**: Add `move_word_left` and `move_word_right` methods to `TextBuffer`
+   in `crates/buffer/src/text_buffer.rs`. These methods implement the navigation
+   special case from the word model: if the cursor is on whitespace or at the near
+   edge of a run, the jump continues past the adjacent non-whitespace run.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/word_jump_navigation/GOAL.md)
-with references to the files that you expect to touch.
--->
+2. **Command layer**: Add `MoveWordLeft` and `MoveWordRight` variants to the `Command`
+   enum in `crates/editor/src/buffer_target.rs`.
 
-## Subsystem Considerations
+3. **Keybinding layer**: Wire `Option+Left` → `MoveWordLeft` and `Option+Right` →
+   `MoveWordRight` in `resolve_command`, before the plain `Left` / `Right` arms.
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Following TDD (per TESTING_PHILOSOPHY.md), write failing tests for the buffer methods
+before implementation. The existing `word_boundary_primitives` chunk provides the scan
+helpers, so this chunk focuses on the navigation special case logic and command wiring.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing tests for `move_word_right`
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create tests in `crates/buffer/src/text_buffer.rs` covering all success criteria cases:
 
-Example:
+- Cursor mid-word → lands at word end (right edge of non-whitespace run)
+- Cursor at word start → lands at same word's end
+- Cursor at word end → jumps past whitespace to next word's end
+- Cursor on whitespace between words → jumps to end of next non-whitespace run
+- Cursor at line start → jumps to end of first word
+- Cursor at line end → stays at line end (no-op)
+- Empty line → stays at column 0 (no-op)
+- Single-character word → lands at column 1
 
-### Step 1: Define the SegmentHeader struct
+Also verify that all cases clear any active selection (consistent with `move_right`).
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Location: `crates/buffer/src/text_buffer.rs` in the `#[cfg(test)] mod tests` block
 
-Location: src/segment/format.rs
+### Step 2: Implement `move_word_right`
 
-### Step 2: Implement header serialization
+Add the method to `impl TextBuffer`:
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+```rust
+// Chunk: docs/chunks/word_jump_navigation - Word jump navigation
+// Spec: docs/trunk/SPEC.md#word-model
+/// Moves the cursor to the right edge of the current word.
+///
+/// If the cursor is on whitespace, or at the right edge of a non-whitespace run,
+/// the jump continues past the whitespace to the end of the next non-whitespace run.
+/// Stops at line end. Clears any active selection.
+pub fn move_word_right(&mut self) {
+    self.clear_selection();
 
-### Step 3: ...
+    let line_content = self.line_content(self.cursor.line);
+    let line_chars: Vec<char> = line_content.chars().collect();
 
----
+    if self.cursor.col >= line_chars.len() {
+        // At line end, no-op
+        return;
+    }
 
-**BACKREFERENCE COMMENTS**
+    // Get the right edge of the run at the cursor
+    let boundary = word_boundary_right(&line_chars, self.cursor.col);
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
+    // If we landed on whitespace (or were already there), skip to end of next word
+    if boundary < line_chars.len() && line_chars[boundary - 1].is_whitespace() {
+        // We're at the end of a whitespace run; skip the following non-whitespace
+        let next_boundary = word_boundary_right(&line_chars, boundary);
+        self.cursor.col = next_boundary;
+    } else if self.cursor.col < line_chars.len() && line_chars[self.cursor.col].is_whitespace() {
+        // Started on whitespace, skip past it and to end of following word
+        let past_whitespace = word_boundary_right(&line_chars, self.cursor.col);
+        if past_whitespace < line_chars.len() && !line_chars[past_whitespace].is_whitespace() {
+            // Now on a word, get its end
+            let word_end = word_boundary_right(&line_chars, past_whitespace);
+            self.cursor.col = word_end;
+        } else {
+            self.cursor.col = past_whitespace;
+        }
+    } else {
+        self.cursor.col = boundary;
+    }
+}
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+
+Note: The exact logic will need refinement during implementation. The key insight is:
+- If cursor is on non-whitespace mid-word → `word_boundary_right` gives the word end
+- If cursor is on whitespace → skip whitespace, then skip the following word
+- If cursor is at word end (next char is whitespace) → skip whitespace, then skip word
+
+All tests from Step 1 should now pass.
+
+Location: `crates/buffer/src/text_buffer.rs`, in `impl TextBuffer` near other movement methods
+
+### Step 3: Write failing tests for `move_word_left`
+
+Create tests covering:
+
+- Cursor mid-word → lands at word start (left edge of non-whitespace run)
+- Cursor at word end → lands at same word's start
+- Cursor at word start → jumps past preceding whitespace to previous word's start
+- Cursor on whitespace between words → jumps to start of preceding non-whitespace run
+- Cursor at line start → stays at column 0 (no-op)
+- Cursor at line end → jumps to start of last word
+- Empty line → stays at column 0 (no-op)
+- Single-character word → lands at column 0
+
+Also verify that all cases clear any active selection.
+
+Location: `crates/buffer/src/text_buffer.rs` in the `#[cfg(test)] mod tests` block
+
+### Step 4: Implement `move_word_left`
+
+Add the method to `impl TextBuffer`:
+
+```rust
+// Chunk: docs/chunks/word_jump_navigation - Word jump navigation
+// Spec: docs/trunk/SPEC.md#word-model
+/// Moves the cursor to the left edge of the current word.
+///
+/// If the cursor is on whitespace, or at the left edge of a non-whitespace run,
+/// the jump continues past the whitespace to the start of the preceding non-whitespace run.
+/// Stops at column 0. Clears any active selection.
+pub fn move_word_left(&mut self) {
+    self.clear_selection();
+
+    if self.cursor.col == 0 {
+        // At line start, no-op
+        return;
+    }
+
+    let line_content = self.line_content(self.cursor.line);
+    let line_chars: Vec<char> = line_content.chars().collect();
+
+    // Get the left edge of the run containing the character before cursor
+    let boundary = word_boundary_left(&line_chars, self.cursor.col);
+
+    // If we landed at the start of a whitespace run, continue to previous word
+    if boundary > 0 && boundary < self.cursor.col {
+        // Check if we were on whitespace
+        if line_chars[self.cursor.col - 1].is_whitespace() && boundary > 0 {
+            // We skipped whitespace, now skip the preceding word
+            let prev_boundary = word_boundary_left(&line_chars, boundary);
+            self.cursor.col = prev_boundary;
+        } else {
+            self.cursor.col = boundary;
+        }
+    } else if boundary == 0 && self.cursor.col > 0 && line_chars[self.cursor.col - 1].is_whitespace() {
+        // Edge case: whitespace run at line start
+        self.cursor.col = 0;
+    } else {
+        self.cursor.col = boundary;
+    }
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Note: As with `move_word_right`, the logic may need refinement during implementation.
+The key is: skip the current run, and if it was whitespace, skip the preceding word too.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+All tests from Step 3 should now pass.
+
+Location: `crates/buffer/src/text_buffer.rs`, in `impl TextBuffer` near `move_word_right`
+
+### Step 5: Add `MoveWordLeft` and `MoveWordRight` to `Command` enum
+
+Add the new variants to the `Command` enum:
+
+```rust
+// Chunk: docs/chunks/word_jump_navigation - Word jump navigation
+/// Move cursor left by one word (Option+Left)
+MoveWordLeft,
+/// Move cursor right by one word (Option+Right)
+MoveWordRight,
+```
+
+Location: `crates/editor/src/buffer_target.rs`, in the `Command` enum after `MoveToBufferEnd`
+
+### Step 6: Wire `Option+Left` and `Option+Right` in `resolve_command`
+
+Add keybindings before the plain `Left` / `Right` arms:
+
+```rust
+// Chunk: docs/chunks/word_jump_navigation - Word jump navigation
+// Option+Left → move word left (must come before plain Left)
+Key::Left if mods.option && !mods.command && !mods.shift => Some(Command::MoveWordLeft),
+
+// Option+Right → move word right (must come before plain Right)
+Key::Right if mods.option && !mods.command && !mods.shift => Some(Command::MoveWordRight),
+```
+
+These must appear before the existing `Key::Left if !mods.command` and
+`Key::Right if !mods.command` arms to take priority when Option is held.
+
+Location: `crates/editor/src/buffer_target.rs`, in `resolve_command` after the
+`=== Movement commands (no Shift) ===` comment and before plain arrow handling
+
+### Step 7: Handle `MoveWordLeft` and `MoveWordRight` in `execute_command`
+
+Add the execution handlers following the pattern of other movement commands:
+
+```rust
+Command::MoveWordLeft => {
+    ctx.buffer.move_word_left();
+    ctx.mark_cursor_dirty();
+    ctx.ensure_cursor_visible();
+    return;
+}
+Command::MoveWordRight => {
+    ctx.buffer.move_word_right();
+    ctx.mark_cursor_dirty();
+    ctx.ensure_cursor_visible();
+    return;
+}
+```
+
+Location: `crates/editor/src/buffer_target.rs`, in `execute_command` after
+`MoveToBufferEnd` handling
+
+### Step 8: Run full test suite
+
+Run `cargo test` in both `crates/buffer` and `crates/editor` directories.
+All new tests should pass, and no existing tests should regress.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **word_boundary_primitives**: This chunk depends on the `word_boundary_left` and
+  `word_boundary_right` helper functions from the `word_boundary_primitives` chunk.
+  Per the chunk's GOAL.md frontmatter, this dependency is already declared.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **SPEC.md word-model section**: The GOAL.md references `docs/trunk/SPEC.md#word-model`
+  but that section doesn't exist yet (SPEC.md is still a template). The methods will
+  carry the comment pointing to where the spec *should* define the word model,
+  consistent with the approach taken in `word_boundary_primitives`.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Navigation special case complexity**: The "skip past whitespace to the next word"
+  logic is non-trivial. The implementation in Steps 2 and 4 is a starting point;
+  the actual logic may need adjustment based on test failures. The key invariant:
+  the cursor should never land in the middle of a whitespace run (except at line
+  boundaries).
+
+- **Consistency with macOS**: The word model uses `char::is_whitespace()` as the sole
+  classifier, which differs from macOS TextEdit (which considers punctuation as word
+  separators). This is a deliberate simplification per the narrative's scope. Users
+  with muscle memory from TextEdit may notice slight differences.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- POPULATE DURING IMPLEMENTATION -->
