@@ -374,6 +374,55 @@ impl TextBuffer {
         }
     }
 
+    /// Deletes all characters from the cursor to the end of the current line.
+    ///
+    /// This implements kill-line (Emacs `C-k`) behavior:
+    /// - If the cursor is mid-line, deletes all characters from cursor to end of line
+    /// - If the cursor is at the end of the line, deletes the newline (joining with next line)
+    /// - If the cursor is at the end of the buffer, does nothing (returns `DirtyLines::None`)
+    ///
+    /// The cursor position does not change after this operation.
+    pub fn delete_to_line_end(&mut self) -> DirtyLines {
+        let line_len = self.line_len(self.cursor.line);
+        let is_last_line = self.cursor.line + 1 >= self.line_count();
+
+        if self.cursor.col >= line_len {
+            // Cursor is at end of line
+            if is_last_line {
+                // At the very end of the buffer - nothing to delete
+                return DirtyLines::None;
+            }
+
+            // Delete the newline, joining with the next line (same as delete_forward at line end)
+            self.sync_gap_to_cursor();
+            let deleted = self.buffer.delete_forward();
+            if deleted != Some('\n') {
+                // Should not happen, but handle gracefully
+                return DirtyLines::None;
+            }
+
+            self.line_index.remove_newline(self.cursor.line);
+
+            // Cursor stays in place
+            self.assert_line_index_consistent();
+            DirtyLines::FromLineToEnd(self.cursor.line)
+        } else {
+            // Cursor is mid-line: delete from cursor to end of line
+            let chars_to_delete = line_len - self.cursor.col;
+
+            self.sync_gap_to_cursor();
+
+            for _ in 0..chars_to_delete {
+                let _ = self.buffer.delete_forward();
+                self.line_index.remove_char(self.cursor.line);
+            }
+
+            // Cursor stays in place
+            self.assert_line_index_consistent();
+            DirtyLines::Single(self.cursor.line)
+        }
+    }
+
     /// Inserts a string at the cursor position.
     ///
     /// This is a convenience method that inserts each character in sequence.
@@ -753,5 +802,83 @@ mod tests {
         let dirty = buf.insert_str("");
         assert_eq!(buf.content(), "hello");
         assert_eq!(dirty, DirtyLines::None);
+    }
+
+    // ==================== Delete To Line End Tests ====================
+
+    #[test]
+    fn test_delete_to_line_end_from_middle() {
+        // Kill from middle of line: "hello world" with cursor at col 5 → "hello"
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 5));
+        let dirty = buf.delete_to_line_end();
+        assert_eq!(buf.content(), "hello");
+        assert_eq!(buf.cursor_position(), Position::new(0, 5));
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_to_line_end_from_start() {
+        // Kill from start of line: "hello" with cursor at col 0 → ""
+        let mut buf = TextBuffer::from_str("hello");
+        let dirty = buf.delete_to_line_end();
+        assert_eq!(buf.content(), "");
+        assert_eq!(buf.cursor_position(), Position::new(0, 0));
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_to_line_end_joins_lines() {
+        // Kill at end of line (joins next line): "hello\nworld" with cursor at col 5 on line 0 → "helloworld"
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.set_cursor(Position::new(0, 5)); // At end of "hello"
+        let dirty = buf.delete_to_line_end();
+        assert_eq!(buf.content(), "helloworld");
+        assert_eq!(buf.line_count(), 1);
+        assert_eq!(buf.cursor_position(), Position::new(0, 5));
+        assert_eq!(dirty, DirtyLines::FromLineToEnd(0));
+    }
+
+    #[test]
+    fn test_delete_to_line_end_empty_line() {
+        // Kill on empty line: "\nfoo" joins with next line
+        let mut buf = TextBuffer::from_str("\nfoo");
+        buf.set_cursor(Position::new(0, 0)); // On the empty line
+        let dirty = buf.delete_to_line_end();
+        assert_eq!(buf.content(), "foo");
+        assert_eq!(buf.line_count(), 1);
+        assert_eq!(buf.cursor_position(), Position::new(0, 0));
+        assert_eq!(dirty, DirtyLines::FromLineToEnd(0));
+    }
+
+    #[test]
+    fn test_delete_to_line_end_at_buffer_end() {
+        // Kill at end of buffer: no-op
+        let mut buf = TextBuffer::from_str("hello");
+        buf.move_to_buffer_end();
+        let dirty = buf.delete_to_line_end();
+        assert_eq!(buf.content(), "hello");
+        assert_eq!(buf.cursor_position(), Position::new(0, 5));
+        assert_eq!(dirty, DirtyLines::None);
+    }
+
+    #[test]
+    fn test_delete_to_line_end_cursor_unchanged() {
+        // Cursor position unchanged after kill (same line, same column)
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 3));
+        let _dirty = buf.delete_to_line_end();
+        assert_eq!(buf.cursor_position(), Position::new(0, 3));
+    }
+
+    #[test]
+    fn test_delete_to_line_end_multiline() {
+        // Test on second line of multiline buffer
+        let mut buf = TextBuffer::from_str("first\nsecond line\nthird");
+        buf.set_cursor(Position::new(1, 7)); // In "second line" at col 7
+        let dirty = buf.delete_to_line_end();
+        assert_eq!(buf.line_content(1), "second ");
+        assert_eq!(buf.cursor_position(), Position::new(1, 7));
+        assert_eq!(dirty, DirtyLines::Single(1));
     }
 }

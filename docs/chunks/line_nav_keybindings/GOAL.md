@@ -1,18 +1,29 @@
 ---
-status: FUTURE
+status: ACTIVE
 ticket: null
 parent_chunk: null
-code_paths: []
-code_references: []
+code_paths:
+- crates/editor/src/metal_view.rs
+- crates/editor/src/buffer_target.rs
+code_references:
+  - ref: crates/editor/src/metal_view.rs#MetalView::convert_key
+    implements: "Control-key handling in NSEvent conversion - uses charactersIgnoringModifiers when Control is held to get base character instead of control character"
+  - ref: crates/editor/src/buffer_target.rs#resolve_command
+    implements: "Maps Home/End keys and Ctrl+A/Ctrl+E to MoveToLineStart/MoveToLineEnd commands"
+  - ref: crates/editor/src/buffer_target.rs#BufferFocusTarget::execute_command
+    implements: "Executes MoveToLineStart/MoveToLineEnd commands via TextBuffer methods"
 narrative: editor_qol_interactions
 investigation: null
 subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["editable_buffer", "glyph_rendering", "metal_surface", "viewport_rendering"]
+created_after:
+- editable_buffer
+- glyph_rendering
+- metal_surface
+- viewport_rendering
 ---
-
 # Verify Home/End and Ctrl+A/Ctrl+E Line Navigation
 
 ## Minor Goal

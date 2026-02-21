@@ -30,6 +30,8 @@ enum Command {
     DeleteBackward,
     /// Delete the character after the cursor (Delete key)
     DeleteForward,
+    /// Delete from cursor to end of line (kill-line)
+    DeleteToLineEnd,
     /// Move cursor left by one character
     MoveLeft,
     /// Move cursor right by one character
@@ -100,6 +102,9 @@ fn resolve_command(event: &KeyEvent) -> Option<Command> {
         // Ctrl+E → end of line (Emacs-style)
         Key::Char('e') if mods.control && !mods.command => Some(Command::MoveToLineEnd),
 
+        // Cmd+K → kill line (delete to end of line)
+        Key::Char('k') if mods.command && !mods.control => Some(Command::DeleteToLineEnd),
+
         // Unhandled
         _ => None,
     }
@@ -125,6 +130,7 @@ impl BufferFocusTarget {
             Command::InsertTab => ctx.buffer.insert_char('\t'),
             Command::DeleteBackward => ctx.buffer.delete_backward(),
             Command::DeleteForward => ctx.buffer.delete_forward(),
+            Command::DeleteToLineEnd => ctx.buffer.delete_to_line_end(),
             Command::MoveLeft => {
                 ctx.buffer.move_left();
                 // Cursor movement doesn't dirty buffer content, but we need to redraw
@@ -618,6 +624,54 @@ mod tests {
     }
 
     #[test]
+    fn test_home_moves_to_line_start() {
+        let mut buffer = TextBuffer::from_str("hello world");
+        buffer.set_cursor(Position::new(0, 6));
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = KeyEvent::new(Key::Home, Modifiers::default());
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(0, 0));
+    }
+
+    #[test]
+    fn test_end_moves_to_line_end() {
+        let mut buffer = TextBuffer::from_str("hello world");
+        buffer.set_cursor(Position::new(0, 0));
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = KeyEvent::new(Key::End, Modifiers::default());
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(0, 11));
+    }
+
+    #[test]
     fn test_cursor_movement_past_viewport_scrolls() {
         // Create a buffer with many lines
         let content = (0..50)
@@ -892,5 +946,134 @@ mod tests {
 
         assert_eq!(buffer.cursor_position(), Position::new(1, 2));
         assert!(dirty.is_dirty()); // Should have marked cursor line dirty
+    }
+
+    // ==================== Cmd+K Kill Line Tests ====================
+
+    #[test]
+    fn test_cmd_k_deletes_to_line_end() {
+        let mut buffer = TextBuffer::from_str("hello world");
+        buffer.set_cursor(Position::new(0, 5)); // After "hello"
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        let result = {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = KeyEvent::new(
+                Key::Char('k'),
+                Modifiers {
+                    command: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx)
+        };
+
+        assert_eq!(result, Handled::Yes);
+        assert_eq!(buffer.content(), "hello");
+        assert_eq!(buffer.cursor_position(), Position::new(0, 5));
+        assert!(dirty.is_dirty());
+    }
+
+    #[test]
+    fn test_cmd_k_joins_lines_at_end_of_line() {
+        let mut buffer = TextBuffer::from_str("hello\nworld");
+        buffer.set_cursor(Position::new(0, 5)); // At end of "hello"
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = KeyEvent::new(
+                Key::Char('k'),
+                Modifiers {
+                    command: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.content(), "helloworld");
+        assert_eq!(buffer.line_count(), 1);
+        assert_eq!(buffer.cursor_position(), Position::new(0, 5));
+    }
+
+    #[test]
+    fn test_cmd_k_at_buffer_end_is_noop() {
+        let mut buffer = TextBuffer::from_str("hello");
+        buffer.move_to_buffer_end();
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = KeyEvent::new(
+                Key::Char('k'),
+                Modifiers {
+                    command: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.content(), "hello");
+        assert_eq!(buffer.cursor_position(), Position::new(0, 5));
+    }
+
+    #[test]
+    fn test_cmd_k_from_start_of_line() {
+        let mut buffer = TextBuffer::from_str("hello");
+        buffer.set_cursor(Position::new(0, 0)); // At start
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = KeyEvent::new(
+                Key::Char('k'),
+                Modifiers {
+                    command: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.content(), "");
+        assert_eq!(buffer.cursor_position(), Position::new(0, 0));
     }
 }
