@@ -8,153 +8,177 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk refines the scroll position representation in `Viewport` from integer lines to floating-point pixels. The core strategy is:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Replace `scroll_offset: usize` with `scroll_offset_px: f32`** in `Viewport`. This field accumulates raw pixel deltas from scroll events without rounding.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **Derive integer line index on demand** via `first_visible_line()` which computes `(scroll_offset_px / line_height).floor() as usize`, clamped to valid bounds.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/viewport_fractional_scroll/GOAL.md)
-with references to the files that you expect to touch.
--->
+3. **Expose the fractional remainder** via `scroll_fraction_px()` which returns `scroll_offset_px % line_height`. The renderer uses this to offset all drawn lines vertically by `-remainder_px`.
 
-## Subsystem Considerations
+4. **Update clamping to work in pixel space** so `scroll_offset_px` is bounded between `0.0` and `(buffer_line_count - visible_lines) * line_height`.
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+5. **Modify `ensure_visible`** to snap to whole-line boundaries (pixel offsets that are multiples of `line_height`) while still operating in pixel space internally.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
+6. **Update `handle_scroll`** in `BufferFocusTarget` to accumulate raw pixel deltas into `scroll_offset_px` rather than rounding to integer lines.
 
-If no subsystems are relevant, delete this section.
+7. **Modify the glyph buffer** to accept a `y_offset: f32` parameter that shifts all line positions down, enabling sub-pixel rendering.
 
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+This approach follows the existing architecture: the viewport remains the authoritative scroll state, and the renderer remains a humble view that projects state to screen coordinates.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add failing tests for fractional scroll behavior
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Write tests in `crates/editor/src/viewport.rs` that verify:
+- Sub-line deltas accumulate correctly without triggering a line change
+- Deltas that cross a line boundary advance `first_visible_line` by exactly one
+- The fractional remainder is correct after several accumulated deltas
+- Clamping at both ends works in pixel space
 
-Example:
+These tests will fail initially since `scroll_offset_px` doesn't exist yet.
 
-### Step 1: Define the SegmentHeader struct
+Location: `crates/editor/src/viewport.rs` (in the `#[cfg(test)]` module)
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Replace scroll_offset with scroll_offset_px in Viewport
 
-Location: src/segment/format.rs
+Modify the `Viewport` struct:
+- Replace `pub scroll_offset: usize` with `scroll_offset_px: f32` (private)
+- Add `first_visible_line(&self) -> usize` that computes `(self.scroll_offset_px / self.line_height).floor() as usize`
+- Add `scroll_fraction_px(&self) -> f32` that returns `self.scroll_offset_px % self.line_height`
+- Add `scroll_offset_px(&self) -> f32` getter for the raw pixel offset
+- Add `set_scroll_offset_px(&mut self, px: f32, buffer_line_count: usize)` for setting with clamping
 
-### Step 2: Implement header serialization
+Update all internal uses of `scroll_offset` to use the new methods.
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Location: `crates/editor/src/viewport.rs`
 
-### Step 3: ...
+### Step 3: Update visible_range to use first_visible_line
 
----
+Modify `visible_range()` to use `self.first_visible_line()` instead of `self.scroll_offset`. This is a mechanical replacement since the derived line index has the same semantics.
 
-**BACKREFERENCE COMMENTS**
+Location: `crates/editor/src/viewport.rs`
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+### Step 4: Update scroll_to to work in pixel space
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+Modify `scroll_to(line, buffer_line_count)` to:
+- Convert the target line to pixels: `target_px = line as f32 * self.line_height`
+- Clamp to pixel bounds: `max_px = (buffer_line_count.saturating_sub(visible_lines) as f32) * line_height`
+- Set `scroll_offset_px = target_px.min(max_px).max(0.0)`
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+This maintains the same API but operates in pixel space internally.
 
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
+Location: `crates/editor/src/viewport.rs`
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+### Step 5: Update ensure_visible to snap to whole-line boundaries
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Modify `ensure_visible(line, buffer_line_count)` to:
+- Check visibility using `first_visible_line()` and `visible_lines`
+- When scrolling is needed, compute the target line as before
+- Set `scroll_offset_px` to a whole-line boundary: `target_line as f32 * line_height`
+- This ensures that `ensure_visible` always snaps to a clean line position
 
-## Dependencies
+The behavior is: scroll events can leave the viewport mid-line, but `ensure_visible` always snaps to a whole-line boundary.
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+Location: `crates/editor/src/viewport.rs`
 
-If there are no dependencies, delete this section.
--->
+### Step 6: Update buffer_line_to_screen_line and screen_line_to_buffer_line
+
+These methods should use `first_visible_line()` instead of `scroll_offset`:
+- `buffer_line_to_screen_line`: compare against `first_visible_line()`
+- `screen_line_to_buffer_line`: add `first_visible_line()` to screen line
+
+Location: `crates/editor/src/viewport.rs`
+
+### Step 7: Update dirty_lines_to_region
+
+This method uses `scroll_offset` to determine visible bounds. Update it to use `first_visible_line()`.
+
+Location: `crates/editor/src/viewport.rs`
+
+### Step 8: Fix all existing viewport tests
+
+Update the existing tests to use the new API. Tests that directly set `scroll_offset` should either:
+- Use `scroll_to()` which now sets `scroll_offset_px` appropriately
+- Access `first_visible_line()` to check the derived line index
+
+Run `cargo test` to ensure all existing tests pass.
+
+Location: `crates/editor/src/viewport.rs`
+
+### Step 9: Update BufferFocusTarget::handle_scroll to accumulate raw pixels
+
+Modify `handle_scroll` in `crates/editor/src/buffer_target.rs`:
+- Remove the integer rounding: `(delta.dy / line_height as f64).round() as i32`
+- Instead, accumulate the raw delta: `scroll_offset_px += delta.dy as f32`
+- Use the new clamping via `set_scroll_offset_px()` or inline clamping
+- Always mark `DirtyRegion::FullViewport` since any scroll requires re-render
+
+Location: `crates/editor/src/buffer_target.rs`
+
+### Step 10: Add failing tests for scroll handler with sub-pixel deltas
+
+Add tests that verify:
+- A scroll delta of 5px (less than line_height 16px) changes `scroll_offset_px` but not `first_visible_line`
+- Multiple sub-pixel deltas accumulate correctly
+- A delta that crosses a line boundary changes `first_visible_line`
+
+Location: `crates/editor/src/buffer_target.rs` (in the `#[cfg(test)]` module)
+
+### Step 11: Update GlyphBuffer to accept y_offset parameter
+
+Modify `GlyphBuffer::update_from_buffer_with_cursor` to accept an additional `y_offset: f32` parameter:
+- All `position_for(row, col)` calls should have their y-coordinate adjusted by `-y_offset`
+- This shifts all rendered content up by the fractional amount
+
+Also update `GlyphLayout::position_for` or add a variant that accepts y_offset.
+
+Location: `crates/editor/src/glyph_buffer.rs`
+
+### Step 12: Wire the y_offset through the renderer
+
+Modify `Renderer::update_glyph_buffer` to pass `viewport.scroll_fraction_px()` as the y_offset to the glyph buffer update.
+
+Location: `crates/editor/src/renderer.rs`
+
+### Step 13: Add integration tests for smooth scrolling
+
+Add tests that verify the full path from scroll event to rendered y-offset:
+- Set up a viewport and buffer
+- Apply a sub-pixel scroll delta
+- Verify `scroll_fraction_px()` returns the expected value
+- Verify `first_visible_line()` hasn't changed for small deltas
+
+Location: `crates/editor/tests/viewport_test.rs`
+
+### Step 14: Update tests that directly access scroll_offset
+
+Search for any tests or code that directly accesses `viewport.scroll_offset` and update them to use the new methods:
+- `first_visible_line()` for the integer line index
+- `scroll_offset_px()` for the raw pixel value (if needed)
+
+Run the full test suite: `cargo test`
+
+Location: Multiple files (grep for `scroll_offset`)
+
+### Step 15: Visual verification
+
+Run the editor and verify:
+- Trackpad scrolling is smooth (content moves sub-pixel amounts)
+- Lines don't "jump" one at a time
+- The top line is partially clipped when scrolled partway through
+- `ensure_visible` (triggered by typing after scrolling) snaps to whole-line position
+- Scroll bounds work correctly (can't scroll past start or end)
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Performance**: Computing `first_visible_line()` on every access adds a division and floor. Given the frequency of calls, this should be negligible, but worth profiling if issues arise.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Floating-point precision**: Accumulating many small deltas could theoretically accumulate error. Since we're dealing with display coordinates and sub-pixel precision, this is unlikely to be visible. If it becomes an issue, periodic snapping to whole-line boundaries when idle could help.
+
+- **Selector overlay**: The selector rendering may also need y_offset adjustment if it should scroll smoothly. Currently the selector is a fixed overlay, so this is out of scope.
+
+- **API compatibility**: Code that directly accessed `viewport.scroll_offset` will need updates. This is intentional—the field is now private and accessed via methods.
 
 ## Deviations
 

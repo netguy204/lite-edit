@@ -42,6 +42,7 @@ pub trait FocusTarget {
     /// Mutations through `ctx` automatically accumulate dirty regions.
     fn handle_key(&mut self, event: KeyEvent, ctx: &mut EditorContext) -> Handled;
 
+    // Chunk: docs/chunks/viewport_scrolling - Scroll event handling
     /// Handle a scroll event (trackpad or mouse wheel).
     ///
     /// The focus target should adjust the viewport based on the scroll delta.
