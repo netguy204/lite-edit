@@ -1,8 +1,10 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/buffer/src/text_buffer.rs
+- crates/editor/src/buffer_target.rs
 code_references: []
 narrative: editor_ux_refinements
 investigation: null
@@ -10,9 +12,12 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["mouse_drag_selection", "shift_arrow_selection", "text_selection_rendering", "viewport_scrolling"]
+created_after:
+- mouse_drag_selection
+- shift_arrow_selection
+- text_selection_rendering
+- viewport_scrolling
 ---
-
 # Chunk Goal
 
 ## Minor Goal

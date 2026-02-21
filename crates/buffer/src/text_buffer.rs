@@ -561,6 +561,75 @@ impl TextBuffer {
         }
     }
 
+    // Chunk: docs/chunks/delete_backward_word - Alt+Backspace word deletion
+    /// Deletes backward by one word (Alt+Backspace).
+    ///
+    /// The word boundary rule is character-class based:
+    /// - **Non-whitespace class**: If the character immediately before the cursor is non-whitespace,
+    ///   delete backward through contiguous non-whitespace characters until hitting whitespace or
+    ///   the start of the line.
+    /// - **Whitespace class**: If the character immediately before the cursor is whitespace,
+    ///   delete backward through contiguous whitespace characters until hitting non-whitespace or
+    ///   the start of the line.
+    ///
+    /// If there is an active selection, deletes the selection instead (consistent with delete_backward).
+    /// If at column 0, does nothing (returns `DirtyLines::None`).
+    ///
+    /// Returns `DirtyLines::Single(line)` for the affected line.
+    pub fn delete_backward_word(&mut self) -> DirtyLines {
+        // If there's a selection, delete it and return
+        if self.has_selection() {
+            return self.delete_selection();
+        }
+
+        // At column 0, no-op
+        if self.cursor.col == 0 {
+            return DirtyLines::None;
+        }
+
+        // Get the current line content to analyze character classes
+        let line_content = self.line_content(self.cursor.line);
+        let line_chars: Vec<char> = line_content.chars().collect();
+
+        // Determine the character class of the char immediately before the cursor
+        // cursor.col is 1-indexed from the perspective of "chars before cursor"
+        let char_before = line_chars[self.cursor.col - 1];
+        let delete_whitespace = char_before.is_whitespace();
+
+        // Scan backward to find the word start
+        let mut word_start = self.cursor.col;
+        while word_start > 0 {
+            let ch = line_chars[word_start - 1];
+            if delete_whitespace {
+                // Deleting whitespace: stop when we hit non-whitespace
+                if !ch.is_whitespace() {
+                    break;
+                }
+            } else {
+                // Deleting non-whitespace: stop when we hit whitespace
+                if ch.is_whitespace() {
+                    break;
+                }
+            }
+            word_start -= 1;
+        }
+
+        let chars_to_delete = self.cursor.col - word_start;
+
+        self.sync_gap_to_cursor();
+
+        // Delete characters backward
+        for _ in 0..chars_to_delete {
+            self.buffer.delete_backward();
+            self.line_index.remove_char(self.cursor.line);
+        }
+
+        self.cursor.col -= chars_to_delete;
+
+        self.assert_line_index_consistent();
+        DirtyLines::Single(self.cursor.line)
+    }
+
     /// Deletes all characters from the cursor to the end of the current line.
     ///
     /// This implements kill-line (Emacs `C-k`) behavior:
@@ -1494,6 +1563,98 @@ mod tests {
         let mut buf = TextBuffer::from_str("first\nsecond line\nthird");
         buf.set_cursor(Position::new(1, 7)); // In "second line" at col 7
         let dirty = buf.delete_to_line_end();
+        assert_eq!(buf.line_content(1), "second ");
+        assert_eq!(buf.cursor_position(), Position::new(1, 7));
+        assert_eq!(dirty, DirtyLines::Single(1));
+    }
+
+    // ==================== Delete Backward Word Tests ====================
+    // Chunk: docs/chunks/delete_backward_word - Alt+Backspace word deletion
+
+    #[test]
+    fn test_delete_backward_word_non_whitespace() {
+        // "hello world" with cursor at col 11 → "hello " with cursor at col 6
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 11)); // After "world"
+        let dirty = buf.delete_backward_word();
+        assert_eq!(buf.content(), "hello ");
+        assert_eq!(buf.cursor_position(), Position::new(0, 6));
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_backward_word_whitespace() {
+        // "hello   " with cursor at col 8 (trailing spaces) → "hello" with cursor at col 5
+        let mut buf = TextBuffer::from_str("hello   ");
+        buf.set_cursor(Position::new(0, 8)); // After trailing spaces
+        let dirty = buf.delete_backward_word();
+        assert_eq!(buf.content(), "hello");
+        assert_eq!(buf.cursor_position(), Position::new(0, 5));
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_backward_word_at_start_of_line() {
+        // Cursor at col 0 is a no-op
+        let mut buf = TextBuffer::from_str("hello");
+        let dirty = buf.delete_backward_word();
+        assert_eq!(buf.content(), "hello");
+        assert_eq!(buf.cursor_position(), Position::new(0, 0));
+        assert_eq!(dirty, DirtyLines::None);
+    }
+
+    #[test]
+    fn test_delete_backward_word_with_selection() {
+        // With an active selection, delete the selection instead of word
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 8)); // At 'r' in "world"
+        buf.set_selection_anchor(Position::new(0, 6)); // Selects "wo"
+        let dirty = buf.delete_backward_word();
+        assert_eq!(buf.content(), "hello rld");
+        assert_eq!(buf.cursor_position(), Position::new(0, 6)); // At start of former selection
+        assert!(!buf.has_selection());
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_backward_word_mid_line_boundary() {
+        // "one two three" with cursor at col 7 (after "two") → "one  three" with cursor at col 4
+        let mut buf = TextBuffer::from_str("one two three");
+        buf.set_cursor(Position::new(0, 7)); // After "two"
+        let dirty = buf.delete_backward_word();
+        assert_eq!(buf.content(), "one  three");
+        assert_eq!(buf.cursor_position(), Position::new(0, 4));
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_backward_word_single_word_line() {
+        // Delete entire word when it's the only thing on the line
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 5));
+        let dirty = buf.delete_backward_word();
+        assert_eq!(buf.content(), "");
+        assert_eq!(buf.cursor_position(), Position::new(0, 0));
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_backward_word_at_col_1() {
+        // Delete single character when cursor is at col 1
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 1));
+        let dirty = buf.delete_backward_word();
+        assert_eq!(buf.content(), "ello");
+        assert_eq!(buf.cursor_position(), Position::new(0, 0));
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_delete_backward_word_multiline() {
+        // Test on second line of multiline buffer
+        let mut buf = TextBuffer::from_str("first\nsecond line\nthird");
+        buf.set_cursor(Position::new(1, 11)); // After "line" on second line
+        let dirty = buf.delete_backward_word();
         assert_eq!(buf.line_content(1), "second ");
         assert_eq!(buf.cursor_position(), Position::new(1, 7));
         assert_eq!(dirty, DirtyLines::Single(1));

@@ -1,177 +1,140 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk adds Alt+Backspace (Option+Delete) to delete backward by word, following the established patterns for text mutation operations in TextBuffer and command handling in BufferFocusTarget.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The implementation mirrors existing delete operations like `delete_backward` and `delete_to_line_end`, but uses a character-class based word boundary rule:
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. **Non-whitespace class**: If the character immediately before the cursor is non-whitespace, delete backward through contiguous non-whitespace characters until hitting whitespace or line start.
+2. **Whitespace class**: If the character immediately before the cursor is whitespace, delete backward through contiguous whitespace characters until hitting non-whitespace or line start.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/delete_backward_word/GOAL.md)
-with references to the files that you expect to touch.
--->
+This is simpler than Unicode word segmentation and matches the behavior users expect from macOS text editors for quick deletion.
 
-## Subsystem Considerations
+**Selection handling**: Per GOAL.md, if a selection is active when Alt+Backspace is pressed, delete the selection instead of performing word deletion. This is consistent with existing delete behavior (`delete_backward`, `delete_forward`) and uses the existing `delete_selection()` method.
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+**Key binding**: The `option` field on `Modifiers` will be used to detect Alt+Backspace. The resolve_command match will be: `Key::Backspace if mods.option && !mods.command => Some(Command::DeleteBackwardWord)`.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+**Testing strategy**: Following TESTING_PHILOSOPHY.md, tests are written first to verify the semantic goal. Tests cover the success criteria from GOAL.md:
+- Non-whitespace word deletion
+- Whitespace deletion
+- No-op at column 0
+- Selection deletion takes precedence
+- Mid-line word boundary behavior
+- Correct DirtyLines return values
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add `delete_backward_word` tests to TextBuffer
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Write failing tests in `crates/buffer/src/text_buffer.rs` that verify the success criteria:
 
-Example:
+- **Delete non-whitespace word**: `"hello world"` with cursor at col 11 → `"hello "` with cursor at col 6
+- **Delete whitespace**: `"hello   "` with cursor at col 8 (trailing spaces) → `"hello"` with cursor at col 5
+- **No-op at start of line**: cursor at col 0 returns `DirtyLines::None`, buffer unchanged
+- **Selection takes precedence**: with active selection, delete selection instead of word
+- **Mid-line word boundary**: `"one two three"` with cursor at col 7 (after "two") → `"one  three"` with cursor at col 4
 
-### Step 1: Define the SegmentHeader struct
+Location: `crates/buffer/src/text_buffer.rs`, in `#[cfg(test)]` module
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Implement `delete_backward_word` on TextBuffer
 
-Location: src/segment/format.rs
+Add a new method to TextBuffer that:
 
-### Step 2: Implement header serialization
+1. If there's an active selection, delegate to `delete_selection()` and return its result
+2. If cursor is at column 0, return `DirtyLines::None` (no-op)
+3. Get the character immediately before the cursor to determine the character class:
+   - Use `line_content()` to get the current line
+   - Check if `line[cursor.col - 1]` is whitespace or non-whitespace
+4. Scan backward from cursor.col - 1 to find the word start:
+   - For non-whitespace class: scan while chars are non-whitespace
+   - For whitespace class: scan while chars are whitespace
+5. Calculate `chars_to_delete = cursor.col - word_start_col`
+6. Call `sync_gap_to_cursor()` once
+7. Loop `chars_to_delete` times calling `buffer.delete_backward()` and `line_index.remove_char(cursor.line)`
+8. Update `cursor.col -= chars_to_delete`
+9. Return `DirtyLines::Single(cursor.line)` (word deletion stays within single line)
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Add backreference comment: `// Chunk: docs/chunks/delete_backward_word - Alt+Backspace word deletion`
 
-### Step 3: ...
+Location: `crates/buffer/src/text_buffer.rs`, in the `// ==================== Mutations ====================` section
 
----
+### Step 3: Add `DeleteBackwardWord` command variant
 
-**BACKREFERENCE COMMENTS**
+Add a new variant to the `Command` enum:
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+/// Delete backward by one word (Alt+Backspace)
+DeleteBackwardWord,
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Add backreference comment for the variant.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Location: `crates/editor/src/buffer_target.rs`, in `enum Command`
 
-## Dependencies
+### Step 4: Add Alt+Backspace key binding in `resolve_command`
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+Add match arm for `Key::Backspace` with `option` modifier:
 
-If there are no dependencies, delete this section.
--->
+```rust
+// Option+Backspace → delete backward by word
+Key::Backspace if mods.option && !mods.command => Some(Command::DeleteBackwardWord),
+```
+
+This must come BEFORE the generic `Key::Backspace => Some(Command::DeleteBackward)` match, since Rust matches top-to-bottom. The current generic Backspace match has no guard, so it must remain as the fallback.
+
+Location: `crates/editor/src/buffer_target.rs`, in `resolve_command`, near the existing Backspace handling
+
+### Step 5: Handle `DeleteBackwardWord` in `execute_command`
+
+Add the command execution case:
+
+```rust
+Command::DeleteBackwardWord => ctx.buffer.delete_backward_word(),
+```
+
+This follows the same pattern as `DeleteBackward`, `DeleteForward`, and `DeleteToLineEnd` — the dirty region is returned from the buffer method and marked via `ctx.mark_dirty()`.
+
+Location: `crates/editor/src/buffer_target.rs`, in `execute_command`
+
+### Step 6: Add integration tests for Alt+Backspace via BufferFocusTarget
+
+Add tests in `buffer_target.rs` that:
+- Construct `KeyEvent` with `Key::Backspace` and `modifiers.option = true`
+- Send through `BufferFocusTarget::handle_key()`
+- Verify buffer content after word deletion
+- Verify `Handled::Yes` is returned
+
+These follow the existing test patterns in the file.
+
+Location: `crates/editor/src/buffer_target.rs`, in `#[cfg(test)]` module
+
+### Step 7: Update code_paths in GOAL.md
+
+Update the `code_paths` frontmatter field to list the files touched:
+- `crates/buffer/src/text_buffer.rs`
+- `crates/editor/src/buffer_target.rs`
+
+Location: `docs/chunks/delete_backward_word/GOAL.md`
+
+### Step 8: Run tests and verify
+
+Run:
+```bash
+cargo test -p lite-edit-buffer
+cargo test -p lite-edit
+```
+
+All tests should pass. The failing tests from Step 1 should now pass after Step 2.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Unicode handling**: The character-class rule (whitespace vs non-whitespace) uses `char::is_whitespace()` which handles Unicode whitespace correctly. Non-whitespace is simply `!is_whitespace()`. This should work correctly for multi-byte UTF-8 characters since Rust's `char` type represents Unicode scalar values.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Performance**: We loop calling `delete_backward()` for each character. This is O(n) in the number of characters deleted, but each delete is O(1) in the gap buffer. For word deletion (typically < 20 chars), this is negligible. If needed later, a batch delete could be added to GapBuffer.
+
+- **Empty line edge case**: At column 0, we return no-op. This differs from some editors that join with the previous line on Alt+Backspace at line start. The GOAL.md explicitly says "Alt+Backspace at the start of a line (col 0) is a no-op", so this is the correct behavior.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- POPULATE DURING IMPLEMENTATION, not at planning time. -->
