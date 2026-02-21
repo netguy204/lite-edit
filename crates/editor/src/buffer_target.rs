@@ -103,8 +103,10 @@ fn resolve_command(event: &KeyEvent) -> Option<Command> {
     let mods = &event.modifiers;
 
     match &event.key {
-        // Printable characters (no Command/Control modifier)
-        Key::Char(ch) if !mods.command && !mods.control => Some(Command::InsertChar(*ch)),
+        // Printable characters (no Command/Control/Option modifier)
+        // Chunk: docs/chunks/word_forward_delete - Option is a command modifier; exclude it here
+        // so Option+key chords (e.g. Option+D → DeleteForwardWord) are not consumed as InsertChar.
+        Key::Char(ch) if !mods.command && !mods.control && !mods.option => Some(Command::InsertChar(*ch)),
 
         // Return/Enter
         Key::Return if !mods.command && !mods.control => Some(Command::InsertNewline),

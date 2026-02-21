@@ -468,12 +468,22 @@ impl MetalView {
         //   - Ctrl+A → characters() returns '\x01' (SOH control character)
         //   - Ctrl+E → characters() returns '\x05' (ENQ control character)
         //
-        // To correctly handle Ctrl+key combinations like Ctrl+A and Ctrl+E for
-        // Emacs-style line navigation, we use charactersIgnoringModifiers() when
-        // Control is active. This returns the unmodified base character ('a', 'e',
-        // etc.) regardless of what control character macOS would normally produce.
+        // When the Option modifier is held, macOS's event.characters() returns
+        // the *composed* Unicode character for that Option+key combination.
+        // For example:
+        //   - Option+D → characters() returns 'ð' (eth, U+00F0)
+        //   - Option+B → characters() returns '∫' (integral sign)
+        //
+        // Both cases require charactersIgnoringModifiers() to recover the base key
+        // ('d', 'e', etc.) so that modifier-keyed commands like Ctrl+A, Option+D
+        // are correctly routed in resolve_command rather than falling through to
+        // InsertChar with the composed/control character.
+        //
+        // Chunk: docs/chunks/word_forward_delete - Option modifier needs base char like Control
         let flags = event.modifierFlags();
-        let characters = if flags.contains(NSEventModifierFlags::Control) {
+        let characters = if flags.contains(NSEventModifierFlags::Control)
+            || flags.contains(NSEventModifierFlags::Option)
+        {
             event.charactersIgnoringModifiers()?
         } else {
             // Normal case: use characters() which accounts for Shift state

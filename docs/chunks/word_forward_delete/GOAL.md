@@ -5,6 +5,7 @@ parent_chunk: null
 code_paths:
 - crates/buffer/src/text_buffer.rs
 - crates/editor/src/buffer_target.rs
+- crates/editor/src/metal_view.rs
 code_references: []
 narrative: word_nav
 investigation: null
@@ -264,6 +265,10 @@ This chunk builds on `word_boundary_right` from `word_boundary_primitives`.
 - The method carries a `// Spec: docs/trunk/SPEC.md#word-model` comment and calls
   `word_boundary_right` rather than reimplementing scan logic.
 - `DeleteForwardWord` exists in the `Command` enum in `buffer_target.rs`.
+- `convert_key` in `metal_view.rs` uses `event.charactersIgnoringModifiers()` when the
+  Option modifier is held (mirroring the existing Control modifier handling), so that
+  Option+D produces `Key::Char('d')` with `mods.option=true` rather than the macOS-composed
+  character `'ð'` (eth). Without this, the InsertChar arm fires instead of DeleteForwardWord.
 - `resolve_command` maps `Option+'d'` → `DeleteForwardWord`, checked before any plain
   `Key::Char('d')` arm.
 - `execute_command` calls `ctx.buffer.delete_forward_word()`, marks dirty, and ensures
