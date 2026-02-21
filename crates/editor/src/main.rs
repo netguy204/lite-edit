@@ -19,6 +19,7 @@
 //! renders of events ahead of it in the batch.
 
 mod buffer_target;
+mod clipboard;
 mod context;
 mod dirty_region;
 mod editor_state;
@@ -183,8 +184,18 @@ impl EditorController {
     }
 
     /// Handles a key event by forwarding to the editor state.
+    ///
+    /// After processing the event, checks if the app should quit (Cmd+Q)
+    /// and terminates the application if so.
     fn handle_key(&mut self, event: KeyEvent) {
         self.state.handle_key(event);
+
+        // Check for quit request
+        if self.state.should_quit {
+            self.terminate_app();
+            return;
+        }
+
         self.render_if_dirty();
     }
 
@@ -192,6 +203,20 @@ impl EditorController {
     fn handle_mouse(&mut self, event: MouseEvent) {
         self.state.handle_mouse(event);
         self.render_if_dirty();
+    }
+
+    /// Terminates the macOS application.
+    ///
+    /// This is called when the user presses Cmd+Q. It obtains a MainThreadMarker
+    /// (which is safe since EditorController only runs on the main thread) and
+    /// calls NSApplication::terminate to perform a clean shutdown.
+    fn terminate_app(&self) {
+        // SAFETY: EditorController is only accessed from the main thread
+        // (via callbacks from the NSRunLoop), so MainThreadMarker::new() will succeed.
+        let mtm = MainThreadMarker::new().expect("EditorController must run on main thread");
+        let app = NSApplication::sharedApplication(mtm);
+        // Passing None as sender is equivalent to the user quitting from the menu
+        app.terminate(None);
     }
 
     /// Toggles cursor blink and re-renders if needed.
