@@ -31,6 +31,9 @@ enum Command {
     DeleteBackward,
     /// Delete the character after the cursor (Delete key)
     DeleteForward,
+    // Chunk: docs/chunks/delete_backward_word - Alt+Backspace word deletion
+    /// Delete backward by one word (Alt+Backspace)
+    DeleteBackwardWord,
     // Chunk: docs/chunks/kill_line - Delete from cursor to end of line (Ctrl+K)
     /// Delete from cursor to end of line (kill-line)
     DeleteToLineEnd,
@@ -102,6 +105,10 @@ fn resolve_command(event: &KeyEvent) -> Option<Command> {
 
         // Cmd+Backspace → delete to line start
         Key::Backspace if mods.command && !mods.control => Some(Command::DeleteToLineStart),
+
+        // Chunk: docs/chunks/delete_backward_word - Alt+Backspace word deletion
+        // Option+Backspace → delete backward by word (must come before generic Backspace)
+        Key::Backspace if mods.option && !mods.command => Some(Command::DeleteBackwardWord),
 
         // Backspace (Delete backward)
         Key::Backspace => Some(Command::DeleteBackward),
@@ -182,6 +189,7 @@ fn resolve_command(event: &KeyEvent) -> Option<Command> {
 
         // Chunk: docs/chunks/kill_line - Ctrl+K key binding
         // Ctrl+K → kill line (delete to end of line)
+        // Chunk: docs/chunks/kill_line - Ctrl+K key binding resolution
         Key::Char('k') if mods.control && !mods.command => Some(Command::DeleteToLineEnd),
 
         // Unhandled
@@ -210,6 +218,9 @@ impl BufferFocusTarget {
             Command::InsertTab => ctx.buffer.insert_char('\t'),
             Command::DeleteBackward => ctx.buffer.delete_backward(),
             Command::DeleteForward => ctx.buffer.delete_forward(),
+            // Chunk: docs/chunks/delete_backward_word - Alt+Backspace word deletion
+            Command::DeleteBackwardWord => ctx.buffer.delete_backward_word(),
+            // Chunk: docs/chunks/kill_line - Execute DeleteToLineEnd command
             Command::DeleteToLineEnd => ctx.buffer.delete_to_line_end(),
             Command::DeleteToLineStart => ctx.buffer.delete_to_line_start(),
             Command::MoveLeft => {
@@ -2891,5 +2902,132 @@ mod tests {
                 panic!("Expected dirty region after drag");
             }
         }
+    }
+
+    // ==================== Delete Backward Word Tests (Alt+Backspace) ====================
+    // Chunk: docs/chunks/delete_backward_word - Alt+Backspace word deletion integration tests
+
+    #[test]
+    fn test_option_backspace_deletes_word() {
+        let mut buffer = TextBuffer::from_str("hello world");
+        buffer.set_cursor(Position::new(0, 11)); // After "world"
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        let result = {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = KeyEvent::new(
+                Key::Backspace,
+                Modifiers {
+                    option: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx)
+        };
+
+        assert_eq!(result, Handled::Yes);
+        assert_eq!(buffer.content(), "hello ");
+        assert_eq!(buffer.cursor_position(), Position::new(0, 6));
+        assert!(dirty.is_dirty());
+    }
+
+    #[test]
+    fn test_option_backspace_deletes_whitespace() {
+        let mut buffer = TextBuffer::from_str("hello   ");
+        buffer.set_cursor(Position::new(0, 8)); // After trailing spaces
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = KeyEvent::new(
+                Key::Backspace,
+                Modifiers {
+                    option: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.content(), "hello");
+        assert_eq!(buffer.cursor_position(), Position::new(0, 5));
+    }
+
+    #[test]
+    fn test_option_backspace_at_start_is_noop() {
+        let mut buffer = TextBuffer::from_str("hello");
+        // Cursor at start
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = KeyEvent::new(
+                Key::Backspace,
+                Modifiers {
+                    option: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        // Should be unchanged
+        assert_eq!(buffer.content(), "hello");
+        assert_eq!(buffer.cursor_position(), Position::new(0, 0));
+    }
+
+    #[test]
+    fn test_plain_backspace_still_works() {
+        // Ensure we didn't break plain backspace
+        let mut buffer = TextBuffer::from_str("hello world");
+        buffer.set_cursor(Position::new(0, 11)); // After "world"
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            // Plain backspace - no modifiers
+            let event = KeyEvent::new(Key::Backspace, Modifiers::default());
+            target.handle_key(event, &mut ctx);
+        }
+
+        // Should only delete one character
+        assert_eq!(buffer.content(), "hello worl");
+        assert_eq!(buffer.cursor_position(), Position::new(0, 10));
     }
 }
