@@ -1,12 +1,22 @@
 ---
-status: IMPLEMENTING
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
   - crates/editor/src/metal_view.rs
   - crates/editor/src/buffer_target.rs
   - crates/buffer/src/text_buffer.rs
-code_references: []
+code_references:
+  - ref: crates/editor/src/metal_view.rs#MetalView::__mouse_dragged
+    implements: "Forward mouse drag events through the mouse handler callback"
+  - ref: crates/editor/src/metal_view.rs#MetalView::__mouse_up
+    implements: "Forward mouse up events through the mouse handler callback"
+  - ref: crates/editor/src/buffer_target.rs#BufferFocusTarget::handle_mouse
+    implements: "Full mouse lifecycle handling for selection (Down sets anchor, Moved extends, Up finalizes)"
+  - ref: crates/editor/src/buffer_target.rs#pixel_to_buffer_position
+    implements: "Coordinate conversion with edge case clamping (past line end, below last line, above first line)"
+  - ref: crates/buffer/src/text_buffer.rs#TextBuffer::move_cursor_preserving_selection
+    implements: "Move cursor during drag without clearing selection anchor"
 narrative: editor_qol_interactions
 investigation: null
 subsystems: []
