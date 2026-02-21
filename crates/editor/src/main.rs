@@ -261,10 +261,15 @@ impl AppDelegate {
         let metal_view = MetalView::new(mtm, content_rect);
 
         // Attach the view to the window BEFORE creating the renderer.
-        // This triggers viewDidChangeBackingProperties, which sets the
-        // correct scale factor (e.g., 2.0 on Retina). The renderer needs
-        // the correct scale to create the font and viewport at the right size.
+        // The renderer needs the correct scale factor to rasterize the font
+        // and glyph atlas at native resolution (e.g., 2x on Retina).
         window.setContentView(Some(&metal_view));
+
+        // viewDidChangeBackingProperties may not fire synchronously during
+        // setContentView. Explicitly sync the scale factor, contentsScale,
+        // and drawable size from the window so the renderer sees the correct
+        // values when it creates the font and atlas.
+        metal_view.sync_backing_properties();
 
         let mut renderer = Renderer::new(&metal_view);
 

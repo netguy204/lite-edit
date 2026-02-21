@@ -155,6 +155,22 @@ impl MetalView {
         self.ivars().scale_factor.get()
     }
 
+    /// Syncs the backing scale factor from the view's window.
+    ///
+    /// `viewDidChangeBackingProperties` may not fire synchronously when the
+    /// view is added to a window via `setContentView`. Call this explicitly
+    /// after attaching the view to a window to ensure the scale factor,
+    /// layer contentsScale, and drawable size are correct before creating
+    /// scale-dependent resources (font, glyph atlas, etc.).
+    pub fn sync_backing_properties(&self) {
+        if let Some(window) = self.window() {
+            let scale: CGFloat = unsafe { msg_send![&window, backingScaleFactor] };
+            self.ivars().scale_factor.set(scale);
+            self.ivars().metal_layer.setContentsScale(scale);
+            self.update_drawable_size_internal();
+        }
+    }
+
     /// Updates the drawable size based on current frame and scale factor
     pub fn update_drawable_size(&self) {
         self.update_drawable_size_internal();
