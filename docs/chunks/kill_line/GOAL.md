@@ -1,11 +1,19 @@
 ---
-status: IMPLEMENTING
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
 - crates/buffer/src/text_buffer.rs
 - crates/editor/src/buffer_target.rs
-code_references: []
+code_references:
+  - ref: crates/buffer/src/text_buffer.rs#TextBuffer::delete_to_line_end
+    implements: "Delete from cursor to end of line (kill-line) behavior with Emacs C-k semantics"
+  - ref: crates/editor/src/buffer_target.rs#Command::DeleteToLineEnd
+    implements: "Command enum variant for kill-line operation"
+  - ref: crates/editor/src/buffer_target.rs#resolve_command
+    implements: "Cmd+K key binding resolution to DeleteToLineEnd command"
+  - ref: crates/editor/src/buffer_target.rs#BufferFocusTarget::execute_command
+    implements: "Execute DeleteToLineEnd command via ctx.buffer.delete_to_line_end()"
 narrative: editor_qol_interactions
 investigation: null
 subsystems: []
