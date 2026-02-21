@@ -193,23 +193,39 @@ define_class!(
     unsafe impl NSWindowDelegate for AppDelegate {
         #[unsafe(method(windowDidResize:))]
         fn window_did_resize(&self, _notification: &NSNotification) {
-            // Render on resize
-            let mut renderer_ref = self.ivars().renderer.borrow_mut();
-            let metal_view_ref = self.ivars().metal_view.borrow();
+            self.update_viewport_and_render();
+        }
 
-            if let (Some(renderer), Some(metal_view)) = (renderer_ref.as_mut(), metal_view_ref.as_ref()) {
-                metal_view.update_drawable_size();
-                // Update viewport size based on new window dimensions
-                let frame = metal_view.frame();
-                let scale = metal_view.scale_factor();
-                renderer.update_viewport_size((frame.size.height * scale) as f32);
-                renderer.render(metal_view);
-            }
+        #[unsafe(method(windowDidChangeBackingProperties:))]
+        fn window_did_change_backing_properties(&self, _notification: &NSNotification) {
+            // Fires when the window moves between displays with different
+            // scale factors (e.g., Retina ↔ non-Retina). The MetalView's
+            // viewDidChangeBackingProperties updates the drawable size;
+            // we need to re-calculate the viewport and re-render.
+            self.update_viewport_and_render();
         }
     }
 );
 
 impl AppDelegate {
+    /// Updates the viewport size from the current metal view dimensions and re-renders.
+    ///
+    /// Called from windowDidResize and windowDidChangeBackingProperties.
+    fn update_viewport_and_render(&self) {
+        let mut renderer_ref = self.ivars().renderer.borrow_mut();
+        let metal_view_ref = self.ivars().metal_view.borrow();
+
+        if let (Some(renderer), Some(metal_view)) =
+            (renderer_ref.as_mut(), metal_view_ref.as_ref())
+        {
+            metal_view.update_drawable_size();
+            let frame = metal_view.frame();
+            let scale = metal_view.scale_factor();
+            renderer.update_viewport_size((frame.size.height * scale) as f32);
+            renderer.render(metal_view);
+        }
+    }
+
     /// Creates a new application delegate
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = mtm.alloc::<Self>();
@@ -241,8 +257,15 @@ impl AppDelegate {
         window.setTitle(ns_string!("lite-edit"));
         window.center();
 
-        // Create the Metal-backed view and renderer
+        // Create the Metal-backed view
         let metal_view = MetalView::new(mtm, content_rect);
+
+        // Attach the view to the window BEFORE creating the renderer.
+        // This triggers viewDidChangeBackingProperties, which sets the
+        // correct scale factor (e.g., 2.0 on Retina). The renderer needs
+        // the correct scale to create the font and viewport at the right size.
+        window.setContentView(Some(&metal_view));
+
         let mut renderer = Renderer::new(&metal_view);
 
         // Create a TextBuffer with 100+ lines of demo content
@@ -254,9 +277,6 @@ impl AppDelegate {
         let frame = metal_view.frame();
         let scale = metal_view.scale_factor();
         renderer.update_viewport_size((frame.size.height * scale) as f32);
-
-        // Set the Metal view as the window's content view
-        window.setContentView(Some(&metal_view));
 
         // Set up window delegate (self handles window events)
         let delegate: &ProtocolObject<dyn NSWindowDelegate> = ProtocolObject::from_ref(self);
