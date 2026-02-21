@@ -169,6 +169,11 @@ impl Renderer {
         &self.viewport
     }
 
+    /// Returns the font metrics
+    pub fn font_metrics(&self) -> crate::font::FontMetrics {
+        self.font.metrics
+    }
+
     /// Updates the viewport size based on window dimensions
     ///
     /// Call this when the window resizes.

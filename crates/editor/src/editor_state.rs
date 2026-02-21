@@ -1,4 +1,5 @@
 // Chunk: docs/chunks/editable_buffer - Main loop + input events + editable buffer
+// Chunk: docs/chunks/mouse_click_cursor - Mouse click cursor positioning
 //!
 //! Editor state container.
 //!
@@ -12,7 +13,8 @@ use crate::buffer_target::BufferFocusTarget;
 use crate::context::EditorContext;
 use crate::dirty_region::DirtyRegion;
 use crate::focus::FocusTarget;
-use crate::input::KeyEvent;
+use crate::font::FontMetrics;
+use crate::input::{KeyEvent, MouseEvent};
 use crate::viewport::Viewport;
 use lite_edit_buffer::TextBuffer;
 
@@ -27,6 +29,7 @@ const CURSOR_BLINK_INTERVAL_MS: u64 = 500;
 /// - The active focus target
 /// - Cursor visibility state
 /// - Dirty region tracking
+/// - Font metrics for pixel-to-position conversion
 pub struct EditorState {
     /// The text buffer being edited
     pub buffer: TextBuffer,
@@ -40,11 +43,20 @@ pub struct EditorState {
     pub cursor_visible: bool,
     /// Time of the last keystroke (for cursor blink reset)
     pub last_keystroke: Instant,
+    /// Font metrics for pixel-to-position conversion
+    font_metrics: FontMetrics,
+    /// View height in pixels (for y-coordinate flipping in mouse events)
+    view_height: f32,
 }
 
 impl EditorState {
-    /// Creates a new EditorState with the given buffer.
-    pub fn new(buffer: TextBuffer, line_height: f32) -> Self {
+    /// Creates a new EditorState with the given buffer and font metrics.
+    ///
+    /// # Arguments
+    /// * `buffer` - The text buffer being edited
+    /// * `font_metrics` - Font metrics for pixel-to-position conversion
+    pub fn new(buffer: TextBuffer, font_metrics: FontMetrics) -> Self {
+        let line_height = font_metrics.line_height as f32;
         Self {
             buffer,
             viewport: Viewport::new(line_height),
@@ -52,17 +64,27 @@ impl EditorState {
             focus_target: BufferFocusTarget::new(),
             cursor_visible: true,
             last_keystroke: Instant::now(),
+            font_metrics,
+            view_height: 0.0,
         }
     }
 
     /// Creates an EditorState with an empty buffer.
-    pub fn empty(line_height: f32) -> Self {
-        Self::new(TextBuffer::new(), line_height)
+    pub fn empty(font_metrics: FontMetrics) -> Self {
+        Self::new(TextBuffer::new(), font_metrics)
+    }
+
+    /// Returns the font metrics.
+    pub fn font_metrics(&self) -> &FontMetrics {
+        &self.font_metrics
     }
 
     /// Updates the viewport size based on window height in pixels.
+    ///
+    /// This also updates the stored view_height for mouse event coordinate flipping.
     pub fn update_viewport_size(&mut self, window_height: f32) {
         self.viewport.update_size(window_height);
+        self.view_height = window_height;
     }
 
     /// Handles a key event by forwarding to the active focus target.
@@ -90,8 +112,41 @@ impl EditorState {
             &mut self.buffer,
             &mut self.viewport,
             &mut self.dirty_region,
+            self.font_metrics,
+            self.view_height,
         );
         self.focus_target.handle_key(event, &mut ctx);
+    }
+
+    /// Handles a mouse event by forwarding to the active focus target.
+    ///
+    /// This records the event time (for cursor blink reset) and
+    /// ensures the cursor is visible after any mouse interaction.
+    pub fn handle_mouse(&mut self, event: MouseEvent) {
+        // Record event time for cursor blink reset (same as keystroke)
+        self.last_keystroke = Instant::now();
+
+        // Ensure cursor is visible when clicking
+        if !self.cursor_visible {
+            self.cursor_visible = true;
+            // Mark cursor line dirty to show it
+            let cursor_line = self.buffer.cursor_position().line;
+            let dirty = self.viewport.dirty_lines_to_region(
+                &lite_edit_buffer::DirtyLines::Single(cursor_line),
+                self.buffer.line_count(),
+            );
+            self.dirty_region.merge(dirty);
+        }
+
+        // Create context and forward to focus target
+        let mut ctx = EditorContext::new(
+            &mut self.buffer,
+            &mut self.viewport,
+            &mut self.dirty_region,
+            self.font_metrics,
+            self.view_height,
+        );
+        self.focus_target.handle_mouse(event, &mut ctx);
     }
 
     /// Returns true if any screen region needs re-rendering.
@@ -145,7 +200,16 @@ impl EditorState {
 
 impl Default for EditorState {
     fn default() -> Self {
-        Self::empty(16.0) // Sensible default line height
+        // Sensible default font metrics
+        let font_metrics = FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        };
+        Self::empty(font_metrics)
     }
 }
 
@@ -154,9 +218,21 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// Creates test font metrics with known values
+    fn test_font_metrics() -> FontMetrics {
+        FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        }
+    }
+
     #[test]
     fn test_new_state() {
-        let state = EditorState::empty(16.0);
+        let state = EditorState::empty(test_font_metrics());
         assert!(state.buffer.is_empty());
         assert!(!state.is_dirty());
         assert!(state.cursor_visible);
@@ -164,7 +240,7 @@ mod tests {
 
     #[test]
     fn test_handle_key_marks_dirty() {
-        let mut state = EditorState::empty(16.0);
+        let mut state = EditorState::empty(test_font_metrics());
         state.update_viewport_size(160.0);
 
         state.handle_key(KeyEvent::char('a'));
@@ -175,7 +251,7 @@ mod tests {
 
     #[test]
     fn test_take_dirty_region_resets() {
-        let mut state = EditorState::empty(16.0);
+        let mut state = EditorState::empty(test_font_metrics());
         state.update_viewport_size(160.0);
 
         state.handle_key(KeyEvent::char('a'));
@@ -188,7 +264,7 @@ mod tests {
 
     #[test]
     fn test_keystroke_shows_cursor() {
-        let mut state = EditorState::empty(16.0);
+        let mut state = EditorState::empty(test_font_metrics());
         state.update_viewport_size(160.0);
         state.cursor_visible = false;
 
@@ -199,7 +275,7 @@ mod tests {
 
     #[test]
     fn test_toggle_cursor_blink() {
-        let mut state = EditorState::empty(16.0);
+        let mut state = EditorState::empty(test_font_metrics());
         state.update_viewport_size(160.0);
 
         // Set last_keystroke to the past so blink toggle works
@@ -214,7 +290,7 @@ mod tests {
 
     #[test]
     fn test_recent_keystroke_keeps_cursor_solid() {
-        let mut state = EditorState::empty(16.0);
+        let mut state = EditorState::empty(test_font_metrics());
         state.update_viewport_size(160.0);
 
         // Keystroke just happened
@@ -227,9 +303,10 @@ mod tests {
 
     #[test]
     fn test_viewport_size_update() {
-        let mut state = EditorState::empty(16.0);
+        let mut state = EditorState::empty(test_font_metrics());
         state.update_viewport_size(320.0);
 
         assert_eq!(state.viewport.visible_lines(), 20); // 320 / 16 = 20
+        assert_eq!(state.view_height, 320.0);
     }
 }

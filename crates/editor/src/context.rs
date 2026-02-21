@@ -1,11 +1,14 @@
 // Chunk: docs/chunks/editable_buffer - Main loop + input events + editable buffer
+// Chunk: docs/chunks/mouse_click_cursor - Mouse click cursor positioning
 //!
 //! Editor context providing mutable access to core state.
 //!
 //! Focus targets mutate state through this context. It provides access to
-//! the buffer, viewport, and dirty region accumulator.
+//! the buffer, viewport, dirty region accumulator, and font metrics for
+//! pixel-to-position conversion.
 
 use crate::dirty_region::DirtyRegion;
+use crate::font::FontMetrics;
 use crate::viewport::Viewport;
 use lite_edit_buffer::{DirtyLines, TextBuffer};
 
@@ -23,19 +26,34 @@ pub struct EditorContext<'a> {
     pub viewport: &'a mut Viewport,
     /// Accumulated dirty region for this event batch
     pub dirty_region: &'a mut DirtyRegion,
+    /// Font metrics for pixel-to-position conversion (char_width, line_height)
+    pub font_metrics: FontMetrics,
+    /// View height in pixels (for y-coordinate flipping)
+    pub view_height: f32,
 }
 
 impl<'a> EditorContext<'a> {
     /// Creates a new EditorContext from mutable references.
+    ///
+    /// # Arguments
+    /// * `buffer` - The text buffer being edited
+    /// * `viewport` - The viewport (scroll state, visible line range)
+    /// * `dirty_region` - Accumulated dirty region for this event batch
+    /// * `font_metrics` - Font metrics for pixel-to-position conversion
+    /// * `view_height` - View height in pixels (for y-coordinate flipping)
     pub fn new(
         buffer: &'a mut TextBuffer,
         viewport: &'a mut Viewport,
         dirty_region: &'a mut DirtyRegion,
+        font_metrics: FontMetrics,
+        view_height: f32,
     ) -> Self {
         Self {
             buffer,
             viewport,
             dirty_region,
+            font_metrics,
+            view_height,
         }
     }
 
@@ -73,6 +91,18 @@ mod tests {
     use super::*;
     use lite_edit_buffer::Position;
 
+    /// Creates test font metrics with known values
+    fn test_font_metrics() -> FontMetrics {
+        FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        }
+    }
+
     #[test]
     fn test_mark_dirty_single_line() {
         let mut buffer = TextBuffer::from_str("hello\nworld");
@@ -81,7 +111,13 @@ mod tests {
         let mut dirty = DirtyRegion::None;
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             ctx.mark_dirty(DirtyLines::Single(0));
         }
 
@@ -96,7 +132,13 @@ mod tests {
         let mut dirty = DirtyRegion::None;
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             ctx.mark_dirty(DirtyLines::Single(0));
             ctx.mark_dirty(DirtyLines::Single(2));
         }
@@ -112,7 +154,13 @@ mod tests {
         let mut dirty = DirtyRegion::None;
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             ctx.ensure_cursor_visible();
         }
 
@@ -132,7 +180,13 @@ mod tests {
         let mut dirty = DirtyRegion::None;
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             ctx.ensure_cursor_visible();
         }
 
@@ -150,7 +204,13 @@ mod tests {
         let mut dirty = DirtyRegion::None;
 
         {
-            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
             ctx.mark_cursor_dirty();
         }
 

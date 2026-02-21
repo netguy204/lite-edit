@@ -1,177 +1,133 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk establishes the mouse event pipeline from macOS through to cursor positioning. The architecture follows the existing pattern: MetalView handles NSEvent conversion (like it does for keyboard), EditorController routes to EditorState, and BufferFocusTarget interprets the event.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+Key design choices:
+1. **Parallel to key handling**: Just as `MetalView` has `set_key_handler`, we add `set_mouse_handler`. `EditorController` and `EditorState` already have `handle_key`; we add `handle_mouse` in parallel.
+2. **Font metrics in EditorContext**: The pixel-to-position conversion needs `line_height` and `char_width` (advance width). We augment `EditorContext` with a `FontMetrics` struct to make these available to focus targets.
+3. **Coordinate flipping**: macOS views use bottom-left origin; our buffer uses top-left. The conversion flips y: `buffer_y = view_height - event_y`.
+4. **Scale factor handling**: NSEvent provides coordinates in points. We convert to pixels using the view's scale factor for consistent math.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+The existing input types (`MouseEvent`, `MouseEventKind`) are already defined in `input.rs`.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/mouse_click_cursor/GOAL.md)
-with references to the files that you expect to touch.
--->
-
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Testing follows the humble view architecture: the pixel-to-position logic is pure math that can be unit tested without platform dependencies. We test the conversion function with known font metrics and edge cases.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add `char_width` to EditorContext
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create a `FontMetrics` struct in `context.rs` (or use a simple tuple) to hold `line_height` and `char_width`. Update `EditorContext` to accept these values at construction time.
 
-Example:
+Location: `crates/editor/src/context.rs`
 
-### Step 1: Define the SegmentHeader struct
+Rationale: Focus targets need font metrics to convert pixel coordinates to buffer positions. EditorContext is the state they have access to.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Thread font metrics through EditorState
 
-Location: src/segment/format.rs
+Update `EditorState::handle_key` and the future `handle_mouse` to pass font metrics when constructing `EditorContext`. The metrics come from the Renderer's font.
 
-### Step 2: Implement header serialization
+Location: `crates/editor/src/editor_state.rs`
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+This requires `EditorState` to store font metrics (or receive them as parameters).
 
-### Step 3: ...
+### Step 3: Add `handle_mouse` to EditorState
 
----
+Add a `handle_mouse(&mut self, event: MouseEvent, font_metrics: FontMetrics, view_height: f32)` method that creates an `EditorContext` and calls `self.focus_target.handle_mouse(event, &mut ctx)`.
 
-**BACKREFERENCE COMMENTS**
+Location: `crates/editor/src/editor_state.rs`
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+### Step 4: Implement pixel-to-position conversion in BufferFocusTarget
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+Implement `handle_mouse` in `BufferFocusTarget`:
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+1. On `MouseEventKind::Down`:
+   - Flip y-coordinate: `flipped_y = view_height - event.position.1`
+   - Compute line: `line = (flipped_y / line_height) + scroll_offset`, clamp to `[0, line_count - 1]`
+   - Compute col: `col = event.position.0 / char_width`, clamp to `[0, line_len]`
+   - Call `buffer.set_cursor(Position::new(line, col))`
+   - Mark cursor line dirty
 
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
+The math must handle Retina (scale factor) if coordinates are in points.
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `crates/editor/src/buffer_target.rs`
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 5: Unit test pixel-to-position logic
+
+Write tests for the conversion logic:
+- Click on first character → col 0
+- Click on last character of line → correct col
+- Click past end of line → clamp to line length
+- Click below last line → clamp to last line
+- Click with scroll offset → correct buffer line
+- Edge case: empty buffer
+
+Location: `crates/editor/src/buffer_target.rs` (in `#[cfg(test)]` module)
+
+Per testing philosophy: test the behavior, not the plumbing.
+
+### Step 6: Override `mouseDown:` in MetalView
+
+Add a `mouseDown:` override in MetalView that:
+1. Extracts position from NSEvent (`locationInWindow`)
+2. Converts to view coordinates (`convertPoint:fromView:`)
+3. Extracts modifier flags
+4. Constructs a `MouseEvent` with `MouseEventKind::Down`
+5. Calls the mouse handler callback
+
+Location: `crates/editor/src/metal_view.rs`
+
+Also add a `set_mouse_handler` method parallel to `set_key_handler`.
+
+### Step 7: Add `handle_mouse` to EditorController
+
+Add a `handle_mouse(&mut self, event: MouseEvent)` method that:
+1. Records mouse event time (like keystroke for cursor reset)
+2. Forwards to `self.state.handle_mouse(event, font_metrics, view_height)`
+3. Calls `render_if_dirty()`
+
+Location: `crates/editor/src/main.rs`
+
+### Step 8: Wire mouse handler in `setup_window`
+
+In `AppDelegate::setup_window`, after setting up the key handler:
+1. Clone controller for mouse handler closure
+2. Call `metal_view.set_mouse_handler(...)` with a closure that calls `controller.borrow_mut().handle_mouse(event)`
+
+Location: `crates/editor/src/main.rs`
+
+### Step 9: Integration test (manual)
+
+Manually verify:
+- Click positions cursor at expected location
+- Click on different lines works
+- Click past end of line clamps correctly
+- Click below last line clamps to last line
+- Scrolled viewport: click targets correct buffer line
+
+This cannot be automated (requires macOS GUI) per testing philosophy.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+All dependencies are satisfied:
+- `editable_buffer` chunk: Provides TextBuffer, cursor movement, `set_cursor`
+- `glyph_rendering` chunk: Provides Font and FontMetrics
+- `metal_surface` chunk: Provides MetalView infrastructure
+- `viewport_rendering` chunk: Provides Viewport with scroll_offset
 
-If there are no dependencies, delete this section.
--->
+The `MouseEvent` and `MouseEventKind` types are already defined in `input.rs`.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Coordinate system**: Need to verify whether `NSEvent.locationInWindow` returns points or pixels. If points, multiply by scale factor before pixel math.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Click position rounding**: Should clicking at x=12.7 pixels (when char_width=10) target column 1 or 2? The plan uses truncation (`floor`). Alternatively, use `round` for nearest-character behavior. Start with truncation; adjust if it feels wrong.
+
+3. **Tab characters**: The current approach assumes monospace chars. Tab characters may have different visual widths. For now, assume tabs render as single characters (the current behavior). This is a known limitation.
+
+4. **View bounds**: If user clicks outside the actual text area (e.g., in padding), we may compute negative or very large positions. Clamping handles this, but verify behavior.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- Populated during implementation -->
