@@ -1,177 +1,133 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk adds Cmd+K kill-line functionality, following the existing patterns for text mutation operations in TextBuffer and command handling in BufferFocusTarget.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The implementation mirrors how `delete_forward` works but extends it to delete multiple characters at once. The key insight from the GOAL.md is that kill-line has two distinct behaviors:
+1. **Cursor mid-line**: Delete all characters from cursor to end of line (cursor stays put, returns `DirtyLines::Single`)
+2. **Cursor at end of line**: Delete the newline character, joining with the next line (cursor stays put, returns `DirtyLines::FromLineToEnd`)
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+This matches Emacs `C-k` behavior and the existing `delete_forward` pattern for newline handling.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/kill_line/GOAL.md)
-with references to the files that you expect to touch.
--->
+**Selection handling**: Per GOAL.md, if a selection is active, clear it first before operating from cursor. This follows Emacs semantics where `C-k` ignores the mark. The text_selection_model chunk (a sibling in the narrative) will add selection support, but our implementation should be forward-compatible — currently there's no selection to clear, but when there is, kill-line should clear it.
+
+**Testing strategy**: Following TESTING_PHILOSOPHY.md, we write tests first that verify the semantic goal (text is deleted correctly, cursor stays put, dirty lines are correct). Tests exercise boundary conditions: middle of line, start of line, end of line (joins), empty line, and end of buffer.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems are relevant. This chunk implements a standalone editing command following established patterns.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add `delete_to_line_end` tests to TextBuffer
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Write failing tests in `crates/buffer/src/text_buffer.rs` that verify the success criteria from GOAL.md:
 
-Example:
+- **Kill from middle of line**: `"hello world"` with cursor at col 5 → `"hello"`
+- **Kill from start of line**: `"hello"` with cursor at col 0 → `""`
+- **Kill at end of line** (joins next line): `"hello\nworld"` with cursor at col 5 on line 0 → `"helloworld"`
+- **Kill on empty line**: `"\n"` or `"\nfoo"` joins with next line
+- **Kill at end of buffer**: no-op, returns `DirtyLines::None`
+- **Cursor position unchanged**: same (line, col) after kill
+- **Dirty lines correct**: `Single(line)` for within-line, `FromLineToEnd(line)` when newline deleted
 
-### Step 1: Define the SegmentHeader struct
+Location: `crates/buffer/src/text_buffer.rs` (inline `#[cfg(test)]` module)
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Implement `delete_to_line_end` on TextBuffer
 
-Location: src/segment/format.rs
+Add a new method to TextBuffer that:
 
-### Step 2: Implement header serialization
+1. Calculates the current line length and cursor column
+2. If cursor is at line end:
+   - If this is the last line, return `DirtyLines::None` (no-op)
+   - Otherwise, delete the newline character (similar to `delete_forward` at line end)
+   - Update line_index via `remove_newline`
+   - Return `DirtyLines::FromLineToEnd(cursor.line)`
+3. If cursor is mid-line:
+   - Calculate `chars_to_delete = line_len - cursor.col`
+   - Call `sync_gap_to_cursor()` once
+   - Loop `chars_to_delete` times calling `buffer.delete_forward()` and `line_index.remove_char()`
+   - Return `DirtyLines::Single(cursor.line)`
+4. Cursor position does NOT change
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+The implementation reuses existing GapBuffer/LineIndex primitives. No new data structures needed.
 
-### Step 3: ...
+Location: `crates/buffer/src/text_buffer.rs`, in the `// ==================== Mutations ====================` section
 
----
+### Step 3: Add `DeleteToLineEnd` command variant
 
-**BACKREFERENCE COMMENTS**
+Add a new variant to the `Command` enum in `buffer_target.rs`:
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+/// Delete from cursor to end of line (kill-line)
+DeleteToLineEnd,
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `crates/editor/src/buffer_target.rs`
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 4: Add Cmd+K key binding in `resolve_command`
+
+Map `Key::Char('k')` with `mods.command && !mods.control` to `Command::DeleteToLineEnd`:
+
+```rust
+// Cmd+K → kill line (delete to end of line)
+Key::Char('k') if mods.command && !mods.control => Some(Command::DeleteToLineEnd),
+```
+
+Place this near other Cmd+key bindings in the match.
+
+Location: `crates/editor/src/buffer_target.rs`, in `resolve_command`
+
+### Step 5: Handle `DeleteToLineEnd` in `execute_command`
+
+Add the command execution case that:
+1. Calls `ctx.buffer.delete_to_line_end()`
+2. Marks the returned dirty region
+3. Ensures cursor visibility
+
+```rust
+Command::DeleteToLineEnd => ctx.buffer.delete_to_line_end(),
+```
+
+This follows the same pattern as `DeleteBackward` and `DeleteForward`.
+
+Location: `crates/editor/src/buffer_target.rs`, in `execute_command`
+
+### Step 6: Add integration tests for Cmd+K via BufferFocusTarget
+
+Add tests in `buffer_target.rs` that:
+- Send `KeyEvent` for Cmd+K
+- Verify buffer content after kill
+- Verify dirty region marking
+- Verify `Handled::Yes` is returned
+
+These tests follow the existing pattern in the file (e.g., `test_typing_hello`, `test_cmd_left_moves_to_line_start`).
+
+Location: `crates/editor/src/buffer_target.rs`, in `#[cfg(test)]` module
+
+### Step 7: Run tests and verify
+
+Run:
+```bash
+cargo test -p lite-edit-buffer
+cargo test -p lite-edit
+```
+
+All tests should pass. The failing tests from Step 1 should now pass after Step 2.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+This chunk has no blocking dependencies. The `created_after` frontmatter references are for ordering only — editable_buffer, glyph_rendering, metal_surface, and viewport_rendering are all complete.
 
-If there are no dependencies, delete this section.
--->
+The text_selection_model chunk (sibling in the narrative) is NOT a dependency. Kill-line operates on cursor position regardless of selection. When selection support is added later, selection should be cleared before kill-line operates, but that's forward-compatible — currently there's no selection to clear.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Selection interaction**: GOAL.md says to clear selection first if active. Currently there's no selection model, so this is a no-op. When text_selection_model is implemented, we may need to revisit to add `ctx.buffer.clear_selection()` before the kill. However, the current design is forward-compatible — we operate from cursor position, which is correct whether or not a selection exists.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Multi-character delete performance**: We loop calling `delete_forward` for each character. This is O(n) in the number of characters deleted, but each delete is O(1) in the gap buffer. For kill-line on typical line lengths (< 200 chars), this is negligible. If needed later, a batch delete could be added to GapBuffer.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- POPULATE DURING IMPLEMENTATION, not at planning time. -->
