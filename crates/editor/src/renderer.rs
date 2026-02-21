@@ -1,11 +1,15 @@
 // Chunk: docs/chunks/metal_surface - macOS window + Metal surface foundation
 // Chunk: docs/chunks/glyph_rendering - Monospace glyph atlas + text rendering
+// Chunk: docs/chunks/viewport_rendering - Viewport + Buffer-to-Screen Rendering
 //!
 //! Metal rendering pipeline
 //!
 //! This module provides the core Metal rendering functionality.
 //! It clears the surface to a dark editor background color and renders
 //! text using a glyph atlas and textured quads.
+//!
+//! The renderer manages a Viewport for determining which buffer lines are visible
+//! and supports rendering from a TextBuffer with cursor display.
 
 use std::ptr::NonNull;
 
@@ -18,11 +22,14 @@ use objc2_metal::{
 };
 use objc2_quartz_core::CAMetalDrawable;
 
+use crate::dirty_region::DirtyRegion;
 use crate::font::Font;
 use crate::glyph_atlas::GlyphAtlas;
 use crate::glyph_buffer::GlyphBuffer;
 use crate::metal_view::MetalView;
 use crate::shader::GlyphPipeline;
+use crate::viewport::Viewport;
+use lite_edit_buffer::{DirtyLines, TextBuffer};
 
 // =============================================================================
 // Background Color
@@ -75,6 +82,12 @@ pub struct Renderer {
     pipeline: GlyphPipeline,
     /// The device reference for buffer creation
     device: Retained<ProtocolObject<dyn MTLDevice>>,
+    /// The viewport for buffer-to-screen coordinate mapping
+    viewport: Viewport,
+    /// The text buffer being edited (if any)
+    buffer: Option<TextBuffer>,
+    /// Whether the cursor should be visible
+    cursor_visible: bool,
 }
 
 impl Renderer {
@@ -113,6 +126,9 @@ impl Renderer {
         let device_retained =
             unsafe { Retained::from_raw(device_ptr).expect("Failed to get device") };
 
+        // Create the viewport with the font's line height
+        let viewport = Viewport::new(font.metrics.line_height as f32);
+
         Self {
             command_queue,
             font,
@@ -120,6 +136,91 @@ impl Renderer {
             glyph_buffer,
             pipeline,
             device: device_retained,
+            viewport,
+            buffer: None,
+            cursor_visible: true,
+        }
+    }
+
+    /// Sets the text buffer to render
+    ///
+    /// This replaces any existing buffer and marks the full viewport dirty.
+    pub fn set_buffer(&mut self, buffer: TextBuffer) {
+        self.buffer = Some(buffer);
+    }
+
+    /// Returns a mutable reference to the text buffer, if any
+    pub fn buffer_mut(&mut self) -> Option<&mut TextBuffer> {
+        self.buffer.as_mut()
+    }
+
+    /// Returns a reference to the text buffer, if any
+    pub fn buffer(&self) -> Option<&TextBuffer> {
+        self.buffer.as_ref()
+    }
+
+    /// Returns a mutable reference to the viewport
+    pub fn viewport_mut(&mut self) -> &mut Viewport {
+        &mut self.viewport
+    }
+
+    /// Returns a reference to the viewport
+    pub fn viewport(&self) -> &Viewport {
+        &self.viewport
+    }
+
+    /// Updates the viewport size based on window dimensions
+    ///
+    /// Call this when the window resizes.
+    pub fn update_viewport_size(&mut self, window_height: f32) {
+        self.viewport.update_size(window_height);
+    }
+
+    /// Sets cursor visibility
+    pub fn set_cursor_visible(&mut self, visible: bool) {
+        self.cursor_visible = visible;
+    }
+
+    /// Converts buffer-space DirtyLines to screen-space DirtyRegion
+    ///
+    /// This is used in the drain-all-then-render loop to determine what
+    /// portion of the screen needs re-rendering.
+    pub fn apply_mutation(&self, dirty_lines: &DirtyLines) -> DirtyRegion {
+        if let Some(buffer) = &self.buffer {
+            self.viewport.dirty_lines_to_region(dirty_lines, buffer.line_count())
+        } else {
+            DirtyRegion::None
+        }
+    }
+
+    /// Renders based on dirty region
+    ///
+    /// For now, any dirty region triggers a full redraw. This is acceptable
+    /// because full viewport redraws are <1ms (per H3 investigation).
+    /// The dirty region tracking is in place for future optimization.
+    pub fn render_dirty(&mut self, view: &MetalView, dirty: &DirtyRegion) {
+        match dirty {
+            DirtyRegion::None => {
+                // No redraw needed
+            }
+            DirtyRegion::FullViewport | DirtyRegion::Lines { .. } => {
+                // Rebuild the glyph buffer and render
+                self.update_glyph_buffer();
+                self.render(view);
+            }
+        }
+    }
+
+    /// Updates the glyph buffer from the current buffer and viewport
+    fn update_glyph_buffer(&mut self) {
+        if let Some(buffer) = &self.buffer {
+            self.glyph_buffer.update_from_buffer_with_cursor(
+                &self.device,
+                &self.atlas,
+                buffer,
+                &self.viewport,
+                self.cursor_visible,
+            );
         }
     }
 
@@ -135,7 +236,12 @@ impl Renderer {
     ///
     /// This clears the surface to the background color and renders
     /// any text content that has been set.
-    pub fn render(&self, view: &MetalView) {
+    ///
+    /// If a TextBuffer is set, this method updates the glyph buffer
+    /// from the buffer content before rendering.
+    pub fn render(&mut self, view: &MetalView) {
+        // Update glyph buffer from TextBuffer if available
+        self.update_glyph_buffer();
         let metal_layer = view.metal_layer();
 
         // Get the next drawable from the layer

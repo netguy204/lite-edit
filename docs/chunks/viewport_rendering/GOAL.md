@@ -1,18 +1,27 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/editor/Cargo.toml
+  - crates/editor/src/dirty_region.rs
+  - crates/editor/src/viewport.rs
+  - crates/editor/src/glyph_buffer.rs
+  - crates/editor/src/renderer.rs
+  - crates/editor/src/main.rs
+  - crates/editor/tests/viewport_test.rs
+  - crates/editor/tests/smoke_test.rs
 code_references: []
 narrative: null
 investigation: editor_core_architecture
 subsystems: []
 friction_entries: []
 bug_type: null
-depends_on: ["text_buffer", "glyph_rendering"]
+depends_on:
+- text_buffer
+- glyph_rendering
 created_after: []
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

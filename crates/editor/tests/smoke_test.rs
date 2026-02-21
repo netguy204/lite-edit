@@ -1,5 +1,6 @@
 // Chunk: docs/chunks/metal_surface - macOS window + Metal surface foundation
 // Chunk: docs/chunks/glyph_rendering - Monospace glyph atlas + text rendering
+// Chunk: docs/chunks/viewport_rendering - Viewport + Buffer-to-Screen Rendering
 //!
 //! Smoke tests for the Metal surface and glyph rendering implementation
 //!
@@ -97,15 +98,23 @@ fn test_main_thread_marker() {
 /// 1. Run: `cargo run --package lite-edit`
 /// 2. A window should appear with the title "lite-edit"
 /// 3. The window should have a dark background (Catppuccin Mocha #1e1e2e)
-/// 4. You should see 20+ lines of demo code rendered in light text
+/// 4. You should see 100+ lines of demo code rendered (only visible portion)
 /// 5. Text should be legible, properly anti-aliased
 /// 6. Resizing the window should re-render correctly
 /// 7. The text should read correctly (not garbled or misaligned)
+/// 8. A cursor block should be visible at position (0, 0)
+///
+/// Viewport verification:
+/// - Only visible lines should be rendered (not all 100+)
+/// - The viewport should show lines starting from line 0
+/// - Resizing the window should adjust visible_lines count
 ///
 /// Performance validation:
 /// - Rendering should be smooth during window resize
 /// - Initial startup should be under 1 second
 /// - The window should be responsive (no lag during interaction)
+/// - Rendering 100+ line buffer should be no slower than smaller buffers
+///   (only visible lines are sent to GPU)
 #[test]
 fn test_visual_verification_notes() {
     // This test just documents the manual verification process

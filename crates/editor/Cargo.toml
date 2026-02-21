@@ -1,5 +1,6 @@
 # Chunk: docs/chunks/metal_surface - macOS window + Metal surface foundation
 # Chunk: docs/chunks/glyph_rendering - Monospace glyph atlas + text rendering
+# Chunk: docs/chunks/viewport_rendering - Viewport + Buffer-to-Screen Rendering
 
 [package]
 name = "lite-edit"
@@ -10,6 +11,9 @@ license.workspace = true
 repository = "https://github.com/example/lite-edit"
 
 [dependencies]
+# Text buffer for editing operations
+lite-edit-buffer = { path = "../buffer" }
+
 # Core Objective-C runtime bindings
 objc2 = "0.6"
 # Foundation framework (NSString, NSRunLoop, etc.)
