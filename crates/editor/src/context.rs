@@ -192,7 +192,7 @@ mod tests {
 
         // Should have scrolled and marked full viewport dirty
         assert_eq!(dirty, DirtyRegion::FullViewport);
-        assert!(viewport.scroll_offset > 0);
+        assert!(viewport.first_visible_line() > 0);
     }
 
     #[test]

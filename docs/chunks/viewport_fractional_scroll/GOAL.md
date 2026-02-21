@@ -1,11 +1,13 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: viewport_scrolling
 code_paths:
-  - crates/editor/src/viewport.rs
-  - crates/editor/src/buffer_target.rs
-  - crates/editor/src/renderer.rs
+- crates/editor/src/viewport.rs
+- crates/editor/src/buffer_target.rs
+- crates/editor/src/renderer.rs
+- crates/editor/src/glyph_buffer.rs
+- crates/editor/tests/viewport_test.rs
 code_references: []
 narrative: null
 investigation: null
@@ -13,9 +15,12 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["delete_backward_word", "fuzzy_file_matcher", "selector_rendering", "selector_widget"]
+created_after:
+- delete_backward_word
+- fuzzy_file_matcher
+- selector_rendering
+- selector_widget
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
