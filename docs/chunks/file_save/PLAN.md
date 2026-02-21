@@ -8,153 +8,289 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk completes the file I/O story by implementing file-buffer association and save functionality. The implementation builds directly on the `file_picker` chunk's `resolved_path` field and follows the project's Humble View Architecture:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Extend `EditorState`** with an `associated_file: Option<PathBuf>` field to track the current file association
+2. **Add `associate_file(path: PathBuf)` method** that loads file contents into the buffer (or leaves it empty for new files), resets cursor/scroll state, and stores the path
+3. **Consume `resolved_path`** from the file picker confirmation to trigger file association
+4. **Update window title** via `NSWindow::setTitle_` when the association changes
+5. **Handle Cmd+S** to write buffer contents to the associated file
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+Tests follow the project's TDD discipline for testable behavior (buffer replacement, cursor reset, file writing) but skip tests for platform integration (window title setting via NSWindow).
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/file_save/GOAL.md)
-with references to the files that you expect to touch.
--->
-
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+The implementation uses `std::fs::read_to_string` with `String::from_utf8_lossy` for UTF-8 file reading (replacing invalid bytes with U+FFFD) and `std::fs::write` for saving.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add `associated_file` field to `EditorState`
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add the field specified in the success criteria:
 
-Example:
-
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+// In editor_state.rs, in EditorState struct
+/// The file currently associated with the buffer (if any).
+/// When `Some`, this is the path that Cmd+S writes to.
+pub associated_file: Option<PathBuf>,
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Initialize to `None` in `EditorState::new()` and `EditorState::empty()`.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Location: `crates/editor/src/editor_state.rs`
+
+Write tests for:
+- Initial `associated_file` is `None`
+
+### Step 2: Implement `associate_file(path: PathBuf)` method
+
+Add method to `EditorState` that:
+
+1. If the file at `path` exists:
+   - Read its contents using `std::fs::read()` (returns `Vec<u8>`)
+   - Convert to UTF-8 using `String::from_utf8_lossy()` (replaces invalid bytes with `\u{FFFD}`)
+   - Replace the buffer with `TextBuffer::from_str(&contents)`
+   - Reset cursor to `(0, 0)` via `buffer.set_cursor(Position::new(0, 0))`
+   - Reset viewport scroll offset to 0 via `viewport.scroll_to(0, line_count)`
+2. If the file does not exist:
+   - Leave the buffer as-is (empty for new files created by file picker)
+3. Store `path` in `associated_file`
+4. Mark `DirtyRegion::FullViewport`
+
+```rust
+// In editor_state.rs
+// Chunk: docs/chunks/file_save - File-buffer association and Cmd+S save
+pub fn associate_file(&mut self, path: PathBuf) {
+    if path.exists() {
+        // Read file contents with UTF-8 lossy conversion
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                let contents = String::from_utf8_lossy(&bytes);
+                self.buffer = TextBuffer::from_str(&contents);
+                self.buffer.set_cursor(lite_edit_buffer::Position::new(0, 0));
+                let line_count = self.buffer.line_count();
+                self.viewport.scroll_to(0, line_count);
+            }
+            Err(_) => {
+                // Silently ignore read errors (out of scope for this chunk)
+            }
+        }
+    }
+    // For non-existent files, leave buffer as-is (file picker already created empty file)
+
+    self.associated_file = Some(path);
+    self.dirty_region.merge(DirtyRegion::FullViewport);
+}
+```
+
+Location: `crates/editor/src/editor_state.rs`
+
+Write tests for:
+- `associate_file` with an existing file: buffer content matches file, cursor at `(0, 0)`
+- `associate_file` with an existing file: `associated_file` is `Some(path)`
+- `associate_file` with a non-existent path: buffer unchanged
+- `associate_file` with a non-existent path: `associated_file` is `Some(path)`
+- `associate_file` resets scroll offset to 0
+
+### Step 3: Consume `resolved_path` after file picker confirmation
+
+Modify the file picker confirmation handling to call `associate_file()`:
+
+In `EditorState::handle_selector_confirm()`, after storing `resolved_path` and before calling `close_selector()`:
+1. Take the resolved path: `let path = self.resolved_path.take().unwrap();`
+2. Call `self.associate_file(path);`
+3. Re-store in `resolved_path` if needed for debugging (or just leave it as `None`)
+
+Actually, looking more closely at the flow: the file picker stores `resolved_path`, then closes. The `file_save` chunk should consume this immediately after the picker closes. Let's modify to call `associate_file` right after setting `resolved_path`:
+
+```rust
+// In handle_selector_confirm, after setting resolved_path:
+self.resolved_path = Some(resolved.clone());
+
+// Immediately associate the file with the buffer
+self.associate_file(resolved);
+```
+
+Location: `crates/editor/src/editor_state.rs`
+
+Write tests for:
+- After file picker confirmation, buffer contains file contents (for existing file)
+- After file picker confirmation with new file, buffer remains empty
+- After file picker confirmation, `associated_file` is set
+
+### Step 4: Add Cmd+S handler for file save
+
+Modify `EditorState::handle_key()` to intercept Cmd+S before delegating:
+
+```rust
+// In handle_key, within the Cmd+!Ctrl block:
+if let Key::Char('s') = event.key {
+    self.save_file();
+    return;
+}
+```
+
+Implement `save_file()` method:
+
+```rust
+// Chunk: docs/chunks/file_save - File-buffer association and Cmd+S save
+fn save_file(&mut self) {
+    let path = match &self.associated_file {
+        Some(p) => p.clone(),
+        None => return, // No file associated - no-op
+    };
+
+    let content = self.buffer.content();
+    let _ = std::fs::write(&path, content.as_bytes());
+    // Silently ignore write errors (out of scope for this chunk)
+
+    // Cmd+S does NOT mark dirty (buffer unchanged visually)
+}
+```
+
+Location: `crates/editor/src/editor_state.rs`
+
+Write tests for:
+- Cmd+S with `associated_file == None`: no-op, buffer unchanged
+- Cmd+S with `associated_file == Some(path)`: file on disk contains buffer content
+- Cmd+S does not modify the buffer
+- Cmd+S does not move the cursor
+- Cmd+S does not mark dirty region
+
+### Step 5: Update window title on file association
+
+The window title update requires access to the `NSWindow`, which is owned by `AppDelegate` in `main.rs`. We need a mechanism to notify `main.rs` when the associated file changes.
+
+**Approach**: Add a `window_title_needs_update: bool` flag to `EditorState` that `associate_file()` sets to `true`. Then in `EditorController::render_if_dirty()`, check this flag and update the window title.
+
+However, a cleaner approach is to have `EditorController` check the current `associated_file` path and derive the title directly. Add a method `EditorState::window_title() -> &str` that returns:
+- The filename (last path component) if `associated_file.is_some()`
+- `"Untitled"` if `associated_file.is_none()`
+
+```rust
+// In editor_state.rs
+/// Returns the window title based on the current file association.
+/// Returns the filename if a file is associated, or "Untitled" otherwise.
+pub fn window_title(&self) -> String {
+    match &self.associated_file {
+        Some(path) => path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("Untitled")
+            .to_string(),
+        None => "Untitled".to_string(),
+    }
+}
+```
+
+Then in `main.rs`, track the previous title and update when changed:
+
+```rust
+// In EditorController
+fn update_window_title_if_needed(&mut self, window: &NSWindow) {
+    let new_title = self.state.window_title();
+    // Use objc2 to set the title
+    window.setTitle(&NSString::from_str(&new_title));
+}
+```
+
+This requires passing the window reference to `EditorController`. Currently `EditorController` holds `metal_view` but not `window`. We'll need to either:
+1. Store a reference to the window in `EditorController`
+2. Access the window via `metal_view.window()`
+
+Option 2 is cleaner - `NSView` has a `window` method that returns the window it's attached to.
+
+Location: `crates/editor/src/editor_state.rs` and `crates/editor/src/main.rs`
+
+Write tests for:
+- `window_title()` returns "Untitled" when no file associated
+- `window_title()` returns filename when file is associated
+
+### Step 6: Wire window title update in main.rs
+
+Modify `EditorController` to track window title state and update when needed:
+
+1. Add `last_window_title: String` field to `EditorController`
+2. In `render_if_dirty()`, check if `state.window_title()` differs from `last_window_title`
+3. If different, get the window via `metal_view.window()` and call `setTitle`
+4. Store the new title in `last_window_title`
+
+```rust
+// In EditorController::render_if_dirty or a new method:
+fn update_window_title_if_needed(&mut self) {
+    let current_title = self.state.window_title();
+    if current_title != self.last_window_title {
+        // Get window from metal_view
+        if let Some(window) = self.metal_view.window() {
+            window.setTitle(&NSString::from_str(&current_title));
+        }
+        self.last_window_title = current_title;
+    }
+}
+```
+
+Note: Need to check the objc2 API for `NSView::window()` and `NSWindow::setTitle_`.
+
+Location: `crates/editor/src/main.rs`
+
+No tests (platform integration).
+
+### Step 7: Add module-level backreference comment
+
+Add the chunk backreference comment at the top of `editor_state.rs`:
+
+```rust
+// Chunk: docs/chunks/file_save - File-buffer association and Cmd+S save
+```
+
+Location: `crates/editor/src/editor_state.rs` (add to existing chunk comments)
+
+### Step 8: Update code_paths in GOAL.md
+
+Update the `code_paths` field in the chunk's GOAL.md frontmatter with the files modified:
+
+```yaml
+code_paths:
+  - crates/editor/src/editor_state.rs
+  - crates/editor/src/main.rs
+```
+
+Location: `docs/chunks/file_save/GOAL.md`
+
+### Step 9: Manual smoke test
+
+Verify the following by running the application:
+
+1. Open app - window title should be "lite-edit" (or "Untitled" after our change)
+2. Press Cmd+P, select an existing file, press Enter
+3. Verify buffer shows file contents
+4. Verify window title shows filename
+5. Verify cursor is at (0, 0)
+6. Edit the buffer (add some text)
+7. Press Cmd+S
+8. Re-open the same file (Cmd+P, select it) or verify via external tool that changes were saved
+9. Press Cmd+P, type a new filename, press Enter
+10. Verify buffer is empty (new file)
+11. Verify window title shows the new filename
+12. Type some content, press Cmd+S
+13. Verify the new file exists on disk with the content
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+This chunk depends on:
+- `file_picker` - Provides the `resolved_path` field and file picker UI
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **UTF-8 handling**: Using `String::from_utf8_lossy` replaces invalid UTF-8 bytes with U+FFFD. This is intentional per the success criteria but may cause confusion for users editing binary files. Future work could detect binary files and refuse to open them.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **File read/write errors**: Currently silently ignored. This is acceptable for the MVP but should be improved in a future chunk with error reporting UI.
+
+3. **Large file performance**: Loading a very large file will freeze the UI while reading. Consider async file loading in a future chunk.
+
+4. **File encoding**: We assume UTF-8 encoding. Files with other encodings (UTF-16, Latin-1, etc.) will be mangled. Future work could detect encoding.
+
+5. **Window reference**: We need to access `NSWindow` from `EditorController` to set the title. Using `metal_view.window()` should work, but need to verify the objc2 API.
+
+6. **Initial window title**: The current app shows "lite-edit" as the initial title. We'll change this to "Untitled" when no file is associated, which is a slight behavior change.
 
 ## Deviations
 

@@ -1,18 +1,22 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/editor/src/editor_state.rs
+  - crates/editor/src/main.rs
 code_references: []
 narrative: file_buffer_association
 investigation: null
 subsystems: []
 friction_entries: []
 bug_type: null
-depends_on: ["file_picker"]
-created_after: ["delete_to_line_start", "ibeam_cursor"]
+depends_on:
+- file_picker
+created_after:
+- delete_to_line_start
+- ibeam_cursor
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

@@ -3,6 +3,7 @@
 // Chunk: docs/chunks/viewport_scrolling - Scroll event handling
 // Chunk: docs/chunks/quit_command - Cmd+Q quit flag and key interception
 // Chunk: docs/chunks/file_picker - File picker (Cmd+P) integration
+// Chunk: docs/chunks/file_save - File-buffer association and Cmd+S save
 //!
 //! Editor state container.
 //!
@@ -81,6 +82,9 @@ pub struct EditorState {
     /// The resolved path from the last selector confirmation
     /// (consumed by file_save chunk for buffer association)
     pub resolved_path: Option<PathBuf>,
+    /// The file currently associated with the buffer (if any).
+    /// When `Some`, this is the path that Cmd+S writes to.
+    pub associated_file: Option<PathBuf>,
 }
 
 impl EditorState {
@@ -107,6 +111,7 @@ impl EditorState {
             file_index: None,
             last_cache_version: 0,
             resolved_path: None,
+            associated_file: None,
         }
     }
 
@@ -162,6 +167,12 @@ impl EditorState {
             // Cmd+P (without Ctrl) toggles file picker
             if let Key::Char('p') = event.key {
                 self.handle_cmd_p();
+                return;
+            }
+
+            // Cmd+S (without Ctrl) saves the current file
+            if let Key::Char('s') = event.key {
+                self.save_file();
                 return;
             }
         }
@@ -295,7 +306,10 @@ impl EditorState {
         }
 
         // Store the resolved path for file_save chunk to consume
-        self.resolved_path = Some(resolved);
+        self.resolved_path = Some(resolved.clone());
+
+        // Immediately associate the file with the buffer
+        self.associate_file(resolved);
 
         // Close the selector
         self.close_selector();
@@ -582,6 +596,77 @@ impl EditorState {
     /// Marks the full viewport as dirty (e.g., after buffer replacement).
     pub fn mark_full_dirty(&mut self) {
         self.dirty_region = DirtyRegion::FullViewport;
+    }
+
+    // =========================================================================
+    // File Association (Chunk: docs/chunks/file_save)
+    // =========================================================================
+
+    /// Associates a file path with the current buffer.
+    ///
+    /// If the file at `path` exists:
+    /// - Reads its contents as UTF-8 (with lossy conversion for invalid bytes)
+    /// - Replaces the buffer with those contents
+    /// - Resets cursor to (0, 0)
+    /// - Resets viewport scroll offset to 0
+    ///
+    /// If the file does not exist (newly created by file picker):
+    /// - Leaves the buffer as-is
+    ///
+    /// In both cases:
+    /// - Stores `path` in `associated_file`
+    /// - Marks `DirtyRegion::FullViewport`
+    pub fn associate_file(&mut self, path: PathBuf) {
+        if path.exists() {
+            // Read file contents with UTF-8 lossy conversion
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    let contents = String::from_utf8_lossy(&bytes);
+                    self.buffer = TextBuffer::from_str(&contents);
+                    self.buffer.set_cursor(lite_edit_buffer::Position::new(0, 0));
+                    let line_count = self.buffer.line_count();
+                    self.viewport.scroll_to(0, line_count);
+                }
+                Err(_) => {
+                    // Silently ignore read errors (out of scope for this chunk)
+                }
+            }
+        }
+        // For non-existent files, leave buffer as-is (file picker already created empty file)
+
+        self.associated_file = Some(path);
+        self.dirty_region.merge(DirtyRegion::FullViewport);
+    }
+
+    /// Returns the window title based on the current file association.
+    ///
+    /// Returns the filename if a file is associated, or "Untitled" otherwise.
+    pub fn window_title(&self) -> String {
+        match &self.associated_file {
+            Some(path) => path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("Untitled")
+                .to_string(),
+            None => "Untitled".to_string(),
+        }
+    }
+
+    /// Saves the buffer content to the associated file.
+    ///
+    /// If no file is associated, this is a no-op.
+    /// On write error, this silently fails (error reporting is out of scope).
+    fn save_file(&mut self) {
+        let path = match &self.associated_file {
+            Some(p) => p.clone(),
+            None => return, // No file associated - no-op
+        };
+
+        let content = self.buffer.content();
+        let _ = std::fs::write(&path, content.as_bytes());
+        // Silently ignore write errors (out of scope for this chunk)
+
+        // Cmd+S does NOT mark dirty (buffer unchanged visually)
     }
 }
 
@@ -1168,5 +1253,416 @@ mod tests {
         // Second tick immediately - should return None (no change)
         let dirty = state.tick_picker();
         assert!(!dirty.is_dirty());
+    }
+
+    // =========================================================================
+    // File Association Tests (Chunk: docs/chunks/file_save)
+    // =========================================================================
+
+    #[test]
+    fn test_initial_associated_file_is_none() {
+        let state = EditorState::empty(test_font_metrics());
+        assert!(state.associated_file.is_none());
+    }
+
+    #[test]
+    fn test_associate_file_with_existing_file_loads_content() {
+        use std::io::Write;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Create a temporary file with content
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_associate_file.txt");
+        {
+            let mut f = std::fs::File::create(&temp_file).unwrap();
+            f.write_all(b"Hello, world!\nLine two\n").unwrap();
+        }
+
+        state.associate_file(temp_file.clone());
+
+        // Buffer should contain the file content
+        assert_eq!(state.buffer.content(), "Hello, world!\nLine two\n");
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn test_associate_file_with_existing_file_sets_cursor_to_origin() {
+        use std::io::Write;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Type some content and move cursor
+        state.handle_key(KeyEvent::char('a'));
+        state.handle_key(KeyEvent::char('b'));
+        assert_eq!(state.buffer.cursor_position().col, 2);
+
+        // Create a temporary file
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_associate_cursor.txt");
+        {
+            let mut f = std::fs::File::create(&temp_file).unwrap();
+            f.write_all(b"Content here").unwrap();
+        }
+
+        state.associate_file(temp_file.clone());
+
+        // Cursor should be at (0, 0)
+        assert_eq!(state.buffer.cursor_position().line, 0);
+        assert_eq!(state.buffer.cursor_position().col, 0);
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn test_associate_file_with_existing_file_sets_associated_file() {
+        use std::io::Write;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Create a temporary file
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_associate_path.txt");
+        {
+            let mut f = std::fs::File::create(&temp_file).unwrap();
+            f.write_all(b"Content").unwrap();
+        }
+
+        state.associate_file(temp_file.clone());
+
+        // associated_file should be Some(path)
+        assert_eq!(state.associated_file, Some(temp_file.clone()));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn test_associate_file_with_nonexistent_path_keeps_buffer() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Type some content
+        state.handle_key(KeyEvent::char('a'));
+        state.handle_key(KeyEvent::char('b'));
+        assert_eq!(state.buffer.content(), "ab");
+
+        // Associate with a non-existent file
+        let nonexistent_path = PathBuf::from("/nonexistent/path/to/file.txt");
+        state.associate_file(nonexistent_path.clone());
+
+        // Buffer should be unchanged
+        assert_eq!(state.buffer.content(), "ab");
+    }
+
+    #[test]
+    fn test_associate_file_with_nonexistent_path_sets_associated_file() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        let nonexistent_path = PathBuf::from("/nonexistent/path/to/file.txt");
+        state.associate_file(nonexistent_path.clone());
+
+        // associated_file should be Some(path)
+        assert_eq!(state.associated_file, Some(nonexistent_path));
+    }
+
+    #[test]
+    fn test_associate_file_resets_scroll_offset() {
+        use std::io::Write;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0); // 10 visible lines
+
+        // Manually set scroll offset
+        state.viewport.scroll_to(10, 100);
+        assert_eq!(state.viewport.scroll_offset, 10);
+
+        // Create a temporary file
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_scroll_reset.txt");
+        {
+            let mut f = std::fs::File::create(&temp_file).unwrap();
+            f.write_all(b"Line 1\n").unwrap();
+        }
+
+        state.associate_file(temp_file.clone());
+
+        // Scroll offset should be reset to 0
+        assert_eq!(state.viewport.scroll_offset, 0);
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn test_associate_file_marks_full_viewport_dirty() {
+        use std::io::Write;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Clear any existing dirty region
+        let _ = state.take_dirty_region();
+        assert!(!state.is_dirty());
+
+        // Create a temporary file
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_dirty_viewport.txt");
+        {
+            let mut f = std::fs::File::create(&temp_file).unwrap();
+            f.write_all(b"Content").unwrap();
+        }
+
+        state.associate_file(temp_file.clone());
+
+        // Should be dirty after association
+        assert!(state.is_dirty());
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    // =========================================================================
+    // Window Title Tests (Chunk: docs/chunks/file_save)
+    // =========================================================================
+
+    #[test]
+    fn test_window_title_returns_untitled_when_no_file() {
+        let state = EditorState::empty(test_font_metrics());
+        assert_eq!(state.window_title(), "Untitled");
+    }
+
+    #[test]
+    fn test_window_title_returns_filename_when_file_associated() {
+        let mut state = EditorState::empty(test_font_metrics());
+
+        let path = PathBuf::from("/some/path/to/myfile.rs");
+        state.associated_file = Some(path);
+
+        assert_eq!(state.window_title(), "myfile.rs");
+    }
+
+    #[test]
+    fn test_window_title_returns_filename_for_nested_path() {
+        let mut state = EditorState::empty(test_font_metrics());
+
+        let path = PathBuf::from("/Users/btaylor/Projects/lite-edit/src/main.rs");
+        state.associated_file = Some(path);
+
+        assert_eq!(state.window_title(), "main.rs");
+    }
+
+    // =========================================================================
+    // Cmd+S Save Tests (Chunk: docs/chunks/file_save)
+    // =========================================================================
+
+    #[test]
+    fn test_cmd_s_with_no_associated_file_is_noop() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Type some content
+        state.handle_key(KeyEvent::char('a'));
+        state.handle_key(KeyEvent::char('b'));
+
+        // Clear dirty region
+        let _ = state.take_dirty_region();
+
+        // Press Cmd+S
+        let cmd_s = KeyEvent::new(
+            Key::Char('s'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_s);
+
+        // Buffer should be unchanged
+        assert_eq!(state.buffer.content(), "ab");
+    }
+
+    #[test]
+    fn test_cmd_s_writes_to_file() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Create a temporary file
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_cmd_s_save.txt");
+
+        // Set up the associated file
+        state.associated_file = Some(temp_file.clone());
+
+        // Type some content
+        state.handle_key(KeyEvent::char('H'));
+        state.handle_key(KeyEvent::char('i'));
+        state.handle_key(KeyEvent::char('!'));
+
+        // Press Cmd+S
+        let cmd_s = KeyEvent::new(
+            Key::Char('s'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_s);
+
+        // File should contain the buffer content
+        let file_content = std::fs::read_to_string(&temp_file).unwrap();
+        assert_eq!(file_content, "Hi!");
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn test_cmd_s_does_not_modify_buffer() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Create a temporary file
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_cmd_s_no_modify.txt");
+
+        state.associated_file = Some(temp_file.clone());
+
+        // Type content
+        state.handle_key(KeyEvent::char('a'));
+        state.handle_key(KeyEvent::char('b'));
+
+        let content_before = state.buffer.content();
+
+        // Press Cmd+S
+        let cmd_s = KeyEvent::new(
+            Key::Char('s'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_s);
+
+        // Buffer content should be unchanged
+        assert_eq!(state.buffer.content(), content_before);
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn test_cmd_s_does_not_move_cursor() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Create a temporary file
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_cmd_s_cursor.txt");
+
+        state.associated_file = Some(temp_file.clone());
+
+        // Type content
+        state.handle_key(KeyEvent::char('a'));
+        state.handle_key(KeyEvent::char('b'));
+        state.handle_key(KeyEvent::char('c'));
+
+        let cursor_before = state.buffer.cursor_position();
+
+        // Press Cmd+S
+        let cmd_s = KeyEvent::new(
+            Key::Char('s'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_s);
+
+        // Cursor should be unchanged
+        assert_eq!(state.buffer.cursor_position(), cursor_before);
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn test_cmd_s_does_not_mark_dirty() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Create a temporary file
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_cmd_s_dirty.txt");
+
+        state.associated_file = Some(temp_file.clone());
+
+        // Type content
+        state.handle_key(KeyEvent::char('a'));
+
+        // Clear dirty region
+        let _ = state.take_dirty_region();
+        assert!(!state.is_dirty());
+
+        // Press Cmd+S
+        let cmd_s = KeyEvent::new(
+            Key::Char('s'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_s);
+
+        // Should NOT be dirty after Cmd+S
+        assert!(!state.is_dirty());
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn test_cmd_s_does_not_insert_s() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Buffer should be empty
+        assert!(state.buffer.is_empty());
+
+        // Press Cmd+S
+        let cmd_s = KeyEvent::new(
+            Key::Char('s'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_s);
+
+        // Buffer should still be empty (no 's' inserted)
+        assert!(state.buffer.is_empty());
+    }
+
+    #[test]
+    fn test_ctrl_s_does_not_save() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Ctrl+S should NOT trigger save (different binding)
+        // It should pass through to buffer and potentially insert
+        let ctrl_s = KeyEvent::new(
+            Key::Char('s'),
+            Modifiers {
+                control: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(ctrl_s);
+
+        // No file associated, so nothing should crash
+        // (we just verify it doesn't trigger save behavior)
+        assert!(state.associated_file.is_none());
     }
 }

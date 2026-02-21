@@ -6,6 +6,7 @@
 // Chunk: docs/chunks/mouse_click_cursor - Mouse click cursor positioning
 // Chunk: docs/chunks/viewport_scrolling - Scroll event handling
 // Chunk: docs/chunks/quit_command - Cmd+Q app termination handling
+// Chunk: docs/chunks/file_save - File-buffer association and Cmd+S save
 //!
 //! lite-edit: A lightweight, GPU-accelerated text editor for macOS
 //!
@@ -55,7 +56,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect,
-    NSRunLoop, NSSize, NSTimer,
+    NSRunLoop, NSSize, NSString, NSTimer,
 };
 
 use lite_edit_buffer::TextBuffer;
@@ -180,6 +181,8 @@ struct EditorController {
     state: EditorState,
     renderer: Renderer,
     metal_view: Retained<MetalView>,
+    /// Last window title that was set, to avoid redundant updates
+    last_window_title: String,
 }
 
 impl EditorController {
@@ -188,6 +191,7 @@ impl EditorController {
             state,
             renderer,
             metal_view,
+            last_window_title: String::new(),
         }
     }
 
@@ -255,6 +259,9 @@ impl EditorController {
 
     /// Renders if there's a dirty region.
     fn render_if_dirty(&mut self) {
+        // Update window title if needed (even if not rendering)
+        self.update_window_title_if_needed();
+
         if self.state.is_dirty() {
             // Update renderer state from editor state
             self.renderer.set_cursor_visible(self.state.cursor_visible);
@@ -279,6 +286,21 @@ impl EditorController {
                 // Normal render when selector is not active
                 self.renderer.render(&self.metal_view);
             }
+        }
+    }
+
+    /// Updates the window title if it has changed.
+    ///
+    /// Compares the current `state.window_title()` with `last_window_title`.
+    /// If different, updates the NSWindow title and caches the new value.
+    fn update_window_title_if_needed(&mut self) {
+        let current_title = self.state.window_title();
+        if current_title != self.last_window_title {
+            // Get window from metal_view and update title
+            if let Some(window) = self.metal_view.window() {
+                window.setTitle(&NSString::from_str(&current_title));
+            }
+            self.last_window_title = current_title;
         }
     }
 
