@@ -1,19 +1,39 @@
 ---
-status: FUTURE
+status: ACTIVE
 ticket: null
 parent_chunk: null
-code_paths: []
-code_references: []
+code_paths:
+  - crates/editor/src/clipboard.rs
+  - crates/editor/src/buffer_target.rs
+  - crates/editor/src/main.rs
+code_references:
+  - ref: crates/editor/src/clipboard.rs#copy_to_clipboard
+    implements: "Writes text to macOS system clipboard via NSPasteboard"
+  - ref: crates/editor/src/clipboard.rs#paste_from_clipboard
+    implements: "Reads text from macOS system clipboard via NSPasteboard"
+  - ref: crates/editor/src/buffer_target.rs#Command::SelectAll
+    implements: "SelectAll command enum variant for Cmd+A"
+  - ref: crates/editor/src/buffer_target.rs#Command::Copy
+    implements: "Copy command enum variant for Cmd+C"
+  - ref: crates/editor/src/buffer_target.rs#Command::Paste
+    implements: "Paste command enum variant for Cmd+V"
+  - ref: crates/editor/src/buffer_target.rs#resolve_command
+    implements: "Key binding resolution for Cmd+A/C/V to clipboard commands"
+  - ref: crates/editor/src/buffer_target.rs#BufferFocusTarget::execute_command
+    implements: "Clipboard command execution (select_all, copy, paste)"
 narrative: editor_qol_interactions
 investigation: null
 subsystems: []
 friction_entries: []
 bug_type: null
 depends_on:
-  - text_selection_model
-created_after: ["editable_buffer", "glyph_rendering", "metal_surface", "viewport_rendering"]
+- text_selection_model
+created_after:
+- editable_buffer
+- glyph_rendering
+- metal_surface
+- viewport_rendering
 ---
-
 # Clipboard Operations: Cmd+A, Cmd+C, Cmd+V
 
 ## Minor Goal
