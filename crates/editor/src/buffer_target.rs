@@ -40,6 +40,7 @@ enum Command {
     // Chunk: docs/chunks/kill_line - Delete from cursor to end of line (Ctrl+K)
     /// Delete from cursor to end of line (kill-line)
     DeleteToLineEnd,
+    // Chunk: docs/chunks/delete_to_line_start - Cmd+Backspace command variant
     /// Delete from cursor to start of line (Cmd+Backspace)
     DeleteToLineStart,
     /// Move cursor left by one character
@@ -111,6 +112,7 @@ fn resolve_command(event: &KeyEvent) -> Option<Command> {
         // Tab
         Key::Tab if !mods.command && !mods.control => Some(Command::InsertTab),
 
+        // Chunk: docs/chunks/delete_to_line_start - Cmd+Backspace key binding
         // Cmd+Backspace → delete to line start
         Key::Backspace if mods.command && !mods.control => Some(Command::DeleteToLineStart),
 
@@ -206,9 +208,8 @@ fn resolve_command(event: &KeyEvent) -> Option<Command> {
         // Ctrl+E → end of line (Emacs-style)
         Key::Char('e') if mods.control && !mods.command => Some(Command::MoveToLineEnd),
 
-        // Chunk: docs/chunks/kill_line - Ctrl+K key binding
+        // Chunk: docs/chunks/kill_line - Ctrl+K key binding resolution to DeleteToLineEnd
         // Ctrl+K → kill line (delete to end of line)
-        // Chunk: docs/chunks/kill_line - Ctrl+K key binding resolution
         Key::Char('k') if mods.control && !mods.command => Some(Command::DeleteToLineEnd),
 
         // Unhandled
@@ -243,6 +244,7 @@ impl BufferFocusTarget {
             Command::DeleteForwardWord => ctx.buffer.delete_forward_word(),
             // Chunk: docs/chunks/kill_line - Execute DeleteToLineEnd command
             Command::DeleteToLineEnd => ctx.buffer.delete_to_line_end(),
+            // Chunk: docs/chunks/delete_to_line_start - Execute DeleteToLineStart command
             Command::DeleteToLineStart => ctx.buffer.delete_to_line_start(),
             Command::MoveLeft => {
                 ctx.buffer.move_left();

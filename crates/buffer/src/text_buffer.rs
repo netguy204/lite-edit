@@ -831,6 +831,7 @@ impl TextBuffer {
         }
     }
 
+    // Chunk: docs/chunks/delete_to_line_start - Delete from cursor to line start
     /// Deletes all characters from the cursor to the start of the current line.
     ///
     /// This implements Cmd+Backspace (macOS standard) behavior:
