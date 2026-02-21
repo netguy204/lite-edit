@@ -314,6 +314,18 @@ define_class!(
                 controller.borrow_mut().handle_resize();
             }
         }
+
+        #[unsafe(method(windowDidChangeBackingProperties:))]
+        fn window_did_change_backing_properties(&self, _notification: &NSNotification) {
+            // Fires when the window moves between displays with different
+            // scale factors (e.g., Retina ↔ non-Retina). The MetalView's
+            // viewDidChangeBackingProperties updates the drawable size;
+            // we need to re-calculate the viewport and re-render.
+            let controller_ref = self.ivars().controller.borrow();
+            if let Some(controller) = controller_ref.as_ref() {
+                controller.borrow_mut().handle_resize();
+            }
+        }
     }
 );
 
@@ -352,6 +364,17 @@ impl AppDelegate {
         // Create the Metal-backed view
         let metal_view = MetalView::new(mtm, content_rect);
 
+        // Attach the view to the window BEFORE creating the renderer.
+        // The renderer needs the correct scale factor to rasterize the font
+        // and glyph atlas at native resolution (e.g., 2x on Retina).
+        window.setContentView(Some(&metal_view));
+
+        // viewDidChangeBackingProperties may not fire synchronously during
+        // setContentView. Explicitly sync the scale factor, contentsScale,
+        // and drawable size from the window so the renderer sees the correct
+        // values when it creates the font and atlas.
+        metal_view.sync_backing_properties();
+
         // Create the renderer
         let mut renderer = Renderer::new(&metal_view);
 
@@ -388,9 +411,6 @@ impl AppDelegate {
         metal_view.set_key_handler(move |event| {
             key_controller.borrow_mut().handle_key(event);
         });
-
-        // Set the Metal view as the window's content view
-        window.setContentView(Some(&metal_view));
 
         // Make the view first responder to receive key events
         window.makeFirstResponder(Some(&metal_view));
