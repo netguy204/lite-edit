@@ -1,19 +1,41 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
-code_references: []
+code_paths:
+  - crates/editor/src/buffer_target.rs
+code_references:
+  - ref: crates/editor/src/buffer_target.rs#Command::SelectLeft
+    implements: "Selection extension command for Shift+Left arrow key"
+  - ref: crates/editor/src/buffer_target.rs#Command::SelectRight
+    implements: "Selection extension command for Shift+Right arrow key"
+  - ref: crates/editor/src/buffer_target.rs#Command::SelectUp
+    implements: "Selection extension command for Shift+Up arrow key"
+  - ref: crates/editor/src/buffer_target.rs#Command::SelectDown
+    implements: "Selection extension command for Shift+Down arrow key"
+  - ref: crates/editor/src/buffer_target.rs#Command::SelectToLineStart
+    implements: "Selection extension command for Shift+Home or Shift+Cmd+Left"
+  - ref: crates/editor/src/buffer_target.rs#Command::SelectToLineEnd
+    implements: "Selection extension command for Shift+End or Shift+Cmd+Right"
+  - ref: crates/editor/src/buffer_target.rs#Command::SelectToBufferStart
+    implements: "Selection extension command for Shift+Cmd+Up"
+  - ref: crates/editor/src/buffer_target.rs#Command::SelectToBufferEnd
+    implements: "Selection extension command for Shift+Cmd+Down"
+  - ref: crates/editor/src/buffer_target.rs#BufferFocusTarget::extend_selection_with_move
+    implements: "Helper method that preserves selection anchor across movement operations"
 narrative: editor_qol_interactions
 investigation: null
 subsystems: []
 friction_entries: []
 bug_type: null
 depends_on:
-  - text_selection_model
-created_after: ["editable_buffer", "glyph_rendering", "metal_surface", "viewport_rendering"]
+- text_selection_model
+created_after:
+- editable_buffer
+- glyph_rendering
+- metal_surface
+- viewport_rendering
 ---
-
 # Shift+Arrow Key Selection
 
 ## Minor Goal
