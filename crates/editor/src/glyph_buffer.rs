@@ -360,13 +360,14 @@ impl GlyphBuffer {
         if cursor_visible {
             let cursor_pos = buffer.cursor_position();
             if let Some(screen_line) = viewport.buffer_line_to_screen_line(cursor_pos.line) {
-                // Render cursor as a block cursor using a solid rectangle
-                // We'll use the space glyph's dimensions for sizing
-                if let Some(space_glyph) = atlas.get_glyph(' ') {
+                // Render cursor as a block cursor using the solid (fully opaque)
+                // atlas region so the fragment shader produces a visible quad.
+                {
+                    let solid_glyph = atlas.solid_glyph();
                     let cursor_quad = self.create_cursor_quad(
                         screen_line,
                         cursor_pos.col,
-                        space_glyph,
+                        solid_glyph,
                     );
                     vertices.extend_from_slice(&cursor_quad);
 

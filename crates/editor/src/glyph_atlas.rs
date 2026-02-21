@@ -121,6 +121,11 @@ impl GlyphAtlas {
             atlas.add_glyph(font, c);
         }
 
+        // Add a solid white cell (used for cursor and other solid-color quads).
+        // We store it under the non-printable '\x01' so it never collides with
+        // real characters.
+        atlas.add_solid_cell();
+
         atlas
     }
 
@@ -137,6 +142,17 @@ impl GlyphAtlas {
     /// Returns the cell dimensions used for glyph storage
     pub fn cell_dimensions(&self) -> (usize, usize) {
         (self.cell_width, self.cell_height)
+    }
+
+    /// Returns glyph info for a solid (fully opaque) white region in the atlas.
+    ///
+    /// This is used for rendering solid-colored quads like the cursor, where
+    /// we need atlas alpha = 1.0 everywhere so the fragment shader's
+    /// `text_color.a * alpha` produces a fully opaque result.
+    pub fn solid_glyph(&self) -> &GlyphInfo {
+        self.glyphs
+            .get(&'\x01')
+            .expect("solid glyph must be present in atlas")
     }
 
     /// Adds a glyph to the atlas
@@ -232,6 +248,70 @@ impl GlyphAtlas {
         self.row_height = self.row_height.max(glyph_height);
 
         true
+    }
+
+    /// Adds a fully opaque (white) cell to the atlas.
+    ///
+    /// This provides a solid UV region that the cursor and other non-glyph
+    /// quads can sample from, ensuring atlas alpha = 1.0.
+    fn add_solid_cell(&mut self) {
+        let glyph_width = self.cell_width;
+        let glyph_height = self.cell_height;
+
+        // Advance to next row if needed
+        if self.cursor_x + glyph_width + self.padding > ATLAS_SIZE {
+            self.cursor_x = 0;
+            self.cursor_y += self.row_height + self.padding;
+            self.row_height = 0;
+        }
+
+        // Fill a cell-sized bitmap with 0xFF (fully opaque white)
+        let bitmap = vec![0xFFu8; glyph_width * glyph_height];
+
+        let region = MTLRegion {
+            origin: objc2_metal::MTLOrigin {
+                x: self.cursor_x,
+                y: self.cursor_y,
+                z: 0,
+            },
+            size: objc2_metal::MTLSize {
+                width: glyph_width,
+                height: glyph_height,
+                depth: 1,
+            },
+        };
+
+        let bytes_ptr = NonNull::new(bitmap.as_ptr() as *mut std::ffi::c_void)
+            .expect("bitmap pointer should not be null");
+
+        unsafe {
+            self.texture
+                .replaceRegion_mipmapLevel_withBytes_bytesPerRow(region, 0, bytes_ptr, glyph_width);
+        }
+
+        let atlas_size = ATLAS_SIZE as f32;
+        let uv_min = (
+            self.cursor_x as f32 / atlas_size,
+            self.cursor_y as f32 / atlas_size,
+        );
+        let uv_max = (
+            (self.cursor_x + glyph_width) as f32 / atlas_size,
+            (self.cursor_y + glyph_height) as f32 / atlas_size,
+        );
+
+        let info = GlyphInfo {
+            uv_min,
+            uv_max,
+            width: glyph_width as f32,
+            height: glyph_height as f32,
+            bearing_x: 0.0,
+            bearing_y: 0.0,
+        };
+
+        self.glyphs.insert('\x01', info);
+
+        self.cursor_x += glyph_width + self.padding;
+        self.row_height = self.row_height.max(glyph_height);
     }
 
     /// Rasterizes a single glyph into an R8 bitmap

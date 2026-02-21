@@ -154,6 +154,12 @@ impl LineIndex {
             *start -= 1;
         }
     }
+
+    /// Returns the raw line_starts array (for debug validation).
+    #[cfg(any(debug_assertions, test))]
+    pub fn line_starts(&self) -> &[usize] {
+        &self.line_starts
+    }
 }
 
 impl Default for LineIndex {

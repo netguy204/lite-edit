@@ -97,6 +97,10 @@ impl GapBuffer {
     }
 
     /// Ensures the gap is at least the specified size.
+    ///
+    /// Grows the gap in place so that the gap position is preserved.
+    /// This is critical: callers (e.g., `insert`) rely on the gap staying
+    /// where `move_gap_to` left it.
     fn ensure_gap(&mut self, min_size: usize) {
         if self.gap_len() >= min_size {
             return;
@@ -107,13 +111,25 @@ impl GapBuffer {
         let needed = min_size - current_gap;
         let growth = needed.max(self.data.len() * GAP_GROWTH_FACTOR);
 
-        // Move gap to end for simpler reallocation
-        self.move_gap_to(self.len());
+        // Grow in place: insert `growth` new slots at gap_end,
+        // shifting the post-gap content right.
+        let old_gap_end = self.gap_end;
+        let old_len = self.data.len();
+        let post_gap_len = old_len - old_gap_end;
 
-        // Extend the buffer
-        let new_size = self.data.len() + growth;
+        // Extend the backing store
+        let new_size = old_len + growth;
         self.data.resize(new_size, '\0');
-        self.gap_end = new_size;
+
+        // Shift post-gap content to the end of the new buffer
+        // (copy from old position to new position, back-to-front safe via copy_within)
+        if post_gap_len > 0 {
+            let new_post_gap_start = new_size - post_gap_len;
+            self.data.copy_within(old_gap_end..old_len, new_post_gap_start);
+        }
+
+        // Update gap_end — gap_start stays the same
+        self.gap_end = new_size - post_gap_len;
     }
 
     /// Inserts a character at the current gap position.

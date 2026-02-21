@@ -301,3 +301,114 @@ fn test_inserting_at_various_buffer_positions() {
     buf.insert_char('x');
     assert_eq!(buf.content(), "lmxn");
 }
+
+/// Regression test: navigate to a blank line and type.
+///
+/// Repro of reported bug where typing on an empty line caused text to appear
+/// on the line below the cursor.
+#[test]
+fn test_type_on_blank_line_after_many_edits() {
+    // Start with content that has a blank line (like the demo buffer)
+    let mut buf = TextBuffer::from_str("}\n\nimpl LiteEdit {");
+    // line 0: "}"
+    // line 1: "" (blank)
+    // line 2: "impl LiteEdit {"
+
+    // Simulate typing several lines at the beginning (like the user did)
+    // Cursor starts at (0, 0)
+    for ch in "bam boom bam".chars() {
+        buf.insert_char(ch);
+    }
+    buf.insert_char('\n'); // Enter
+    buf.insert_char('\n'); // Enter (blank line)
+    for ch in "wish this was real".chars() {
+        buf.insert_char(ch);
+    }
+    buf.insert_char('\n'); // Enter
+    buf.insert_char('\n'); // Enter (blank line)
+    for ch in "maybe too long".chars() {
+        buf.insert_char(ch);
+    }
+    buf.insert_char('\n'); // Enter
+
+    // Now navigate DOWN to the blank line between "}" and "impl LiteEdit {"
+    // First, figure out which line that is by searching for it
+    let line_count = buf.line_count();
+    let mut blank_line = None;
+    for i in 0..line_count {
+        if buf.line_content(i) == "}" {
+            // The blank line should be i+1
+            if i + 1 < line_count && buf.line_content(i + 1).is_empty() {
+                blank_line = Some(i + 1);
+                break;
+            }
+        }
+    }
+    let blank_line = blank_line.expect("should find blank line after '}'");
+
+    // Navigate there with move_down (like the user did with arrow keys)
+    buf.set_cursor(Position::new(0, 0));
+    for _ in 0..blank_line {
+        buf.move_down();
+    }
+    assert_eq!(buf.cursor_position().line, blank_line);
+    assert_eq!(buf.cursor_position().col, 0);
+    assert_eq!(buf.line_content(blank_line), "");
+
+    // NOW TYPE on the blank line — this is where the bug was reported
+    let impl_line = blank_line + 1;
+    let impl_content_before = buf.line_content(impl_line);
+    assert_eq!(impl_content_before, "impl LiteEdit {");
+
+    for ch in "hello from blank".chars() {
+        buf.insert_char(ch);
+    }
+
+    // CRITICAL: text must appear on the blank line, NOT on the impl line
+    assert_eq!(
+        buf.line_content(blank_line),
+        "hello from blank",
+        "Text should appear on the blank line (line {}), not below it",
+        blank_line
+    );
+    assert_eq!(
+        buf.line_content(impl_line),
+        "impl LiteEdit {",
+        "impl line (line {}) should be unchanged",
+        impl_line
+    );
+    assert_eq!(
+        buf.cursor_position(),
+        Position::new(blank_line, 16),
+        "Cursor should be at end of typed text on the blank line"
+    );
+}
+
+/// Validates line_index consistency after a complex sequence matching
+/// the user's reported editing pattern.
+#[test]
+fn test_line_index_consistency_after_mixed_edits() {
+    let mut buf = TextBuffer::from_str("}\n\nimpl LiteEdit {\n    pub fn new() -> Self {\n    }\n}");
+
+    // Type at the beginning
+    for ch in "first line\n\nsecond line\n".chars() {
+        buf.insert_char(ch);
+    }
+
+    // Navigate to every line and verify content matches a fresh rebuild
+    let content = buf.content();
+    let fresh = TextBuffer::from_str(&content);
+
+    assert_eq!(buf.line_count(), fresh.line_count(),
+        "Line count mismatch after edits");
+    for i in 0..buf.line_count() {
+        assert_eq!(
+            buf.line_content(i),
+            fresh.line_content(i),
+            "Line {} content mismatch:\n  incremental: {:?}\n  from_str:    {:?}",
+            i,
+            buf.line_content(i),
+            fresh.line_content(i),
+        );
+    }
+}

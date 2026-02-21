@@ -25,6 +25,9 @@ pub struct TextBuffer {
     buffer: GapBuffer,
     line_index: LineIndex,
     cursor: Position,
+    /// Mutation counter for sampling debug assertions (debug builds only).
+    #[cfg(debug_assertions)]
+    debug_mutation_count: u64,
 }
 
 impl TextBuffer {
@@ -34,6 +37,8 @@ impl TextBuffer {
             buffer: GapBuffer::new(),
             line_index: LineIndex::new(),
             cursor: Position::default(),
+            #[cfg(debug_assertions)]
+            debug_mutation_count: 0,
         }
     }
 
@@ -51,6 +56,8 @@ impl TextBuffer {
             buffer,
             line_index,
             cursor: Position::default(),
+            #[cfg(debug_assertions)]
+            debug_mutation_count: 0,
         }
     }
 
@@ -201,6 +208,37 @@ impl TextBuffer {
         self.cursor = Position::new(line, col);
     }
 
+    // ==================== Validation ====================
+
+    /// Debug assertion: verifies that the incremental line_index matches
+    /// a fresh rebuild from the buffer content.
+    ///
+    /// This catches cumulative drift between incremental updates
+    /// (insert_char, insert_newline, remove_char, remove_newline) and
+    /// the ground truth. Compiled out in release builds.
+    ///
+    /// Uses a mutation counter so the O(n) rebuild doesn't tank perf
+    /// in tight loops — checks every 64th mutation.
+    #[cfg(debug_assertions)]
+    fn assert_line_index_consistent(&mut self) {
+        self.debug_mutation_count += 1;
+        if self.debug_mutation_count % 64 != 0 {
+            return;
+        }
+        let mut expected = LineIndex::new();
+        expected.rebuild(self.buffer.chars());
+        let actual = self.line_index.line_starts();
+        let expected_starts = expected.line_starts();
+        assert_eq!(
+            actual, expected_starts,
+            "line_index drift detected after {} mutations!\n  cursor: {:?}\n  buffer len: {}\n  actual line_starts:   {:?}\n  expected line_starts: {:?}",
+            self.debug_mutation_count, self.cursor, self.buffer.len(), actual, expected_starts,
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn assert_line_index_consistent(&mut self) {}
+
     // ==================== Mutations ====================
 
     /// Ensures the gap buffer's gap is at the cursor position.
@@ -224,6 +262,7 @@ impl TextBuffer {
         let dirty_line = self.cursor.line;
         self.cursor.col += 1;
 
+        self.assert_line_index_consistent();
         DirtyLines::Single(dirty_line)
     }
 
@@ -243,6 +282,7 @@ impl TextBuffer {
         self.cursor.line += 1;
         self.cursor.col = 0;
 
+        self.assert_line_index_consistent();
         DirtyLines::FromLineToEnd(dirty_from)
     }
 
@@ -274,6 +314,7 @@ impl TextBuffer {
             self.cursor.line = prev_line;
             self.cursor.col = prev_line_len;
 
+            self.assert_line_index_consistent();
             DirtyLines::FromLineToEnd(prev_line)
         } else {
             // Delete a regular character within the line
@@ -285,6 +326,7 @@ impl TextBuffer {
             self.line_index.remove_char(self.cursor.line);
             self.cursor.col -= 1;
 
+            self.assert_line_index_consistent();
             DirtyLines::Single(self.cursor.line)
         }
     }
@@ -315,6 +357,7 @@ impl TextBuffer {
             self.line_index.remove_newline(self.cursor.line);
 
             // Cursor stays in place
+            self.assert_line_index_consistent();
             DirtyLines::FromLineToEnd(self.cursor.line)
         } else {
             // Delete a regular character within the line
@@ -326,6 +369,7 @@ impl TextBuffer {
             self.line_index.remove_char(self.cursor.line);
 
             // Cursor stays in place
+            self.assert_line_index_consistent();
             DirtyLines::Single(self.cursor.line)
         }
     }
