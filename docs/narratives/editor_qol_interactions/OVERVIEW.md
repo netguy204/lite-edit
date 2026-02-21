@@ -15,7 +15,7 @@ proposed_chunks:
     chunk_directory: mouse_drag_selection
     depends_on: [0, 2]
   - prompt: "Add selection rendering: highlight selected text with a background color in the renderer. When a selection exists, draw colored quads behind the selected character cells before drawing the glyphs."
-    chunk_directory: selection_rendering
+    chunk_directory: text_selection_rendering
     depends_on: [2]
   - prompt: "Add Cmd+A to select entire buffer, Cmd+C to copy selection to macOS pasteboard, and Cmd+V to paste from macOS pasteboard at cursor (replacing selection if active). Requires interfacing with NSPasteboard for clipboard access."
     chunk_directory: clipboard_operations
