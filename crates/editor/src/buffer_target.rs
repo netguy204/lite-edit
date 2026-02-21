@@ -44,6 +44,13 @@ enum Command {
     MoveToBufferEnd,
     /// Insert a tab character
     InsertTab,
+    // Chunk: docs/chunks/clipboard_operations - Clipboard command variants
+    /// Select the entire buffer (Cmd+A)
+    SelectAll,
+    /// Copy selection to clipboard (Cmd+C)
+    Copy,
+    /// Paste from clipboard at cursor (Cmd+V)
+    Paste,
 }
 
 /// Resolves a key event to a command.
@@ -89,6 +96,16 @@ fn resolve_command(event: &KeyEvent) -> Option<Command> {
 
         // Cmd+Down → end of buffer
         Key::Down if mods.command => Some(Command::MoveToBufferEnd),
+
+        // Chunk: docs/chunks/clipboard_operations - Clipboard key bindings
+        // Cmd+A → select all (must come before Ctrl+A)
+        Key::Char('a') if mods.command && !mods.control => Some(Command::SelectAll),
+
+        // Cmd+C → copy selection to clipboard
+        Key::Char('c') if mods.command && !mods.control => Some(Command::Copy),
+
+        // Cmd+V → paste from clipboard
+        Key::Char('v') if mods.command && !mods.control => Some(Command::Paste),
 
         // Ctrl+A → start of line (Emacs-style)
         Key::Char('a') if mods.control && !mods.command => Some(Command::MoveToLineStart),
@@ -171,6 +188,29 @@ impl BufferFocusTarget {
                 ctx.buffer.move_to_buffer_end();
                 ctx.mark_cursor_dirty();
                 ctx.ensure_cursor_visible();
+                return;
+            }
+            // Chunk: docs/chunks/clipboard_operations - Clipboard command execution
+            Command::SelectAll => {
+                ctx.buffer.select_all();
+                // Mark full viewport dirty since all visible lines now have selection highlight
+                ctx.dirty_region.merge(crate::dirty_region::DirtyRegion::FullViewport);
+                return;
+            }
+            Command::Copy => {
+                // Get selected text; no-op if no selection
+                if let Some(text) = ctx.buffer.selected_text() {
+                    crate::clipboard::copy_to_clipboard(&text);
+                }
+                // Do not modify buffer or clear selection (standard copy behavior)
+                return;
+            }
+            Command::Paste => {
+                if let Some(text) = crate::clipboard::paste_from_clipboard() {
+                    let dirty = ctx.buffer.insert_str(&text);
+                    ctx.mark_dirty(dirty);
+                    ctx.ensure_cursor_visible();
+                }
                 return;
             }
         };
@@ -659,5 +699,201 @@ mod tests {
 
         assert_eq!(buffer.content(), "");
         assert_eq!(buffer.cursor_position(), Position::new(0, 0));
+    }
+
+    // ==================== Clipboard Operations Tests ====================
+    // Chunk: docs/chunks/clipboard_operations - Tests for Cmd+A, Cmd+C, Cmd+V
+
+    #[test]
+    fn test_cmd_a_resolves_to_select_all() {
+        let event = KeyEvent::new(
+            Key::Char('a'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(resolve_command(&event), Some(Command::SelectAll));
+    }
+
+    #[test]
+    fn test_cmd_c_resolves_to_copy() {
+        let event = KeyEvent::new(
+            Key::Char('c'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(resolve_command(&event), Some(Command::Copy));
+    }
+
+    #[test]
+    fn test_cmd_v_resolves_to_paste() {
+        let event = KeyEvent::new(
+            Key::Char('v'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(resolve_command(&event), Some(Command::Paste));
+    }
+
+    #[test]
+    fn test_cmd_a_vs_ctrl_a_precedence() {
+        // Cmd+A should be SelectAll, not MoveToLineStart
+        let cmd_a = KeyEvent::new(
+            Key::Char('a'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(resolve_command(&cmd_a), Some(Command::SelectAll));
+
+        // Ctrl+A should still be MoveToLineStart
+        let ctrl_a = KeyEvent::new(
+            Key::Char('a'),
+            Modifiers {
+                control: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(resolve_command(&ctrl_a), Some(Command::MoveToLineStart));
+    }
+
+    #[test]
+    fn test_cmd_a_selects_entire_buffer() {
+        let mut buffer = TextBuffer::from_str("hello\nworld");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let event = KeyEvent::new(
+                Key::Char('a'),
+                Modifiers {
+                    command: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert!(buffer.has_selection());
+        assert_eq!(buffer.selected_text(), Some("hello\nworld".to_string()));
+        assert_eq!(dirty, DirtyRegion::FullViewport);
+    }
+
+    #[test]
+    fn test_cmd_c_with_no_selection_is_noop() {
+        let mut buffer = TextBuffer::from_str("hello");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Ensure no selection
+        assert!(!buffer.has_selection());
+
+        let result = {
+            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let event = KeyEvent::new(
+                Key::Char('c'),
+                Modifiers {
+                    command: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx)
+        };
+
+        assert_eq!(result, Handled::Yes); // Command was recognized
+        // Buffer unchanged, no dirty region
+        assert_eq!(buffer.content(), "hello");
+        assert_eq!(dirty, DirtyRegion::None);
+    }
+
+    #[test]
+    fn test_cmd_a_then_type_replaces_selection() {
+        // Test that Cmd+A selects all, then typing replaces the selection
+        let mut buffer = TextBuffer::from_str("hello");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+
+            // Cmd+A to select all
+            let select_all = KeyEvent::new(
+                Key::Char('a'),
+                Modifiers {
+                    command: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(select_all, &mut ctx);
+
+            // Type 'X' to replace the selection
+            target.handle_key(KeyEvent::char('X'), &mut ctx);
+        }
+
+        assert_eq!(buffer.content(), "X");
+        assert!(!buffer.has_selection());
+    }
+
+    #[test]
+    fn test_cmd_c_preserves_selection() {
+        // Copy should not clear the selection
+        let mut buffer = TextBuffer::from_str("hello");
+        buffer.set_selection_anchor(lite_edit_buffer::Position::new(0, 0));
+        buffer.set_cursor(lite_edit_buffer::Position::new(0, 5));
+        // Manually set anchor without clearing (workaround since set_cursor clears)
+        buffer.set_selection_anchor(lite_edit_buffer::Position::new(0, 0));
+
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Verify we have a selection first
+        // Need to do this differently since set_cursor clears selection
+        {
+            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            // Select all first
+            let select_all = KeyEvent::new(
+                Key::Char('a'),
+                Modifiers {
+                    command: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(select_all, &mut ctx);
+        }
+
+        assert!(buffer.has_selection());
+        dirty = DirtyRegion::None; // Reset dirty
+
+        {
+            let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+            let copy = KeyEvent::new(
+                Key::Char('c'),
+                Modifiers {
+                    command: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(copy, &mut ctx);
+        }
+
+        // Selection should still be present after copy
+        assert!(buffer.has_selection());
+        // No dirty region since copy doesn't modify the buffer
+        assert_eq!(dirty, DirtyRegion::None);
     }
 }

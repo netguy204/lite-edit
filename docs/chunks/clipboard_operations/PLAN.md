@@ -1,177 +1,283 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk adds Cmd+A (select-all), Cmd+C (copy), and Cmd+V (paste) operations that integrate with the macOS system clipboard. The implementation follows the existing command resolution pattern established in `buffer_target.rs` and creates a small, focused clipboard module for NSPasteboard integration.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**High-level strategy:**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. **Clipboard module**: Create `crates/editor/src/clipboard.rs` with two functions that wrap NSPasteboard Objective-C calls using the `objc2-app-kit` bindings already present in Cargo.toml.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/clipboard_operations/GOAL.md)
-with references to the files that you expect to touch.
--->
+2. **Command enum extension**: Add `SelectAll`, `Copy`, and `Paste` variants to the `Command` enum in `buffer_target.rs`.
+
+3. **Key resolution**: Add match arms in `resolve_command` to map:
+   - `Cmd+A` → `SelectAll`
+   - `Cmd+C` → `Copy`
+   - `Cmd+V` → `Paste`
+
+4. **Command execution**: Implement the commands in `execute_command`:
+   - `SelectAll` calls `buffer.select_all()` and marks full viewport dirty
+   - `Copy` calls `buffer.selected_text()` and writes to clipboard (no-op if no selection)
+   - `Paste` reads from clipboard and calls `buffer.insert_str()` (which handles selection replacement)
+
+**Key design decisions:**
+- Clipboard operations are **side effects** called directly from `execute_command`, not mediated through `EditorContext`. This matches the GOAL.md guidance.
+- The clipboard module is a thin FFI wrapper with no business logic - all complexity stays in `BufferFocusTarget`.
+- Tests verify command resolution and buffer state changes; clipboard FFI is not unit-tested per the testing philosophy's "humble object" pattern.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems exist yet in this project. This chunk does not introduce cross-cutting patterns that would warrant a new subsystem - the clipboard module is a small, isolated FFI wrapper.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Create clipboard module with NSPasteboard FFI
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create `crates/editor/src/clipboard.rs` with two public functions:
 
-Example:
+```rust
+/// Writes text to the macOS general pasteboard.
+pub fn copy_to_clipboard(text: &str)
 
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+/// Reads text from the macOS general pasteboard.
+pub fn paste_from_clipboard() -> Option<String>
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+**Implementation details:**
+- Use `objc2_app_kit::NSPasteboard::generalPasteboard()` to get the shared pasteboard
+- For `copy_to_clipboard`:
+  1. Call `clearContents()` to clear existing content
+  2. Create an `NSString` from the Rust `&str`
+  3. Call `setString_forType(string, NSPasteboardTypeString)` to write the string
+- For `paste_from_clipboard`:
+  1. Call `stringForType(NSPasteboardTypeString)` to read
+  2. Convert the `Option<Retained<NSString>>` to `Option<String>`
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+**Reference patterns:** See `metal_view.rs` for how `objc2` crates are used in this project.
+
+Location: `crates/editor/src/clipboard.rs`
+
+Add `pub mod clipboard;` to `crates/editor/src/main.rs` (or lib.rs if it exists).
+
+### Step 2: Add SelectAll, Copy, Paste commands to Command enum
+
+In `crates/editor/src/buffer_target.rs`, add three new variants to the `Command` enum:
+
+```rust
+enum Command {
+    // ... existing variants ...
+    /// Select the entire buffer
+    SelectAll,
+    /// Copy selection to clipboard
+    Copy,
+    /// Paste from clipboard at cursor
+    Paste,
+}
+```
+
+Location: `crates/editor/src/buffer_target.rs`
+
+### Step 3: Add key resolution for Cmd+A, Cmd+C, Cmd+V
+
+In the `resolve_command` function in `buffer_target.rs`, add match arms for the new commands. These must be placed **before** the Ctrl+A match arm to ensure correct precedence:
+
+```rust
+// Cmd+A → select all (must come before Ctrl+A)
+Key::Char('a') if mods.command && !mods.control => Some(Command::SelectAll),
+
+// Cmd+C → copy
+Key::Char('c') if mods.command && !mods.control => Some(Command::Copy),
+
+// Cmd+V → paste
+Key::Char('v') if mods.command && !mods.control => Some(Command::Paste),
+```
+
+Note: The existing `Ctrl+A` match arm (`Key::Char('a') if mods.control && !mods.command`) already excludes `Cmd+A`, so no conflict exists. However, placing `Cmd` variants first is clearer and future-proof.
+
+Location: `crates/editor/src/buffer_target.rs`
+
+### Step 4: Implement SelectAll command execution
+
+In the `execute_command` method of `BufferFocusTarget`, add handling for `Command::SelectAll`:
+
+```rust
+Command::SelectAll => {
+    ctx.buffer.select_all();
+    // Mark full viewport dirty since all visible lines now have selection highlight
+    ctx.dirty_region.merge(DirtyRegion::FullViewport);
+    return;
+}
+```
+
+The `buffer.select_all()` method already exists from the `text_selection_model` chunk.
+
+Location: `crates/editor/src/buffer_target.rs`
+
+### Step 5: Implement Copy command execution
+
+Add handling for `Command::Copy`:
+
+```rust
+Command::Copy => {
+    // Get selected text; no-op if no selection
+    if let Some(text) = ctx.buffer.selected_text() {
+        crate::clipboard::copy_to_clipboard(&text);
+    }
+    // Do not modify buffer or clear selection (standard copy behavior)
+    return;
+}
+```
+
+Note: Copy does not return dirty lines - it's a read-only operation on the buffer.
+
+Location: `crates/editor/src/buffer_target.rs`
+
+### Step 6: Implement Paste command execution
+
+Add handling for `Command::Paste`:
+
+```rust
+Command::Paste => {
+    if let Some(text) = crate::clipboard::paste_from_clipboard() {
+        let dirty = ctx.buffer.insert_str(&text);
+        ctx.mark_dirty(dirty);
+        ctx.ensure_cursor_visible();
+    }
+    return;
+}
+```
+
+The `buffer.insert_str()` method (from `text_selection_model` chunk) already:
+1. Deletes any active selection first
+2. Inserts the string at the cursor
+3. Returns appropriate `DirtyLines`
+
+Location: `crates/editor/src/buffer_target.rs`
+
+### Step 7: Write unit tests for command resolution
+
+Add tests to verify that `resolve_command` correctly maps the new key combinations:
+
+```rust
+#[test]
+fn test_cmd_a_resolves_to_select_all() {
+    let event = KeyEvent::new(Key::Char('a'), Modifiers { command: true, ..Default::default() });
+    assert_eq!(resolve_command(&event), Some(Command::SelectAll));
+}
+
+#[test]
+fn test_cmd_c_resolves_to_copy() {
+    let event = KeyEvent::new(Key::Char('c'), Modifiers { command: true, ..Default::default() });
+    assert_eq!(resolve_command(&event), Some(Command::Copy));
+}
+
+#[test]
+fn test_cmd_v_resolves_to_paste() {
+    let event = KeyEvent::new(Key::Char('v'), Modifiers { command: true, ..Default::default() });
+    assert_eq!(resolve_command(&event), Some(Command::Paste));
+}
+
+#[test]
+fn test_cmd_a_vs_ctrl_a_precedence() {
+    // Cmd+A should be SelectAll, not MoveToLineStart
+    let cmd_a = KeyEvent::new(Key::Char('a'), Modifiers { command: true, ..Default::default() });
+    assert_eq!(resolve_command(&cmd_a), Some(Command::SelectAll));
+
+    // Ctrl+A should still be MoveToLineStart
+    let ctrl_a = KeyEvent::new(Key::Char('a'), Modifiers { control: true, ..Default::default() });
+    assert_eq!(resolve_command(&ctrl_a), Some(Command::MoveToLineStart));
+}
+```
+
+Location: `crates/editor/src/buffer_target.rs` (tests module)
+
+### Step 8: Write integration tests for clipboard operations through BufferFocusTarget
+
+Add tests that verify the full pipeline from key event to buffer state:
+
+```rust
+#[test]
+fn test_cmd_a_selects_entire_buffer() {
+    let mut buffer = TextBuffer::from_str("hello\nworld");
+    let mut viewport = Viewport::new(16.0);
+    viewport.update_size(160.0);
+    let mut dirty = DirtyRegion::None;
+    let mut target = BufferFocusTarget::new();
+
+    {
+        let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+        let event = KeyEvent::new(Key::Char('a'), Modifiers { command: true, ..Default::default() });
+        target.handle_key(event, &mut ctx);
+    }
+
+    assert!(buffer.has_selection());
+    assert_eq!(buffer.selected_text(), Some("hello\nworld".to_string()));
+    assert_eq!(dirty, DirtyRegion::FullViewport);
+}
+
+#[test]
+fn test_cmd_c_with_no_selection_is_noop() {
+    let mut buffer = TextBuffer::from_str("hello");
+    let mut viewport = Viewport::new(16.0);
+    viewport.update_size(160.0);
+    let mut dirty = DirtyRegion::None;
+    let mut target = BufferFocusTarget::new();
+
+    // Ensure no selection
+    assert!(!buffer.has_selection());
+
+    {
+        let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+        let event = KeyEvent::new(Key::Char('c'), Modifiers { command: true, ..Default::default() });
+        let handled = target.handle_key(event, &mut ctx);
+        assert_eq!(handled, Handled::Yes); // Command was recognized
+    }
+
+    // Buffer unchanged, no dirty region
+    assert_eq!(buffer.content(), "hello");
+    assert_eq!(dirty, DirtyRegion::None);
+}
+```
+
+Note: Testing actual clipboard content would require calling the clipboard FFI functions, which is not appropriate for unit tests. The clipboard module is a "humble object" and is tested only via manual verification.
+
+Location: `crates/editor/src/buffer_target.rs` (tests module)
+
+### Step 9: Update GOAL.md code_paths
+
+Update the `code_paths` field in `docs/chunks/clipboard_operations/GOAL.md` to reference the files touched:
+
+```yaml
+code_paths:
+  - crates/editor/src/clipboard.rs
+  - crates/editor/src/buffer_target.rs
+  - crates/editor/src/main.rs
+```
+
+Location: `docs/chunks/clipboard_operations/GOAL.md`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+**Chunk dependencies:**
+- `text_selection_model` (ACTIVE): Provides `buffer.select_all()`, `buffer.selected_text()`, and `buffer.insert_str()` with selection-aware behavior. This chunk depends on these methods being implemented.
 
-If there are no dependencies, delete this section.
--->
+**External dependencies:**
+- `objc2-app-kit` crate: Already in `Cargo.toml` - provides `NSPasteboard` bindings
+- `objc2-foundation` crate: Already in `Cargo.toml` - provides `NSString` bindings
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+**Risks:**
+1. **NSPasteboard API usage**: The `objc2-app-kit` bindings for NSPasteboard may not exactly match the expected API. If `NSPasteboard::generalPasteboard()` or `setString_forType` methods don't exist with those exact names, we'll need to check the crate documentation or use lower-level `msg_send!` macros.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Thread safety**: NSPasteboard must be accessed from the main thread (which is guaranteed since this is called from key event handlers), but the API may have additional requirements around pasteboard change counts or ownership.
+
+3. **Empty paste behavior**: If the clipboard contains non-text data (e.g., an image), `paste_from_clipboard()` should return `None` and the paste command should be a no-op. Need to verify `stringForType` returns `None` in this case.
+
+**Mitigations:**
+- Step 1 (clipboard module) should be implemented first and tested manually before integrating with the command system.
+- If the bindings are problematic, fall back to raw `msg_send!` calls as used in `metal_view.rs`.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+*To be populated during implementation.*

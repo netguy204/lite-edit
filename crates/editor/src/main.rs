@@ -18,6 +18,7 @@
 //! renders of events ahead of it in the batch.
 
 mod buffer_target;
+mod clipboard;
 mod context;
 mod dirty_region;
 mod editor_state;
