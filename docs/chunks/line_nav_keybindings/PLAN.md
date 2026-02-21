@@ -8,170 +8,119 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk addresses a bug in the macOS NSEvent-to-KeyEvent conversion pipeline and verifies the existing Home/End keybinding support works end-to-end.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**The Core Problem:**
+In `MetalView::convert_key` (crates/editor/src/metal_view.rs), when the Control modifier is held, macOS's `event.characters()` returns the *interpreted* control character rather than the underlying key. For example:
+- Ctrl+A → `characters()` returns `\x01` (SOH control character)
+- Ctrl+E → `characters()` returns `\x05` (ENQ control character)
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+The current code filters out control characters with `ch.is_control()` returning `None`, so **Ctrl+A and Ctrl+E are silently dropped** before reaching `resolve_command` in `buffer_target.rs`.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/line_nav_keybindings/GOAL.md)
-with references to the files that you expect to touch.
--->
+**The Fix:**
+When the Control modifier is active, use `charactersIgnoringModifiers` instead of `characters`. This returns the unmodified base character ('a', 'e', etc.) regardless of what control character macOS would normally produce. This ensures we produce `KeyEvent { key: Key::Char('a'), modifiers: Modifiers { control: true, .. } }` which `resolve_command` already maps to `MoveToLineStart`.
 
-## Subsystem Considerations
+**What Already Works:**
+- Home/End keys use key codes (`0x73`, `0x77`) which are handled in the keycode match before we ever call `characters()` — these should work today.
+- `resolve_command` correctly maps:
+  - `Key::Home` → `MoveToLineStart`
+  - `Key::End` → `MoveToLineEnd`
+  - `Key::Char('a') + control` → `MoveToLineStart`
+  - `Key::Char('e') + control` → `MoveToLineEnd`
+- `TextBuffer::move_to_line_start` and `move_to_line_end` are implemented.
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+**Testing Strategy:**
+Per TESTING_PHILOSOPHY.md, we test behavior at the `BufferFocusTarget::handle_key` level with synthetic `KeyEvent` inputs — this is the "update" function in our humble view architecture and is pure Rust without platform dependencies. The existing tests `test_ctrl_a_moves_to_line_start` and `test_ctrl_e_moves_to_line_end` verify this level. The fix in `convert_key` is platform code (humble object) that we verify works manually since it requires real NSEvent objects.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+<!-- No subsystems exist yet in this project. -->
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Fix `convert_key` to use `charactersIgnoringModifiers` for Control-modified keys
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Location: `crates/editor/src/metal_view.rs`, in `MetalView::convert_key`
 
-Example:
+Modify the character-key handling logic:
+1. After checking key codes for special keys (Return, Tab, etc.), before calling `event.characters()`:
+2. Check if the Control modifier is active using `event.modifierFlags().contains(NSEventModifierFlags::Control)`
+3. If Control is active, call `event.charactersIgnoringModifiers()` instead of `event.characters()`
+4. This returns the base character ('a', 'e', etc.) instead of the control character (`\x01`, `\x05`)
 
-### Step 1: Define the SegmentHeader struct
+The change is localized to the character-key handling section (after the keycode match, in the fallback to `characters()`).
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+**Implementation detail:** `charactersIgnoringModifiers` is available on NSEvent. We may need to add a binding if objc2-app-kit doesn't expose it — check the objc2 crate documentation. Worst case, use `msg_send!` to call it directly.
 
-Location: src/segment/format.rs
+### Step 2: Verify existing tests pass for Ctrl+A and Ctrl+E
 
-### Step 2: Implement header serialization
+Location: `crates/editor/src/buffer_target.rs`
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+The tests `test_ctrl_a_moves_to_line_start` and `test_ctrl_e_moves_to_line_end` already exist and test at the `BufferFocusTarget::handle_key` level with synthetic `KeyEvent` inputs. Run these tests to confirm:
+- They construct `KeyEvent::new(Key::Char('a'), Modifiers { control: true, .. })`
+- They call `target.handle_key(event, &mut ctx)`
+- They assert the cursor moved to line start/end
 
-### Step 3: ...
+Run: `cargo test --package lite-edit-editor -p lite-edit-editor`
 
----
+### Step 3: Add tests for Home and End keys at the BufferFocusTarget level
 
-**BACKREFERENCE COMMENTS**
+Location: `crates/editor/src/buffer_target.rs`
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+Add two new tests to verify the command resolver correctly maps Home/End keys:
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+```rust
+#[test]
+fn test_home_moves_to_line_start() {
+    // Similar setup to test_ctrl_a_moves_to_line_start
+    // Send KeyEvent::new(Key::Home, Modifiers::default())
+    // Assert cursor is at column 0
+}
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+#[test]
+fn test_end_moves_to_line_end() {
+    // Similar setup to test_ctrl_e_moves_to_line_end
+    // Send KeyEvent::new(Key::End, Modifiers::default())
+    // Assert cursor is at line end
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+These tests verify the resolve_command → execute_command pipeline for Home/End.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 4: Verify no regressions in regular typing
+
+Run the full test suite to ensure the change to `convert_key` doesn't break normal typing (characters without Control held should still work):
+
+```bash
+cargo test --package lite-edit-editor
+cargo test --package lite-edit-buffer
+```
+
+Key tests that exercise typing: `test_typing_hello`, `test_typing_then_backspace`, `test_insert_at_empty_buffer`, etc.
+
+### Step 5: Manual verification (platform code)
+
+Since the `convert_key` fix is platform code (humble object), verify manually:
+1. Build and run the editor: `cargo run`
+2. Type some text to verify normal typing works
+3. Press Home → cursor should jump to line start
+4. Press End → cursor should jump to line end
+5. Press Ctrl+A → cursor should jump to line start
+6. Press Ctrl+E → cursor should jump to line end
+7. Verify typing still works after using these keybindings (no regression)
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **editable_buffer** (complete): Provides `TextBuffer::move_to_line_start`, `move_to_line_end`, and the `BufferFocusTarget` focus target
+- **metal_surface** (complete): Provides the `MetalView` with `convert_key` that we're fixing
+- **objc2-app-kit**: External crate for NSEvent API — need to verify `charactersIgnoringModifiers` is available or use `msg_send!`
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **`charactersIgnoringModifiers` availability**: The objc2-app-kit crate may or may not expose this method. If not, we'll need to use `msg_send!` to call it directly. This is a minor implementation detail.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Other Control-modified keys**: This fix will also enable other Ctrl+key combinations to reach `resolve_command`. Currently, only Ctrl+A and Ctrl+E are mapped — other combinations will return `None` from `resolve_command` and be ignored (via `Handled::No`). This is the correct behavior.
+
+- **Option key interactions**: The Option key on macOS also modifies `characters()` output (e.g., Option+E produces `´` for accent input). This chunk doesn't address Option-key handling — that's a separate concern for dead-key/accent input.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- Populate during implementation -->
