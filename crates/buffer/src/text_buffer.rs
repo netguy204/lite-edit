@@ -925,6 +925,7 @@ impl TextBuffer {
         self.accumulate_dirty(DirtyLines::Single(current_line))
     }
 
+    // Chunk: docs/chunks/clipboard_operations - Bulk O(n) paste insertion
     /// Inserts a string at the cursor position.
     ///
     /// If there is an active selection, deletes it first before inserting.

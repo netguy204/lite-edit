@@ -176,6 +176,9 @@ impl EditorState {
     /// # Arguments
     /// * `buffer` - The text buffer being edited
     /// * `font_metrics` - Font metrics for pixel-to-position conversion
+    ///
+    /// Note: `view_width` defaults to 10000.0 to avoid unintended line wrapping in tests.
+    /// Call `update_viewport_dimensions` to set the actual width for wrap calculations.
     pub fn new(buffer: TextBuffer, font_metrics: FontMetrics) -> Self {
         let line_height = font_metrics.line_height as f32;
 
@@ -199,7 +202,9 @@ impl EditorState {
             last_keystroke: Instant::now(),
             font_metrics,
             view_height: 0.0,
-            view_width: 0.0,
+            // Default to a large width to prevent unintended wrapping in tests
+            // Chunk: docs/chunks/line_wrap_rendering - Large default to avoid test breakage
+            view_width: 10000.0,
             should_quit: false,
             focus: EditorFocus::Buffer,
             active_selector: None,
@@ -528,6 +533,7 @@ impl EditorState {
             &mut self.dirty_region,
             font_metrics,
             view_height,
+            self.view_width,
         );
         self.focus_target.handle_key(event, &mut ctx);
     }
@@ -647,6 +653,7 @@ impl EditorState {
             &mut self.dirty_region,
             font_metrics,
             view_height,
+            self.view_width,
         );
         self.focus_target.handle_mouse(event, &mut ctx);
     }
@@ -678,6 +685,7 @@ impl EditorState {
             &mut self.dirty_region,
             font_metrics,
             view_height,
+            self.view_width,
         );
         self.focus_target.handle_scroll(delta, &mut ctx);
     }
