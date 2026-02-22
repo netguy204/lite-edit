@@ -1,8 +1,11 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/terminal/src/terminal_buffer.rs
+- crates/terminal/src/terminal_target.rs
+- crates/terminal/tests/selection_integration.rs
 code_references: []
 narrative: null
 investigation: null
@@ -14,9 +17,11 @@ depends_on:
 - clipboard_operations
 - mouse_drag_selection
 - word_double_click_select
-created_after: ["scroll_bottom_deadzone_v3", "terminal_pty_wakeup", "terminal_styling_fidelity"]
+created_after:
+- scroll_bottom_deadzone_v3
+- terminal_pty_wakeup
+- terminal_styling_fidelity
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

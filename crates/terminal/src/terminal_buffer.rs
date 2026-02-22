@@ -32,6 +32,7 @@ use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{CursorShape as VteCursorShape, Processor};
 
+// Chunk: docs/chunks/terminal_clipboard_selection - Terminal selection types
 use lite_edit_buffer::{
     BufferView, CursorInfo, CursorShape, DirtyLines, Position, StyledLine,
 };
@@ -97,6 +98,13 @@ pub struct TerminalBuffer {
     last_history_size: usize,
     /// Maximum lines to keep in hot scrollback before flushing to cold.
     hot_scrollback_limit: usize,
+    // Chunk: docs/chunks/terminal_clipboard_selection - Selection state
+    /// Selection anchor (where the selection started).
+    /// In terminal grid coordinates (line, col).
+    selection_anchor: Option<Position>,
+    /// Selection head (current end of selection).
+    /// In terminal grid coordinates (line, col).
+    selection_head: Option<Position>,
 }
 
 impl TerminalBuffer {
@@ -138,6 +146,8 @@ impl TerminalBuffer {
             cold_line_count: 0,
             last_history_size: 0,
             hot_scrollback_limit: hot_limit,
+            selection_anchor: None,
+            selection_head: None,
         }
     }
 
@@ -211,6 +221,11 @@ impl TerminalBuffer {
         }
 
         if processed_any {
+            // Chunk: docs/chunks/terminal_clipboard_selection - Clear selection on PTY output
+            // Clear selection when new output arrives to avoid stale/misaligned highlights.
+            // This is standard terminal emulator behavior.
+            self.clear_selection();
+
             // Update dirty tracking based on terminal damage
             self.update_damage();
 
@@ -327,6 +342,125 @@ impl TerminalBuffer {
     /// This is used for sending signals (e.g., SIGTERM for graceful shutdown).
     pub fn process_id(&self) -> Option<u32> {
         self.pty.as_ref().and_then(|pty| pty.process_id())
+    }
+
+    // =========================================================================
+    // Selection Support
+    // Chunk: docs/chunks/terminal_clipboard_selection - Selection state management
+    // =========================================================================
+
+    /// Sets the selection anchor (where the selection started).
+    ///
+    /// This is typically called on mouse down to start a new selection.
+    pub fn set_selection_anchor(&mut self, pos: Position) {
+        self.selection_anchor = Some(pos);
+    }
+
+    /// Sets the selection head (current end of selection).
+    ///
+    /// This is called as the user drags to extend the selection.
+    /// Marks the affected lines as dirty for re-rendering.
+    pub fn set_selection_head(&mut self, pos: Position) {
+        let old_head = self.selection_head;
+        self.selection_head = Some(pos);
+
+        // Mark dirty: old selection range + new selection range
+        // This ensures both the old highlight and new highlight get redrawn
+        if let Some(old) = old_head {
+            self.dirty.merge(DirtyLines::Range {
+                from: old.line.min(pos.line),
+                to: old.line.max(pos.line) + 1,
+            });
+        }
+        if let Some(anchor) = self.selection_anchor {
+            self.dirty.merge(DirtyLines::Range {
+                from: anchor.line.min(pos.line),
+                to: anchor.line.max(pos.line) + 1,
+            });
+        }
+    }
+
+    /// Clears the current selection.
+    ///
+    /// This is called when:
+    /// - New PTY output arrives (selection becomes stale)
+    /// - User clicks without dragging
+    /// - User copies selection (optionally)
+    pub fn clear_selection(&mut self) {
+        if let Some((start, end)) = self.selection_range() {
+            // Mark the selection range as dirty so highlight is removed
+            self.dirty.merge(DirtyLines::Range {
+                from: start.line,
+                to: end.line + 1,
+            });
+        }
+        self.selection_anchor = None;
+        self.selection_head = None;
+    }
+
+    /// Returns the selection anchor, if any.
+    pub fn selection_anchor(&self) -> Option<Position> {
+        self.selection_anchor
+    }
+
+    /// Returns the selection head, if any.
+    pub fn selection_head(&self) -> Option<Position> {
+        self.selection_head
+    }
+
+    /// Returns the selected text as a string.
+    ///
+    /// Extracts text from the terminal grid between the selection anchor and head.
+    /// Multi-line selections are joined with newlines. Trailing spaces on each
+    /// line are trimmed (standard terminal behavior).
+    ///
+    /// Returns `None` if there is no active selection.
+    pub fn selected_text(&self) -> Option<String> {
+        let (start, end) = self.selection_range()?;
+
+        let mut result = String::new();
+
+        for line_idx in start.line..=end.line {
+            let Some(styled_line) = self.styled_line(line_idx) else {
+                continue;
+            };
+
+            // Convert styled line to plain text
+            let line_text: String = styled_line.spans.iter()
+                .map(|span| span.text.as_str())
+                .collect();
+
+            // Determine column bounds for this line
+            let start_col = if line_idx == start.line { start.col } else { 0 };
+            let end_col = if line_idx == end.line {
+                end.col
+            } else {
+                line_text.chars().count()
+            };
+
+            // Extract the substring
+            let chars: Vec<char> = line_text.chars().collect();
+            let actual_start = start_col.min(chars.len());
+            let actual_end = end_col.min(chars.len());
+
+            let selected: String = chars[actual_start..actual_end].iter().collect();
+
+            // Trim trailing spaces (standard terminal behavior)
+            let trimmed = selected.trim_end();
+
+            result.push_str(trimmed);
+
+            // Add newline between lines (not after the last line)
+            if line_idx < end.line {
+                result.push('\n');
+            }
+        }
+
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
     }
 
     // =========================================================================
@@ -624,6 +758,24 @@ impl BufferView for TerminalBuffer {
             blinking,
         ))
     }
+
+    // Chunk: docs/chunks/terminal_clipboard_selection - Selection range for rendering
+    fn selection_range(&self) -> Option<(Position, Position)> {
+        let anchor = self.selection_anchor?;
+        let head = self.selection_head?;
+
+        // No selection if anchor equals head
+        if anchor == head {
+            return None;
+        }
+
+        // Return in document order (start, end)
+        if anchor < head {
+            Some((anchor, head))
+        } else {
+            Some((head, anchor))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -695,5 +847,120 @@ mod tests {
         // After taking, should be none
         let dirty2 = term.take_dirty();
         assert!(dirty2.is_none());
+    }
+
+    // =========================================================================
+    // Selection Tests
+    // Chunk: docs/chunks/terminal_clipboard_selection - Selection unit tests
+    // =========================================================================
+
+    #[test]
+    fn test_selection_anchor_initially_none() {
+        let term = TerminalBuffer::new(80, 24, 1000);
+        assert!(term.selection_anchor().is_none());
+        assert!(term.selection_head().is_none());
+    }
+
+    #[test]
+    fn test_set_selection_anchor() {
+        let mut term = TerminalBuffer::new(80, 24, 1000);
+        let pos = Position::new(5, 10);
+        term.set_selection_anchor(pos);
+        assert_eq!(term.selection_anchor(), Some(pos));
+    }
+
+    #[test]
+    fn test_set_selection_head() {
+        let mut term = TerminalBuffer::new(80, 24, 1000);
+        let anchor = Position::new(5, 10);
+        let head = Position::new(7, 20);
+        term.set_selection_anchor(anchor);
+        term.set_selection_head(head);
+        assert_eq!(term.selection_anchor(), Some(anchor));
+        assert_eq!(term.selection_head(), Some(head));
+    }
+
+    #[test]
+    fn test_clear_selection() {
+        let mut term = TerminalBuffer::new(80, 24, 1000);
+        term.set_selection_anchor(Position::new(5, 10));
+        term.set_selection_head(Position::new(7, 20));
+        term.clear_selection();
+        assert!(term.selection_anchor().is_none());
+        assert!(term.selection_head().is_none());
+    }
+
+    #[test]
+    fn test_selection_range_none_when_no_anchor() {
+        let term = TerminalBuffer::new(80, 24, 1000);
+        assert!(term.selection_range().is_none());
+    }
+
+    #[test]
+    fn test_selection_range_none_when_anchor_equals_head() {
+        let mut term = TerminalBuffer::new(80, 24, 1000);
+        let pos = Position::new(5, 10);
+        term.set_selection_anchor(pos);
+        term.set_selection_head(pos);
+        assert!(term.selection_range().is_none());
+    }
+
+    #[test]
+    fn test_selection_range_forward() {
+        let mut term = TerminalBuffer::new(80, 24, 1000);
+        let anchor = Position::new(5, 10);
+        let head = Position::new(7, 20);
+        term.set_selection_anchor(anchor);
+        term.set_selection_head(head);
+        assert_eq!(term.selection_range(), Some((anchor, head)));
+    }
+
+    #[test]
+    fn test_selection_range_backward_returns_ordered() {
+        let mut term = TerminalBuffer::new(80, 24, 1000);
+        // Set anchor after head (backward selection)
+        let anchor = Position::new(7, 20);
+        let head = Position::new(5, 10);
+        term.set_selection_anchor(anchor);
+        term.set_selection_head(head);
+        // Should return in document order (start, end)
+        assert_eq!(term.selection_range(), Some((head, anchor)));
+    }
+
+    #[test]
+    fn test_selected_text_none_when_no_selection() {
+        let term = TerminalBuffer::new(80, 24, 1000);
+        assert!(term.selected_text().is_none());
+    }
+
+    #[test]
+    fn test_selection_change_marks_lines_dirty() {
+        let mut term = TerminalBuffer::new(80, 24, 1000);
+        // Clear initial dirty state
+        let _ = term.take_dirty();
+
+        // Set selection
+        term.set_selection_anchor(Position::new(5, 0));
+        term.set_selection_head(Position::new(8, 10));
+
+        // Should have marked lines 5-8 as dirty
+        let dirty = term.take_dirty();
+        assert!(!dirty.is_none());
+    }
+
+    #[test]
+    fn test_clear_selection_marks_dirty() {
+        let mut term = TerminalBuffer::new(80, 24, 1000);
+        term.set_selection_anchor(Position::new(5, 0));
+        term.set_selection_head(Position::new(8, 10));
+        // Clear initial dirty state
+        let _ = term.take_dirty();
+
+        // Clear selection
+        term.clear_selection();
+
+        // Should have marked lines as dirty to remove highlight
+        let dirty = term.take_dirty();
+        assert!(!dirty.is_none());
     }
 }

@@ -1094,6 +1094,39 @@ impl EditorState {
             );
             self.focus_target.handle_key(event, &mut ctx);
         } else if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
+            // Chunk: docs/chunks/terminal_clipboard_selection - Terminal clipboard operations
+            // Check for Cmd+C (copy) and Cmd+V (paste) first
+            use crate::input::Key;
+
+            if event.modifiers.command && !event.modifiers.control {
+                match event.key {
+                    Key::Char('c') | Key::Char('C') => {
+                        // Cmd+C: copy selected text to clipboard
+                        if let Some(text) = terminal.selected_text() {
+                            crate::clipboard::copy_to_clipboard(&text);
+                            terminal.clear_selection();
+                        }
+                        // No-op if no selection (don't send interrupt)
+                        self.dirty_region.merge(DirtyRegion::FullViewport);
+                        return;
+                    }
+                    Key::Char('v') | Key::Char('V') => {
+                        // Cmd+V: paste from clipboard
+                        if let Some(text) = crate::clipboard::paste_from_clipboard() {
+                            // Use bracketed paste encoding
+                            let modes = terminal.term_mode();
+                            let bytes = InputEncoder::encode_paste(&text, modes);
+                            if !bytes.is_empty() {
+                                let _ = terminal.write_input(&bytes);
+                            }
+                        }
+                        self.dirty_region.merge(DirtyRegion::FullViewport);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+
             // Chunk: docs/chunks/terminal_scrollback_viewport - Snap to bottom on keypress
             // Terminal tab: encode key and send to PTY
             // First, snap to bottom if scrolled up in primary screen mode
@@ -1296,28 +1329,87 @@ impl EditorState {
                 self.view_width - RAIL_WIDTH, // Content width also adjusted
             );
             self.focus_target.handle_mouse(adjusted_event, &mut ctx);
-        } else if let Some(terminal) = tab.as_terminal_buffer_mut() {
-            // Terminal tab: encode mouse event and send to PTY if mouse mode is enabled
+        } else if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
+            // Chunk: docs/chunks/terminal_clipboard_selection - Terminal mouse selection
+            // Terminal tab: handle mouse events for selection or forward to PTY
             let modes = terminal.term_mode();
 
-            // Check if any mouse mode is active
+            // Calculate cell position from pixel coordinates
+            let cell_width = self.font_metrics.advance_width;
+            let cell_height = self.font_metrics.line_height as f32;
+
+            let (x, y) = event.position;
+            let adjusted_x = (x - RAIL_WIDTH as f64).max(0.0);
+            // NSView uses bottom-left origin, flip to get top-down coordinates
+            let adjusted_y = self.view_height as f64 - TAB_BAR_HEIGHT as f64 - y;
+
+            let col = (adjusted_x / cell_width as f64) as usize;
+            let row = (adjusted_y / cell_height as f64) as usize;
+
+            // Check if any mouse mode is active - forward to PTY
             if modes.intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG) {
-                // Calculate cell position from pixel coordinates
-                // For now, we use simplified cell calculation. A full implementation
-                // would use TerminalFocusTarget.
-                let cell_width = self.font_metrics.advance_width;
-                let cell_height = self.font_metrics.line_height as f32;
-
-                let (x, y) = event.position;
-                let adjusted_x = (x - RAIL_WIDTH as f64).max(0.0);
-                let adjusted_y = self.view_height as f64 - TAB_BAR_HEIGHT as f64 - y;
-
-                let col = (adjusted_x / cell_width as f64) as usize;
-                let row = (adjusted_y / cell_height as f64) as usize;
-
                 let bytes = InputEncoder::encode_mouse(&event, col, row, modes);
                 if !bytes.is_empty() {
                     let _ = terminal.write_input(&bytes);
+                }
+            } else {
+                // No mouse mode active - handle selection
+                use crate::input::MouseEventKind;
+
+                // Convert screen row to document line (accounting for viewport scroll)
+                let doc_line = viewport.first_visible_line() + row;
+                let pos = Position::new(doc_line, col);
+
+                match event.kind {
+                    MouseEventKind::Down => {
+                        if event.click_count >= 2 {
+                            // Double-click: select word at position
+                            // Chunk: docs/chunks/terminal_clipboard_selection - Word selection
+                            if let Some(styled_line) = terminal.styled_line(pos.line) {
+                                let line_text: String = styled_line.spans.iter()
+                                    .map(|span| span.text.as_str())
+                                    .collect();
+                                let chars: Vec<char> = line_text.chars().collect();
+                                if !chars.is_empty() && pos.col < chars.len() {
+                                    let click_char = chars[pos.col];
+                                    let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
+                                    let (start, end) = if is_word_char(click_char) {
+                                        let mut s = pos.col;
+                                        while s > 0 && is_word_char(chars[s - 1]) { s -= 1; }
+                                        let mut e = pos.col;
+                                        while e < chars.len() && is_word_char(chars[e]) { e += 1; }
+                                        (s, e)
+                                    } else if click_char.is_whitespace() {
+                                        let mut s = pos.col;
+                                        while s > 0 && chars[s - 1].is_whitespace() { s -= 1; }
+                                        let mut e = pos.col;
+                                        while e < chars.len() && chars[e].is_whitespace() { e += 1; }
+                                        (s, e)
+                                    } else {
+                                        (pos.col, pos.col + 1)
+                                    };
+                                    terminal.set_selection_anchor(Position::new(pos.line, start));
+                                    terminal.set_selection_head(Position::new(pos.line, end));
+                                }
+                            }
+                        } else {
+                            // Single click: start new selection
+                            terminal.set_selection_anchor(pos);
+                            terminal.set_selection_head(pos);
+                        }
+                    }
+                    MouseEventKind::Moved => {
+                        // Only extend selection if we have an anchor (dragging)
+                        if terminal.selection_anchor().is_some() {
+                            terminal.set_selection_head(pos);
+                        }
+                    }
+                    MouseEventKind::Up => {
+                        // Finalize selection - if anchor == head, clear selection
+                        if terminal.selection_anchor() == terminal.selection_head() {
+                            terminal.clear_selection();
+                        }
+                    }
                 }
             }
 
@@ -1326,6 +1418,7 @@ impl EditorState {
         }
         // Other tab types (AgentOutput, Diff): no-op
     }
+
 
     /// Handles a scroll event by forwarding to the active focus target.
     ///

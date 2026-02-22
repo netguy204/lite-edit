@@ -727,3 +727,125 @@ fn test_combined_attributes_captured() {
         "Expected 'COMBINED' text with red, bold, and underline attributes"
     );
 }
+
+// =============================================================================
+// Selection and clipboard integration tests
+// Chunk: docs/chunks/terminal_clipboard_selection - Selection and copy/paste tests
+// =============================================================================
+
+use lite_edit_buffer::Position;
+
+/// Test that selection state can be set and read back.
+#[test]
+fn test_selection_set_and_get() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Initially no selection
+    assert!(terminal.selection_anchor().is_none());
+    assert!(terminal.selection_head().is_none());
+
+    // Set selection
+    terminal.set_selection_anchor(Position::new(5, 10));
+    terminal.set_selection_head(Position::new(7, 20));
+
+    assert_eq!(terminal.selection_anchor(), Some(Position::new(5, 10)));
+    assert_eq!(terminal.selection_head(), Some(Position::new(7, 20)));
+
+    // Clear selection
+    terminal.clear_selection();
+    assert!(terminal.selection_anchor().is_none());
+    assert!(terminal.selection_head().is_none());
+}
+
+/// Test that selection_range returns positions in document order.
+#[test]
+fn test_selection_range_ordering() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Forward selection
+    terminal.set_selection_anchor(Position::new(5, 10));
+    terminal.set_selection_head(Position::new(7, 20));
+    let range = terminal.selection_range();
+    assert_eq!(range, Some((Position::new(5, 10), Position::new(7, 20))));
+
+    // Backward selection - should still return in document order
+    terminal.set_selection_anchor(Position::new(7, 20));
+    terminal.set_selection_head(Position::new(5, 10));
+    let range = terminal.selection_range();
+    assert_eq!(range, Some((Position::new(5, 10), Position::new(7, 20))));
+
+    // No selection when anchor equals head
+    terminal.set_selection_anchor(Position::new(5, 10));
+    terminal.set_selection_head(Position::new(5, 10));
+    assert!(terminal.selection_range().is_none());
+}
+
+/// Test that selection is cleared when new PTY output arrives.
+#[test]
+fn test_selection_cleared_on_output() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+    terminal.spawn_shell("/bin/sh", Path::new("/tmp")).unwrap();
+
+    // Wait for initial prompt
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Set a selection
+    terminal.set_selection_anchor(Position::new(0, 0));
+    terminal.set_selection_head(Position::new(1, 10));
+    assert!(terminal.selection_range().is_some());
+
+    // Generate more output by sending a command
+    terminal.write_input(b"echo test\n").unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Selection should be cleared
+    assert!(terminal.selection_anchor().is_none());
+    assert!(terminal.selection_head().is_none());
+}
+
+/// Test that selected_text extracts correct content from terminal grid.
+#[test]
+fn test_selected_text_extraction() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Output some text to select
+    terminal
+        .spawn_command("printf", &["Hello World\\nTest Line\\n"], Path::new("/tmp"))
+        .unwrap();
+
+    // Wait for output
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Find the line with "Hello World"
+    let mut hello_line = None;
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            let text: String = styled.spans.iter().map(|s| &s.text[..]).collect();
+            if text.contains("Hello World") {
+                hello_line = Some(line);
+                break;
+            }
+        }
+    }
+
+    let hello_line = hello_line.expect("Should find 'Hello World' in output");
+
+    // Select "World" (columns 6-11 on that line)
+    terminal.set_selection_anchor(Position::new(hello_line, 6));
+    terminal.set_selection_head(Position::new(hello_line, 11));
+
+    let selected = terminal.selected_text();
+    assert!(
+        selected.is_some(),
+        "Should have selected text"
+    );
+    let selected = selected.unwrap();
+    assert!(
+        selected.contains("World"),
+        "Selected text should contain 'World', got: {:?}",
+        selected
+    );
+}
