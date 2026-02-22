@@ -950,6 +950,7 @@ impl GlyphBuffer {
     }
 
     // Chunk: docs/chunks/line_wrap_rendering - Continuation row border indicator
+    // Chunk: docs/chunks/renderer_styled_content - Per-vertex color for styled text
     /// Creates a left-edge border quad for a continuation row.
     ///
     /// The border is 2 pixels wide and spans the full line height, positioned
@@ -959,6 +960,7 @@ impl GlyphBuffer {
         screen_row: usize,
         solid_glyph: &GlyphInfo,
         y_offset: f32,
+        color: [f32; 4],
     ) -> [GlyphVertex; 4] {
         let y = screen_row as f32 * self.layout.line_height - y_offset;
 
@@ -970,10 +972,10 @@ impl GlyphBuffer {
         let (u1, v1) = solid_glyph.uv_max;
 
         [
-            GlyphVertex::new(0.0, y, u0, v0),                           // top-left
-            GlyphVertex::new(border_width, y, u1, v0),                  // top-right
-            GlyphVertex::new(border_width, y + border_height, u1, v1),  // bottom-right
-            GlyphVertex::new(0.0, y + border_height, u0, v1),           // bottom-left
+            GlyphVertex::new(0.0, y, u0, v0, color),                           // top-left
+            GlyphVertex::new(border_width, y, u1, v0, color),                  // top-right
+            GlyphVertex::new(border_width, y + border_height, u1, v1, color),  // bottom-right
+            GlyphVertex::new(0.0, y + border_height, u0, v1, color),           // bottom-left
         ]
     }
 
@@ -1026,6 +1028,16 @@ impl GlyphBuffer {
         self.border_range = QuadRange::default();
         self.glyph_range = QuadRange::default();
         self.cursor_range = QuadRange::default();
+
+        // Define colors for this rendering pass
+        // Selection color (Catppuccin Mocha surface2 at 40% alpha)
+        let selection_color: [f32; 4] = [0.345, 0.357, 0.439, 0.4];
+        // Cursor color (same as default text color)
+        let cursor_color = self.palette.default_foreground();
+        // Border color for continuation lines (dimmed foreground)
+        let border_color: [f32; 4] = [0.4, 0.4, 0.45, 0.6];
+        // Default glyph foreground color
+        let glyph_color = self.palette.default_foreground();
 
         if estimated_quads == 0 && !cursor_visible {
             self.vertex_buffer = None;
@@ -1109,6 +1121,7 @@ impl GlyphBuffer {
                                     screen_end_col,
                                     solid_glyph,
                                     y_offset,
+                                    selection_color,
                                 );
                                 vertices.extend_from_slice(&quad);
                                 push_quad_indices(&mut indices, &mut vertex_offset);
@@ -1146,7 +1159,7 @@ impl GlyphBuffer {
                         break;
                     }
 
-                    let quad = self.create_border_quad(screen_row, solid_glyph, y_offset);
+                    let quad = self.create_border_quad(screen_row, solid_glyph, y_offset, border_color);
                     vertices.extend_from_slice(&quad);
                     push_quad_indices(&mut indices, &mut vertex_offset);
                 }
@@ -1204,6 +1217,7 @@ impl GlyphBuffer {
                         screen_col,
                         glyph,
                         y_offset,
+                        glyph_color,
                     );
                     vertices.extend_from_slice(&quad);
                     push_quad_indices(&mut indices, &mut vertex_offset);
@@ -1240,6 +1254,7 @@ impl GlyphBuffer {
                                 screen_col,
                                 solid_glyph,
                                 y_offset,
+                                cursor_color,
                             );
                             vertices.extend_from_slice(&cursor_quad);
                             push_quad_indices(&mut indices, &mut vertex_offset);
