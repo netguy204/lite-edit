@@ -1139,6 +1139,7 @@ impl EditorState {
                     }
                     Key::Char('v') | Key::Char('V') => {
                         // Cmd+V: paste from clipboard
+                        // Chunk: docs/chunks/terminal_paste_render - Don't mark dirty before PTY echo
                         if let Some(text) = crate::clipboard::paste_from_clipboard() {
                             // Use bracketed paste encoding
                             let modes = terminal.term_mode();
@@ -1147,7 +1148,8 @@ impl EditorState {
                                 let _ = terminal.write_input(&bytes);
                             }
                         }
-                        self.dirty_region.merge(DirtyRegion::FullViewport);
+                        // No dirty marking here - let poll_agents() detect the PTY echo
+                        // and update_damage() mark the correct lines dirty.
                         return;
                     }
                     _ => {}

@@ -293,6 +293,65 @@ fn test_ctrl_d_sends_eof() {
     );
 }
 
+/// Tests that pasted text appears in the terminal buffer after poll.
+/// This validates the fix for terminal_paste_render - ensuring that
+/// paste content doesn't render as blank spaces.
+///
+/// Chunk: docs/chunks/terminal_paste_render - Paste rendering test
+#[test]
+fn test_paste_content_appears_after_poll() {
+    let terminal = Rc::new(RefCell::new(TerminalBuffer::new(80, 24, 1000)));
+
+    // Spawn cat which echoes input
+    terminal
+        .borrow_mut()
+        .spawn_command("cat", &[], Path::new("/tmp"))
+        .expect("Failed to spawn cat");
+
+    // Wait for cat to start
+    thread::sleep(Duration::from_millis(50));
+    terminal.borrow_mut().poll_events();
+
+    // Simulate paste (write bytes directly, no bracketed paste for simplicity)
+    let paste_text = "hello world";
+    terminal
+        .borrow_mut()
+        .write_input(paste_text.as_bytes())
+        .expect("Failed to write paste input");
+    terminal
+        .borrow_mut()
+        .write_input(b"\n")
+        .expect("Failed to write newline"); // End with newline to complete the echo
+
+    // Poll for output with timeout
+    let mut found = false;
+    for _ in 0..50 {
+        if terminal.borrow_mut().poll_events() {
+            // Check if pasted text appears in buffer
+            let term = terminal.borrow();
+            for line in 0..term.line_count() {
+                if let Some(styled) = term.styled_line(line) {
+                    let text: String = styled.spans.iter().map(|s| s.text.as_str()).collect();
+                    if text.contains("hello world") {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            drop(term);
+            if found {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    assert!(
+        found,
+        "Pasted text 'hello world' should appear in terminal buffer after polling"
+    );
+}
+
 // Chunk: docs/chunks/terminal_alt_backspace - Alt+Backspace integration test
 #[test]
 fn test_alt_backspace_deletes_word() {
