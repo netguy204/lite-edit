@@ -41,7 +41,11 @@ use crate::left_rail::{calculate_left_rail_geometry, status_color, LeftRailGlyph
 use crate::metal_view::MetalView;
 use crate::selector::SelectorWidget;
 // Chunk: docs/chunks/renderer_styled_content - Per-vertex colors, overlay colors now in vertices
-use crate::selector_overlay::{calculate_overlay_geometry, SelectorGlyphBuffer};
+// Chunk: docs/chunks/find_in_file - Find strip rendering
+use crate::selector_overlay::{
+    calculate_find_strip_geometry, calculate_overlay_geometry, FindStripGlyphBuffer,
+    SelectorGlyphBuffer,
+};
 use crate::shader::GlyphPipeline;
 use crate::viewport::Viewport;
 use crate::workspace::Editor;
@@ -124,6 +128,8 @@ pub struct Renderer {
     selector_buffer: Option<SelectorGlyphBuffer>,
     /// The glyph buffer for left rail (workspace tiles) rendering (lazy-initialized)
     left_rail_buffer: Option<LeftRailGlyphBuffer>,
+    /// The glyph buffer for find strip rendering (lazy-initialized)
+    find_strip_buffer: Option<FindStripGlyphBuffer>,
     /// Current viewport width in pixels (for wrap layout calculation)
     viewport_width_px: f32,
 }
@@ -184,6 +190,7 @@ impl Renderer {
             cursor_visible: true,
             selector_buffer: None,
             left_rail_buffer: None,
+            find_strip_buffer: None,
             viewport_width_px,
         }
     }
@@ -1108,5 +1115,251 @@ impl Renderer {
     /// with the left rail.
     pub fn left_rail_width(&self) -> f32 {
         RAIL_WIDTH
+    }
+
+    // =========================================================================
+    // Find Strip Rendering (Chunk: docs/chunks/find_in_file)
+    // =========================================================================
+
+    /// Renders the editor with left rail and find strip (when find-in-file is active).
+    ///
+    /// This is similar to `render_with_editor` but draws the find strip at the bottom
+    /// instead of a selector overlay.
+    ///
+    /// # Arguments
+    /// * `view` - The Metal view to render to
+    /// * `editor` - The Editor state containing workspace information
+    /// * `find_query` - The current find query text
+    /// * `find_cursor_col` - The cursor column position in the query
+    /// * `find_cursor_visible` - Whether the find strip cursor should be visible
+    pub fn render_with_find_strip(
+        &mut self,
+        view: &MetalView,
+        editor: &Editor,
+        find_query: &str,
+        find_cursor_col: usize,
+        find_cursor_visible: bool,
+    ) {
+        // Set content area offset to account for left rail
+        self.set_content_x_offset(RAIL_WIDTH);
+
+        // Update glyph buffer from TextBuffer if available
+        self.update_glyph_buffer();
+        let metal_layer = view.metal_layer();
+
+        // Get the next drawable from the layer
+        let drawable = match metal_layer.nextDrawable() {
+            Some(d) => d,
+            None => {
+                eprintln!("Failed to get next drawable");
+                return;
+            }
+        };
+
+        // Create a render pass descriptor
+        let render_pass_descriptor = MTLRenderPassDescriptor::new();
+
+        // Configure the color attachment
+        let color_attachments = render_pass_descriptor.colorAttachments();
+        let color_attachment = unsafe { color_attachments.objectAtIndexedSubscript(0) };
+
+        // Set the drawable's texture as the render target
+        color_attachment.setTexture(Some(drawable.texture().as_ref()));
+
+        // Clear to our background color
+        color_attachment.setLoadAction(MTLLoadAction::Clear);
+        color_attachment.setClearColor(BACKGROUND_COLOR);
+
+        // Store the result
+        color_attachment.setStoreAction(MTLStoreAction::Store);
+
+        // Create a command buffer
+        let command_buffer = match self.command_queue.commandBuffer() {
+            Some(cb) => cb,
+            None => {
+                eprintln!("Failed to create command buffer");
+                return;
+            }
+        };
+
+        // Create a render command encoder
+        let encoder =
+            match command_buffer.renderCommandEncoderWithDescriptor(&render_pass_descriptor) {
+                Some(e) => e,
+                None => {
+                    eprintln!("Failed to create render command encoder");
+                    return;
+                }
+            };
+
+        // Render left rail first (background layer)
+        self.draw_left_rail(&encoder, view, editor);
+
+        // Render editor text content (offset by RAIL_WIDTH)
+        if self.glyph_buffer.index_count() > 0 {
+            self.render_text(&encoder, view);
+        }
+
+        // Render find strip at the bottom
+        self.draw_find_strip(&encoder, view, find_query, find_cursor_col, find_cursor_visible);
+
+        // End encoding
+        encoder.endEncoding();
+
+        // Present the drawable
+        let mtl_drawable: &ProtocolObject<dyn MTLDrawable> = ProtocolObject::from_ref(&*drawable);
+        command_buffer.presentDrawable(mtl_drawable);
+
+        // Commit the command buffer
+        command_buffer.commit();
+    }
+
+    /// Draws the find strip at the bottom of the viewport.
+    ///
+    /// The find strip is a one-line-tall bar that shows "find:" followed by
+    /// the query text and a blinking cursor.
+    ///
+    /// # Arguments
+    /// * `encoder` - The active render command encoder
+    /// * `view` - The Metal view (for viewport dimensions)
+    /// * `query` - The find query text
+    /// * `cursor_col` - The cursor column position in the query
+    /// * `cursor_visible` - Whether to render the cursor
+    fn draw_find_strip(
+        &mut self,
+        encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        view: &MetalView,
+        query: &str,
+        cursor_col: usize,
+        cursor_visible: bool,
+    ) {
+        let frame = view.frame();
+        let scale = view.scale_factor();
+        let view_width = (frame.size.width * scale) as f32;
+        let view_height = (frame.size.height * scale) as f32;
+        let line_height = self.font.metrics.line_height as f32;
+        let glyph_width = self.font.metrics.advance_width as f32;
+
+        // Calculate find strip geometry
+        let geometry = calculate_find_strip_geometry(
+            view_width,
+            view_height,
+            line_height,
+            glyph_width,
+            cursor_col,
+        );
+
+        // Ensure find strip buffer is initialized
+        if self.find_strip_buffer.is_none() {
+            let layout = GlyphLayout::from_metrics(&self.font.metrics);
+            self.find_strip_buffer = Some(FindStripGlyphBuffer::new(layout));
+        }
+
+        // Update the find strip buffer with current content
+        let find_strip_buffer = self.find_strip_buffer.as_mut().unwrap();
+        find_strip_buffer.update(
+            &self.device,
+            &self.atlas,
+            query,
+            &geometry,
+            cursor_visible,
+        );
+
+        // Get buffers
+        let vertex_buffer = match find_strip_buffer.vertex_buffer() {
+            Some(b) => b,
+            None => return,
+        };
+        let index_buffer = match find_strip_buffer.index_buffer() {
+            Some(b) => b,
+            None => return,
+        };
+
+        // Set the render pipeline state
+        encoder.setRenderPipelineState(self.pipeline.pipeline_state());
+
+        // Set the vertex buffer
+        unsafe {
+            encoder.setVertexBuffer_offset_atIndex(Some(vertex_buffer), 0, 0);
+        }
+
+        // Set uniforms (viewport size)
+        let uniforms = Uniforms {
+            viewport_size: [view_width, view_height],
+        };
+        let uniforms_ptr =
+            NonNull::new(&uniforms as *const Uniforms as *mut std::ffi::c_void).unwrap();
+        unsafe {
+            encoder.setVertexBytes_length_atIndex(
+                uniforms_ptr,
+                std::mem::size_of::<Uniforms>(),
+                1,
+            );
+        }
+
+        // Set the atlas texture
+        unsafe {
+            encoder.setFragmentTexture_atIndex(Some(self.atlas.texture()), 0);
+        }
+
+        // Draw background
+        let bg_range = find_strip_buffer.background_range();
+        if !bg_range.is_empty() {
+            let index_offset = bg_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    bg_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
+        // Draw label
+        let label_range = find_strip_buffer.label_range();
+        if !label_range.is_empty() {
+            let index_offset = label_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    label_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
+        // Draw query text
+        let query_range = find_strip_buffer.query_text_range();
+        if !query_range.is_empty() {
+            let index_offset = query_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    query_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
+        // Draw cursor
+        let cursor_range = find_strip_buffer.cursor_range();
+        if !cursor_range.is_empty() {
+            let index_offset = cursor_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    cursor_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
     }
 }

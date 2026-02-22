@@ -1,177 +1,326 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk implements a live find-in-file feature (Cmd+F) that follows the
+established patterns in lite-edit:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Focus Model Extension**: Add a new `EditorFocus::FindInFile` variant to
+   the existing focus enum, following the same pattern as `EditorFocus::Selector`.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **Reuse MiniBuffer**: Use the `MiniBuffer` struct (from chunk `mini_buffer_model`)
+   for query input. This gives us full editing affordances (word-jump, selection,
+   clipboard) for free.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/find_in_file/GOAL.md)
-with references to the files that you expect to touch.
--->
+3. **Humble View Architecture**: All logic (search, match selection, cursor
+   positioning) stays in testable pure Rust code (`EditorState`). The renderer
+   is a thin projection of state to pixels.
+
+4. **Rendering Pattern**: Follow `render_with_selector` pattern — add a new
+   `render_with_find_strip` entry point in `renderer.rs` that draws the find
+   strip at the bottom of the viewport (distinct from the centered floating
+   overlay used by the selector).
+
+5. **Search Implementation**: Case-insensitive substring search on the raw
+   content string. Wrap around at buffer end. Set the main buffer's selection
+   to highlight the match.
+
+Tests follow TDD and the project's testing philosophy:
+- Unit tests for state transitions (focus changes, search behavior, match advancing)
+- Tests exercise `EditorState` directly without Metal dependencies
+- Boundary conditions: empty buffer, no match, wrap-around, Cmd+F while open
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems are relevant to this chunk. The focus/state management and
+rendering patterns are established but not captured as formal subsystems.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add `EditorFocus::FindInFile` variant
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Extend the `EditorFocus` enum in `editor_state.rs` to add a `FindInFile` variant.
+This mirrors the existing `Selector` variant structure.
 
-Example:
+**Location**: `crates/editor/src/editor_state.rs`
 
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+**Changes**:
+```rust
+pub enum EditorFocus {
+    #[default]
+    Buffer,
+    Selector,
+    FindInFile,  // NEW
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+### Step 2: Add find-in-file state fields to `EditorState`
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Add the state fields needed to track the find-in-file session:
+
+**Location**: `crates/editor/src/editor_state.rs`
+
+**Fields to add**:
+```rust
+/// The MiniBuffer for the find query (when focus == FindInFile)
+pub find_mini_buffer: Option<MiniBuffer>,
+
+/// The buffer position from which the current search started
+/// (used as the search origin; only advances when Enter is pressed)
+pub search_origin: lite_edit_buffer::Position,
+```
+
+Update `EditorState::new()` and `EditorState::default()` to initialize these fields.
+
+### Step 3: Implement `handle_cmd_f()` to open the find strip
+
+Add a method to open the find-in-file strip:
+
+**Location**: `crates/editor/src/editor_state.rs`
+
+**Behavior**:
+1. If `focus == Buffer`: create a new `MiniBuffer`, record cursor position as
+   `search_origin`, set `focus = FindInFile`, mark `DirtyRegion::FullViewport`.
+2. If `focus == FindInFile`: no-op (Cmd+F while open does nothing).
+3. If `focus == Selector`: no-op (don't open find while file picker is open).
+
+Wire this to Cmd+F in `handle_key()` (alongside existing Cmd+P, Cmd+Q, etc.).
+
+### Step 4: Implement `close_find_strip()`
+
+Add a method to close the find-in-file strip:
+
+**Location**: `crates/editor/src/editor_state.rs`
+
+**Behavior**:
+1. Set `find_mini_buffer = None`.
+2. Set `focus = Buffer`.
+3. Mark `DirtyRegion::FullViewport`.
+4. Leave the main buffer's cursor and selection at their current positions
+   (the last match position).
+
+### Step 5: Implement `find_next_match()` search function
+
+Add a helper function for case-insensitive forward substring search:
+
+**Location**: `crates/editor/src/editor_state.rs` (private helper)
+
+**Signature**:
+```rust
+fn find_next_match(
+    buffer: &TextBuffer,
+    query: &str,
+    start_pos: Position,
+) -> Option<(Position, Position)>
+```
+
+**Behavior**:
+1. If query is empty, return `None`.
+2. Get the buffer content as a single string.
+3. Convert `start_pos` to a byte offset in the content.
+4. Search forward (case-insensitive) from that byte offset.
+5. If found, convert the match byte range back to `(start_pos, end_pos)`.
+6. If not found before end, wrap around and search from the beginning up to `start_pos`.
+7. Return the match range or `None` if no match.
+
+### Step 6: Implement `handle_key_find()` for find-strip key routing
+
+Add a method to handle key events when `focus == FindInFile`:
+
+**Location**: `crates/editor/src/editor_state.rs`
+
+**Key routing**:
+- `Key::Escape` → call `close_find_strip()`
+- `Key::Return` → advance `search_origin` past current match, re-run search
+- All other keys → delegate to `find_mini_buffer.handle_key(event)`, then if
+  content changed, run live search
+
+**Live search on content change**:
+1. Get the query from `find_mini_buffer.content()`.
+2. Call `find_next_match(buffer, query, search_origin)`.
+3. If match found: set the main buffer's selection to the match range, scroll
+   viewport to make match visible.
+4. If no match: clear the main buffer's selection.
+5. Mark `DirtyRegion::FullViewport`.
+
+### Step 7: Wire key routing through `handle_key()`
+
+Update `handle_key()` to route events based on focus:
+
+**Location**: `crates/editor/src/editor_state.rs`
+
+**Changes**:
+1. Add Cmd+F handling (call `handle_cmd_f()`).
+2. Add `EditorFocus::FindInFile` case to the match that routes to
+   `handle_key_find()` (analogous to the existing `handle_key_selector()` path).
+
+### Step 8: Wire mouse/scroll events for find mode
+
+When `focus == FindInFile`:
+- **Mouse events**: Route to the buffer (user can scroll/click in main buffer
+  while searching). The find strip doesn't handle mouse events.
+- **Scroll events**: Route to the buffer (scroll the main content).
+
+This is different from Selector mode where mouse/scroll go to the overlay.
+
+**Location**: `crates/editor/src/editor_state.rs` (update `handle_mouse()` and
+`handle_scroll()`)
+
+### Step 9: Add find strip geometry calculation
+
+Add layout calculation for the find strip (bottom-anchored, 1 line tall):
+
+**Location**: `crates/editor/src/selector_overlay.rs` (or a new section in that file)
+
+**Struct**:
+```rust
+pub struct FindStripGeometry {
+    pub strip_y: f32,      // Y coordinate (bottom of viewport - line_height)
+    pub strip_height: f32, // 1 line height
+    pub content_x: f32,    // X where "find:" label starts
+    pub query_x: f32,      // X where query text starts (after label)
+    pub cursor_x: f32,     // X of cursor position in query
+}
+```
+
+**Function**:
+```rust
+pub fn calculate_find_strip_geometry(
+    view_width: f32,
+    view_height: f32,
+    line_height: f32,
+    query_len: usize,
+    cursor_col: usize,
+    glyph_width: f32,
+) -> FindStripGeometry
+```
+
+### Step 10: Add `FindStripGlyphBuffer` for rendering
+
+Create a glyph buffer for the find strip (similar to `SelectorGlyphBuffer`):
+
+**Location**: `crates/editor/src/selector_overlay.rs` (new struct alongside existing)
+
+**Elements to render**:
+1. Background rect (same color as selector overlay: `OVERLAY_BACKGROUND_COLOR`)
+2. "find:" label text (dim color)
+3. Query text
+4. Blinking cursor (if visible)
+
+**Quad ranges**:
+- `background_range`
+- `label_range`
+- `query_text_range`
+- `cursor_range`
+
+### Step 11: Add `render_with_find_strip()` to Renderer
+
+Add a new rendering entry point:
+
+**Location**: `crates/editor/src/renderer.rs`
+
+**Signature**:
+```rust
+pub fn render_with_find_strip(
+    &mut self,
+    view: &MetalView,
+    editor: &Editor,
+    find_query: &str,
+    find_cursor_col: usize,
+    find_cursor_visible: bool,
+)
+```
+
+**Behavior**:
+1. Render the left rail.
+2. Render the editor content (but reduce visible area by 1 line at bottom for
+   the find strip — or just let it overlap).
+3. Render the find strip on top at the bottom.
+
+Alternatively, integrate into `render_with_editor()` by adding an optional find
+strip state parameter.
+
+### Step 12: Wire rendering in main loop
+
+Update the main render loop to call the appropriate render method based on
+`EditorState.focus`:
+
+**Location**: Main event loop (wherever `renderer.render_with_editor()` is called)
+
+**Logic**:
+```rust
+match state.focus {
+    EditorFocus::Buffer => renderer.render_with_editor(..., None, false),
+    EditorFocus::Selector => renderer.render_with_editor(..., Some(&selector), cursor_visible),
+    EditorFocus::FindInFile => {
+        // Get find mini buffer state
+        if let Some(ref mb) = state.find_mini_buffer {
+            renderer.render_with_find_strip(..., mb.content(), mb.cursor_col(), cursor_visible);
+        }
+    }
+}
+```
+
+### Step 13: Unit tests for find state transitions
+
+Write tests verifying focus model behavior:
+
+**Location**: `crates/editor/src/editor_state.rs` (test module)
+
+**Tests**:
+- `test_cmd_f_transitions_to_find_focus`: Cmd+F from Buffer → focus is `FindInFile`
+- `test_cmd_f_creates_mini_buffer`: `find_mini_buffer` is `Some` after Cmd+F
+- `test_cmd_f_records_search_origin`: `search_origin` equals cursor position
+- `test_escape_closes_find_strip`: Escape → focus returns to `Buffer`, `find_mini_buffer` is `None`
+- `test_cmd_f_while_open_is_noop`: Cmd+F when focus is `FindInFile` → no change
+
+### Step 14: Unit tests for live search behavior
+
+Write tests verifying search and match selection:
+
+**Location**: `crates/editor/src/editor_state.rs` (test module)
+
+**Tests**:
+- `test_typing_in_find_selects_match`: Type query → buffer selection covers match
+- `test_no_match_clears_selection`: Type query with no matches → buffer selection is None
+- `test_enter_advances_to_next_match`: Enter → search origin moves, next match selected
+- `test_search_wraps_around`: Match found after wrap at buffer end
+- `test_case_insensitive_match`: "HELLO" matches "hello" in buffer
+
+### Step 15: Unit tests for edge cases
+
+**Location**: `crates/editor/src/editor_state.rs` (test module)
+
+**Tests**:
+- `test_find_in_empty_buffer`: Cmd+F on empty buffer, type query → no crash, no match
+- `test_empty_query_no_selection`: Empty query string → no selection
+- `test_multiple_enter_advances`: Multiple Enter presses cycle through matches
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **mini_buffer_model** (chunk): Must be complete. This chunk depends on the
+  `MiniBuffer` struct for query input. ✓ Listed in `depends_on` in GOAL.md.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Viewport adjustment for find strip**: The find strip takes 1 line at the
+   bottom. We may need to reduce the visible buffer area by 1 line when find is
+   open to prevent content from being hidden behind the strip. Alternatively,
+   we could let it overlap (simpler, but text may be obscured).
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Position ↔ byte offset conversion**: The search operates on the raw content
+   string, but `Position` is line/col based. Need to carefully implement the
+   conversion functions. The existing `TextBuffer` has some position utilities
+   that may help.
+
+3. **Selection anchor behavior**: When setting the match as a selection, we need
+   to set both the cursor and the selection anchor. The `TextBuffer` API supports
+   this via `set_selection_anchor()` and `set_cursor_unchecked()`.
+
+4. **Cursor visibility during find**: The main buffer's cursor should probably
+   not blink while find is active (the find strip cursor blinks instead). Need
+   to pass the right `cursor_visible` value to the buffer renderer.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+_To be populated during implementation._
