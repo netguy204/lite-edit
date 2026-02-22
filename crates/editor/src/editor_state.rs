@@ -76,6 +76,12 @@ pub struct EditorState {
     pub cursor_visible: bool,
     /// Time of the last keystroke (for cursor blink reset)
     pub last_keystroke: Instant,
+    /// Whether the overlay cursor is currently visible (for blink animation)
+    /// Chunk: docs/chunks/cursor_blink_focus - Separate blink state for overlay mini-buffers
+    pub overlay_cursor_visible: bool,
+    /// Time of the last overlay keystroke (for overlay cursor blink reset)
+    /// Chunk: docs/chunks/cursor_blink_focus - Separate keystroke tracking for overlays
+    pub last_overlay_keystroke: Instant,
     /// Font metrics for pixel-to-position conversion
     font_metrics: FontMetrics,
     /// View height in pixels (for y-coordinate flipping in mouse events)
@@ -246,6 +252,9 @@ impl EditorState {
             focus_target: BufferFocusTarget::new(),
             cursor_visible: true,
             last_keystroke: Instant::now(),
+            // Chunk: docs/chunks/cursor_blink_focus - Initialize overlay cursor state
+            overlay_cursor_visible: true,
+            last_overlay_keystroke: Instant::now(),
             font_metrics,
             view_height: 0.0,
             // Default to a large width to prevent unintended wrapping in tests
@@ -425,6 +434,23 @@ impl EditorState {
                 }
             }
 
+            // Chunk: docs/chunks/workspace_switching - Workspace cycling shortcuts
+            // Cmd+] (without Shift) cycles to next workspace
+            if let Key::Char(']') = event.key {
+                if !event.modifiers.shift {
+                    self.next_workspace();
+                    return;
+                }
+            }
+
+            // Cmd+[ (without Shift) cycles to previous workspace
+            if let Key::Char('[') = event.key {
+                if !event.modifiers.shift {
+                    self.prev_workspace();
+                    return;
+                }
+            }
+
             // Chunk: docs/chunks/content_tab_bar - Create new tab
             // Cmd+T creates a new empty tab in the current workspace
             // Chunk: docs/chunks/terminal_tab_spawn - Cmd+Shift+T creates a new terminal tab
@@ -522,6 +548,13 @@ impl EditorState {
         self.focus = EditorFocus::Selector;
         self.last_cache_version = self.file_index.as_ref().unwrap().cache_version();
 
+        // Chunk: docs/chunks/cursor_blink_focus - Reset cursor states on focus transition
+        // Main buffer cursor stays visible (static) while overlay is active
+        self.cursor_visible = true;
+        // Overlay cursor starts visible and ready to blink
+        self.overlay_cursor_visible = true;
+        self.last_overlay_keystroke = Instant::now();
+
         // Mark full viewport dirty for overlay rendering
         self.dirty_region.merge(DirtyRegion::FullViewport);
     }
@@ -531,6 +564,12 @@ impl EditorState {
     fn close_selector(&mut self) {
         self.active_selector = None;
         self.focus = EditorFocus::Buffer;
+
+        // Chunk: docs/chunks/cursor_blink_focus - Reset cursor states on focus transition
+        // Buffer cursor resumes blinking (start visible, record keystroke to prevent immediate blink-off)
+        self.cursor_visible = true;
+        self.last_keystroke = Instant::now();
+
         self.dirty_region.merge(DirtyRegion::FullViewport);
     }
 
@@ -562,6 +601,13 @@ impl EditorState {
                 // Transition focus
                 self.focus = EditorFocus::FindInFile;
 
+                // Chunk: docs/chunks/cursor_blink_focus - Reset cursor states on focus transition
+                // Main buffer cursor stays visible (static) while overlay is active
+                self.cursor_visible = true;
+                // Overlay cursor starts visible and ready to blink
+                self.overlay_cursor_visible = true;
+                self.last_overlay_keystroke = Instant::now();
+
                 // Mark full viewport dirty for overlay rendering
                 self.dirty_region.merge(DirtyRegion::FullViewport);
             }
@@ -582,6 +628,12 @@ impl EditorState {
     fn close_find_strip(&mut self) {
         self.find_mini_buffer = None;
         self.focus = EditorFocus::Buffer;
+
+        // Chunk: docs/chunks/cursor_blink_focus - Reset cursor states on focus transition
+        // Buffer cursor resumes blinking (start visible, record keystroke to prevent immediate blink-off)
+        self.cursor_visible = true;
+        self.last_keystroke = Instant::now();
+
         self.dirty_region.merge(DirtyRegion::FullViewport);
     }
 
@@ -702,6 +754,14 @@ impl EditorState {
     ///   if content changed, run live search
     fn handle_key_find(&mut self, event: KeyEvent) {
         use crate::input::Key;
+
+        // Chunk: docs/chunks/cursor_blink_focus - Record overlay keystroke time for blink reset
+        self.last_overlay_keystroke = Instant::now();
+
+        // Ensure overlay cursor is visible when typing
+        if !self.overlay_cursor_visible {
+            self.overlay_cursor_visible = true;
+        }
 
         match &event.key {
             Key::Escape => {
@@ -824,6 +884,14 @@ impl EditorState {
     /// Handles a key event when the selector is focused.
     /// Chunk: docs/chunks/file_picker - Key forwarding to SelectorWidget and SelectorOutcome handling
     fn handle_key_selector(&mut self, event: KeyEvent) {
+        // Chunk: docs/chunks/cursor_blink_focus - Record overlay keystroke time for blink reset
+        self.last_overlay_keystroke = Instant::now();
+
+        // Ensure overlay cursor is visible when typing
+        if !self.overlay_cursor_visible {
+            self.overlay_cursor_visible = true;
+        }
+
         let selector = match self.active_selector.as_mut() {
             Some(s) => s,
             None => return,
@@ -1035,6 +1103,7 @@ impl EditorState {
     ///
     /// Mouse clicks in the left rail switch workspaces.
     /// Mouse clicks in the tab bar switch tabs.
+    // Chunk: docs/chunks/mouse_click_cursor - Mouse event routing from controller to focus target via EditorContext
     /// Chunk: docs/chunks/file_picker - Focus-based mouse routing (selector vs buffer)
     pub fn handle_mouse(&mut self, event: MouseEvent) {
         use crate::input::MouseEventKind;
@@ -1045,8 +1114,13 @@ impl EditorState {
             if let MouseEventKind::Down = event.kind {
                 // Calculate which workspace was clicked
                 let geometry = calculate_left_rail_geometry(self.view_height, self.editor.workspace_count());
+                // Chunk: docs/chunks/workspace_switching - Y-coordinate flip for left rail hit-testing
+                // Flip y-coordinate: macOS NSView uses bottom-left origin (y=0 at bottom),
+                // but calculate_left_rail_geometry produces tile rects in top-down screen space
+                // (y=0 at top, tiles start at TOP_MARGIN and increase downward).
+                let flipped_y = self.view_height - mouse_y as f32;
                 for (idx, tile_rect) in geometry.tile_rects.iter().enumerate() {
-                    if tile_rect.contains(mouse_x as f32, mouse_y as f32) {
+                    if tile_rect.contains(mouse_x as f32, flipped_y) {
                         self.switch_workspace(idx);
                         return;
                     }
@@ -1406,8 +1480,14 @@ impl EditorState {
 
     /// Toggles cursor visibility for blink animation.
     ///
+    /// Focus-aware: only the cursor in the currently focused area (buffer or overlay)
+    /// blinks. When an overlay (Selector or FindInFile) is focused, the main buffer
+    /// cursor remains static (visible), and the overlay cursor blinks.
+    ///
     /// Returns the dirty region for the cursor line if visibility changed.
     /// If the user recently typed, this keeps the cursor solid instead of toggling.
+    ///
+    /// Chunk: docs/chunks/cursor_blink_focus - Focus-aware cursor blink toggle
     // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
     pub fn toggle_cursor_blink(&mut self) -> DirtyRegion {
         // Terminal tabs don't have a text buffer cursor to blink.
@@ -1432,20 +1512,45 @@ impl EditorState {
         }
 
         let now = Instant::now();
-        let since_keystroke = now.duration_since(self.last_keystroke);
 
-        // If user typed recently, keep cursor solid
-        if since_keystroke.as_millis() < CURSOR_BLINK_INTERVAL_MS as u128 {
-            if !self.cursor_visible {
-                self.cursor_visible = true;
-                return self.cursor_dirty_region();
+        match self.focus {
+            EditorFocus::Buffer => {
+                // Buffer has focus - toggle the main buffer cursor
+                let since_keystroke = now.duration_since(self.last_keystroke);
+
+                // If user typed recently, keep cursor solid
+                if since_keystroke.as_millis() < CURSOR_BLINK_INTERVAL_MS as u128 {
+                    if !self.cursor_visible {
+                        self.cursor_visible = true;
+                        return self.cursor_dirty_region();
+                    }
+                    return DirtyRegion::None;
+                }
+
+                // Toggle buffer cursor visibility
+                self.cursor_visible = !self.cursor_visible;
+                self.cursor_dirty_region()
             }
-            return DirtyRegion::None;
-        }
+            EditorFocus::Selector | EditorFocus::FindInFile => {
+                // Overlay has focus - toggle the overlay cursor, not the buffer cursor
+                let since_keystroke = now.duration_since(self.last_overlay_keystroke);
 
-        // Toggle visibility
-        self.cursor_visible = !self.cursor_visible;
-        self.cursor_dirty_region()
+                // If user typed recently, keep cursor solid
+                if since_keystroke.as_millis() < CURSOR_BLINK_INTERVAL_MS as u128 {
+                    if !self.overlay_cursor_visible {
+                        self.overlay_cursor_visible = true;
+                        // Return FullViewport since overlay cursors aren't on a specific buffer line
+                        return DirtyRegion::FullViewport;
+                    }
+                    return DirtyRegion::None;
+                }
+
+                // Toggle overlay cursor visibility
+                self.overlay_cursor_visible = !self.overlay_cursor_visible;
+                // Return FullViewport since overlay cursors aren't on a specific buffer line
+                DirtyRegion::FullViewport
+            }
+        }
     }
 
     /// Returns the dirty region for just the cursor line.
@@ -1609,6 +1714,34 @@ impl EditorState {
         if index < self.editor.workspace_count() && index != self.editor.active_workspace {
             self.editor.switch_workspace(index);
             self.dirty_region.merge(DirtyRegion::FullViewport);
+        }
+    }
+
+    /// Cycles to the next workspace (wraps from last to first).
+    ///
+    /// Does nothing if there's only one workspace.
+    // Chunk: docs/chunks/workspace_switching - Cmd+] workspace cycling
+    pub fn next_workspace(&mut self) {
+        let count = self.editor.workspace_count();
+        if count > 1 {
+            let next = (self.editor.active_workspace + 1) % count;
+            self.switch_workspace(next);
+        }
+    }
+
+    /// Cycles to the previous workspace (wraps from first to last).
+    ///
+    /// Does nothing if there's only one workspace.
+    // Chunk: docs/chunks/workspace_switching - Cmd+[ workspace cycling
+    pub fn prev_workspace(&mut self) {
+        let count = self.editor.workspace_count();
+        if count > 1 {
+            let prev = if self.editor.active_workspace == 0 {
+                count - 1
+            } else {
+                self.editor.active_workspace - 1
+            };
+            self.switch_workspace(prev);
         }
     }
 
@@ -3168,6 +3301,187 @@ mod tests {
         let title = state.window_title();
         assert!(title.contains("—")); // em-dash separator
         assert!(title.contains("untitled")); // workspace label
+    }
+
+    // =========================================================================
+    // Workspace Switching Tests (Chunk: docs/chunks/workspace_switching)
+    // =========================================================================
+
+    #[test]
+    fn test_left_rail_click_switches_workspace_with_y_flip() {
+        use crate::left_rail::{calculate_left_rail_geometry, RAIL_WIDTH, TILE_HEIGHT};
+        let mut state = EditorState::empty(test_font_metrics());
+
+        // Set up view dimensions - use a realistic window height
+        let view_height: f32 = 600.0;
+        state.view_height = view_height;
+        state.view_width = 800.0;
+
+        // Create a second workspace so we have 2 total
+        state.new_workspace();
+        assert_eq!(state.editor.workspace_count(), 2);
+        // Switch back to workspace 0
+        state.switch_workspace(0);
+        assert_eq!(state.editor.active_workspace, 0);
+
+        let _ = state.take_dirty_region();
+
+        // Calculate geometry to find the y-position of workspace 1's tile
+        // In top-down screen coords: workspace 0 is at y=TOP_MARGIN (8.0)
+        //                            workspace 1 is at y=TOP_MARGIN+TILE_HEIGHT+TILE_SPACING (60.0)
+        let geom = calculate_left_rail_geometry(view_height, 2);
+        let tile_1_y_top_down = geom.tile_rects[1].y; // Should be ~60.0
+        let tile_1_y_center = tile_1_y_top_down + TILE_HEIGHT / 2.0;
+
+        // Convert to NSView coordinates (y=0 at bottom)
+        // NSView y = view_height - screen_y
+        let nsview_y = view_height - tile_1_y_center;
+
+        // Create a click event at the center of workspace 1 tile
+        let click_x = (RAIL_WIDTH / 2.0) as f64;
+        let click_event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (click_x, nsview_y as f64),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+
+        state.handle_mouse(click_event);
+
+        // Should have switched to workspace 1
+        assert_eq!(
+            state.editor.active_workspace, 1,
+            "Clicking on workspace 1 tile (NSView y={}, flipped to top-down y={}) should switch to workspace 1",
+            nsview_y, tile_1_y_center
+        );
+        assert!(state.is_dirty());
+    }
+
+    #[test]
+    fn test_next_workspace_cycles_forward() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Create 3 workspaces total
+        state.new_workspace();
+        state.new_workspace();
+        assert_eq!(state.editor.workspace_count(), 3);
+
+        // Switch to workspace 0
+        state.switch_workspace(0);
+        assert_eq!(state.editor.active_workspace, 0);
+
+        // Cycle forward: 0 -> 1 -> 2 -> 0
+        state.next_workspace();
+        assert_eq!(state.editor.active_workspace, 1);
+
+        state.next_workspace();
+        assert_eq!(state.editor.active_workspace, 2);
+
+        state.next_workspace();
+        assert_eq!(state.editor.active_workspace, 0); // Wraps around
+    }
+
+    #[test]
+    fn test_prev_workspace_cycles_backward() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Create 3 workspaces total
+        state.new_workspace();
+        state.new_workspace();
+        assert_eq!(state.editor.workspace_count(), 3);
+
+        // Switch to workspace 2
+        state.switch_workspace(2);
+        assert_eq!(state.editor.active_workspace, 2);
+
+        // Cycle backward: 2 -> 1 -> 0 -> 2
+        state.prev_workspace();
+        assert_eq!(state.editor.active_workspace, 1);
+
+        state.prev_workspace();
+        assert_eq!(state.editor.active_workspace, 0);
+
+        state.prev_workspace();
+        assert_eq!(state.editor.active_workspace, 2); // Wraps around
+    }
+
+    #[test]
+    fn test_next_workspace_single_workspace_is_noop() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        assert_eq!(state.editor.workspace_count(), 1);
+        assert_eq!(state.editor.active_workspace, 0);
+
+        state.next_workspace();
+        assert_eq!(state.editor.active_workspace, 0);
+    }
+
+    #[test]
+    fn test_prev_workspace_single_workspace_is_noop() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        assert_eq!(state.editor.workspace_count(), 1);
+        assert_eq!(state.editor.active_workspace, 0);
+
+        state.prev_workspace();
+        assert_eq!(state.editor.active_workspace, 0);
+    }
+
+    #[test]
+    fn test_cmd_right_bracket_next_workspace() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Create second workspace
+        state.new_workspace();
+        state.switch_workspace(0);
+        assert_eq!(state.editor.active_workspace, 0);
+
+        let _ = state.take_dirty_region();
+
+        // Cmd+] (without Shift) cycles to next workspace
+        let cmd_bracket = KeyEvent::new(
+            Key::Char(']'),
+            Modifiers {
+                command: true,
+                shift: false,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_bracket);
+
+        assert_eq!(state.editor.active_workspace, 1);
+        assert!(state.is_dirty());
+    }
+
+    #[test]
+    fn test_cmd_left_bracket_prev_workspace() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Create second workspace
+        state.new_workspace();
+        assert_eq!(state.editor.active_workspace, 1);
+
+        let _ = state.take_dirty_region();
+
+        // Cmd+[ (without Shift) cycles to previous workspace
+        let cmd_bracket = KeyEvent::new(
+            Key::Char('['),
+            Modifiers {
+                command: true,
+                shift: false,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_bracket);
+
+        assert_eq!(state.editor.active_workspace, 0);
+        assert!(state.is_dirty());
     }
 
     // =========================================================================
@@ -4886,5 +5200,207 @@ mod tests {
             },
         );
         state.handle_key(cmd_s);
+    }
+
+    // =========================================================================
+    // Focus-aware cursor blink tests (Chunk: docs/chunks/cursor_blink_focus)
+    // =========================================================================
+
+    #[test]
+    fn test_buffer_focus_blink_toggles_cursor_visible() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Ensure buffer focus (default)
+        assert_eq!(state.focus, EditorFocus::Buffer);
+
+        // Set last_keystroke to the past so blink toggle works
+        state.last_keystroke = Instant::now() - Duration::from_secs(1);
+
+        assert!(state.cursor_visible);
+        state.toggle_cursor_blink();
+        assert!(!state.cursor_visible);
+        state.toggle_cursor_blink();
+        assert!(state.cursor_visible);
+    }
+
+    #[test]
+    fn test_overlay_focus_blink_toggles_overlay_cursor_visible() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Open find strip to switch to FindInFile focus
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+        assert_eq!(state.focus, EditorFocus::FindInFile);
+
+        // Set last_overlay_keystroke to the past so blink toggle works
+        state.last_overlay_keystroke = Instant::now() - Duration::from_secs(1);
+
+        assert!(state.overlay_cursor_visible);
+        state.toggle_cursor_blink();
+        assert!(!state.overlay_cursor_visible);
+        state.toggle_cursor_blink();
+        assert!(state.overlay_cursor_visible);
+    }
+
+    #[test]
+    fn test_overlay_focus_does_not_toggle_buffer_cursor() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Open find strip to switch to FindInFile focus
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+        assert_eq!(state.focus, EditorFocus::FindInFile);
+
+        // Buffer cursor should be visible (static)
+        assert!(state.cursor_visible);
+
+        // Set last_overlay_keystroke to the past so blink toggle works
+        state.last_overlay_keystroke = Instant::now() - Duration::from_secs(1);
+
+        // Toggle blink multiple times
+        state.toggle_cursor_blink();
+        state.toggle_cursor_blink();
+        state.toggle_cursor_blink();
+
+        // Buffer cursor should still be visible (not toggled)
+        assert!(
+            state.cursor_visible,
+            "Buffer cursor should remain static when overlay has focus"
+        );
+    }
+
+    #[test]
+    fn test_recent_overlay_keystroke_keeps_overlay_cursor_solid() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Open find strip
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        // Overlay keystroke just happened (set by handle_cmd_f)
+        // Toggle should keep overlay cursor visible
+        state.toggle_cursor_blink();
+        assert!(
+            state.overlay_cursor_visible,
+            "Recent keystroke should keep overlay cursor solid"
+        );
+    }
+
+    #[test]
+    fn test_focus_transition_to_overlay_resets_cursors() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Make buffer cursor invisible to verify it gets reset
+        state.cursor_visible = false;
+
+        // Open find strip
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        // Both cursors should be visible after transition
+        assert!(
+            state.cursor_visible,
+            "Buffer cursor should be visible (static) when overlay opens"
+        );
+        assert!(
+            state.overlay_cursor_visible,
+            "Overlay cursor should be visible when overlay opens"
+        );
+    }
+
+    #[test]
+    fn test_focus_transition_from_overlay_resets_buffer_cursor() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Open find strip
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        // Make buffer cursor invisible
+        state.cursor_visible = false;
+
+        // Close find strip with Escape
+        let escape = KeyEvent::new(Key::Escape, Modifiers::default());
+        state.handle_key(escape);
+
+        // Buffer should have focus again
+        assert_eq!(state.focus, EditorFocus::Buffer);
+
+        // Buffer cursor should be visible and last_keystroke should be recent
+        assert!(
+            state.cursor_visible,
+            "Buffer cursor should be visible after closing overlay"
+        );
+
+        // Toggle should not immediately blink off because keystroke is recent
+        state.toggle_cursor_blink();
+        assert!(
+            state.cursor_visible,
+            "Buffer cursor should stay solid briefly after closing overlay"
+        );
+    }
+
+    #[test]
+    fn test_overlay_keystroke_makes_cursor_visible() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Open find strip
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        // Make overlay cursor invisible
+        state.overlay_cursor_visible = false;
+
+        // Type in find strip
+        state.handle_key(KeyEvent::char('a'));
+
+        // Overlay cursor should become visible
+        assert!(
+            state.overlay_cursor_visible,
+            "Typing in overlay should make cursor visible"
+        );
     }
 }

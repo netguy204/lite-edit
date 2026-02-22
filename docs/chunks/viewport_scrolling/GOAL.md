@@ -9,7 +9,7 @@ code_paths:
   - crates/editor/src/buffer_target.rs
   - crates/editor/tests/viewport_test.rs
 code_references:
-  - ref: crates/editor/src/input.rs#ScrollDelta
+  - ref: crates/input/src/lib.rs#ScrollDelta
     implements: "Scroll delta data structure for representing scroll events"
   - ref: crates/editor/src/metal_view.rs#MetalView::__scroll_wheel
     implements: "macOS scrollWheel: event handler that invokes the scroll callback"

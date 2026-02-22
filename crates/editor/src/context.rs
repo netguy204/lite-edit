@@ -15,6 +15,7 @@ use crate::viewport::Viewport;
 use crate::wrap_layout::WrapLayout;
 use lite_edit_buffer::{DirtyLines, TextBuffer};
 
+// Chunk: docs/chunks/mouse_click_cursor - Font metrics (char_width, line_height) and view_height for pixel-to-position conversion
 /// Context providing mutable access to editor state.
 ///
 /// Focus targets receive this context in their `handle_*` methods and use it
