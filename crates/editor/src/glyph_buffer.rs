@@ -42,7 +42,8 @@ use crate::glyph_atlas::{GlyphAtlas, GlyphInfo};
 use crate::shader::VERTEX_SIZE;
 use crate::viewport::Viewport;
 use crate::wrap_layout::WrapLayout;
-use lite_edit_buffer::TextBuffer;
+// Chunk: docs/chunks/buffer_view_trait - Use BufferView trait instead of TextBuffer
+use lite_edit_buffer::BufferView;
 
 // =============================================================================
 // Vertex Data
@@ -364,24 +365,25 @@ impl GlyphBuffer {
         self.index_count = indices.len();
     }
 
-    /// Updates the buffers with content from a TextBuffer, rendering only visible lines
+    /// Updates the buffers with content from a BufferView, rendering only visible lines
     ///
     /// # Arguments
     /// * `device` - The Metal device for buffer creation
     /// * `atlas` - The glyph atlas containing character UV mappings
-    /// * `buffer` - The text buffer to render from
+    /// * `view` - The buffer view to render from
     /// * `viewport` - The viewport defining which lines are visible
+    // Chunk: docs/chunks/buffer_view_trait - Accept BufferView trait instead of TextBuffer
     pub fn update_from_buffer(
         &mut self,
         device: &ProtocolObject<dyn MTLDevice>,
         atlas: &GlyphAtlas,
-        buffer: &TextBuffer,
+        view: &dyn BufferView,
         viewport: &Viewport,
     ) {
-        self.update_from_buffer_with_cursor(device, atlas, buffer, viewport, true, 0.0);
+        self.update_from_buffer_with_cursor(device, atlas, view, viewport, true, 0.0);
     }
 
-    /// Updates the buffers with content from a TextBuffer, including cursor and selection rendering
+    /// Updates the buffers with content from a BufferView, including cursor and selection rendering
     ///
     /// Emits quads in this order:
     /// 1. Selection highlight quads (drawn first, behind text)
@@ -394,30 +396,34 @@ impl GlyphBuffer {
     /// # Arguments
     /// * `device` - The Metal device for buffer creation
     /// * `atlas` - The glyph atlas containing character UV mappings
-    /// * `buffer` - The text buffer to render from
+    /// * `view` - The buffer view to render from
     /// * `viewport` - The viewport defining which lines are visible
     /// * `cursor_visible` - Whether to render the cursor (for future blink support)
     /// * `y_offset` - Vertical offset in pixels for smooth scrolling. When scrolled to a
     ///   fractional position (e.g., 2.5 lines), pass the fractional remainder (e.g., 0.5 * line_height)
     ///   to shift all content up, causing the top line to be partially clipped.
     // Chunk: docs/chunks/viewport_fractional_scroll - Y offset parameter for smooth scrolling
+    // Chunk: docs/chunks/buffer_view_trait - Accept BufferView trait instead of TextBuffer
     pub fn update_from_buffer_with_cursor(
         &mut self,
         device: &ProtocolObject<dyn MTLDevice>,
         atlas: &GlyphAtlas,
-        buffer: &TextBuffer,
+        view: &dyn BufferView,
         viewport: &Viewport,
         cursor_visible: bool,
         y_offset: f32,
     ) {
-        let visible_range = viewport.visible_range(buffer.line_count());
+        let visible_range = viewport.visible_range(view.line_count());
 
         // Estimate character count for buffer sizing
         // Add extra for selection quads (one per visible line in selection)
         // and 1 for cursor quad
         let mut estimated_chars: usize = 0;
         for line in visible_range.clone() {
-            estimated_chars += buffer.line_content(line).chars().count();
+            // Use styled_line to get line content, extract text from spans
+            if let Some(styled_line) = view.styled_line(line) {
+                estimated_chars += styled_line.char_count();
+            }
         }
         let selection_lines = visible_range.len(); // Max selection quads
         let cursor_quads = if cursor_visible { 1 } else { 0 };
@@ -428,7 +434,7 @@ impl GlyphBuffer {
         self.glyph_range = QuadRange::default();
         self.cursor_range = QuadRange::default();
 
-        if estimated_chars == 0 && cursor_quads == 0 && buffer.selection_range().is_none() {
+        if estimated_chars == 0 && cursor_quads == 0 && view.selection_range().is_none() {
             self.vertex_buffer = None;
             self.index_buffer = None;
             self.index_count = 0;
@@ -443,7 +449,7 @@ impl GlyphBuffer {
         // ==================== Phase 1: Selection Quads ====================
         let selection_start_index = indices.len();
 
-        if let Some((sel_start, sel_end)) = buffer.selection_range() {
+        if let Some((sel_start, sel_end)) = view.selection_range() {
             let solid_glyph = atlas.solid_glyph();
 
             // For each visible line that intersects the selection
@@ -454,7 +460,7 @@ impl GlyphBuffer {
                 }
 
                 let screen_row = buffer_line - viewport.first_visible_line();
-                let line_len = buffer.line_len(buffer_line);
+                let line_len = view.line_len(buffer_line);
 
                 // Calculate selection columns for this line
                 let start_col = if buffer_line == sel_start.line {
@@ -498,7 +504,15 @@ impl GlyphBuffer {
 
         for buffer_line in visible_range.clone() {
             let screen_row = buffer_line - viewport.first_visible_line();
-            let line_content = buffer.line_content(buffer_line);
+
+            // Get line content via styled_line, extract text from spans
+            // For now, TextBuffer returns single unstyled span per line
+            let line_content = if let Some(styled_line) = view.styled_line(buffer_line) {
+                // Concatenate text from all spans
+                styled_line.spans.iter().map(|s| s.text.as_str()).collect::<String>()
+            } else {
+                continue;
+            };
 
             for (col, c) in line_content.chars().enumerate() {
                 // Skip spaces (they don't need quads)
@@ -538,26 +552,28 @@ impl GlyphBuffer {
         let cursor_start_index = indices.len();
 
         if cursor_visible {
-            let cursor_pos = buffer.cursor_position();
-            if let Some(screen_line) = viewport.buffer_line_to_screen_line(cursor_pos.line) {
-                // Render cursor as a block cursor using the solid (fully opaque)
-                // atlas region so the fragment shader produces a visible quad.
-                let solid_glyph = atlas.solid_glyph();
-                let cursor_quad = self.create_cursor_quad_with_offset(
-                    screen_line,
-                    cursor_pos.col,
-                    solid_glyph,
-                    y_offset,
-                );
-                vertices.extend_from_slice(&cursor_quad);
+            if let Some(cursor_info) = view.cursor_info() {
+                let cursor_pos = cursor_info.position;
+                if let Some(screen_line) = viewport.buffer_line_to_screen_line(cursor_pos.line) {
+                    // Render cursor as a block cursor using the solid (fully opaque)
+                    // atlas region so the fragment shader produces a visible quad.
+                    let solid_glyph = atlas.solid_glyph();
+                    let cursor_quad = self.create_cursor_quad_with_offset(
+                        screen_line,
+                        cursor_pos.col,
+                        solid_glyph,
+                        y_offset,
+                    );
+                    vertices.extend_from_slice(&cursor_quad);
 
-                // Generate indices for the cursor quad
-                indices.push(vertex_offset);
-                indices.push(vertex_offset + 1);
-                indices.push(vertex_offset + 2);
-                indices.push(vertex_offset);
-                indices.push(vertex_offset + 2);
-                indices.push(vertex_offset + 3);
+                    // Generate indices for the cursor quad
+                    indices.push(vertex_offset);
+                    indices.push(vertex_offset + 1);
+                    indices.push(vertex_offset + 2);
+                    indices.push(vertex_offset);
+                    indices.push(vertex_offset + 2);
+                    indices.push(vertex_offset + 3);
+                }
             }
         }
 
@@ -724,7 +740,7 @@ impl GlyphBuffer {
     }
 
     // Chunk: docs/chunks/line_wrap_rendering - Wrap-aware rendering
-    /// Updates the buffers with content from a TextBuffer, with soft line wrapping.
+    /// Updates the buffers with content from a BufferView, with soft line wrapping.
     ///
     /// This is the main rendering entry point when line wrapping is enabled.
     /// It iterates buffer lines, wrapping each according to the WrapLayout,
@@ -735,11 +751,12 @@ impl GlyphBuffer {
     /// 2. Border quads (for continuation rows)
     /// 3. Glyph quads (text characters)
     /// 4. Cursor quad
+    // Chunk: docs/chunks/buffer_view_trait - Accept BufferView trait instead of TextBuffer
     pub fn update_from_buffer_with_wrap(
         &mut self,
         device: &ProtocolObject<dyn MTLDevice>,
         atlas: &GlyphAtlas,
-        buffer: &TextBuffer,
+        view: &dyn BufferView,
         viewport: &Viewport,
         wrap_layout: &WrapLayout,
         cursor_visible: bool,
@@ -752,14 +769,14 @@ impl GlyphBuffer {
         // We don't know exact counts without iterating, but we can estimate
         let mut estimated_quads = 0;
         let mut screen_row = 0;
-        let line_count = buffer.line_count();
+        let line_count = view.line_count();
 
         // Quick estimate: count chars in visible lines
         for buffer_line in first_visible_line..line_count {
             if screen_row >= max_screen_rows {
                 break;
             }
-            let line_len = buffer.line_len(buffer_line);
+            let line_len = view.line_len(buffer_line);
             let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
             estimated_quads += line_len + rows_for_line; // chars + potential borders
             screen_row += rows_for_line;
@@ -798,7 +815,7 @@ impl GlyphBuffer {
         // ==================== Phase 1: Selection Quads ====================
         let selection_start_index = indices.len();
 
-        if let Some((sel_start, sel_end)) = buffer.selection_range() {
+        if let Some((sel_start, sel_end)) = view.selection_range() {
             let solid_glyph = atlas.solid_glyph();
             let cols_per_row = wrap_layout.cols_per_row();
 
@@ -809,7 +826,7 @@ impl GlyphBuffer {
                     break;
                 }
 
-                let line_len = buffer.line_len(buffer_line);
+                let line_len = view.line_len(buffer_line);
                 let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
 
                 // Check if this buffer line intersects the selection
@@ -881,7 +898,7 @@ impl GlyphBuffer {
                     break;
                 }
 
-                let line_len = buffer.line_len(buffer_line);
+                let line_len = view.line_len(buffer_line);
                 let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
 
                 // Emit border quads for continuation rows (row_offset > 0)
@@ -914,7 +931,12 @@ impl GlyphBuffer {
                     break;
                 }
 
-                let line_content = buffer.line_content(buffer_line);
+                // Get line content via styled_line, extract text from spans
+                let line_content = if let Some(styled_line) = view.styled_line(buffer_line) {
+                    styled_line.spans.iter().map(|s| s.text.as_str()).collect::<String>()
+                } else {
+                    continue;
+                };
                 let line_len = line_content.chars().count();
                 let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
 
@@ -960,40 +982,42 @@ impl GlyphBuffer {
         let cursor_start_index = indices.len();
 
         if cursor_visible {
-            let cursor_pos = buffer.cursor_position();
-            let solid_glyph = atlas.solid_glyph();
+            if let Some(cursor_info) = view.cursor_info() {
+                let cursor_pos = cursor_info.position;
+                let solid_glyph = atlas.solid_glyph();
 
-            // Calculate the cumulative screen row for the cursor's buffer line
-            let mut cumulative_screen_row: usize = 0;
-            let mut found_cursor = false;
+                // Calculate the cumulative screen row for the cursor's buffer line
+                let mut cumulative_screen_row: usize = 0;
+                let mut found_cursor = false;
 
-            for buffer_line in first_visible_line..=cursor_pos.line.min(line_count.saturating_sub(1)) {
-                if buffer_line == cursor_pos.line {
-                    // Calculate cursor's screen position
-                    let (row_offset, screen_col) = wrap_layout.buffer_col_to_screen_pos(cursor_pos.col);
-                    let screen_row = cumulative_screen_row + row_offset;
+                for buffer_line in first_visible_line..=cursor_pos.line.min(line_count.saturating_sub(1)) {
+                    if buffer_line == cursor_pos.line {
+                        // Calculate cursor's screen position
+                        let (row_offset, screen_col) = wrap_layout.buffer_col_to_screen_pos(cursor_pos.col);
+                        let screen_row = cumulative_screen_row + row_offset;
 
-                    if screen_row < max_screen_rows {
-                        let cursor_quad = self.create_cursor_quad_with_offset(
-                            screen_row,
-                            screen_col,
-                            solid_glyph,
-                            y_offset,
-                        );
-                        vertices.extend_from_slice(&cursor_quad);
-                        push_quad_indices(&mut indices, &mut vertex_offset);
-                        found_cursor = true;
+                        if screen_row < max_screen_rows {
+                            let cursor_quad = self.create_cursor_quad_with_offset(
+                                screen_row,
+                                screen_col,
+                                solid_glyph,
+                                y_offset,
+                            );
+                            vertices.extend_from_slice(&cursor_quad);
+                            push_quad_indices(&mut indices, &mut vertex_offset);
+                            found_cursor = true;
+                        }
+                        break;
                     }
-                    break;
+
+                    let line_len = view.line_len(buffer_line);
+                    cumulative_screen_row += wrap_layout.screen_rows_for_line(line_len);
                 }
 
-                let line_len = buffer.line_len(buffer_line);
-                cumulative_screen_row += wrap_layout.screen_rows_for_line(line_len);
-            }
-
-            // Handle case where cursor is before first_visible_line
-            if !found_cursor && cursor_pos.line < first_visible_line {
-                // Cursor is above viewport, don't render
+                // Handle case where cursor is before first_visible_line
+                if !found_cursor && cursor_pos.line < first_visible_line {
+                    // Cursor is above viewport, don't render
+                }
             }
         }
 

@@ -8,170 +8,173 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The buffer is implemented as its own `lite-edit-buffer` crate (no macOS or rendering
+dependencies — compiles and tests on any platform) composed of four modules:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **`types`** — `Position` and `DirtyLines`; the foundational types everything else uses
+2. **`gap_buffer`** — character storage with a movable gap; O(1) amortized insert/delete at the gap position
+3. **`line_index`** — a `Vec<usize>` of line-start offsets kept incrementally in sync with every mutation
+4. **`text_buffer`** — the public API, combining the three above with cursor and selection state
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+This layering keeps each concern testable in isolation. `lib.rs` re-exports the three
+public types (`TextBuffer`, `DirtyLines`, `Position`) as the crate surface.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/text_buffer/GOAL.md)
-with references to the files that you expect to touch.
--->
-
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+The gap buffer was chosen over a rope as the backing store per the investigation
+findings (`docs/investigations/editor_core_architecture`): simpler to implement
+correctly, sufficient for the initial editable buffer milestone, and the interface
+is designed so swapping to a rope later wouldn't change the public API.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Define `Position` and `DirtyLines` in `types.rs`
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+`Position` is `(line: usize, col: usize)`, 0-indexed. It derives `Ord` (line first,
+then col) so selection range endpoints can be sorted without if/else at every call site.
 
-Example:
+`DirtyLines` is the return type of every `TextBuffer` mutation:
 
-### Step 1: Define the SegmentHeader struct
+- `None` — no-op or cursor-only operation, nothing to redraw
+- `Single(usize)` — exactly one line changed (most in-line edits)
+- `Range { from, to }` — a contiguous range changed (e.g., multi-line delete)
+- `FromLineToEnd(usize)` — all lines from a point to the end changed (line split or join
+  pushes/pulls all subsequent lines)
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+`DirtyLines::merge` combines two dirty regions into the smallest covering region.
+Used by the event loop to accumulate dirty info across multiple events in a single
+frame before a single render pass.
 
-Location: src/segment/format.rs
+Location: `crates/buffer/src/types.rs`
 
-### Step 2: Implement header serialization
+### Step 2: Implement `GapBuffer` in `gap_buffer.rs`
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+A `Vec<char>` with a movable gap representing the cursor:
 
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+data: [ pre-gap content | gap (\0 fill) | post-gap content ]
+       [0 .. gap_start)   [gap_start..gap_end)   [gap_end..)
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Key design points:
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+- `move_gap_to(pos)` shifts content to move the gap; O(distance), amortises well for
+  the typical locality-of-edits pattern
+- `insert(ch)` writes to `data[gap_start]` and increments `gap_start`; O(1) amortized
+- `delete_backward()` / `delete_forward()` shrink/expand the gap by adjusting `gap_start`
+  or `gap_end`; O(1)
+- `ensure_gap(n)` grows the backing store in-place using `GAP_GROWTH_FACTOR = 2`,
+  preserving the gap at its current position (critical: callers call `move_gap_to` then
+  `insert` in sequence, so the gap must not move during growth)
+- Initial gap size: 64 characters (`INITIAL_GAP_SIZE`)
 
-## Dependencies
+Location: `crates/buffer/src/gap_buffer.rs`
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+### Step 3: Implement `LineIndex` in `line_index.rs`
 
-If there are no dependencies, delete this section.
--->
+A `Vec<usize>` where `line_starts[i]` is the character offset of the first character
+on line `i`. Invariant: `line_starts[0] == 0` always; the vec always has at least one
+entry.
 
-## Risks and Open Questions
+Incremental update methods (called by `TextBuffer` on every mutation so the index never
+needs a full rebuild during normal editing):
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- `insert_newline(offset)` — inserts a new entry after the line containing `offset`,
+  shifts all subsequent starts by +1
+- `remove_newline(line)` — removes the entry for line `line+1` (joining it into `line`),
+  shifts all subsequent starts by -1
+- `insert_char(line)` / `remove_char(line)` — shifts all starts after `line` by ±1
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+Bulk variants for `insert_str` (avoids O(n·m) per-character shifting):
+
+- `line_starts_after_mut(after_line)` — mutable slice of all entries strictly after
+  `after_line`, for bulk offset adjustment
+- `insert_line_starts_after(after_line, new_starts)` — splices multiple entries in one
+  `copy_within` + slice-copy operation
+
+`rebuild(content)` does a full O(n) pass from scratch, used only when loading a file.
+
+Location: `crates/buffer/src/line_index.rs`
+
+### Step 4: Implement `TextBuffer` in `text_buffer.rs`
+
+Combines `GapBuffer` + `LineIndex` + `cursor: Position` + `selection_anchor: Option<Position>`.
+
+**Core helper — `sync_gap_to_cursor()`:** Converts `(line, col)` to a logical character
+offset using the line index and calls `buffer.move_gap_to(offset)`. Called at the top
+of every mutation to ensure the gap is in the right place before touching the buffer.
+
+**Mutation operations** (all return `DirtyLines`):
+
+- `insert_char(ch)` — inserts at cursor, updates line index via `insert_char` or
+  `insert_newline`, advances cursor; returns `Single(line)` for normal chars,
+  `FromLineToEnd(line)` for `\n`
+- `insert_newline()` — splits the current line at the cursor; returns `FromLineToEnd(line)`
+- `delete_backward()` — deletes the character before the cursor; if that character is
+  `\n` the lines join (`remove_newline`) and returns `FromLineToEnd`; no-op at buffer
+  start
+- `delete_forward()` — deletes the character at the cursor; same line-join logic;
+  no-op at buffer end
+- `insert_str(s)` — bulk insert, uses `line_starts_after_mut` + `insert_line_starts_after`
+  for efficient line-index update
+- `delete_selection()` — deletes the text between anchor and cursor, places cursor at
+  the selection start, clears the anchor
+
+**Cursor movement** (return `()`):
+
+- `move_left` / `move_right` with wrap at line boundaries
+- `move_up` / `move_down` with column clamping at shorter lines
+- `move_to_line_start` / `move_to_line_end`
+- `move_to_buffer_start` / `move_to_buffer_end`
+- `set_cursor(pos)` — direct placement with bounds clamping
+- `move_word_left` / `move_word_right` — character-class run scanning using
+  `word_boundary_left` / `word_boundary_right` (private helpers, also used by the
+  word-deletion operations added in later chunks)
+
+**Selection:**
+
+- Anchor-cursor model: `selection_anchor: Option<Position>` stores one end; the cursor
+  is the other
+- `set_selection_anchor(pos)` / `clear_selection()` / `has_selection()`
+- `selection_range()` — returns `(min, max)` regardless of which end is anchor vs cursor
+- `select_all()`, `select_word_at(col)` — convenience setters
+
+**Debug consistency check:** `assert_line_index_consistent()` — sampled every 64
+mutations in debug builds; does a full rebuild into a scratch index and panics if it
+disagrees with the live index. Catches any off-by-one in the incremental update code.
+
+Location: `crates/buffer/src/text_buffer.rs`
+
+### Step 5: Wire up `lib.rs`
+
+Re-export `TextBuffer`, `DirtyLines`, and `Position` as the crate's public surface.
+Add module declarations for the four internal modules. Include a doc-comment crate
+overview with a usage example.
+
+Location: `crates/buffer/src/lib.rs`
+
+### Step 6: Write unit tests
+
+Tests are co-located in each module's `#[cfg(test)]` block:
+
+- **`gap_buffer.rs`** — new/empty, `from_str`, insert, insert at middle, delete backward/forward
+  at boundaries, `move_gap`, `char_at` with gap in middle, `slice`, `insert_str`, large insert
+- **`line_index.rs`** — rebuild (empty, single-line, multi-line), `line_end`, `line_len`,
+  `line_at_offset`, `insert_newline`, `remove_newline`, `insert_char`, `remove_char`
+- **`types.rs`** — `DirtyLines::merge` exhaustively: identity (None), same/adjacent/distant
+  singles, overlapping/disjoint/nested ranges, single+range, `FromLineToEnd` absorption,
+  multi-event sequences
+- **`text_buffer.rs`** — 169 tests covering insert/delete at beginning/middle/end,
+  newline insertion, backspace across line boundaries, cursor movement at all boundaries,
+  multi-character sequences, dirty line correctness, selection operations, word movement,
+  word deletion, kill-line, paste, and the debug line-index consistency assertion
+
+Integration tests in `crates/buffer/tests/` cover multi-operation sequences and
+performance (100K character insert in < 100ms release, < 200ms with newlines).
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+None — implementation matched the design described above. The `word_boundary_left` and
+`word_boundary_right` helpers, and the selection/word-operation methods, were added in
+later chunks (`word_boundary_primitives`, `text_selection_model`, `delete_backward_word`,
+`word_forward_delete`) but live in this file because `TextBuffer` is the natural home
+for buffer-level operations. Those additions are governed by their respective chunks,
+not this one.
