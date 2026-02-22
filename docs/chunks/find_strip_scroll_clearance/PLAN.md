@@ -1,177 +1,182 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk fixes two compounding issues that prevent find-and-scroll from
+landing matches in the visible area:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Tab bar height not subtracted from viewport calculation**:
+   `EditorState::update_viewport_dimensions` passes the raw `window_height` to
+   `Viewport::update_size`, but the content area is actually `window_height -
+   TAB_BAR_HEIGHT` pixels. This causes `visible_lines` to be over-counted by
+   `floor(32 / 16) = 2` lines with typical metrics.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **Find strip occludes the last visible line**: When scrolling to reveal a
+   match, `ensure_visible` places the target at `visible_lines - 1` (the last
+   visible row). The find strip (~24px) renders over this row, hiding the match.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/find_strip_scroll_clearance/GOAL.md)
-with references to the files that you expect to touch.
--->
+**Strategy:**
 
-## Subsystem Considerations
+- Fix #1 by passing `window_height - TAB_BAR_HEIGHT` (i.e., `content_height`) to
+  `Viewport::update_size` in `update_viewport_dimensions`. This value is already
+  computed elsewhere in `editor_state.rs` for mouse/scroll handling.
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+- Fix #2 by introducing a `ensure_visible_with_margin` helper on `Viewport` that
+  accepts a `bottom_margin_lines` parameter, then calling it from
+  `run_live_search` / `advance_to_next_match` with margin=1 when find mode is
+  active. This keeps the generic `ensure_visible` unchanged for normal cursor
+  scrolling.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
+**Testing Philosophy alignment:**
 
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+- Per TESTING_PHILOSOPHY.md, we test pure state manipulation without platform
+  dependencies. The viewport and scroll logic are already fully testable.
+- We write failing tests first for both fixes before implementing the changes.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add failing test for visible_lines overcount
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Write a test in `editor_state.rs` that creates an `EditorState`, calls
+`update_viewport_dimensions(800.0, 600.0)`, and asserts that `visible_lines`
+equals `floor((600 - 32) / 16) = 35` rather than `floor(600 / 16) = 37`.
 
-Example:
+Location: `crates/editor/src/editor_state.rs` (test module)
 
-### Step 1: Define the SegmentHeader struct
+Expected: Test fails because current code computes 37 lines.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Fix update_viewport_dimensions to subtract TAB_BAR_HEIGHT
 
-Location: src/segment/format.rs
+In `EditorState::update_viewport_dimensions`, change the call from:
 
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+self.viewport_mut().update_size(window_height, line_count);
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+to:
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+```rust
+let content_height = window_height - TAB_BAR_HEIGHT;
+self.viewport_mut().update_size(content_height, line_count);
+```
+
+This mirrors how `content_height` is already computed for mouse event handling
+in the same file (lines ~851, ~1013, ~1057).
+
+Also update `update_viewport_size` for consistency (line ~244-248).
+
+Location: `crates/editor/src/editor_state.rs`
+
+Verify: The test from Step 1 now passes.
+
+### Step 3: Add ensure_visible_with_margin method to Viewport
+
+Add a new method to `Viewport`:
+
+```rust
+/// Ensures a buffer line is visible, with additional bottom margin.
+///
+/// Like `ensure_visible`, but treats the viewport as if it had
+/// `bottom_margin_lines` fewer rows at the bottom. This is useful when
+/// an overlay (like the find strip) occludes the bottom of the viewport.
+///
+/// Returns `true` if scrolling occurred.
+pub fn ensure_visible_with_margin(
+    &mut self,
+    line: usize,
+    buffer_line_count: usize,
+    bottom_margin_lines: usize,
+) -> bool
+```
+
+The implementation will temporarily reduce `visible_lines` by the margin when
+computing whether scrolling is needed (or delegate to `RowScroller` with
+adjusted parameters).
+
+Location: `crates/editor/src/viewport.rs`
+
+### Step 4: Add unit tests for ensure_visible_with_margin
+
+Write tests verifying:
+- `ensure_visible_with_margin(line, count, 0)` behaves identically to
+  `ensure_visible(line, count)`
+- `ensure_visible_with_margin(target, count, 1)` scrolls such that target ends
+  up at `visible_lines - 2` (one row above the margin)
+- Already-visible lines with margin still don't trigger scrolling
+
+Location: `crates/editor/src/viewport.rs` (test module)
+
+### Step 5: Add integration test for find scroll clearance
+
+Write a test in `editor_state.rs` that:
+1. Creates a buffer with 100 lines
+2. Sets viewport dimensions such that ~10 lines are visible
+3. Opens find mode (set `focus` to `FindInFile`, init `find_mini_buffer`)
+4. Runs `run_live_search` for a query matching a line near the bottom
+5. Asserts the match line is at or above `first_visible_line + visible_lines - 2`
+   (i.e., above the find strip area)
+
+Location: `crates/editor/src/editor_state.rs` (test module)
+
+Expected: Test fails because current `run_live_search` uses `ensure_visible`
+without margin.
+
+### Step 6: Update run_live_search to use ensure_visible_with_margin
+
+In `EditorState::run_live_search`, change:
+
+```rust
+if self.viewport_mut().ensure_visible(match_line, line_count) {
+```
+
+to:
+
+```rust
+// When find mode is active, use margin=1 to keep the match above the find strip
+if self.viewport_mut().ensure_visible_with_margin(match_line, line_count, 1) {
+```
+
+Location: `crates/editor/src/editor_state.rs`
+
+Note: `run_live_search` is only called when find mode is active, so we can
+unconditionally apply the margin.
+
+### Step 7: Verify all tests pass
+
+Run the full test suite:
+
+```bash
+cargo test -p lite-edit-editor
+```
+
+All tests should pass, including the new tests from Steps 1, 4, and 5.
+
+### Step 8: Manual verification
+
+Open the editor, load a file with content extending past one viewport, press
+Ctrl+F, and type a query that matches a line near the bottom of the file. Verify
+the match is clearly visible above the find strip without requiring manual
+scrolling.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **find_in_file** chunk: This chunk builds on the find-in-file functionality
+  implemented in that chunk. The `run_live_search` and `advance_to_next_match`
+  methods must already exist.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Line wrap interaction**: The chunk's success criteria mention that when find
+  mode is *not* active, `ensure_visible` should behave exactly as before. The
+  approach of introducing a separate method (`ensure_visible_with_margin`) and
+  only calling it from find-mode code paths ensures this invariant. However, we
+  should verify that `ensure_visible_wrapped` (used for soft-wrapped lines) is
+  not affected by this change.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Margin calculation edge case**: With very small viewports (e.g., 2 visible
+  lines), applying a 1-line margin may behave unexpectedly. Consider clamping
+  the effective visible lines to at least 1.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- POPULATE DURING IMPLEMENTATION -->

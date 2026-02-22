@@ -209,6 +209,26 @@ impl Viewport {
         self.scroller.ensure_visible(line, buffer_line_count)
     }
 
+    // Chunk: docs/chunks/find_strip_scroll_clearance - Margin support for overlays
+    /// Ensures a buffer line is visible, with additional bottom margin.
+    ///
+    /// Like `ensure_visible`, but treats the viewport as if it had
+    /// `bottom_margin_lines` fewer rows at the bottom. This is useful when
+    /// an overlay (like the find strip) occludes the bottom of the viewport.
+    ///
+    /// When scrolling is needed, this snaps to a whole-line boundary.
+    ///
+    /// Returns `true` if scrolling occurred, `false` if the line was already visible.
+    pub fn ensure_visible_with_margin(
+        &mut self,
+        line: usize,
+        buffer_line_count: usize,
+        bottom_margin_lines: usize,
+    ) -> bool {
+        self.scroller
+            .ensure_visible_with_margin(line, buffer_line_count, bottom_margin_lines)
+    }
+
     // Chunk: docs/chunks/line_wrap_rendering - Wrap-aware cursor visibility
     /// Ensures a cursor position is visible with soft line wrapping.
     ///
@@ -1061,5 +1081,35 @@ mod tests {
         assert_eq!(buf_line, 0);
         assert_eq!(row_off, 2); // This is also a continuation row
         assert_eq!(cumulative, 0);
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/find_strip_scroll_clearance - ensure_visible_with_margin tests
+    // =========================================================================
+
+    #[test]
+    fn test_ensure_visible_with_margin_delegates_to_scroller() {
+        // Verify that Viewport.ensure_visible_with_margin delegates properly to RowScroller
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(160.0, 100); // 10 visible lines
+
+        // With margin=1, line 9 should trigger scroll
+        let scrolled = vp.ensure_visible_with_margin(9, 100, 1);
+        assert!(scrolled);
+        assert_eq!(vp.first_visible_line(), 1);
+    }
+
+    #[test]
+    fn test_ensure_visible_with_margin_zero_same_as_ensure_visible() {
+        let mut vp1 = Viewport::new(16.0);
+        let mut vp2 = Viewport::new(16.0);
+        vp1.update_size(160.0, 100);
+        vp2.update_size(160.0, 100);
+
+        let scrolled1 = vp1.ensure_visible(15, 100);
+        let scrolled2 = vp2.ensure_visible_with_margin(15, 100, 0);
+
+        assert_eq!(scrolled1, scrolled2);
+        assert_eq!(vp1.first_visible_line(), vp2.first_visible_line());
     }
 }

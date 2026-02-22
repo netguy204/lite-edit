@@ -253,6 +253,7 @@ impl EditorController {
     }
 
     /// Toggles cursor blink, checks for picker updates, and re-renders if needed.
+    /// Chunk: docs/chunks/file_picker - Integration of tick_picker into timer-driven refresh loop
     fn toggle_cursor_blink(&mut self) {
         // Toggle cursor blink
         let cursor_dirty = self.state.toggle_cursor_blink();
@@ -271,6 +272,7 @@ impl EditorController {
     }
 
     /// Renders if there's a dirty region.
+    /// Chunk: docs/chunks/file_picker - Conditional render_with_selector when focus is Selector
     fn render_if_dirty(&mut self) {
         // Update window title if needed (even if not rendering)
         self.update_window_title_if_needed();

@@ -37,6 +37,7 @@ use lite_edit_buffer::{Position, TextBuffer};
 const CURSOR_BLINK_INTERVAL_MS: u64 = 500;
 
 /// Which UI element currently owns keyboard/mouse focus.
+/// Chunk: docs/chunks/file_picker - Focus mode enum distinguishing Buffer vs Selector editing mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EditorFocus {
     /// Normal buffer editing mode
@@ -61,6 +62,7 @@ pub enum EditorFocus {
 ///
 /// The `buffer`, `viewport`, and `associated_file` are now accessed through
 /// delegate methods that forward to the active workspace's active tab.
+/// Chunk: docs/chunks/file_picker - File picker state fields (focus, active_selector, file_index, last_cache_version, resolved_path)
 pub struct EditorState {
     /// The workspace/tab model containing all buffers and viewports
     pub editor: Editor,
@@ -243,8 +245,11 @@ impl EditorState {
     /// mouse event coordinate flipping and selector overlay geometry.
     // Chunk: docs/chunks/resize_click_alignment - Pass line count for scroll clamping
     // Chunk: docs/chunks/scroll_max_last_line - Pass content_height to viewport
+    // Chunk: docs/chunks/find_strip_scroll_clearance - Subtract TAB_BAR_HEIGHT for correct visible_lines
     pub fn update_viewport_size(&mut self, window_height: f32) {
         let line_count = self.buffer().line_count();
+        // Pass content_height (window_height minus tab bar) to viewport so visible_lines
+        // is computed correctly. The tab bar occupies the top TAB_BAR_HEIGHT pixels.
         let content_height = window_height - TAB_BAR_HEIGHT;
         self.viewport_mut().update_size(content_height, line_count);
         self.view_height = window_height; // Keep full height for coordinate flipping
@@ -255,8 +260,11 @@ impl EditorState {
     /// This is the preferred method when both dimensions are available.
     // Chunk: docs/chunks/resize_click_alignment - Pass line count for scroll clamping
     // Chunk: docs/chunks/scroll_max_last_line - Pass content_height to viewport
+    // Chunk: docs/chunks/find_strip_scroll_clearance - Subtract TAB_BAR_HEIGHT for correct visible_lines
     pub fn update_viewport_dimensions(&mut self, window_width: f32, window_height: f32) {
         let line_count = self.buffer().line_count();
+        // Pass content_height (window_height minus tab bar) to viewport so visible_lines
+        // is computed correctly. The tab bar occupies the top TAB_BAR_HEIGHT pixels.
         let content_height = window_height - TAB_BAR_HEIGHT;
         self.viewport_mut().update_size(content_height, line_count);
         self.view_height = window_height; // Keep full height for coordinate flipping
@@ -273,6 +281,7 @@ impl EditorState {
     ///
     /// If the cursor has been scrolled off-screen, we snap the viewport back
     /// to make the cursor visible BEFORE processing the keystroke.
+    // Chunk: docs/chunks/file_picker - Cmd+P interception and focus-based key routing
     pub fn handle_key(&mut self, event: KeyEvent) {
         use crate::input::Key;
 
@@ -378,6 +387,7 @@ impl EditorState {
     }
 
     /// Handles Cmd+P to toggle the file picker.
+    /// Chunk: docs/chunks/file_picker - Toggle behavior for Cmd+P (open/close file picker)
     fn handle_cmd_p(&mut self) {
         match self.focus {
             EditorFocus::Buffer => {
@@ -395,6 +405,7 @@ impl EditorState {
     }
 
     /// Opens the file picker selector.
+    /// Chunk: docs/chunks/file_picker - FileIndex initialization, initial query, SelectorWidget setup
     fn open_file_picker(&mut self) {
         // Get the current working directory
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -427,6 +438,7 @@ impl EditorState {
     }
 
     /// Closes the active selector.
+    /// Chunk: docs/chunks/file_picker - Selector dismissal and focus return to Buffer
     fn close_selector(&mut self) {
         self.active_selector = None;
         self.focus = EditorFocus::Buffer;
@@ -657,10 +669,13 @@ impl EditorState {
                 #[cfg(test)]
                 eprintln!("run_live_search: After setting selection, selection_range={:?}", self.buffer().selection_range());
 
-                // Scroll viewport to make match visible
+                // Scroll viewport to make match visible.
+                // Chunk: docs/chunks/find_strip_scroll_clearance - Use margin when find strip is active
+                // Use margin=1 because the find strip occludes the last visible row.
+                // This ensures matches land at visible_lines - 2 (one row above the strip).
                 let line_count = self.buffer().line_count();
                 let match_line = start.line;
-                if self.viewport_mut().ensure_visible(match_line, line_count) {
+                if self.viewport_mut().ensure_visible_with_margin(match_line, line_count, 1) {
                     self.dirty_region.merge(DirtyRegion::FullViewport);
                 }
             }
@@ -699,6 +714,7 @@ impl EditorState {
     }
 
     /// Handles a key event when the selector is focused.
+    /// Chunk: docs/chunks/file_picker - Key forwarding to SelectorWidget and SelectorOutcome handling
     fn handle_key_selector(&mut self, event: KeyEvent) {
         let selector = match self.active_selector.as_mut() {
             Some(s) => s,
@@ -756,6 +772,7 @@ impl EditorState {
     }
 
     /// Handles selector confirmation (Enter pressed).
+    /// Chunk: docs/chunks/file_picker - Path resolution, recency recording, and resolved_path storage on Enter
     fn handle_selector_confirm(&mut self, idx: usize) {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
@@ -789,6 +806,7 @@ impl EditorState {
     /// If `idx < items.len()`: returns `cwd / items[idx]`
     /// If `idx == usize::MAX` or query doesn't match: returns `cwd / query` (new file)
     /// If the resolved file doesn't exist, creates it as an empty file.
+    /// Chunk: docs/chunks/file_picker - Path resolution logic (existing file vs new file creation)
     fn resolve_picker_path(
         &self,
         idx: usize,
@@ -880,6 +898,7 @@ impl EditorState {
     ///
     /// Mouse clicks in the left rail switch workspaces.
     /// Mouse clicks in the tab bar switch tabs.
+    /// Chunk: docs/chunks/file_picker - Focus-based mouse routing (selector vs buffer)
     pub fn handle_mouse(&mut self, event: MouseEvent) {
         use crate::input::MouseEventKind;
 
@@ -925,6 +944,7 @@ impl EditorState {
     }
 
     /// Handles a mouse event when the selector is focused.
+    /// Chunk: docs/chunks/file_picker - Mouse forwarding to SelectorWidget with overlay geometry
     fn handle_mouse_selector(&mut self, event: MouseEvent) {
         let selector = match self.active_selector.as_mut() {
             Some(s) => s,
@@ -1044,6 +1064,7 @@ impl EditorState {
     ///
     /// When find-in-file is open, scroll events go to the main buffer (the user
     /// can scroll while searching).
+    /// Chunk: docs/chunks/file_picker - Scroll event routing to selector widget when selector is open
     pub fn handle_scroll(&mut self, delta: ScrollDelta) {
         // When selector is open, forward scroll to selector
         if self.focus == EditorFocus::Selector {
@@ -1076,8 +1097,8 @@ impl EditorState {
         self.focus_target.handle_scroll(delta, &mut ctx);
     }
 
-    // Chunk: docs/chunks/file_picker_scroll - Forwards scroll events to selector when focused
     /// Handles a scroll event when the selector is focused.
+    /// Chunk: docs/chunks/file_picker - Scroll event routing to selector widget when selector is open
     fn handle_scroll_selector(&mut self, delta: ScrollDelta) {
         let selector = match self.active_selector.as_mut() {
             Some(s) => s,
@@ -1116,6 +1137,7 @@ impl EditorState {
     /// initial directory walk.
     ///
     /// Returns `DirtyRegion::FullViewport` if items were updated, `None` otherwise.
+    /// Chunk: docs/chunks/file_picker - Streaming refresh mechanism for background file index updates
     pub fn tick_picker(&mut self) -> DirtyRegion {
         // Only relevant when selector is active
         if self.focus != EditorFocus::Selector {
@@ -1652,12 +1674,15 @@ mod tests {
 
     #[test]
     fn test_viewport_size_update() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
         let mut state = EditorState::empty(test_font_metrics());
         state.update_viewport_size(320.0);
 
+        // visible_lines is computed from content_height = window_height - TAB_BAR_HEIGHT
         // With TAB_BAR_HEIGHT=32, content_height = 320 - 32 = 288
         // visible_lines = 288 / 16 = 18
-        assert_eq!(state.viewport().visible_lines(), 18);
+        let expected_visible = ((320.0 - TAB_BAR_HEIGHT) / 16.0).floor() as usize;
+        assert_eq!(state.viewport().visible_lines(), expected_visible);
         // view_height remains the full window height for coordinate flipping
         assert_eq!(state.view_height, 320.0);
     }
@@ -3753,6 +3778,126 @@ mod tests {
         state.new_tab();
 
         assert!(state.is_dirty());
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/find_strip_scroll_clearance - Viewport dimensions tests
+    // =========================================================================
+
+    #[test]
+    fn test_update_viewport_dimensions_subtracts_tab_bar_height() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        // line_height is 16.0 in test_font_metrics()
+
+        // With window_height = 600.0 and TAB_BAR_HEIGHT = 32.0,
+        // content_height = 600 - 32 = 568
+        // visible_lines = floor(568 / 16) = 35
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        let expected_content_height = 600.0 - TAB_BAR_HEIGHT;
+        let expected_visible_lines = (expected_content_height / 16.0).floor() as usize;
+
+        assert_eq!(
+            state.viewport().visible_lines(),
+            expected_visible_lines,
+            "update_viewport_dimensions should pass content_height (window_height - TAB_BAR_HEIGHT) to viewport, \
+             not the full window_height. Expected {} visible lines but got {}.",
+            expected_visible_lines,
+            state.viewport().visible_lines()
+        );
+    }
+
+    #[test]
+    fn test_update_viewport_size_subtracts_tab_bar_height() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        // line_height is 16.0 in test_font_metrics()
+
+        // With window_height = 600.0 and TAB_BAR_HEIGHT = 32.0,
+        // content_height = 600 - 32 = 568
+        // visible_lines = floor(568 / 16) = 35
+        state.update_viewport_size(600.0);
+
+        let expected_content_height = 600.0 - TAB_BAR_HEIGHT;
+        let expected_visible_lines = (expected_content_height / 16.0).floor() as usize;
+
+        assert_eq!(
+            state.viewport().visible_lines(),
+            expected_visible_lines,
+            "update_viewport_size should pass content_height (window_height - TAB_BAR_HEIGHT) to viewport, \
+             not the full window_height. Expected {} visible lines but got {}.",
+            expected_visible_lines,
+            state.viewport().visible_lines()
+        );
+    }
+
+    #[test]
+    fn test_find_scroll_clearance() {
+        // This test verifies that when find mode is active and scrolling is needed
+        // to reveal a match, the match lands at or above the second-to-last visible row
+        // (i.e., above the find strip area).
+
+        let mut state = EditorState::empty(test_font_metrics());
+
+        // Create a buffer with 100 lines, each containing a unique identifier
+        let mut content = String::new();
+        for i in 0..100 {
+            content.push_str(&format!("line{:03}\n", i));
+        }
+        state.buffer_mut().insert_str(&content);
+
+        // Set up viewport with window_height = 192 px
+        // content_height = 192 - 32 (TAB_BAR_HEIGHT) = 160 px
+        // visible_lines = 160 / 16 = 10 lines
+        state.update_viewport_size(192.0);
+        let visible_lines = state.viewport().visible_lines();
+        assert_eq!(visible_lines, 10, "Sanity check: expected 10 visible lines");
+
+        // Start at the top of the buffer
+        state.buffer_mut().set_cursor(lite_edit_buffer::Position { line: 0, col: 0 });
+        let line_count = state.buffer().line_count();
+        state.viewport_mut().scroll_to(0, line_count);
+
+        // Open find mode (Cmd+F)
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+        assert_eq!(state.focus, EditorFocus::FindInFile);
+
+        // Type a search query that matches a line near the bottom of what would scroll
+        // Search for "line025" which is at line 25 (0-indexed)
+        for c in "line025".chars() {
+            state.handle_key(KeyEvent::char(c));
+        }
+
+        // After searching, the match should be scrolled into view
+        let first_visible = state.viewport().first_visible_line();
+        let match_line = 25_usize;
+
+        // The match line should be within the effective visible area.
+        // With find strip margin=1, match should be at position <= visible_lines - 2
+        // (i.e., at row 8 or earlier, since visible_lines = 10)
+        let match_screen_position = match_line.saturating_sub(first_visible);
+
+        assert!(
+            match_screen_position <= visible_lines.saturating_sub(2),
+            "When find mode is active, matches should be scrolled to land above the find strip. \
+             Match at line {} is at screen position {} (first_visible = {}, visible_lines = {}). \
+             Expected screen position <= {} (visible_lines - 2).",
+            match_line,
+            match_screen_position,
+            first_visible,
+            visible_lines,
+            visible_lines.saturating_sub(2)
+        );
     }
 
     // =========================================================================
