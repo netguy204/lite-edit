@@ -241,9 +241,13 @@ impl EditorState {
     /// This also updates the stored view_height and view_width for
     /// mouse event coordinate flipping and selector overlay geometry.
     // Chunk: docs/chunks/resize_click_alignment - Pass line count for scroll clamping
+    // Chunk: docs/chunks/find_strip_scroll_clearance - Subtract TAB_BAR_HEIGHT for correct visible_lines
     pub fn update_viewport_size(&mut self, window_height: f32) {
         let line_count = self.buffer().line_count();
-        self.viewport_mut().update_size(window_height, line_count);
+        // Pass content_height (window_height minus tab bar) to viewport so visible_lines
+        // is computed correctly. The tab bar occupies the top TAB_BAR_HEIGHT pixels.
+        let content_height = window_height - TAB_BAR_HEIGHT;
+        self.viewport_mut().update_size(content_height, line_count);
         self.view_height = window_height;
     }
 
@@ -251,9 +255,13 @@ impl EditorState {
     ///
     /// This is the preferred method when both dimensions are available.
     // Chunk: docs/chunks/resize_click_alignment - Pass line count for scroll clamping
+    // Chunk: docs/chunks/find_strip_scroll_clearance - Subtract TAB_BAR_HEIGHT for correct visible_lines
     pub fn update_viewport_dimensions(&mut self, window_width: f32, window_height: f32) {
         let line_count = self.buffer().line_count();
-        self.viewport_mut().update_size(window_height, line_count);
+        // Pass content_height (window_height minus tab bar) to viewport so visible_lines
+        // is computed correctly. The tab bar occupies the top TAB_BAR_HEIGHT pixels.
+        let content_height = window_height - TAB_BAR_HEIGHT;
+        self.viewport_mut().update_size(content_height, line_count);
         self.view_height = window_height;
         self.view_width = window_width;
     }
@@ -652,10 +660,13 @@ impl EditorState {
                 #[cfg(test)]
                 eprintln!("run_live_search: After setting selection, selection_range={:?}", self.buffer().selection_range());
 
-                // Scroll viewport to make match visible
+                // Scroll viewport to make match visible.
+                // Chunk: docs/chunks/find_strip_scroll_clearance - Use margin when find strip is active
+                // Use margin=1 because the find strip occludes the last visible row.
+                // This ensures matches land at visible_lines - 2 (one row above the strip).
                 let line_count = self.buffer().line_count();
                 let match_line = start.line;
-                if self.viewport_mut().ensure_visible(match_line, line_count) {
+                if self.viewport_mut().ensure_visible_with_margin(match_line, line_count, 1) {
                     self.dirty_region.merge(DirtyRegion::FullViewport);
                 }
             }
@@ -1634,10 +1645,14 @@ mod tests {
 
     #[test]
     fn test_viewport_size_update() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
         let mut state = EditorState::empty(test_font_metrics());
         state.update_viewport_size(320.0);
 
-        assert_eq!(state.viewport().visible_lines(), 20); // 320 / 16 = 20
+        // visible_lines is computed from content_height = window_height - TAB_BAR_HEIGHT
+        // (320 - 32) / 16 = 288 / 16 = 18
+        let expected_visible = ((320.0 - TAB_BAR_HEIGHT) / 16.0).floor() as usize;
+        assert_eq!(state.viewport().visible_lines(), expected_visible);
         assert_eq!(state.view_height, 320.0);
     }
 
@@ -3706,5 +3721,125 @@ mod tests {
         state.new_tab();
 
         assert!(state.is_dirty());
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/find_strip_scroll_clearance - Viewport dimensions tests
+    // =========================================================================
+
+    #[test]
+    fn test_update_viewport_dimensions_subtracts_tab_bar_height() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        // line_height is 16.0 in test_font_metrics()
+
+        // With window_height = 600.0 and TAB_BAR_HEIGHT = 32.0,
+        // content_height = 600 - 32 = 568
+        // visible_lines = floor(568 / 16) = 35
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        let expected_content_height = 600.0 - TAB_BAR_HEIGHT;
+        let expected_visible_lines = (expected_content_height / 16.0).floor() as usize;
+
+        assert_eq!(
+            state.viewport().visible_lines(),
+            expected_visible_lines,
+            "update_viewport_dimensions should pass content_height (window_height - TAB_BAR_HEIGHT) to viewport, \
+             not the full window_height. Expected {} visible lines but got {}.",
+            expected_visible_lines,
+            state.viewport().visible_lines()
+        );
+    }
+
+    #[test]
+    fn test_update_viewport_size_subtracts_tab_bar_height() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        // line_height is 16.0 in test_font_metrics()
+
+        // With window_height = 600.0 and TAB_BAR_HEIGHT = 32.0,
+        // content_height = 600 - 32 = 568
+        // visible_lines = floor(568 / 16) = 35
+        state.update_viewport_size(600.0);
+
+        let expected_content_height = 600.0 - TAB_BAR_HEIGHT;
+        let expected_visible_lines = (expected_content_height / 16.0).floor() as usize;
+
+        assert_eq!(
+            state.viewport().visible_lines(),
+            expected_visible_lines,
+            "update_viewport_size should pass content_height (window_height - TAB_BAR_HEIGHT) to viewport, \
+             not the full window_height. Expected {} visible lines but got {}.",
+            expected_visible_lines,
+            state.viewport().visible_lines()
+        );
+    }
+
+    #[test]
+    fn test_find_scroll_clearance() {
+        // This test verifies that when find mode is active and scrolling is needed
+        // to reveal a match, the match lands at or above the second-to-last visible row
+        // (i.e., above the find strip area).
+
+        let mut state = EditorState::empty(test_font_metrics());
+
+        // Create a buffer with 100 lines, each containing a unique identifier
+        let mut content = String::new();
+        for i in 0..100 {
+            content.push_str(&format!("line{:03}\n", i));
+        }
+        state.buffer_mut().insert_str(&content);
+
+        // Set up viewport with window_height = 192 px
+        // content_height = 192 - 32 (TAB_BAR_HEIGHT) = 160 px
+        // visible_lines = 160 / 16 = 10 lines
+        state.update_viewport_size(192.0);
+        let visible_lines = state.viewport().visible_lines();
+        assert_eq!(visible_lines, 10, "Sanity check: expected 10 visible lines");
+
+        // Start at the top of the buffer
+        state.buffer_mut().set_cursor(lite_edit_buffer::Position { line: 0, col: 0 });
+        let line_count = state.buffer().line_count();
+        state.viewport_mut().scroll_to(0, line_count);
+
+        // Open find mode (Cmd+F)
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+        assert_eq!(state.focus, EditorFocus::FindInFile);
+
+        // Type a search query that matches a line near the bottom of what would scroll
+        // Search for "line025" which is at line 25 (0-indexed)
+        for c in "line025".chars() {
+            state.handle_key(KeyEvent::char(c));
+        }
+
+        // After searching, the match should be scrolled into view
+        let first_visible = state.viewport().first_visible_line();
+        let match_line = 25_usize;
+
+        // The match line should be within the effective visible area.
+        // With find strip margin=1, match should be at position <= visible_lines - 2
+        // (i.e., at row 8 or earlier, since visible_lines = 10)
+        let match_screen_position = match_line.saturating_sub(first_visible);
+
+        assert!(
+            match_screen_position <= visible_lines.saturating_sub(2),
+            "When find mode is active, matches should be scrolled to land above the find strip. \
+             Match at line {} is at screen position {} (first_visible = {}, visible_lines = {}). \
+             Expected screen position <= {} (visible_lines - 2).",
+            match_line,
+            match_screen_position,
+            first_visible,
+            visible_lines,
+            visible_lines.saturating_sub(2)
+        );
     }
 }

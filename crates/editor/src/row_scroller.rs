@@ -171,18 +171,41 @@ impl RowScroller {
     /// When scrolling is needed, this snaps to a whole-row boundary, ensuring
     /// clean alignment after cursor-following operations.
     pub fn ensure_visible(&mut self, row: usize, row_count: usize) -> bool {
+        self.ensure_visible_with_margin(row, row_count, 0)
+    }
+
+    // Chunk: docs/chunks/find_strip_scroll_clearance - Margin support for overlays
+    /// Ensures a row is visible, with additional bottom margin.
+    ///
+    /// Like `ensure_visible`, but treats the viewport as if it had
+    /// `bottom_margin_rows` fewer rows at the bottom. This is useful when
+    /// an overlay (like the find strip) occludes the bottom of the viewport.
+    ///
+    /// When scrolling is needed, this snaps to a whole-row boundary.
+    ///
+    /// Returns `true` if scrolling occurred, `false` if the row was already visible.
+    pub fn ensure_visible_with_margin(
+        &mut self,
+        row: usize,
+        row_count: usize,
+        bottom_margin_rows: usize,
+    ) -> bool {
         let old_offset_px = self.scroll_offset_px;
         let first_row = self.first_visible_row();
+
+        // Compute effective visible rows, accounting for margin.
+        // Clamp to at least 1 to avoid edge cases with very small viewports.
+        let effective_visible = self.visible_rows.saturating_sub(bottom_margin_rows).max(1);
 
         if row < first_row {
             // Row is above viewport - scroll up to put row at top
             // Snap to whole-row boundary
             let target_px = row as f32 * self.row_height;
             self.set_scroll_offset_px(target_px, row_count);
-        } else if row >= first_row + self.visible_rows {
-            // Row is below viewport - scroll down
-            // Put the row at the bottom of the viewport
-            let new_row = row.saturating_sub(self.visible_rows.saturating_sub(1));
+        } else if row >= first_row + effective_visible {
+            // Row is below effective viewport - scroll down
+            // Put the row at the effective bottom of the viewport
+            let new_row = row.saturating_sub(effective_visible.saturating_sub(1));
             // Snap to whole-row boundary
             let target_px = new_row as f32 * self.row_height;
             self.set_scroll_offset_px(target_px, row_count);
@@ -618,5 +641,97 @@ mod tests {
         // And first_visible_row() should reflect the clamped position
         assert_eq!(scroller.first_visible_row(), 80); // 1280 / 16 = 80
         assert_eq!(scroller.visible_rows(), 20);
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/find_strip_scroll_clearance - ensure_visible_with_margin tests
+    // =========================================================================
+
+    #[test]
+    fn test_ensure_visible_with_margin_zero_margin_same_as_ensure_visible() {
+        // With margin=0, ensure_visible_with_margin should behave identically to ensure_visible
+        let mut scroller1 = RowScroller::new(16.0);
+        let mut scroller2 = RowScroller::new(16.0);
+        scroller1.update_size(160.0, 100); // 10 visible rows
+        scroller2.update_size(160.0, 100);
+
+        // Test scrolling down
+        let scrolled1 = scroller1.ensure_visible(25, 100);
+        let scrolled2 = scroller2.ensure_visible_with_margin(25, 100, 0);
+
+        assert_eq!(scrolled1, scrolled2);
+        assert_eq!(scroller1.first_visible_row(), scroller2.first_visible_row());
+        assert!((scroller1.scroll_offset_px() - scroller2.scroll_offset_px()).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_ensure_visible_with_margin_scrolls_earlier() {
+        // With margin=1, a row that would be at position 9 (last visible) should trigger scroll
+        let mut scroller = RowScroller::new(16.0);
+        scroller.update_size(160.0, 100); // 10 visible rows, showing 0..10
+
+        // Row 9 would be at the last visible position without margin
+        // With margin=1, effective visible rows = 9, so row 9 is beyond effective viewport
+        let scrolled = scroller.ensure_visible_with_margin(9, 100, 1);
+
+        // Should have scrolled to put row 9 at effective bottom (position 8)
+        // new_row = 9 - (9 - 1) = 1
+        assert!(scrolled);
+        assert_eq!(scroller.first_visible_row(), 1);
+    }
+
+    #[test]
+    fn test_ensure_visible_with_margin_row_above_effective_bottom() {
+        // Row that's above the effective bottom should not trigger scroll
+        let mut scroller = RowScroller::new(16.0);
+        scroller.update_size(160.0, 100); // 10 visible rows
+
+        // Row 8 is at position 8 (within effective 9-row viewport with margin=1)
+        let scrolled = scroller.ensure_visible_with_margin(8, 100, 1);
+        assert!(!scrolled);
+        assert_eq!(scroller.first_visible_row(), 0);
+    }
+
+    #[test]
+    fn test_ensure_visible_with_margin_larger_margin() {
+        // Test with margin=2
+        let mut scroller = RowScroller::new(16.0);
+        scroller.update_size(160.0, 100); // 10 visible rows
+
+        // With margin=2, effective visible = 8
+        // Row 8 should trigger scroll (it's >= first + 8)
+        let scrolled = scroller.ensure_visible_with_margin(8, 100, 2);
+
+        assert!(scrolled);
+        // new_row = 8 - (8 - 1) = 1
+        assert_eq!(scroller.first_visible_row(), 1);
+    }
+
+    #[test]
+    fn test_ensure_visible_with_margin_clamps_to_min_one() {
+        // With a very small viewport (2 rows) and margin=2, effective should be clamped to 1
+        let mut scroller = RowScroller::new(16.0);
+        scroller.update_size(32.0, 100); // 2 visible rows
+
+        // Row 1 should trigger scroll because effective visible = max(2-2, 1) = 1
+        let scrolled = scroller.ensure_visible_with_margin(1, 100, 2);
+
+        assert!(scrolled);
+        // new_row = 1 - (1 - 1) = 1
+        assert_eq!(scroller.first_visible_row(), 1);
+    }
+
+    #[test]
+    fn test_ensure_visible_with_margin_scroll_up_unaffected() {
+        // Scrolling up should not be affected by bottom margin
+        let mut scroller = RowScroller::new(16.0);
+        scroller.update_size(160.0, 100); // 10 visible rows
+        scroller.scroll_to(20, 100);
+
+        // Row 10 is above viewport - should scroll up to put it at top
+        let scrolled = scroller.ensure_visible_with_margin(10, 100, 1);
+
+        assert!(scrolled);
+        assert_eq!(scroller.first_visible_row(), 10);
     }
 }

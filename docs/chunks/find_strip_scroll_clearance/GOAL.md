@@ -1,10 +1,11 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
 code_paths:
 - crates/editor/src/editor_state.rs
 - crates/editor/src/viewport.rs
+- crates/editor/src/row_scroller.rs
 code_references: []
 narrative: null
 investigation: null
@@ -13,9 +14,16 @@ friction_entries: []
 bug_type: implementation
 depends_on:
 - find_in_file
-created_after: ["agent_lifecycle", "content_tab_bar", "terminal_input_encoding", "find_in_file", "cursor_wrap_scroll_alignment", "row_scroller_extract", "selector_row_scroller", "selector_smooth_render"]
+created_after:
+- agent_lifecycle
+- content_tab_bar
+- terminal_input_encoding
+- find_in_file
+- cursor_wrap_scroll_alignment
+- row_scroller_extract
+- selector_row_scroller
+- selector_smooth_render
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
