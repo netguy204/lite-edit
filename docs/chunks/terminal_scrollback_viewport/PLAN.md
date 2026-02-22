@@ -1,177 +1,192 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk wires terminal tabs into the existing `Viewport` scroll infrastructure, enabling users to scroll through terminal scrollback history with trackpad/mouse wheel. The implementation follows the existing architecture where each `Tab` owns a `Viewport` and the renderer already uses `viewport.visible_range()` + `BufferView::styled_line()` generically.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Architecture:**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+The key insight is that the terminal already implements `BufferView`, and its `line_count()` returns the total of cold + hot scrollback + viewport lines. The `Viewport` scroll machinery doesn't care whether the underlying buffer is a `TextBuffer` or a `TerminalBuffer` — it just needs a line count for clamping.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/terminal_scrollback_viewport/GOAL.md)
-with references to the files that you expect to touch.
--->
+The behavioral distinction between primary screen and alternate screen modes is critical:
+
+1. **Primary screen** (shell, build output): Scroll events adjust the tab's `Viewport` scroll offset. The total scrollable content is `TerminalBuffer::line_count()`. New output auto-follows when at the bottom; otherwise, the user's position is preserved. Keypresses snap to bottom.
+
+2. **Alternate screen** (vim, htop, less): Scroll events are encoded as mouse wheel escape sequences and sent to the PTY. The `Viewport` stays at offset 0 since the application owns scrolling.
+
+**Strategy:**
+
+1. **Add scroll encoding to `InputEncoder`**: Add `encode_scroll()` method that encodes scroll wheel events as mouse button 64/65 (scroll up/down) sequences.
+
+2. **Implement `TerminalFocusTarget::handle_scroll()`**: Replace the no-op stub with logic that:
+   - In alternate screen mode: Encode scroll as mouse wheel sequence via `InputEncoder` and write to PTY
+   - In primary screen mode: Adjust the tab's `Viewport` scroll offset against `line_count()`
+
+3. **Wire scroll through `EditorState`**: Update `EditorState::handle_scroll()` to properly route scroll events to terminal tabs via `TerminalFocusTarget`.
+
+4. **Implement auto-follow behavior**: When in primary screen at the bottom, new output should advance the viewport. When scrolled up, new output should not change the scroll position.
+
+5. **Implement snap-to-bottom on keypress**: Any keypress that sends data to the PTY should first snap the viewport to the bottom.
+
+6. **Handle mode transitions**: When transitioning from alternate to primary screen, snap the viewport to bottom.
+
+**Testing approach per TESTING_PHILOSOPHY.md:**
+
+Since `TerminalBuffer` implements `BufferView` and `Viewport` is already well-tested, we can test the scroll behavior by:
+- Unit tests for `InputEncoder::encode_scroll()` encoding
+- Unit tests for `TerminalFocusTarget::handle_scroll()` behavior in both modes
+- Integration tests for auto-follow and snap-to-bottom behavior
+
+Visual verification will confirm the behavior with actual terminal applications.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+- **docs/subsystems/viewport_scroll** (DOCUMENTED): This chunk USES the viewport_scroll subsystem. The `Viewport` type and `RowScroller` primitives provide all the scroll arithmetic we need. The subsystem's scope explicitly lists "Terminal scrollback" as out of scope because `TerminalBuffer` has its own scrollback management — but that's fine because we're using `Viewport` as the view layer over the terminal's scrollback, not replacing how scrollback is stored.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add scroll wheel encoding to InputEncoder
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add `encode_scroll(delta: ScrollDelta, col: usize, row: usize, modes: TermMode) -> Vec<u8>` to `InputEncoder` that encodes scroll events as mouse button 64 (up) or 65 (down).
 
-Example:
+The encoding follows the same pattern as `encode_mouse()`:
+- Button 64 = scroll up
+- Button 65 = scroll down
+- Use SGR encoding if available, otherwise X10/normal encoding
 
-### Step 1: Define the SegmentHeader struct
+**Files:** `crates/terminal/src/input_encoder.rs`
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+**Tests:** Unit tests verifying scroll encoding produces correct escape sequences for both SGR and legacy modes.
 
-Location: src/segment/format.rs
+### Step 2: Implement TerminalFocusTarget::handle_scroll for alternate screen
 
-### Step 2: Implement header serialization
+Implement the alternate screen path in `handle_scroll()`:
+- Check if `terminal.borrow().is_alt_screen()` is true
+- If so, encode scroll as mouse wheel sequence using `InputEncoder::encode_scroll()`
+- Write to PTY via `terminal.borrow_mut().write_input()`
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+This allows applications like vim, htop, and less to receive scroll events.
 
-### Step 3: ...
+**Files:** `crates/terminal/src/terminal_target.rs`
 
----
+**Tests:** Unit test verifying scroll events are encoded and written when in alternate screen mode.
 
-**BACKREFERENCE COMMENTS**
+### Step 3: Add viewport scroll support to TerminalFocusTarget
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+Modify `TerminalFocusTarget` to hold a reference to the tab's `Viewport` (or receive it as a parameter). This is needed for primary screen scrolling.
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+**Design decision:** Rather than storing the viewport in `TerminalFocusTarget`, we'll pass viewport parameters through the scroll handler. This matches how `EditorState::handle_scroll()` already creates an `EditorContext` for file tabs.
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+**Files:** `crates/terminal/src/terminal_target.rs`
 
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
+### Step 4: Implement primary screen scrolling in handle_scroll
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+For primary screen mode (not alternate screen):
+1. Get the terminal's `line_count()` for scroll bounds
+2. Convert pixel delta to scroll offset change
+3. Call `viewport.set_scroll_offset_px(new_offset, line_count)`
+4. Mark viewport dirty
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+The viewport clamping ensures we can't scroll past the oldest line or past the bottom.
+
+**Files:** `crates/terminal/src/terminal_target.rs`, `crates/editor/src/editor_state.rs`
+
+**Tests:** Unit tests for scroll delta conversion and viewport offset changes.
+
+### Step 5: Wire terminal scroll through EditorState
+
+Update `EditorState::handle_scroll()` to properly handle terminal tabs:
+1. Get the terminal buffer and viewport from the active tab
+2. Create a `TerminalFocusTarget` (or reuse one) with access to both
+3. Call `handle_scroll()` on the target with the delta and line count
+4. Mark the appropriate dirty region
+
+The current implementation marks `FullViewport` dirty, which is correct since terminal content may need full re-render after scrolling.
+
+**Files:** `crates/editor/src/editor_state.rs`
+
+**Tests:** Integration test verifying scroll events are properly routed to terminal tabs.
+
+### Step 6: Implement auto-follow behavior
+
+Add logic to `TerminalBuffer` polling to track whether the viewport is "at bottom":
+- Track `was_at_bottom` flag before processing PTY events
+- After new output arrives, if `was_at_bottom`, advance the viewport to keep latest output visible
+- If not at bottom, preserve the current scroll position
+
+"At bottom" means the viewport's scroll offset positions the last line of content at or below the bottom of the visible area.
+
+**Files:** `crates/editor/src/editor_state.rs`
+
+**Tests:**
+- Test that new output advances viewport when at bottom
+- Test that new output does NOT change viewport when scrolled up into history
+
+### Step 7: Implement snap-to-bottom on keypress
+
+Modify `EditorState::handle_key()` terminal path to:
+1. Check if the terminal tab's viewport is scrolled up from bottom
+2. If so, snap to bottom before sending the keypress to the PTY
+3. Mark viewport dirty
+
+This ensures the user always sees their input and the terminal's response.
+
+**Files:** `crates/editor/src/editor_state.rs`
+
+**Tests:** Test that keypress snaps viewport to bottom when scrolled up.
+
+### Step 8: Handle alternate-to-primary mode transition
+
+When the terminal transitions from alternate screen back to primary screen, snap the viewport to bottom. This is detected by:
+- Tracking `was_alt_screen` before processing PTY events
+- If `is_alt_screen()` changed from true to false, set viewport to bottom
+
+**Files:** `crates/editor/src/editor_state.rs` or `crates/terminal/src/terminal_buffer.rs`
+
+**Tests:** Test that exiting vim/htop snaps viewport to bottom of primary scrollback.
+
+### Step 9: Integration testing and visual verification
+
+Create integration tests that verify the complete flow:
+1. Terminal with scrollback → scroll up → can see history
+2. Scroll up → new output arrives → viewport position unchanged
+3. At bottom → new output arrives → viewport follows
+4. Scrolled up → keypress → snaps to bottom
+5. Alternate screen active → scroll event → sent to PTY
+6. Exit alternate screen → viewport snaps to bottom
+
+Visual verification:
+1. Run shell, generate output, scroll through history with trackpad
+2. Run vim, scroll using trackpad → vim receives scroll events
+3. Exit vim → back to shell at bottom of output
+
+**Files:** `crates/terminal/tests/scroll_integration.rs`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+**Chunks that must be complete:**
+- `terminal_input_encoding` (ACTIVE) — Provides `InputEncoder` with mouse encoding
+- `terminal_file_backed_scrollback` (ACTIVE) — Provides `TerminalBuffer::line_count()` including cold + hot + screen
+- `viewport_scrolling` (ACTIVE) — Provides scroll event handling infrastructure
+- `terminal_tab_spawn` (ACTIVE) — Provides terminal tab creation and PTY polling
 
-If there are no dependencies, delete this section.
--->
+**External dependencies:** None — all required infrastructure exists.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Scroll direction convention**: Need to verify that positive scroll delta in the terminal context maps correctly to "scroll down into newer content" vs "scroll up into history". The existing `BufferFocusTarget` convention is positive dy = content moves up = see older content.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Scroll granularity for alternate screen**: Terminal mouse wheel encoding sends discrete events (button 64 or 65) per scroll "click". Need to determine how to convert continuous pixel delta to discrete scroll events — probably use a threshold (e.g., one event per 3 pixels).
+
+3. **Auto-follow threshold**: The GOAL says "within one screen of the latest line". Need to define precisely what "at bottom" means — possibly `scroll_offset_px >= max_offset_px - line_height` to allow some tolerance.
+
+4. **Mode transition detection**: Detecting alternate-to-primary transitions requires tracking mode state across PTY polls. Need to verify this can be done reliably without race conditions.
+
+5. **Viewport sharing**: `TerminalFocusTarget` currently doesn't have access to the viewport. Need to either:
+   - Pass viewport as parameter to `handle_scroll()`
+   - Store viewport reference in the target
+   - Handle scrolling entirely in `EditorState` without delegating to the target
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- POPULATE DURING IMPLEMENTATION -->

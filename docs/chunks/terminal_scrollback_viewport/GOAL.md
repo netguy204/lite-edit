@@ -1,20 +1,28 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/terminal/src/input_encoder.rs
+  - crates/terminal/src/terminal_target.rs
+  - crates/editor/src/editor_state.rs
+  - crates/terminal/tests/scroll_integration.rs
 code_references: []
 narrative: null
 investigation: null
 subsystems:
-  - subsystem_id: "viewport_scroll"
-    relationship: uses
+- subsystem_id: viewport_scroll
+  relationship: uses
 friction_entries: []
 bug_type: null
 depends_on: null
-created_after: ["scroll_bottom_deadzone", "terminal_tab_spawn", "workspace_switching", "cursor_blink_focus", "word_triclass_boundaries"]
+created_after:
+- scroll_bottom_deadzone
+- terminal_tab_spawn
+- workspace_switching
+- cursor_blink_focus
+- word_triclass_boundaries
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

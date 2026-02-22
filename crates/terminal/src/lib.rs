@@ -82,7 +82,8 @@ pub use agent::{AgentConfig, AgentHandle, AgentState, AgentStateMachine};
 // Chunk: docs/chunks/terminal_input_encoding - Terminal input encoding
 pub use input_encoder::InputEncoder;
 pub use terminal_buffer::TerminalBuffer;
-pub use terminal_target::TerminalFocusTarget;
+// Chunk: docs/chunks/terminal_scrollback_viewport - Terminal scroll action result
+pub use terminal_target::{ScrollAction, TerminalFocusTarget};
 
 // Re-export BufferView and related types for convenience
 pub use lite_edit_buffer::{BufferView, CursorInfo, CursorShape, DirtyLines, Position, StyledLine};
