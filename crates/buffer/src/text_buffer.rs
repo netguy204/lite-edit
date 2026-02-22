@@ -8,6 +8,7 @@
 //! Each mutation operation returns `DirtyLines` indicating which lines changed,
 //! enabling downstream rendering to minimize redraws.
 
+use crate::buffer_view::{BufferView, CursorInfo, StyledLine};
 use crate::gap_buffer::GapBuffer;
 use crate::line_index::LineIndex;
 use crate::types::{DirtyLines, Position};
@@ -69,6 +70,7 @@ fn word_boundary_right(chars: &[char], col: usize) -> usize {
 ///
 /// All mutation operations return `DirtyLines` to enable efficient rendering.
 // Chunk: docs/chunks/text_selection_model - Selection anchor and range API
+// Chunk: docs/chunks/buffer_view_trait - BufferView trait implementation
 #[derive(Debug)]
 pub struct TextBuffer {
     buffer: GapBuffer,
@@ -77,6 +79,9 @@ pub struct TextBuffer {
     /// Selection anchor position. When `Some`, the selection spans from anchor to cursor.
     /// The anchor may come before or after the cursor (both directions are valid).
     selection_anchor: Option<Position>,
+    /// Accumulated dirty lines for BufferView::take_dirty().
+    /// This tracks all mutations since the last drain.
+    dirty_lines: DirtyLines,
     /// Mutation counter for sampling debug assertions (debug builds only).
     #[cfg(debug_assertions)]
     debug_mutation_count: u64,
@@ -90,6 +95,7 @@ impl TextBuffer {
             line_index: LineIndex::new(),
             cursor: Position::default(),
             selection_anchor: None,
+            dirty_lines: DirtyLines::None,
             #[cfg(debug_assertions)]
             debug_mutation_count: 0,
         }
@@ -110,6 +116,7 @@ impl TextBuffer {
             line_index,
             cursor: Position::default(),
             selection_anchor: None,
+            dirty_lines: DirtyLines::None,
             #[cfg(debug_assertions)]
             debug_mutation_count: 0,
         }
@@ -321,11 +328,12 @@ impl TextBuffer {
         // Cursor should now be at start position
         self.assert_line_index_consistent();
 
-        if is_multiline {
+        let dirty = if is_multiline {
             DirtyLines::FromLineToEnd(start_line)
         } else {
             DirtyLines::Single(start_line)
-        }
+        };
+        self.accumulate_dirty(dirty)
     }
 
     // ==================== Cursor Movement ====================
@@ -582,7 +590,7 @@ impl TextBuffer {
 
         self.assert_line_index_consistent();
         dirty.merge(DirtyLines::Single(dirty_line));
-        dirty
+        self.accumulate_dirty(dirty)
     }
 
     /// Inserts a newline at the cursor position, splitting the current line.
@@ -607,7 +615,7 @@ impl TextBuffer {
 
         self.assert_line_index_consistent();
         dirty.merge(DirtyLines::FromLineToEnd(dirty_from));
-        dirty
+        self.accumulate_dirty(dirty)
     }
 
     /// Deletes the character before the cursor (Backspace).
@@ -622,7 +630,7 @@ impl TextBuffer {
         }
 
         if self.cursor.col == 0 && self.cursor.line == 0 {
-            // At the very beginning of the buffer
+            // At the very beginning of the buffer - no-op, don't accumulate
             return DirtyLines::None;
         }
 
@@ -645,7 +653,7 @@ impl TextBuffer {
             self.cursor.col = prev_line_len;
 
             self.assert_line_index_consistent();
-            DirtyLines::FromLineToEnd(prev_line)
+            self.accumulate_dirty(DirtyLines::FromLineToEnd(prev_line))
         } else {
             // Delete a regular character within the line
             let deleted = self.buffer.delete_backward();
@@ -657,7 +665,7 @@ impl TextBuffer {
             self.cursor.col -= 1;
 
             self.assert_line_index_consistent();
-            DirtyLines::Single(self.cursor.line)
+            self.accumulate_dirty(DirtyLines::Single(self.cursor.line))
         }
     }
 
@@ -676,7 +684,7 @@ impl TextBuffer {
         let is_last_line = self.cursor.line + 1 >= self.line_count();
 
         if self.cursor.col >= line_len && is_last_line {
-            // At the very end of the buffer
+            // At the very end of the buffer - no-op, don't accumulate
             return DirtyLines::None;
         }
 
@@ -694,7 +702,7 @@ impl TextBuffer {
 
             // Cursor stays in place
             self.assert_line_index_consistent();
-            DirtyLines::FromLineToEnd(self.cursor.line)
+            self.accumulate_dirty(DirtyLines::FromLineToEnd(self.cursor.line))
         } else {
             // Delete a regular character within the line
             let deleted = self.buffer.delete_forward();
@@ -706,7 +714,7 @@ impl TextBuffer {
 
             // Cursor stays in place
             self.assert_line_index_consistent();
-            DirtyLines::Single(self.cursor.line)
+            self.accumulate_dirty(DirtyLines::Single(self.cursor.line))
         }
     }
 
@@ -755,7 +763,7 @@ impl TextBuffer {
         self.cursor.col -= chars_to_delete;
 
         self.assert_line_index_consistent();
-        DirtyLines::Single(self.cursor.line)
+        self.accumulate_dirty(DirtyLines::Single(self.cursor.line))
     }
 
     // Chunk: docs/chunks/word_forward_delete - Alt+D forward word deletion
@@ -805,7 +813,7 @@ impl TextBuffer {
         // Cursor stays in place (forward deletion doesn't move cursor)
 
         self.assert_line_index_consistent();
-        DirtyLines::Single(self.cursor.line)
+        self.accumulate_dirty(DirtyLines::Single(self.cursor.line))
     }
 
     // Chunk: docs/chunks/kill_line - Delete from cursor to end of line (Ctrl+K)
@@ -840,7 +848,7 @@ impl TextBuffer {
 
             // Cursor stays in place
             self.assert_line_index_consistent();
-            DirtyLines::FromLineToEnd(self.cursor.line)
+            self.accumulate_dirty(DirtyLines::FromLineToEnd(self.cursor.line))
         } else {
             // Cursor is mid-line: delete from cursor to end of line
             let chars_to_delete = line_len - self.cursor.col;
@@ -854,7 +862,7 @@ impl TextBuffer {
 
             // Cursor stays in place
             self.assert_line_index_consistent();
-            DirtyLines::Single(self.cursor.line)
+            self.accumulate_dirty(DirtyLines::Single(self.cursor.line))
         }
     }
 
@@ -896,7 +904,7 @@ impl TextBuffer {
             self.cursor.col = prev_line_len;
 
             self.assert_line_index_consistent();
-            return DirtyLines::FromLineToEnd(prev_line);
+            return self.accumulate_dirty(DirtyLines::FromLineToEnd(prev_line));
         }
 
         let chars_to_delete = self.cursor.col;
@@ -914,7 +922,7 @@ impl TextBuffer {
         self.cursor.col = 0;
 
         self.assert_line_index_consistent();
-        DirtyLines::Single(current_line)
+        self.accumulate_dirty(DirtyLines::Single(current_line))
     }
 
     /// Inserts a string at the cursor position.
@@ -984,7 +992,69 @@ impl TextBuffer {
             DirtyLines::Single(start_line)
         };
         dirty.merge(insert_dirty);
+        self.accumulate_dirty(dirty)
+    }
+
+    // ==================== Dirty Tracking ====================
+    // Chunk: docs/chunks/buffer_view_trait - BufferView dirty tracking
+
+    /// Accumulates dirty lines into the internal field and returns the value.
+    ///
+    /// This maintains backward compatibility: callers can use the return value
+    /// directly, while the accumulated state is available via `take_dirty()`.
+    fn accumulate_dirty(&mut self, dirty: DirtyLines) -> DirtyLines {
+        self.dirty_lines.merge(dirty.clone());
         dirty
+    }
+}
+
+// =============================================================================
+// BufferView Implementation
+// =============================================================================
+// Chunk: docs/chunks/buffer_view_trait - BufferView trait implementation for TextBuffer
+
+impl BufferView for TextBuffer {
+    fn line_count(&self) -> usize {
+        self.line_index.line_count()
+    }
+
+    fn styled_line(&self, line: usize) -> Option<StyledLine> {
+        if line >= self.line_count() {
+            return None;
+        }
+        let content = self.line_content(line);
+        Some(StyledLine::plain(content))
+    }
+
+    fn line_len(&self, line: usize) -> usize {
+        self.line_index
+            .line_len(line, self.buffer.len())
+            .unwrap_or(0)
+    }
+
+    fn take_dirty(&mut self) -> DirtyLines {
+        std::mem::take(&mut self.dirty_lines)
+    }
+
+    fn is_editable(&self) -> bool {
+        true
+    }
+
+    fn cursor_info(&self) -> Option<CursorInfo> {
+        Some(CursorInfo::block(self.cursor))
+    }
+
+    fn selection_range(&self) -> Option<(Position, Position)> {
+        let anchor = self.selection_anchor?;
+        if anchor == self.cursor {
+            return None;
+        }
+        // Return in document order (start <= end)
+        if anchor < self.cursor {
+            Some((anchor, self.cursor))
+        } else {
+            Some((self.cursor, anchor))
+        }
     }
 }
 
@@ -2696,5 +2766,143 @@ mod tests {
         assert_eq!(start, Position::new(1, 0));
         assert_eq!(end, Position::new(1, 6));
         assert_eq!(buf.selected_text(), Some("second".to_string()));
+    }
+
+    // ==================== BufferView Implementation Tests ====================
+    // Chunk: docs/chunks/buffer_view_trait - Tests for BufferView trait implementation
+
+    #[test]
+    fn test_buffer_view_line_count() {
+        use crate::BufferView;
+
+        let buf = TextBuffer::from_str("hello\nworld\nfoo");
+        // Use trait method
+        let view: &dyn BufferView = &buf;
+        assert_eq!(view.line_count(), 3);
+    }
+
+    #[test]
+    fn test_buffer_view_styled_line_returns_plain_text() {
+        use crate::BufferView;
+
+        let buf = TextBuffer::from_str("hello\nworld");
+        let view: &dyn BufferView = &buf;
+
+        let line = view.styled_line(0).unwrap();
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].text, "hello");
+        // Default style
+        assert!(!line.spans[0].style.bold);
+
+        let line1 = view.styled_line(1).unwrap();
+        assert_eq!(line1.spans[0].text, "world");
+    }
+
+    #[test]
+    fn test_buffer_view_styled_line_out_of_bounds() {
+        use crate::BufferView;
+
+        let buf = TextBuffer::from_str("hello");
+        let view: &dyn BufferView = &buf;
+
+        assert!(view.styled_line(0).is_some());
+        assert!(view.styled_line(1).is_none());
+        assert!(view.styled_line(100).is_none());
+    }
+
+    #[test]
+    fn test_buffer_view_line_len() {
+        use crate::BufferView;
+
+        let buf = TextBuffer::from_str("hello\nhi\n");
+        let view: &dyn BufferView = &buf;
+
+        assert_eq!(view.line_len(0), 5); // "hello"
+        assert_eq!(view.line_len(1), 2); // "hi"
+        assert_eq!(view.line_len(2), 0); // empty line
+        assert_eq!(view.line_len(100), 0); // out of bounds
+    }
+
+    #[test]
+    fn test_buffer_view_cursor_info() {
+        use crate::{BufferView, CursorShape};
+
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.set_cursor(Position::new(1, 3));
+
+        let view: &dyn BufferView = &buf;
+        let cursor = view.cursor_info().unwrap();
+
+        assert_eq!(cursor.position, Position::new(1, 3));
+        assert_eq!(cursor.shape, CursorShape::Block);
+        assert!(cursor.blinking);
+    }
+
+    #[test]
+    fn test_buffer_view_is_editable() {
+        use crate::BufferView;
+
+        let buf = TextBuffer::new();
+        let view: &dyn BufferView = &buf;
+        assert!(view.is_editable());
+    }
+
+    #[test]
+    fn test_buffer_view_selection_range_none_when_no_selection() {
+        use crate::BufferView;
+
+        let buf = TextBuffer::from_str("hello");
+        let view: &dyn BufferView = &buf;
+        assert!(view.selection_range().is_none());
+    }
+
+    #[test]
+    fn test_buffer_view_selection_range_returns_selection() {
+        use crate::BufferView;
+
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_selection_anchor(Position::new(0, 0));
+        buf.move_cursor_preserving_selection(Position::new(0, 5));
+
+        let view: &dyn BufferView = &buf;
+        let (start, end) = view.selection_range().unwrap();
+        assert_eq!(start, Position::new(0, 0));
+        assert_eq!(end, Position::new(0, 5));
+    }
+
+    #[test]
+    fn test_buffer_view_take_dirty_accumulates_mutations() {
+        use crate::BufferView;
+
+        let mut buf = TextBuffer::from_str("hello");
+        // Initial state has no dirty lines
+        assert_eq!(buf.take_dirty(), DirtyLines::None);
+
+        // Insert character accumulates dirty
+        buf.insert_char('x');
+        let dirty = buf.take_dirty();
+        assert_eq!(dirty, DirtyLines::Single(0));
+
+        // After take, dirty is cleared
+        assert_eq!(buf.take_dirty(), DirtyLines::None);
+
+        // Multiple mutations merge
+        buf.insert_char('y');
+        buf.insert_newline();
+        let dirty = buf.take_dirty();
+        // Should be FromLineToEnd since newline affects rest of buffer
+        assert_eq!(dirty, DirtyLines::FromLineToEnd(0));
+    }
+
+    #[test]
+    fn test_buffer_view_object_safety_with_textbuffer() {
+        use crate::BufferView;
+
+        let buf = TextBuffer::from_str("test");
+
+        // Verify we can use TextBuffer as Box<dyn BufferView>
+        let boxed: Box<dyn BufferView> = Box::new(buf);
+        assert_eq!(boxed.line_count(), 1);
+        assert!(boxed.is_editable());
     }
 }
