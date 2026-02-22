@@ -1,177 +1,93 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The root cause is a coordinate-space mismatch: `Viewport::ensure_visible_wrapped()` sets
+`scroll_offset_px` in screen-row units, but `Viewport::first_visible_line()` interprets it
+as buffer-line units. The fix introduces wrap-aware coordinate conversion methods and
+updates the rendering pipeline to use them.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+Key insight: When wrapping is active, `scroll_offset_px` represents a position in
+**screen row** space. To render correctly, we must:
+1. Convert that screen row to the corresponding buffer line
+2. Track how many rows of the first visible buffer line are scrolled off-screen
+3. Use this offset when accumulating screen rows during rendering
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
-
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/cursor_wrap_scroll_alignment/GOAL.md)
-with references to the files that you expect to touch.
--->
+No changes are needed to `ensure_visible_wrapped()` itself - it correctly computes scroll
+positions in screen-row space. The fix is in how rendering interprets that scroll position.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems are directly affected by this chunk. The fix is localized to viewport
+coordinate conversion and glyph buffer rendering.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add wrap-aware viewport methods
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Location: `crates/editor/src/viewport.rs`
 
-Example:
+Add two new methods to Viewport:
 
-### Step 1: Define the SegmentHeader struct
+1. `first_visible_screen_row()` - Returns `floor(scroll_offset_px / line_height)` as a
+   screen row index. Identical to `first_visible_line()` in value, but with semantics
+   clarified: this is a screen row, not a buffer line.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+2. `buffer_line_for_screen_row()` - Static method that, given a target screen row and
+   wrap layout, returns:
+   - The buffer line containing that screen row
+   - The row offset within that buffer line (0 = first row)
+   - Cumulative screen rows before this buffer line
 
-Location: src/segment/format.rs
+This enables the renderer to correctly map scroll positions in screen-row space back to
+buffer coordinates.
 
-### Step 2: Implement header serialization
+### Step 2: Update glyph buffer wrap rendering
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Location: `crates/editor/src/glyph_buffer.rs`
 
-### Step 3: ...
+Modify `update_from_buffer_with_wrap()` to:
 
----
+1. Use `first_visible_screen_row()` to get the scroll position in screen-row units
+2. Call `buffer_line_for_screen_row()` to find:
+   - `first_visible_buffer_line`: Which buffer line is at the viewport top
+   - `screen_row_offset_in_line`: How many rows of that line are scrolled off
+3. Track `cumulative_screen_row` starting from 0 (viewport top)
+4. For the first buffer line, skip `screen_row_offset_in_line` rows worth of content
+5. Adjust cursor, selection, border, and glyph positioning accordingly
 
-**BACKREFERENCE COMMENTS**
+This ensures all rendered content is positioned relative to the correct baseline.
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+### Step 3: Add comprehensive tests
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+Location: `crates/editor/src/viewport.rs` (unit tests) and
+`crates/editor/tests/wrap_test.rs` (integration tests)
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
-
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
-
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Add tests covering the success criteria scenarios:
+- Cursor on unwrapped line with wrapped lines above
+- Cursor on continuation row of wrapped line
+- Cursor at document start with no wrapped lines
+- `ensure_visible_wrapped` with cursor below viewport
+- Cursor position after partial scroll (row offset > 0)
+- Cursor above viewport returns None
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- `line_wrap_rendering` chunk (completed) - Provides `WrapLayout` and
+  `ensure_visible_wrapped`
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
-
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Performance**: The `buffer_line_for_screen_row()` method iterates through buffer
+  lines from the start. For documents with many lines, this could be O(n). However,
+  this is called once per render frame at most, and the iteration is simple arithmetic.
+  If profiling shows issues, we could cache the mapping or use binary search.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
+- The original plan did not specify a static method `buffer_line_for_screen_row()`.
+  During implementation, making it static (taking the wrap layout as parameter) proved
+  cleaner since it doesn't need viewport state beyond what's passed explicitly.
 
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+- Added tracking of `is_first_buffer_line` flag in the rendering loop to correctly
+  handle the `screen_row_offset_in_line` only for the first visible buffer line.

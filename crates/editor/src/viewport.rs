@@ -62,11 +62,70 @@ impl Viewport {
     ///
     /// This is computed as `(scroll_offset_px / line_height).floor()`.
     /// The result is the integer line index used for buffer-to-screen mapping.
+    ///
+    /// **Note**: When soft line wrapping is enabled, use `first_visible_screen_row()`
+    /// and `buffer_line_for_screen_row()` instead. This method assumes a 1:1 mapping
+    /// between buffer lines and screen rows, which is only correct without wrapping.
     pub fn first_visible_line(&self) -> usize {
         if self.line_height <= 0.0 {
             return 0;
         }
         (self.scroll_offset_px / self.line_height).floor() as usize
+    }
+
+    // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Wrap-aware scroll position
+    /// Returns the first visible screen row (derived from pixel offset)
+    ///
+    /// When soft line wrapping is enabled, scroll_offset_px tracks position in
+    /// **screen row** space, not buffer line space. This method returns that value
+    /// directly: `floor(scroll_offset_px / line_height)`.
+    ///
+    /// Use `buffer_line_for_screen_row()` to find which buffer line contains
+    /// a given screen row.
+    pub fn first_visible_screen_row(&self) -> usize {
+        if self.line_height <= 0.0 {
+            return 0;
+        }
+        (self.scroll_offset_px / self.line_height).floor() as usize
+    }
+
+    // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Wrap-aware buffer line lookup
+    /// Given a target screen row, finds which buffer line contains it.
+    ///
+    /// Returns `(buffer_line, screen_row_offset_within_line, cumulative_screen_rows_before_line)`:
+    /// - `buffer_line`: The buffer line index that contains the target screen row
+    /// - `screen_row_offset`: Which row within that buffer line (0 = first row of the line)
+    /// - `cumulative_rows_before`: Total screen rows for all buffer lines before this one
+    ///
+    /// This is used to correctly map scroll positions in wrapped mode, where
+    /// `scroll_offset_px` is set in screen row units by `ensure_visible_wrapped`.
+    pub fn buffer_line_for_screen_row<F>(
+        target_screen_row: usize,
+        line_count: usize,
+        wrap_layout: &crate::wrap_layout::WrapLayout,
+        line_len_fn: F,
+    ) -> (usize, usize, usize)
+    where
+        F: Fn(usize) -> usize,
+    {
+        let mut cumulative_screen_rows: usize = 0;
+
+        for buffer_line in 0..line_count {
+            let line_len = line_len_fn(buffer_line);
+            let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
+
+            // Check if target falls within this buffer line's screen rows
+            if cumulative_screen_rows + rows_for_line > target_screen_row {
+                let row_offset = target_screen_row - cumulative_screen_rows;
+                return (buffer_line, row_offset, cumulative_screen_rows);
+            }
+
+            cumulative_screen_rows += rows_for_line;
+        }
+
+        // Target is past the end of the document
+        let last_line = line_count.saturating_sub(1);
+        (last_line, 0, cumulative_screen_rows)
     }
 
     /// Returns the fractional pixel remainder of the scroll position
@@ -819,5 +878,206 @@ mod tests {
         // scroll_offset() should return first_visible_line()
         assert_eq!(vp.scroll_offset(), 20);
         assert_eq!(vp.scroll_offset(), vp.first_visible_line());
+    }
+
+    // ==================== Wrap-aware scroll position tests ====================
+    // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Tests for wrap-aware methods
+
+    #[test]
+    fn test_first_visible_screen_row() {
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(160.0);
+
+        // Initially at 0
+        assert_eq!(vp.first_visible_screen_row(), 0);
+
+        // Set scroll to 3 screen rows
+        vp.scroll_offset_px = 48.0; // 3 * 16
+        assert_eq!(vp.first_visible_screen_row(), 3);
+
+        // Test with fractional position
+        vp.scroll_offset_px = 50.0; // 3 * 16 + 2
+        assert_eq!(vp.first_visible_screen_row(), 3);
+    }
+
+    #[test]
+    fn test_buffer_line_for_screen_row_no_wrapping() {
+        // With no wrapping, each buffer line = 1 screen row
+        // Line lengths are all <= wrap width
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(800.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        // 10 lines, each with 10 characters (fits in 100 cols)
+        let line_lens = vec![10usize; 10];
+
+        // Screen row 0 -> buffer line 0
+        let (buf_line, row_off, cumulative) = Viewport::buffer_line_for_screen_row(
+            0, 10, &wrap_layout, |line| line_lens[line]
+        );
+        assert_eq!(buf_line, 0);
+        assert_eq!(row_off, 0);
+        assert_eq!(cumulative, 0);
+
+        // Screen row 5 -> buffer line 5
+        let (buf_line, row_off, cumulative) = Viewport::buffer_line_for_screen_row(
+            5, 10, &wrap_layout, |line| line_lens[line]
+        );
+        assert_eq!(buf_line, 5);
+        assert_eq!(row_off, 0);
+        assert_eq!(cumulative, 5);
+    }
+
+    #[test]
+    fn test_buffer_line_for_screen_row_with_wrapping() {
+        // 80 cols per screen row
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(640.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        // Line lengths:
+        // Line 0: 40 chars (1 screen row)
+        // Line 1: 150 chars (2 screen rows)
+        // Line 2: 200 chars (3 screen rows)
+        // Line 3: 50 chars (1 screen row)
+        let line_lens = vec![40, 150, 200, 50];
+
+        // Screen row 0 -> buffer line 0, row offset 0
+        let (buf_line, row_off, cumulative) = Viewport::buffer_line_for_screen_row(
+            0, 4, &wrap_layout, |line| line_lens[line]
+        );
+        assert_eq!(buf_line, 0);
+        assert_eq!(row_off, 0);
+        assert_eq!(cumulative, 0);
+
+        // Screen row 1 -> buffer line 1, row offset 0 (first row of wrapped line)
+        let (buf_line, row_off, cumulative) = Viewport::buffer_line_for_screen_row(
+            1, 4, &wrap_layout, |line| line_lens[line]
+        );
+        assert_eq!(buf_line, 1);
+        assert_eq!(row_off, 0);
+        assert_eq!(cumulative, 1);
+
+        // Screen row 2 -> buffer line 1, row offset 1 (second row of wrapped line)
+        let (buf_line, row_off, cumulative) = Viewport::buffer_line_for_screen_row(
+            2, 4, &wrap_layout, |line| line_lens[line]
+        );
+        assert_eq!(buf_line, 1);
+        assert_eq!(row_off, 1);
+        assert_eq!(cumulative, 1);
+
+        // Screen row 3 -> buffer line 2, row offset 0
+        let (buf_line, row_off, cumulative) = Viewport::buffer_line_for_screen_row(
+            3, 4, &wrap_layout, |line| line_lens[line]
+        );
+        assert_eq!(buf_line, 2);
+        assert_eq!(row_off, 0);
+        assert_eq!(cumulative, 3);
+
+        // Screen row 5 -> buffer line 2, row offset 2 (third row of line 2)
+        let (buf_line, row_off, cumulative) = Viewport::buffer_line_for_screen_row(
+            5, 4, &wrap_layout, |line| line_lens[line]
+        );
+        assert_eq!(buf_line, 2);
+        assert_eq!(row_off, 2);
+        assert_eq!(cumulative, 3);
+
+        // Screen row 6 -> buffer line 3, row offset 0
+        let (buf_line, row_off, cumulative) = Viewport::buffer_line_for_screen_row(
+            6, 4, &wrap_layout, |line| line_lens[line]
+        );
+        assert_eq!(buf_line, 3);
+        assert_eq!(row_off, 0);
+        assert_eq!(cumulative, 6);
+    }
+
+    #[test]
+    fn test_buffer_line_for_screen_row_past_end() {
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(800.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        let line_lens = vec![10, 10, 10]; // 3 lines, 1 screen row each
+
+        // Screen row 10 is past end -> returns last buffer line
+        let (buf_line, row_off, _) = Viewport::buffer_line_for_screen_row(
+            10, 3, &wrap_layout, |line| line_lens[line]
+        );
+        assert_eq!(buf_line, 2); // Last buffer line
+        assert_eq!(row_off, 0);
+    }
+
+    #[test]
+    fn test_cursor_on_unwrapped_line_with_wrapped_lines_above() {
+        // This tests the scenario from the success criteria:
+        // Cursor on a line that does not wrap, with wrapped lines above it.
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(640.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        // Line 0: 200 chars (3 screen rows) - wrapped line above cursor
+        // Line 1: 50 chars (1 screen row) - cursor is here, unwrapped
+        let line_lens = vec![200, 50];
+
+        // If scroll is at screen row 0, the cursor on line 1 should be at screen row 3
+        let (buf_line, row_off, cumulative) = Viewport::buffer_line_for_screen_row(
+            3, 2, &wrap_layout, |line| line_lens[line]
+        );
+        assert_eq!(buf_line, 1);
+        assert_eq!(row_off, 0);
+        assert_eq!(cumulative, 3);
+    }
+
+    #[test]
+    fn test_cursor_on_continuation_row() {
+        // This tests the scenario from the success criteria:
+        // Cursor on the continuation row (second or later screen row) of a wrapped buffer line.
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(640.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        // Line 0: 200 chars (3 screen rows) - cursor could be on row 1 or 2 within this line
+        let line_lens = vec![200];
+
+        // Screen row 1 is the second row of line 0
+        let (buf_line, row_off, cumulative) = Viewport::buffer_line_for_screen_row(
+            1, 1, &wrap_layout, |line| line_lens[line]
+        );
+        assert_eq!(buf_line, 0);
+        assert_eq!(row_off, 1); // This is the continuation row
+        assert_eq!(cumulative, 0);
+
+        // Screen row 2 is the third row of line 0
+        let (buf_line, row_off, cumulative) = Viewport::buffer_line_for_screen_row(
+            2, 1, &wrap_layout, |line| line_lens[line]
+        );
+        assert_eq!(buf_line, 0);
+        assert_eq!(row_off, 2); // This is also a continuation row
+        assert_eq!(cumulative, 0);
     }
 }

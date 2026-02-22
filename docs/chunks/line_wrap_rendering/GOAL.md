@@ -8,7 +8,7 @@ code_paths:
 - crates/editor/src/buffer_target.rs
 - crates/editor/src/viewport.rs
 - crates/editor/src/renderer.rs
-- crates/editor/src/lib.rs
+- crates/editor/src/main.rs
 - crates/editor/tests/wrap_test.rs
 code_references:
   - ref: crates/editor/src/wrap_layout.rs#WrapLayout
