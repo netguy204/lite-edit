@@ -1,177 +1,149 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk fixes two coordinate accounting bugs introduced by the `content_tab_bar` chunk:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Buffer text renders over tab bar text** — The glyph rendering in `update_from_buffer_with_cursor` uses `quad_vertices_with_offset` which only accepts y_offset, while selection/cursor quads use `position_for_with_xy_offset` which applies both x_offset and y_offset. This inconsistency means glyphs may not be properly offset when the left rail and tab bar are visible.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **Click targeting is off by ~one line height** — The mouse coordinate transformation in `handle_mouse_buffer()` may have an inconsistency between how coordinates are passed and how they're transformed in `pixel_to_buffer_position`.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/tab_bar_layout_fixes/GOAL.md)
-with references to the files that you expect to touch.
--->
+**Coordinate System Background**:
 
-## Subsystem Considerations
+The codebase uses multiple coordinate systems:
+- **NSView (macOS)**: Bottom-left origin (y=0 at bottom, y=view_height at top)
+- **Metal rendering**: Top-left origin (y=0 at top)
+- **Buffer/Screen coordinates**: Top-left origin, row 0 is top of viewport
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+When the tab bar is active:
+- Tab bar occupies the top `TAB_BAR_HEIGHT` (32px) of the window
+- Content area occupies NSView y ∈ [0, view_height - TAB_BAR_HEIGHT)
+- Content must be rendered starting at Metal y = TAB_BAR_HEIGHT (shifted down)
+- Mouse clicks in the content area must map correctly to buffer positions
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
+**Fix Strategy**:
 
-If no subsystems are relevant, delete this section.
+1. **For Bug #1**: Ensure `update_from_buffer_with_cursor` applies both `self.x_offset` and the effective y offset to glyph quads, consistent with how selection/cursor quads are positioned.
 
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
+2. **For Bug #2**: Verify the mouse coordinate transformation accounts for both offsets correctly. The existing tests suggest the math may already be correct — need to verify through additional tests.
 
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
+**Testing Philosophy Alignment**:
 
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Following the Humble View Architecture from `TESTING_PHILOSOPHY.md`:
+- Test coordinate transformation math (pure functions)
+- Test mouse-to-buffer position mapping
+- Visual rendering verified manually; glyph positioning math is testable
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing tests for glyph positioning with content offsets
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Write tests that verify glyph quad positioning when x_offset and y_offset are set:
 
-Example:
+1. With x_offset=56 (RAIL_WIDTH) and y_offset=32 (TAB_BAR_HEIGHT), verify glyph at row=0, col=0 is positioned at (56, 32)
+2. Verify selection quads and glyph quads have consistent positioning
 
-### Step 1: Define the SegmentHeader struct
+These tests will fail initially, demonstrating the bug.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Location: `crates/editor/src/glyph_buffer.rs` (test module)
 
-Location: src/segment/format.rs
+### Step 2: Fix glyph positioning in update_from_buffer_with_cursor
 
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
+Change glyph quad creation from:
+```rust
+let quad = self.layout.quad_vertices_with_offset(screen_row, col, glyph, effective_y_offset, fg);
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+to:
+```rust
+let quad = self.layout.quad_vertices_with_xy_offset(screen_row, col, glyph, self.x_offset, effective_y_offset, fg);
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+This ensures glyphs are offset by both RAIL_WIDTH (x) and TAB_BAR_HEIGHT (y), consistent with how selection and cursor quads are rendered.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Location: `crates/editor/src/glyph_buffer.rs`, line ~708-709
+
+### Step 3: Verify Step 2 tests pass
+
+Run the tests from Step 1 to confirm the fix works:
+```bash
+cargo test -p lite-edit-editor glyph_buffer
+```
+
+### Step 4: Write test for Y coordinate click targeting
+
+Write a test that verifies clicking in the content area (below the tab bar) correctly targets buffer lines:
+
+1. Set up a view with view_height=320 and TAB_BAR_HEIGHT=32
+2. Click at y coordinate targeting line 0 in the content area (NSView y ≈ 280)
+3. Verify cursor lands on line 0, not line 1 or line -1
+
+The existing test `test_mouse_click_accounts_for_rail_offset` handles X offset. Add a similar test for Y offset.
+
+Location: `crates/editor/src/editor_state.rs` (test module)
+
+### Step 5: Fix click targeting if tests fail
+
+If the test from Step 4 fails, trace through:
+1. `handle_mouse_buffer` coordinate adjustment (currently passes raw y, adjusts via content_height)
+2. `EditorContext` creation with `content_height = view_height - TAB_BAR_HEIGHT`
+3. `pixel_to_buffer_position` y-flip calculation: `flipped_y = content_height - y`
+
+The expected behavior:
+- Clicking at NSView y = (view_height - TAB_BAR_HEIGHT) - ε should target line 0 (top of content)
+- Clicking at NSView y = 0 should target the bottom line of the visible content
+
+Location: `crates/editor/src/editor_state.rs`
+
+### Step 6: Run full test suite
+
+Verify no regressions:
+```bash
+cargo test -p lite-edit-editor
+```
+
+### Step 7: Manual visual verification
+
+After fixing both bugs, manually test:
+1. Buffer text does not render within the tab bar strip at any scroll position
+2. Clicking on line N in the buffer moves cursor to line N (not N±1)
+3. Tab bar click-to-switch still works correctly
+4. Scrolling doesn't cause content to overlap with tab bar
+5. Left rail click handling is unaffected
+
+Add backreference comments to modified code:
+```rust
+// Chunk: docs/chunks/tab_bar_layout_fixes - Fixed glyph positioning for tab bar/rail offsets
+```
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **content_tab_bar** (ACTIVE): This chunk is a direct child fixing bugs from the parent chunk. The tab bar rendering and coordinate system are already in place.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Coordinate system complexity**: Multiple coordinate flips (NSView ↔ Metal ↔ buffer) create opportunities for off-by-one errors. Each transformation must be traced carefully.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Test coverage for Y offset**: The existing tests focus on X offset (left rail). The new tests added in this chunk should provide equivalent coverage for Y offset.
+
+3. **Wrap vs non-wrap code paths**: `update_from_buffer_with_wrap` and `update_from_buffer_with_cursor` have different implementations. After fixing the non-wrapped path, verify the wrapped path is still correct.
+
+4. **Fractional scroll interaction**: The y_offset passed to rendering methods includes both the tab bar offset and scroll pixel fraction. Ensure these compose correctly at boundary conditions.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
+1. **Bug #2 (click targeting) was already fixed**: The plan anticipated that click
+   targeting would be off by one line height due to incorrect TAB_BAR_HEIGHT handling.
+   However, upon investigation and testing, the coordinate transformation in
+   `handle_mouse_buffer()` was already correctly implemented:
+   - X coordinate is adjusted by subtracting RAIL_WIDTH
+   - Y coordinate handling uses `content_height = view_height - TAB_BAR_HEIGHT`
+     for the y-flip calculation in `pixel_to_buffer_position`
 
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
+   A test was added to verify this behavior (`test_mouse_click_accounts_for_tab_bar_offset`)
+   and it passed without any code changes. The original bug report may have been
+   based on an earlier state of the code or a misdiagnosis.
 
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+2. **Only Bug #1 required a code fix**: The glyph rendering bug was real and required
+   changing `update_from_buffer_with_cursor` to use `quad_vertices_with_xy_offset`
+   instead of `quad_vertices_with_offset`, ensuring glyphs are properly offset by
+   both RAIL_WIDTH (x) and TAB_BAR_HEIGHT (y).

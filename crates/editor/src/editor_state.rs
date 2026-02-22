@@ -3262,6 +3262,88 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_mouse_click_accounts_for_tab_bar_offset() {
+        // Chunk: docs/chunks/tab_bar_layout_fixes - Test Y coordinate click targeting
+        // This test verifies that clicking in the content area positions the
+        // cursor at the correct LINE, accounting for the tab bar height.
+        //
+        // The content area starts below the tab bar. Clicks in the content area
+        // should correctly map to buffer lines without being off by one.
+        use crate::left_rail::RAIL_WIDTH;
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(320.0);
+
+        // Set up buffer with multiple lines
+        *state.buffer_mut() = lite_edit_buffer::TextBuffer::from_str("line0\nline1\nline2\nline3");
+
+        // Coordinate system explanation:
+        // NSView uses bottom-left origin: y=0 is BOTTOM, y=view_height is TOP
+        // Tab bar occupies the TOP 32px: NSView y in [288, 320)
+        // Content area is NSView y in [0, 288)
+        //
+        // Within the content area:
+        // - Line 0 is at the TOP of content (NSView y ≈ 288 - line_height)
+        // - Line 1 is below line 0 (NSView y ≈ 288 - 2*line_height)
+        //
+        // To click on line 0:
+        // - content_height = view_height - TAB_BAR_HEIGHT = 320 - 32 = 288
+        // - Line 0 spans flipped_y ∈ [0, line_height) in content coords
+        // - In NSView coords: y = content_height - flipped_y = 288 - (line_height/2) = 280
+
+        let line_height = test_font_metrics().line_height; // 16.0
+        let content_height = 320.0 - TAB_BAR_HEIGHT as f64;
+
+        // Click on line 0 (center of line 0 in content area)
+        let target_line = 0;
+        let flipped_y_line0 = target_line as f64 * line_height + line_height / 2.0;
+        let window_y_line0 = content_height - flipped_y_line0;
+        let window_x = RAIL_WIDTH as f64 + 8.0; // Column 1
+
+        let click_event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (window_x, window_y_line0),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        state.handle_mouse(click_event);
+
+        assert_eq!(
+            state.buffer().cursor_position().line,
+            target_line,
+            "Clicking at center of line {} should place cursor on line {}, but got line {}. \
+             This indicates TAB_BAR_HEIGHT ({}) is not being correctly accounted for.",
+            target_line,
+            target_line,
+            state.buffer().cursor_position().line,
+            TAB_BAR_HEIGHT
+        );
+
+        // Click on line 2
+        let target_line = 2;
+        let flipped_y_line2 = target_line as f64 * line_height + line_height / 2.0;
+        let window_y_line2 = content_height - flipped_y_line2;
+
+        let click_event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (window_x, window_y_line2),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        state.handle_mouse(click_event);
+
+        assert_eq!(
+            state.buffer().cursor_position().line,
+            target_line,
+            "Clicking at center of line {} should place cursor on line {}, but got line {}.",
+            target_line,
+            target_line,
+            state.buffer().cursor_position().line
+        );
+    }
+
     // Tab Command Tests (Chunk: docs/chunks/content_tab_bar)
     // =========================================================================
 
