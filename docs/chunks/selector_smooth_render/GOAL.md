@@ -1,10 +1,12 @@
 ---
-status: IMPLEMENTING
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
 - crates/editor/src/selector_overlay.rs
-code_references: []
+code_references:
+  - ref: crates/editor/src/selector_overlay.rs#SelectorGlyphBuffer::update_from_widget
+    implements: "Fractional scroll offset and visible range for smooth item list rendering and selection highlight"
 narrative: file_picker_viewport
 investigation: null
 subsystems: []
@@ -20,16 +22,6 @@ created_after:
 - file_picker_mini_buffer
 - mini_buffer_model
 ---
-<!--
-╔══════════════════════════════════════════════════════════════════════════════╗
-║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
-║                                                                              ║
-║  AGENT INSTRUCTIONS: When editing this file, preserve this entire comment    ║
-║  block. Only modify the frontmatter YAML and the content sections below      ║
-║  (Minor Goal, Success Criteria, Relationship to Parent). Use targeted edits  ║
-║  that replace specific sections rather than rewriting the entire file.       ║
-╚══════════════════════════════════════════════════════════════════════════════╝
--->
 
 # Chunk Goal
 
