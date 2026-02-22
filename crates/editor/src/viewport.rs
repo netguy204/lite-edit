@@ -316,6 +316,31 @@ impl Viewport {
         self.scroller.set_scroll_offset_unclamped(px);
     }
 
+    // Chunk: docs/chunks/scroll_bottom_deadzone - Wrap-aware scroll clamping
+    /// Sets the scroll offset in pixels, with clamping based on total screen rows.
+    ///
+    /// Unlike `set_scroll_offset_px` which clamps based on buffer line count,
+    /// this method computes the maximum scroll position using total screen rows
+    /// (accounting for wrapped lines). This ensures consistent scroll bounds
+    /// when line wrapping is enabled.
+    ///
+    /// The offset is clamped to `[0.0, max_offset_px]` where:
+    /// `max_offset_px = (total_screen_rows - visible_rows) * line_height`
+    pub fn set_scroll_offset_px_wrapped<F>(
+        &mut self,
+        px: f32,
+        line_count: usize,
+        wrap_layout: &crate::wrap_layout::WrapLayout,
+        line_len_fn: F,
+    ) where
+        F: Fn(usize) -> usize,
+    {
+        let total_screen_rows = self.compute_total_screen_rows(line_count, wrap_layout, &line_len_fn);
+        let max_rows = total_screen_rows.saturating_sub(self.visible_lines());
+        let max_offset_px = max_rows as f32 * self.line_height();
+        self.scroller.set_scroll_offset_unclamped(px.clamp(0.0, max_offset_px));
+    }
+
     /// Helper: computes total screen rows for all buffer lines
     fn compute_total_screen_rows<F>(
         &self,
@@ -1111,5 +1136,203 @@ mod tests {
 
         assert_eq!(scrolled1, scrolled2);
         assert_eq!(vp1.first_visible_line(), vp2.first_visible_line());
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/scroll_bottom_deadzone - Wrap-aware scroll clamping tests
+    // =========================================================================
+
+    #[test]
+    fn test_set_scroll_offset_px_wrapped_clamps_to_screen_rows() {
+        // Test that set_scroll_offset_px_wrapped clamps based on total screen rows,
+        // not buffer line count.
+        //
+        // Scenario: 5 buffer lines, where some wrap to multiple screen rows.
+        // Total screen rows > buffer lines, so max_offset_px should be larger
+        // than what set_scroll_offset_px would compute.
+
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(640.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(160.0, 100); // 10 visible rows
+
+        // Line lengths:
+        // Line 0: 40 chars (1 screen row)
+        // Line 1: 160 chars (2 screen rows at 80 cols)
+        // Line 2: 240 chars (3 screen rows)
+        // Line 3: 160 chars (2 screen rows)
+        // Line 4: 40 chars (1 screen row)
+        // Total: 5 buffer lines, 9 screen rows
+        let line_lens = vec![40, 160, 240, 160, 40];
+
+        // With 10 visible rows and only 9 total screen rows, max_offset should be 0
+        // (can't scroll at all when content fits in viewport)
+        vp.set_scroll_offset_px_wrapped(100.0, 5, &wrap_layout, |line| line_lens[line]);
+        assert_eq!(vp.scroll_offset_px(), 0.0);
+    }
+
+    #[test]
+    fn test_set_scroll_offset_px_wrapped_allows_scroll_for_large_content() {
+        // Test that when content has more screen rows than viewport,
+        // scrolling is allowed up to the correct max.
+
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(640.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(80.0, 100); // 5 visible rows
+
+        // 10 buffer lines, each 160 chars (2 screen rows at 80 cols)
+        // Total: 20 screen rows
+        let line_lens = vec![160; 10];
+
+        // max_offset_px = (20 - 5) * 16 = 240
+        vp.set_scroll_offset_px_wrapped(300.0, 10, &wrap_layout, |line| line_lens[line]);
+        assert!((vp.scroll_offset_px() - 240.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_scroll_at_max_wrapped_responds_immediately() {
+        // This is the key regression test for the scroll deadzone bug.
+        //
+        // Scenario: Scroll to max position using wrap-aware clamping, then
+        // scroll back up by 1px. The offset should decrease immediately.
+
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(640.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(80.0, 100); // 5 visible rows
+
+        // 10 buffer lines, each 160 chars (2 screen rows at 80 cols)
+        // Total: 20 screen rows, max_offset = (20 - 5) * 16 = 240
+        let line_lens = vec![160; 10];
+
+        // Scroll to max
+        vp.set_scroll_offset_px_wrapped(1000.0, 10, &wrap_layout, |line| line_lens[line]);
+        let max_offset = vp.scroll_offset_px();
+        assert!((max_offset - 240.0).abs() < 0.001);
+
+        // Now scroll back up by 1px
+        let new_offset = max_offset - 1.0;
+        vp.set_scroll_offset_px_wrapped(new_offset, 10, &wrap_layout, |line| line_lens[line]);
+
+        // Should respond immediately - offset should be 239.0
+        assert!(
+            (vp.scroll_offset_px() - 239.0).abs() < 0.001,
+            "Expected offset 239.0, got {}. Scroll should respond immediately at max position.",
+            vp.scroll_offset_px()
+        );
+    }
+
+    #[test]
+    fn test_set_scroll_offset_px_wrapped_no_wrapping_matches_buffer_lines() {
+        // When no lines wrap, total_screen_rows == buffer_lines,
+        // so the behavior should match set_scroll_offset_px.
+
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(800.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        let mut vp1 = Viewport::new(16.0);
+        let mut vp2 = Viewport::new(16.0);
+        vp1.update_size(160.0, 100); // 10 visible rows
+        vp2.update_size(160.0, 100);
+
+        // 20 buffer lines, each 40 chars (fits in 100 cols, no wrapping)
+        let line_lens = vec![40; 20];
+
+        // Test that both methods clamp to the same max
+        vp1.set_scroll_offset_px(1000.0, 20);
+        vp2.set_scroll_offset_px_wrapped(1000.0, 20, &wrap_layout, |line| line_lens[line]);
+
+        assert!(
+            (vp1.scroll_offset_px() - vp2.scroll_offset_px()).abs() < 0.001,
+            "Without wrapping, both methods should clamp to same max. Got {} vs {}",
+            vp1.scroll_offset_px(),
+            vp2.scroll_offset_px()
+        );
+    }
+
+    #[test]
+    fn test_set_scroll_offset_px_wrapped_clamps_negative_to_zero() {
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(640.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(160.0, 100);
+
+        let line_lens = vec![160; 10];
+
+        vp.set_scroll_offset_px_wrapped(-100.0, 10, &wrap_layout, |line| line_lens[line]);
+        assert_eq!(vp.scroll_offset_px(), 0.0);
+    }
+
+    #[test]
+    fn test_wrapped_max_offset_greater_than_unwrapped() {
+        // Verify that with wrapped content, the max scroll position
+        // is greater than what buffer-line-based clamping would allow.
+
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(640.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        let mut vp_wrapped = Viewport::new(16.0);
+        let mut vp_unwrapped = Viewport::new(16.0);
+        vp_wrapped.update_size(80.0, 100); // 5 visible rows
+        vp_unwrapped.update_size(80.0, 100);
+
+        // 10 buffer lines, each 160 chars (2 screen rows at 80 cols)
+        // Total screen rows: 20
+        // Unwrapped max = (10 - 5) * 16 = 80
+        // Wrapped max = (20 - 5) * 16 = 240
+        let line_lens = vec![160; 10];
+
+        vp_unwrapped.set_scroll_offset_px(1000.0, 10);
+        vp_wrapped.set_scroll_offset_px_wrapped(1000.0, 10, &wrap_layout, |line| line_lens[line]);
+
+        assert!(
+            vp_wrapped.scroll_offset_px() > vp_unwrapped.scroll_offset_px(),
+            "Wrapped content should allow more scrolling. Wrapped: {}, Unwrapped: {}",
+            vp_wrapped.scroll_offset_px(),
+            vp_unwrapped.scroll_offset_px()
+        );
+        assert!((vp_unwrapped.scroll_offset_px() - 80.0).abs() < 0.001);
+        assert!((vp_wrapped.scroll_offset_px() - 240.0).abs() < 0.001);
     }
 }
