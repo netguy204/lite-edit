@@ -348,6 +348,10 @@ impl SelectorGlyphBuffer {
 
         let solid_glyph = atlas.solid_glyph();
 
+        // Chunk: docs/chunks/renderer_styled_content - Per-vertex colors for overlay
+        // Text color for overlay text (Catppuccin Mocha text)
+        let text_color: [f32; 4] = [0.804, 0.839, 0.957, 1.0];
+
         // ==================== Phase 1: Background Rect ====================
         let bg_start = indices.len();
         {
@@ -357,6 +361,7 @@ impl SelectorGlyphBuffer {
                 geometry.panel_width,
                 geometry.panel_height,
                 solid_glyph,
+                OVERLAY_BACKGROUND_COLOR,
             );
             vertices.extend_from_slice(&quad);
             Self::push_quad_indices(&mut indices, vertex_offset);
@@ -380,6 +385,7 @@ impl SelectorGlyphBuffer {
                     geometry.panel_width,
                     geometry.item_height,
                     solid_glyph,
+                    OVERLAY_SELECTION_COLOR,
                 );
                 vertices.extend_from_slice(&quad);
                 Self::push_quad_indices(&mut indices, vertex_offset);
@@ -397,6 +403,7 @@ impl SelectorGlyphBuffer {
                 geometry.panel_width - 2.0 * OVERLAY_PADDING_X,
                 SEPARATOR_HEIGHT,
                 solid_glyph,
+                OVERLAY_SEPARATOR_COLOR,
             );
             vertices.extend_from_slice(&quad);
             Self::push_quad_indices(&mut indices, vertex_offset);
@@ -425,7 +432,7 @@ impl SelectorGlyphBuffer {
                 }
 
                 if let Some(glyph) = atlas.get_glyph(c) {
-                    let quad = self.create_glyph_quad_at(x, y, glyph);
+                    let quad = self.create_glyph_quad_at(x, y, glyph, text_color);
                     vertices.extend_from_slice(&quad);
                     Self::push_quad_indices(&mut indices, vertex_offset);
                     vertex_offset += 4;
@@ -448,6 +455,7 @@ impl SelectorGlyphBuffer {
                     self.layout.glyph_width,
                     self.layout.line_height,
                     solid_glyph,
+                    text_color, // Cursor uses text color
                 );
                 vertices.extend_from_slice(&quad);
                 Self::push_quad_indices(&mut indices, vertex_offset);
@@ -485,7 +493,7 @@ impl SelectorGlyphBuffer {
                     }
 
                     if let Some(glyph) = atlas.get_glyph(c) {
-                        let quad = self.create_glyph_quad_at(x, y, glyph);
+                        let quad = self.create_glyph_quad_at(x, y, glyph, text_color);
                         vertices.extend_from_slice(&quad);
                         Self::push_quad_indices(&mut indices, vertex_offset);
                         vertex_offset += 4;
@@ -539,7 +547,8 @@ impl SelectorGlyphBuffer {
         self.index_count = indices.len();
     }
 
-    /// Creates a solid rectangle quad at the given position
+    /// Creates a solid rectangle quad at the given position with the specified color
+    // Chunk: docs/chunks/renderer_styled_content - Per-vertex color for styled text
     fn create_rect_quad(
         &self,
         x: f32,
@@ -547,20 +556,22 @@ impl SelectorGlyphBuffer {
         width: f32,
         height: f32,
         solid_glyph: &GlyphInfo,
+        color: [f32; 4],
     ) -> [GlyphVertex; 4] {
         let (u0, v0) = solid_glyph.uv_min;
         let (u1, v1) = solid_glyph.uv_max;
 
         [
-            GlyphVertex::new(x, y, u0, v0),                 // top-left
-            GlyphVertex::new(x + width, y, u1, v0),         // top-right
-            GlyphVertex::new(x + width, y + height, u1, v1), // bottom-right
-            GlyphVertex::new(x, y + height, u0, v1),        // bottom-left
+            GlyphVertex::new(x, y, u0, v0, color),                 // top-left
+            GlyphVertex::new(x + width, y, u1, v0, color),         // top-right
+            GlyphVertex::new(x + width, y + height, u1, v1, color), // bottom-right
+            GlyphVertex::new(x, y + height, u0, v1, color),        // bottom-left
         ]
     }
 
-    /// Creates a glyph quad at an absolute position
-    fn create_glyph_quad_at(&self, x: f32, y: f32, glyph: &GlyphInfo) -> [GlyphVertex; 4] {
+    /// Creates a glyph quad at an absolute position with the specified color
+    // Chunk: docs/chunks/renderer_styled_content - Per-vertex color for styled text
+    fn create_glyph_quad_at(&self, x: f32, y: f32, glyph: &GlyphInfo, color: [f32; 4]) -> [GlyphVertex; 4] {
         let (u0, v0) = glyph.uv_min;
         let (u1, v1) = glyph.uv_max;
 
@@ -568,10 +579,10 @@ impl SelectorGlyphBuffer {
         let h = glyph.height;
 
         [
-            GlyphVertex::new(x, y, u0, v0),         // top-left
-            GlyphVertex::new(x + w, y, u1, v0),     // top-right
-            GlyphVertex::new(x + w, y + h, u1, v1), // bottom-right
-            GlyphVertex::new(x, y + h, u0, v1),     // bottom-left
+            GlyphVertex::new(x, y, u0, v0, color),         // top-left
+            GlyphVertex::new(x + w, y, u1, v0, color),     // top-right
+            GlyphVertex::new(x + w, y + h, u1, v1, color), // bottom-right
+            GlyphVertex::new(x, y + h, u0, v1, color),     // bottom-left
         ]
     }
 

@@ -1,10 +1,11 @@
 // Chunk: docs/chunks/glyph_rendering - Monospace glyph atlas + text rendering
+// Chunk: docs/chunks/renderer_styled_content - Per-vertex color for styled text
 //
 // Metal shaders for text rendering with a glyph atlas.
 //
 // The vertex shader positions textured quads in screen space using an
 // orthographic projection. The fragment shader samples the glyph atlas
-// and applies the text color with alpha blending.
+// and applies the per-vertex color with alpha blending.
 
 #include <metal_stdlib>
 using namespace metal;
@@ -19,6 +20,8 @@ struct GlyphVertex {
     float2 position [[attribute(0)]];
     // Texture UV coordinates (u, v)
     float2 uv [[attribute(1)]];
+    // Per-vertex RGBA color
+    float4 color [[attribute(2)]];
 };
 
 // Uniforms passed to the vertex shader
@@ -31,6 +34,7 @@ struct Uniforms {
 struct FragmentInput {
     float4 position [[position]];
     float2 uv;
+    float4 color;
 };
 
 // =============================================================================
@@ -56,6 +60,7 @@ vertex FragmentInput glyph_vertex(
 
     out.position = float4(ndc, 0.0, 1.0);
     out.uv = in.uv;
+    out.color = in.color;
 
     return out;
 }
@@ -64,13 +69,12 @@ vertex FragmentInput glyph_vertex(
 // Fragment Shader
 // =============================================================================
 
-// Samples the glyph atlas and outputs the glyph with the text color.
+// Samples the glyph atlas and outputs the glyph with the per-vertex color.
 // The atlas stores glyph coverage in the red channel.
-// We multiply by the text color and use alpha blending.
+// We multiply by the per-vertex color and use alpha blending.
 fragment float4 glyph_fragment(
     FragmentInput in [[stage_in]],
-    texture2d<float> atlas [[texture(0)]],
-    constant float4& text_color [[buffer(0)]]
+    texture2d<float> atlas [[texture(0)]]
 ) {
     constexpr sampler atlas_sampler(
         filter::linear,
@@ -80,6 +84,6 @@ fragment float4 glyph_fragment(
     // Sample the glyph alpha from the red channel of the atlas
     float alpha = atlas.sample(atlas_sampler, in.uv).r;
 
-    // Apply text color with glyph alpha
-    return float4(text_color.rgb, text_color.a * alpha);
+    // Apply per-vertex color with glyph alpha
+    return float4(in.color.rgb, in.color.a * alpha);
 }

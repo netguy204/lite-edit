@@ -28,10 +28,13 @@ const GLYPH_SHADER_SOURCE: &str = include_str!("../shaders/glyph.metal");
 /// Vertex structure layout:
 /// - position: float2 (8 bytes) at offset 0
 /// - uv: float2 (8 bytes) at offset 8
-/// Total: 16 bytes per vertex
-pub const VERTEX_SIZE: usize = 16;
+/// - color: float4 (16 bytes) at offset 16
+/// Total: 32 bytes per vertex
+// Chunk: docs/chunks/renderer_styled_content - Per-vertex color for styled text
+pub const VERTEX_SIZE: usize = 32;
 
 /// Creates the vertex descriptor for glyph quad vertices
+// Chunk: docs/chunks/renderer_styled_content - Per-vertex color for styled text
 fn create_vertex_descriptor() -> Retained<MTLVertexDescriptor> {
     let descriptor = MTLVertexDescriptor::new();
 
@@ -52,6 +55,14 @@ fn create_vertex_descriptor() -> Retained<MTLVertexDescriptor> {
         attr1.setFormat(MTLVertexFormat::Float2);
         attr1.setOffset(8);
         attr1.setBufferIndex(0);
+    }
+
+    // Attribute 2: color (float4) at offset 16
+    let attr2 = unsafe { attributes.objectAtIndexedSubscript(2) };
+    unsafe {
+        attr2.setFormat(MTLVertexFormat::Float4);
+        attr2.setOffset(16);
+        attr2.setBufferIndex(0);
     }
 
     // Configure the buffer layout

@@ -1,18 +1,29 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/editor/src/color_palette.rs
+  - crates/editor/src/glyph_buffer.rs
+  - crates/editor/src/renderer.rs
+  - crates/editor/src/shader.rs
+  - crates/editor/src/lib.rs
+  - crates/editor/shaders/glyph.metal
 code_references: []
 narrative: null
 investigation: hierarchical_terminal_tabs
 subsystems: []
 friction_entries: []
 bug_type: null
-depends_on: ["buffer_view_trait"]
-created_after: ["file_save", "viewport_fractional_scroll", "word_boundary_primitives", "word_forward_delete", "word_jump_navigation"]
+depends_on:
+- buffer_view_trait
+created_after:
+- file_save
+- viewport_fractional_scroll
+- word_boundary_primitives
+- word_forward_delete
+- word_jump_navigation
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

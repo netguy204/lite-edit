@@ -33,10 +33,8 @@ use crate::glyph_atlas::GlyphAtlas;
 use crate::glyph_buffer::{GlyphBuffer, GlyphLayout};
 use crate::metal_view::MetalView;
 use crate::selector::SelectorWidget;
-use crate::selector_overlay::{
-    calculate_overlay_geometry, SelectorGlyphBuffer, OVERLAY_BACKGROUND_COLOR,
-    OVERLAY_SELECTION_COLOR, OVERLAY_SEPARATOR_COLOR,
-};
+// Chunk: docs/chunks/renderer_styled_content - Per-vertex colors, overlay colors now in vertices
+use crate::selector_overlay::{calculate_overlay_geometry, SelectorGlyphBuffer};
 use crate::shader::GlyphPipeline;
 use crate::viewport::Viewport;
 use lite_edit_buffer::{DirtyLines, TextBuffer};
@@ -396,21 +394,28 @@ impl Renderer {
             encoder.setFragmentTexture_atIndex(Some(self.atlas.texture()), 0);
         }
 
+        // Chunk: docs/chunks/renderer_styled_content - Per-vertex colors, no per-draw uniforms needed
+        // With per-vertex colors, we draw all quads in a single pass with no uniform changes.
+        // Draw order: background → selection → glyphs → underlines → cursor
+
+        // ==================== Draw Background Quads ====================
+        let background_range = self.glyph_buffer.background_range();
+        if !background_range.is_empty() {
+            let index_offset = background_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    background_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
         // ==================== Draw Selection Quads ====================
         let selection_range = self.glyph_buffer.selection_range();
         if !selection_range.is_empty() {
-            // Set selection color
-            let selection_color_ptr =
-                NonNull::new(SELECTION_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
-            unsafe {
-                encoder.setFragmentBytes_length_atIndex(
-                    selection_color_ptr,
-                    std::mem::size_of::<[f32; 4]>(),
-                    0,
-                );
-            }
-
-            // Draw selection quads
             let index_offset = selection_range.start * std::mem::size_of::<u32>();
             unsafe {
                 encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
@@ -426,18 +431,6 @@ impl Renderer {
         // ==================== Draw Glyph Quads ====================
         let glyph_range = self.glyph_buffer.glyph_range();
         if !glyph_range.is_empty() {
-            // Set text color
-            let text_color_ptr =
-                NonNull::new(TEXT_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
-            unsafe {
-                encoder.setFragmentBytes_length_atIndex(
-                    text_color_ptr,
-                    std::mem::size_of::<[f32; 4]>(),
-                    0,
-                );
-            }
-
-            // Draw glyph quads
             let index_offset = glyph_range.start * std::mem::size_of::<u32>();
             unsafe {
                 encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
@@ -450,21 +443,24 @@ impl Renderer {
             }
         }
 
+        // ==================== Draw Underline Quads ====================
+        let underline_range = self.glyph_buffer.underline_range();
+        if !underline_range.is_empty() {
+            let index_offset = underline_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    underline_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
         // ==================== Draw Cursor Quad ====================
         let cursor_range = self.glyph_buffer.cursor_range();
         if !cursor_range.is_empty() {
-            // Cursor uses text color (already set from glyph phase, but set again for safety)
-            let text_color_ptr =
-                NonNull::new(TEXT_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
-            unsafe {
-                encoder.setFragmentBytes_length_atIndex(
-                    text_color_ptr,
-                    std::mem::size_of::<[f32; 4]>(),
-                    0,
-                );
-            }
-
-            // Draw cursor quad
             let index_offset = cursor_range.start * std::mem::size_of::<u32>();
             unsafe {
                 encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
@@ -657,19 +653,12 @@ impl Renderer {
             encoder.setFragmentTexture_atIndex(Some(self.atlas.texture()), 0);
         }
 
+        // Chunk: docs/chunks/renderer_styled_content - Per-vertex colors, no per-draw uniforms needed
+        // With per-vertex colors, we draw all selector quads in order with no uniform changes.
+
         // ==================== Draw Background ====================
         let bg_range = selector_buffer.background_range();
         if !bg_range.is_empty() {
-            let color_ptr =
-                NonNull::new(OVERLAY_BACKGROUND_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
-            unsafe {
-                encoder.setFragmentBytes_length_atIndex(
-                    color_ptr,
-                    std::mem::size_of::<[f32; 4]>(),
-                    0,
-                );
-            }
-
             let index_offset = bg_range.start * std::mem::size_of::<u32>();
             unsafe {
                 encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
@@ -685,16 +674,6 @@ impl Renderer {
         // ==================== Draw Selection Highlight ====================
         let sel_range = selector_buffer.selection_range();
         if !sel_range.is_empty() {
-            let color_ptr =
-                NonNull::new(OVERLAY_SELECTION_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
-            unsafe {
-                encoder.setFragmentBytes_length_atIndex(
-                    color_ptr,
-                    std::mem::size_of::<[f32; 4]>(),
-                    0,
-                );
-            }
-
             let index_offset = sel_range.start * std::mem::size_of::<u32>();
             unsafe {
                 encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
@@ -710,16 +689,6 @@ impl Renderer {
         // ==================== Draw Separator Line ====================
         let sep_range = selector_buffer.separator_range();
         if !sep_range.is_empty() {
-            let color_ptr =
-                NonNull::new(OVERLAY_SEPARATOR_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
-            unsafe {
-                encoder.setFragmentBytes_length_atIndex(
-                    color_ptr,
-                    std::mem::size_of::<[f32; 4]>(),
-                    0,
-                );
-            }
-
             let index_offset = sep_range.start * std::mem::size_of::<u32>();
             unsafe {
                 encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
@@ -735,16 +704,6 @@ impl Renderer {
         // ==================== Draw Query Text ====================
         let query_range = selector_buffer.query_text_range();
         if !query_range.is_empty() {
-            let color_ptr =
-                NonNull::new(TEXT_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
-            unsafe {
-                encoder.setFragmentBytes_length_atIndex(
-                    color_ptr,
-                    std::mem::size_of::<[f32; 4]>(),
-                    0,
-                );
-            }
-
             let index_offset = query_range.start * std::mem::size_of::<u32>();
             unsafe {
                 encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
@@ -760,17 +719,6 @@ impl Renderer {
         // ==================== Draw Query Cursor ====================
         let cursor_range = selector_buffer.query_cursor_range();
         if !cursor_range.is_empty() {
-            // Cursor uses text color
-            let color_ptr =
-                NonNull::new(TEXT_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
-            unsafe {
-                encoder.setFragmentBytes_length_atIndex(
-                    color_ptr,
-                    std::mem::size_of::<[f32; 4]>(),
-                    0,
-                );
-            }
-
             let index_offset = cursor_range.start * std::mem::size_of::<u32>();
             unsafe {
                 encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
@@ -786,16 +734,6 @@ impl Renderer {
         // ==================== Draw Item Text ====================
         let item_range = selector_buffer.item_text_range();
         if !item_range.is_empty() {
-            let color_ptr =
-                NonNull::new(TEXT_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
-            unsafe {
-                encoder.setFragmentBytes_length_atIndex(
-                    color_ptr,
-                    std::mem::size_of::<[f32; 4]>(),
-                    0,
-                );
-            }
-
             let index_offset = item_range.start * std::mem::size_of::<u32>();
             unsafe {
                 encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(

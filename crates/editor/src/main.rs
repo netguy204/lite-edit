@@ -25,6 +25,8 @@
 
 mod buffer_target;
 mod clipboard;
+// Chunk: docs/chunks/renderer_styled_content - ColorPalette for styled text
+mod color_palette;
 mod context;
 mod dirty_region;
 mod editor_state;

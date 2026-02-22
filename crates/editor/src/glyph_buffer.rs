@@ -31,18 +31,21 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLDevice, MTLResourceOptions};
 
+use crate::color_palette::ColorPalette;
 use crate::font::FontMetrics;
 use crate::glyph_atlas::{GlyphAtlas, GlyphInfo};
 use crate::shader::VERTEX_SIZE;
 use crate::viewport::Viewport;
 // Chunk: docs/chunks/buffer_view_trait - Use BufferView trait instead of TextBuffer
-use lite_edit_buffer::BufferView;
+// Chunk: docs/chunks/renderer_styled_content - Use Style types for per-span colors
+use lite_edit_buffer::{BufferView, CursorShape, UnderlineStyle};
 
 // =============================================================================
 // Vertex Data
 // =============================================================================
 
 /// A single vertex in a glyph quad
+// Chunk: docs/chunks/renderer_styled_content - Per-vertex color for styled text
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct GlyphVertex {
@@ -50,13 +53,16 @@ pub struct GlyphVertex {
     pub position: [f32; 2],
     /// Texture UV coordinates (normalized 0-1)
     pub uv: [f32; 2],
+    /// Per-vertex RGBA color
+    pub color: [f32; 4],
 }
 
 impl GlyphVertex {
-    pub fn new(x: f32, y: f32, u: f32, v: f32) -> Self {
+    pub fn new(x: f32, y: f32, u: f32, v: f32, color: [f32; 4]) -> Self {
         Self {
             position: [x, y],
             uv: [u, v],
+            color,
         }
     }
 }
@@ -109,16 +115,19 @@ impl GlyphLayout {
     /// Generates the four vertices for a glyph quad at (row, col)
     ///
     /// The quad covers the glyph cell with the given UV coordinates.
+    // Chunk: docs/chunks/renderer_styled_content - Per-vertex color for styled text
     pub fn quad_vertices(
         &self,
         row: usize,
         col: usize,
         glyph: &GlyphInfo,
+        color: [f32; 4],
     ) -> [GlyphVertex; 4] {
-        self.quad_vertices_with_offset(row, col, glyph, 0.0)
+        self.quad_vertices_with_offset(row, col, glyph, 0.0, color)
     }
 
     // Chunk: docs/chunks/viewport_fractional_scroll - Quad vertices with Y offset for smooth scrolling
+    // Chunk: docs/chunks/renderer_styled_content - Per-vertex color for styled text
     /// Generates the four vertices for a glyph quad at (row, col) with Y offset
     ///
     /// The Y coordinate is shifted by `-y_offset` pixels for smooth scrolling.
@@ -131,6 +140,7 @@ impl GlyphLayout {
         col: usize,
         glyph: &GlyphInfo,
         y_offset: f32,
+        color: [f32; 4],
     ) -> [GlyphVertex; 4] {
         let (x, y) = self.position_for_with_offset(row, col, y_offset);
 
@@ -144,10 +154,10 @@ impl GlyphLayout {
 
         // Four corners: top-left, top-right, bottom-right, bottom-left
         [
-            GlyphVertex::new(x, y, u0, v0),         // top-left
-            GlyphVertex::new(x + w, y, u1, v0),     // top-right
-            GlyphVertex::new(x + w, y + h, u1, v1), // bottom-right
-            GlyphVertex::new(x, y + h, u0, v1),     // bottom-left
+            GlyphVertex::new(x, y, u0, v0, color),         // top-left
+            GlyphVertex::new(x + w, y, u1, v0, color),     // top-right
+            GlyphVertex::new(x + w, y + h, u1, v1, color), // bottom-right
+            GlyphVertex::new(x, y + h, u0, v1, color),     // bottom-left
         ]
     }
 }
@@ -178,6 +188,7 @@ impl QuadRange {
 }
 
 /// Manages vertex and index buffers for rendering text
+// Chunk: docs/chunks/renderer_styled_content - Extended with background and underline ranges
 pub struct GlyphBuffer {
     /// The vertex buffer containing glyph quad vertices
     vertex_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
@@ -187,24 +198,34 @@ pub struct GlyphBuffer {
     index_count: usize,
     /// Layout calculator
     layout: GlyphLayout,
+    /// Color palette for resolving Style colors to RGBA
+    palette: ColorPalette,
+    /// Index range for background (per-span bg color) quads
+    background_range: QuadRange,
     /// Index range for selection highlight quads
     selection_range: QuadRange,
     /// Index range for glyph (text character) quads
     glyph_range: QuadRange,
+    /// Index range for underline quads
+    underline_range: QuadRange,
     /// Index range for cursor quad
     cursor_range: QuadRange,
 }
 
 impl GlyphBuffer {
     /// Creates a new empty glyph buffer
+    // Chunk: docs/chunks/renderer_styled_content - ColorPalette for styled text
     pub fn new(metrics: &FontMetrics) -> Self {
         Self {
             vertex_buffer: None,
             index_buffer: None,
             index_count: 0,
             layout: GlyphLayout::from_metrics(metrics),
+            palette: ColorPalette::default(),
+            background_range: QuadRange::default(),
             selection_range: QuadRange::default(),
             glyph_range: QuadRange::default(),
+            underline_range: QuadRange::default(),
             cursor_range: QuadRange::default(),
         }
     }
@@ -229,6 +250,12 @@ impl GlyphBuffer {
         &self.layout
     }
 
+    /// Returns the index range for background (per-span bg color) quads
+    // Chunk: docs/chunks/renderer_styled_content - Background quads for styled text
+    pub fn background_range(&self) -> QuadRange {
+        self.background_range
+    }
+
     /// Returns the index range for selection highlight quads
     pub fn selection_range(&self) -> QuadRange {
         self.selection_range
@@ -237,6 +264,12 @@ impl GlyphBuffer {
     /// Returns the index range for glyph (text character) quads
     pub fn glyph_range(&self) -> QuadRange {
         self.glyph_range
+    }
+
+    /// Returns the index range for underline quads
+    // Chunk: docs/chunks/renderer_styled_content - Underline rendering for styled text
+    pub fn underline_range(&self) -> QuadRange {
+        self.underline_range
     }
 
     /// Returns the index range for the cursor quad
@@ -250,6 +283,7 @@ impl GlyphBuffer {
     /// * `device` - The Metal device for buffer creation
     /// * `atlas` - The glyph atlas containing character UV mappings
     /// * `lines` - The text lines to render
+    // Chunk: docs/chunks/renderer_styled_content - Uses default text color
     pub fn update(
         &mut self,
         device: &ProtocolObject<dyn MTLDevice>,
@@ -265,6 +299,9 @@ impl GlyphBuffer {
             self.index_count = 0;
             return;
         }
+
+        // Use default text color for this simple API
+        let text_color = self.palette.default_foreground();
 
         // Allocate vertex and index data
         let mut vertices: Vec<GlyphVertex> = Vec::with_capacity(char_count * 4);
@@ -289,7 +326,7 @@ impl GlyphBuffer {
                 };
 
                 // Generate the quad vertices
-                let quad = self.layout.quad_vertices(row, col, glyph);
+                let quad = self.layout.quad_vertices(row, col, glyph, text_color);
                 vertices.extend_from_slice(&quad);
 
                 // Generate indices for two triangles
@@ -371,12 +408,14 @@ impl GlyphBuffer {
     /// Updates the buffers with content from a BufferView, including cursor and selection rendering
     ///
     /// Emits quads in this order:
-    /// 1. Selection highlight quads (drawn first, behind text)
-    /// 2. Glyph quads (text characters)
-    /// 3. Cursor quad (drawn last, on top)
+    /// 1. Background quads (per-span bg colors)
+    /// 2. Selection highlight quads
+    /// 3. Glyph quads (text characters with per-span fg colors)
+    /// 4. Underline quads (for underlined spans)
+    /// 5. Cursor quad (drawn last, on top)
     ///
-    /// Each category's index range is tracked separately to allow the renderer
-    /// to draw each with different colors.
+    /// Each category's index range is tracked separately. With per-vertex colors,
+    /// all quads are drawn in a single pass with no uniform changes.
     ///
     /// # Arguments
     /// * `device` - The Metal device for buffer creation
@@ -389,6 +428,7 @@ impl GlyphBuffer {
     ///   to shift all content up, causing the top line to be partially clipped.
     // Chunk: docs/chunks/viewport_fractional_scroll - Y offset parameter for smooth scrolling
     // Chunk: docs/chunks/buffer_view_trait - Accept BufferView trait instead of TextBuffer
+    // Chunk: docs/chunks/renderer_styled_content - Per-span colors, backgrounds, underlines, cursor shapes
     pub fn update_from_buffer_with_cursor(
         &mut self,
         device: &ProtocolObject<dyn MTLDevice>,
@@ -401,22 +441,27 @@ impl GlyphBuffer {
         let visible_range = viewport.visible_range(view.line_count());
 
         // Estimate character count for buffer sizing
-        // Add extra for selection quads (one per visible line in selection)
-        // and 1 for cursor quad
+        // Add extra for background quads, selection quads, underline quads, and cursor
         let mut estimated_chars: usize = 0;
+        let mut estimated_spans: usize = 0;
         for line in visible_range.clone() {
-            // Use styled_line to get line content, extract text from spans
             if let Some(styled_line) = view.styled_line(line) {
                 estimated_chars += styled_line.char_count();
+                estimated_spans += styled_line.spans.len();
             }
         }
-        let selection_lines = visible_range.len(); // Max selection quads
+        let selection_lines = visible_range.len();
         let cursor_quads = if cursor_visible { 1 } else { 0 };
-        let total_estimated = estimated_chars + selection_lines + cursor_quads;
+        // Background quads: one per span with non-default bg
+        // Underline quads: one per span with underline
+        // Plus glyphs, selection, cursor
+        let total_estimated = estimated_chars + estimated_spans * 2 + selection_lines + cursor_quads;
 
         // Reset quad ranges
+        self.background_range = QuadRange::default();
         self.selection_range = QuadRange::default();
         self.glyph_range = QuadRange::default();
+        self.underline_range = QuadRange::default();
         self.cursor_range = QuadRange::default();
 
         if estimated_chars == 0 && cursor_quads == 0 && view.selection_range().is_none() {
@@ -431,15 +476,57 @@ impl GlyphBuffer {
         let mut indices: Vec<u32> = Vec::with_capacity(total_estimated * 6);
         let mut vertex_offset: u32 = 0;
 
-        // ==================== Phase 1: Selection Quads ====================
+        let solid_glyph = atlas.solid_glyph();
+
+        // Selection color (Catppuccin Mocha surface2 at 40% alpha)
+        let selection_color: [f32; 4] = [0.345, 0.357, 0.439, 0.4];
+        // Cursor color (same as default text color)
+        let cursor_color = self.palette.default_foreground();
+
+        // ==================== Phase 1: Background Quads ====================
+        // Chunk: docs/chunks/renderer_styled_content - Background quads for per-span bg colors
+        let background_start_index = indices.len();
+
+        for buffer_line in visible_range.clone() {
+            let screen_row = buffer_line - viewport.first_visible_line();
+
+            if let Some(styled_line) = view.styled_line(buffer_line) {
+                let mut col: usize = 0;
+                for span in &styled_line.spans {
+                    let span_len = span.text.chars().count();
+                    let end_col = col + span_len;
+
+                    // Only emit background quad if bg is not default
+                    if !self.palette.is_default_background(span.style.bg) {
+                        let (_, bg) = self.palette.resolve_style_colors(&span.style);
+                        let quad = self.create_selection_quad_with_offset(
+                            screen_row, col, end_col, solid_glyph, y_offset, bg
+                        );
+                        vertices.extend_from_slice(&quad);
+
+                        indices.push(vertex_offset);
+                        indices.push(vertex_offset + 1);
+                        indices.push(vertex_offset + 2);
+                        indices.push(vertex_offset);
+                        indices.push(vertex_offset + 2);
+                        indices.push(vertex_offset + 3);
+
+                        vertex_offset += 4;
+                    }
+
+                    col = end_col;
+                }
+            }
+        }
+
+        let background_index_count = indices.len() - background_start_index;
+        self.background_range = QuadRange::new(background_start_index, background_index_count);
+
+        // ==================== Phase 2: Selection Quads ====================
         let selection_start_index = indices.len();
 
         if let Some((sel_start, sel_end)) = view.selection_range() {
-            let solid_glyph = atlas.solid_glyph();
-
-            // For each visible line that intersects the selection
             for buffer_line in visible_range.clone() {
-                // Check if this line intersects the selection
                 if buffer_line < sel_start.line || buffer_line > sel_end.line {
                     continue;
                 }
@@ -447,7 +534,6 @@ impl GlyphBuffer {
                 let screen_row = buffer_line - viewport.first_visible_line();
                 let line_len = view.line_len(buffer_line);
 
-                // Calculate selection columns for this line
                 let start_col = if buffer_line == sel_start.line {
                     sel_start.col
                 } else {
@@ -456,20 +542,18 @@ impl GlyphBuffer {
                 let end_col = if buffer_line == sel_end.line {
                     sel_end.col
                 } else {
-                    // Include space for newline character visualization
                     line_len + 1
                 };
 
-                // Skip if no columns are selected on this line
                 if start_col >= end_col {
                     continue;
                 }
 
-                // Emit a single selection quad covering the selected range
-                let quad = self.create_selection_quad_with_offset(screen_row, start_col, end_col, solid_glyph, y_offset);
+                let quad = self.create_selection_quad_with_offset(
+                    screen_row, start_col, end_col, solid_glyph, y_offset, selection_color
+                );
                 vertices.extend_from_slice(&quad);
 
-                // Generate indices for the selection quad
                 indices.push(vertex_offset);
                 indices.push(vertex_offset + 1);
                 indices.push(vertex_offset + 2);
@@ -484,80 +568,135 @@ impl GlyphBuffer {
         let selection_index_count = indices.len() - selection_start_index;
         self.selection_range = QuadRange::new(selection_start_index, selection_index_count);
 
-        // ==================== Phase 2: Glyph Quads ====================
+        // ==================== Phase 3: Glyph Quads ====================
+        // Chunk: docs/chunks/renderer_styled_content - Per-span foreground colors
         let glyph_start_index = indices.len();
 
         for buffer_line in visible_range.clone() {
             let screen_row = buffer_line - viewport.first_visible_line();
 
-            // Get line content via styled_line, extract text from spans
-            // For now, TextBuffer returns single unstyled span per line
-            let line_content = if let Some(styled_line) = view.styled_line(buffer_line) {
-                // Concatenate text from all spans
-                styled_line.spans.iter().map(|s| s.text.as_str()).collect::<String>()
-            } else {
-                continue;
-            };
-
-            for (col, c) in line_content.chars().enumerate() {
-                // Skip spaces (they don't need quads)
-                if c == ' ' {
-                    continue;
-                }
-
-                // Get the glyph info from the atlas
-                let glyph = match atlas.get_glyph(c) {
-                    Some(g) => g,
-                    None => {
-                        // Character not in atlas, skip it
+            if let Some(styled_line) = view.styled_line(buffer_line) {
+                let mut col: usize = 0;
+                for span in &styled_line.spans {
+                    // Skip hidden text
+                    if span.style.hidden {
+                        col += span.text.chars().count();
                         continue;
                     }
-                };
 
-                // Generate the quad vertices with y_offset for smooth scrolling
-                let quad = self.layout.quad_vertices_with_offset(screen_row, col, glyph, y_offset);
-                vertices.extend_from_slice(&quad);
+                    // Resolve foreground color for this span
+                    let (fg, _) = self.palette.resolve_style_colors(&span.style);
 
-                // Generate indices for two triangles
-                indices.push(vertex_offset);
-                indices.push(vertex_offset + 1);
-                indices.push(vertex_offset + 2);
-                indices.push(vertex_offset);
-                indices.push(vertex_offset + 2);
-                indices.push(vertex_offset + 3);
+                    for c in span.text.chars() {
+                        // Skip spaces (they don't need quads)
+                        if c == ' ' {
+                            col += 1;
+                            continue;
+                        }
 
-                vertex_offset += 4;
+                        // Get the glyph info from the atlas
+                        let glyph = match atlas.get_glyph(c) {
+                            Some(g) => g,
+                            None => {
+                                col += 1;
+                                continue;
+                            }
+                        };
+
+                        // Generate the quad vertices with per-span fg color
+                        let quad = self.layout.quad_vertices_with_offset(screen_row, col, glyph, y_offset, fg);
+                        vertices.extend_from_slice(&quad);
+
+                        indices.push(vertex_offset);
+                        indices.push(vertex_offset + 1);
+                        indices.push(vertex_offset + 2);
+                        indices.push(vertex_offset);
+                        indices.push(vertex_offset + 2);
+                        indices.push(vertex_offset + 3);
+
+                        vertex_offset += 4;
+                        col += 1;
+                    }
+                }
             }
         }
 
         let glyph_index_count = indices.len() - glyph_start_index;
         self.glyph_range = QuadRange::new(glyph_start_index, glyph_index_count);
 
-        // ==================== Phase 3: Cursor Quad ====================
+        // ==================== Phase 4: Underline Quads ====================
+        // Chunk: docs/chunks/renderer_styled_content - Underline rendering
+        let underline_start_index = indices.len();
+
+        for buffer_line in visible_range.clone() {
+            let screen_row = buffer_line - viewport.first_visible_line();
+
+            if let Some(styled_line) = view.styled_line(buffer_line) {
+                let mut col: usize = 0;
+                for span in &styled_line.spans {
+                    let span_len = span.text.chars().count();
+                    let end_col = col + span_len;
+
+                    // Emit underline quad if underline style is not None
+                    if span.style.underline != UnderlineStyle::None {
+                        // Use underline_color if specified, otherwise use fg color
+                        let underline_color = if let Some(uc) = span.style.underline_color {
+                            self.palette.resolve_color(uc, true)
+                        } else {
+                            let (fg, _) = self.palette.resolve_style_colors(&span.style);
+                            fg
+                        };
+
+                        let quad = self.create_underline_quad(
+                            screen_row, col, end_col, solid_glyph, y_offset, underline_color
+                        );
+                        vertices.extend_from_slice(&quad);
+
+                        indices.push(vertex_offset);
+                        indices.push(vertex_offset + 1);
+                        indices.push(vertex_offset + 2);
+                        indices.push(vertex_offset);
+                        indices.push(vertex_offset + 2);
+                        indices.push(vertex_offset + 3);
+
+                        vertex_offset += 4;
+                    }
+
+                    col = end_col;
+                }
+            }
+        }
+
+        let underline_index_count = indices.len() - underline_start_index;
+        self.underline_range = QuadRange::new(underline_start_index, underline_index_count);
+
+        // ==================== Phase 5: Cursor Quad ====================
+        // Chunk: docs/chunks/renderer_styled_content - Cursor shape rendering
         let cursor_start_index = indices.len();
 
         if cursor_visible {
             if let Some(cursor_info) = view.cursor_info() {
-                let cursor_pos = cursor_info.position;
-                if let Some(screen_line) = viewport.buffer_line_to_screen_line(cursor_pos.line) {
-                    // Render cursor as a block cursor using the solid (fully opaque)
-                    // atlas region so the fragment shader produces a visible quad.
-                    let solid_glyph = atlas.solid_glyph();
-                    let cursor_quad = self.create_cursor_quad_with_offset(
-                        screen_line,
-                        cursor_pos.col,
-                        solid_glyph,
-                        y_offset,
-                    );
-                    vertices.extend_from_slice(&cursor_quad);
+                // Skip if cursor is hidden
+                if cursor_info.shape != CursorShape::Hidden {
+                    let cursor_pos = cursor_info.position;
+                    if let Some(screen_line) = viewport.buffer_line_to_screen_line(cursor_pos.line) {
+                        let cursor_quad = self.create_cursor_quad_for_shape(
+                            screen_line,
+                            cursor_pos.col,
+                            cursor_info.shape,
+                            solid_glyph,
+                            y_offset,
+                            cursor_color,
+                        );
+                        vertices.extend_from_slice(&cursor_quad);
 
-                    // Generate indices for the cursor quad
-                    indices.push(vertex_offset);
-                    indices.push(vertex_offset + 1);
-                    indices.push(vertex_offset + 2);
-                    indices.push(vertex_offset);
-                    indices.push(vertex_offset + 2);
-                    indices.push(vertex_offset + 3);
+                        indices.push(vertex_offset);
+                        indices.push(vertex_offset + 1);
+                        indices.push(vertex_offset + 2);
+                        indices.push(vertex_offset);
+                        indices.push(vertex_offset + 2);
+                        indices.push(vertex_offset + 3);
+                    }
                 }
             }
         }
@@ -608,21 +747,115 @@ impl GlyphBuffer {
         self.index_count = indices.len();
     }
 
+    /// Creates an underline quad at the baseline of the given row
+    // Chunk: docs/chunks/renderer_styled_content - Underline rendering
+    fn create_underline_quad(
+        &self,
+        screen_row: usize,
+        start_col: usize,
+        end_col: usize,
+        solid_glyph: &GlyphInfo,
+        y_offset: f32,
+        color: [f32; 4],
+    ) -> [GlyphVertex; 4] {
+        let (start_x, y) = self.layout.position_for_with_offset(screen_row, start_col, y_offset);
+        let (end_x, _) = self.layout.position_for_with_offset(screen_row, end_col, y_offset);
+
+        // Underline position: at the bottom of the line cell, 2 pixels thick
+        let underline_y = y + self.layout.line_height - 2.0;
+        let underline_height = 1.0; // Single pixel underline
+
+        let (u0, v0) = solid_glyph.uv_min;
+        let (u1, v1) = solid_glyph.uv_max;
+
+        [
+            GlyphVertex::new(start_x, underline_y, u0, v0, color),
+            GlyphVertex::new(end_x, underline_y, u1, v0, color),
+            GlyphVertex::new(end_x, underline_y + underline_height, u1, v1, color),
+            GlyphVertex::new(start_x, underline_y + underline_height, u0, v1, color),
+        ]
+    }
+
+    /// Creates a cursor quad with the appropriate shape
+    // Chunk: docs/chunks/renderer_styled_content - Cursor shape rendering
+    fn create_cursor_quad_for_shape(
+        &self,
+        screen_row: usize,
+        col: usize,
+        shape: CursorShape,
+        solid_glyph: &GlyphInfo,
+        y_offset: f32,
+        color: [f32; 4],
+    ) -> [GlyphVertex; 4] {
+        let (x, y) = self.layout.position_for_with_offset(screen_row, col, y_offset);
+        let (u0, v0) = solid_glyph.uv_min;
+        let (u1, v1) = solid_glyph.uv_max;
+
+        match shape {
+            CursorShape::Block => {
+                // Full cell block cursor
+                let w = self.layout.glyph_width;
+                let h = self.layout.line_height;
+                [
+                    GlyphVertex::new(x, y, u0, v0, color),
+                    GlyphVertex::new(x + w, y, u1, v0, color),
+                    GlyphVertex::new(x + w, y + h, u1, v1, color),
+                    GlyphVertex::new(x, y + h, u0, v1, color),
+                ]
+            }
+            CursorShape::Beam => {
+                // Thin vertical bar at left edge of cell
+                let w = 2.0; // 2 pixels wide
+                let h = self.layout.line_height;
+                [
+                    GlyphVertex::new(x, y, u0, v0, color),
+                    GlyphVertex::new(x + w, y, u1, v0, color),
+                    GlyphVertex::new(x + w, y + h, u1, v1, color),
+                    GlyphVertex::new(x, y + h, u0, v1, color),
+                ]
+            }
+            CursorShape::Underline => {
+                // Thin horizontal bar at bottom of cell
+                let w = self.layout.glyph_width;
+                let h = 2.0; // 2 pixels tall
+                let underline_y = y + self.layout.line_height - h;
+                [
+                    GlyphVertex::new(x, underline_y, u0, v0, color),
+                    GlyphVertex::new(x + w, underline_y, u1, v0, color),
+                    GlyphVertex::new(x + w, underline_y + h, u1, v1, color),
+                    GlyphVertex::new(x, underline_y + h, u0, v1, color),
+                ]
+            }
+            CursorShape::Hidden => {
+                // Return degenerate quad (zero area) - shouldn't be reached
+                [
+                    GlyphVertex::new(x, y, u0, v0, color),
+                    GlyphVertex::new(x, y, u1, v0, color),
+                    GlyphVertex::new(x, y, u1, v1, color),
+                    GlyphVertex::new(x, y, u0, v1, color),
+                ]
+            }
+        }
+    }
+
     /// Creates a selection highlight quad covering columns [start_col, end_col) on the given row
     ///
     /// The quad uses the solid glyph from the atlas so the fragment shader produces
     /// a fully opaque result (the selection color alpha provides transparency).
+    // Chunk: docs/chunks/renderer_styled_content - Per-vertex color for styled text
     fn create_selection_quad(
         &self,
         screen_row: usize,
         start_col: usize,
         end_col: usize,
         solid_glyph: &GlyphInfo,
+        color: [f32; 4],
     ) -> [GlyphVertex; 4] {
-        self.create_selection_quad_with_offset(screen_row, start_col, end_col, solid_glyph, 0.0)
+        self.create_selection_quad_with_offset(screen_row, start_col, end_col, solid_glyph, 0.0, color)
     }
 
     // Chunk: docs/chunks/viewport_fractional_scroll - Selection quad with Y offset for smooth scrolling
+    // Chunk: docs/chunks/renderer_styled_content - Per-vertex color for styled text
     /// Creates a selection highlight quad with Y offset for smooth scrolling
     fn create_selection_quad_with_offset(
         &self,
@@ -631,6 +864,7 @@ impl GlyphBuffer {
         end_col: usize,
         solid_glyph: &GlyphInfo,
         y_offset: f32,
+        color: [f32; 4],
     ) -> [GlyphVertex; 4] {
         let (start_x, y) = self.layout.position_for_with_offset(screen_row, start_col, y_offset);
         let (end_x, _) = self.layout.position_for_with_offset(screen_row, end_col, y_offset);
@@ -643,10 +877,10 @@ impl GlyphBuffer {
         let (u1, v1) = solid_glyph.uv_max;
 
         [
-            GlyphVertex::new(start_x, y, u0, v0),                       // top-left
-            GlyphVertex::new(end_x, y, u1, v0),                         // top-right
-            GlyphVertex::new(end_x, y + selection_height, u1, v1),      // bottom-right
-            GlyphVertex::new(start_x, y + selection_height, u0, v1),    // bottom-left
+            GlyphVertex::new(start_x, y, u0, v0, color),                       // top-left
+            GlyphVertex::new(end_x, y, u1, v0, color),                         // top-right
+            GlyphVertex::new(end_x, y + selection_height, u1, v1, color),      // bottom-right
+            GlyphVertex::new(start_x, y + selection_height, u0, v1, color),    // bottom-left
         ]
     }
 
@@ -655,16 +889,19 @@ impl GlyphBuffer {
     /// The cursor is rendered as a solid block that uses a portion of the atlas
     /// that is guaranteed to be opaque (we use the same technique as text but
     /// the shader will render it with a different color).
+    // Chunk: docs/chunks/renderer_styled_content - Per-vertex color for styled text
     fn create_cursor_quad(
         &self,
         screen_row: usize,
         col: usize,
         reference_glyph: &GlyphInfo,
+        color: [f32; 4],
     ) -> [GlyphVertex; 4] {
-        self.create_cursor_quad_with_offset(screen_row, col, reference_glyph, 0.0)
+        self.create_cursor_quad_with_offset(screen_row, col, reference_glyph, 0.0, color)
     }
 
     // Chunk: docs/chunks/viewport_fractional_scroll - Cursor quad with Y offset for smooth scrolling
+    // Chunk: docs/chunks/renderer_styled_content - Per-vertex color for styled text
     /// Creates a cursor quad at the specified screen position with Y offset
     fn create_cursor_quad_with_offset(
         &self,
@@ -672,6 +909,7 @@ impl GlyphBuffer {
         col: usize,
         reference_glyph: &GlyphInfo,
         y_offset: f32,
+        color: [f32; 4],
     ) -> [GlyphVertex; 4] {
         let (x, y) = self.layout.position_for_with_offset(screen_row, col, y_offset);
 
@@ -689,10 +927,10 @@ impl GlyphBuffer {
         // For a solid cursor, we just need any UV region
         // The fragment shader will handle the color
         [
-            GlyphVertex::new(x, y, u0, v0),                             // top-left
-            GlyphVertex::new(x + cursor_width, y, u1, v0),              // top-right
-            GlyphVertex::new(x + cursor_width, y + cursor_height, u1, v1), // bottom-right
-            GlyphVertex::new(x, y + cursor_height, u0, v1),             // bottom-left
+            GlyphVertex::new(x, y, u0, v0, color),                             // top-left
+            GlyphVertex::new(x + cursor_width, y, u1, v0, color),              // top-right
+            GlyphVertex::new(x + cursor_width, y + cursor_height, u1, v1, color), // bottom-right
+            GlyphVertex::new(x, y + cursor_height, u0, v1, color),             // bottom-left
         ]
     }
 
@@ -755,7 +993,8 @@ mod tests {
             bearing_y: 12.0,
         };
 
-        let quad = layout.quad_vertices(0, 0, &glyph);
+        let test_color = [1.0, 0.5, 0.0, 1.0];
+        let quad = layout.quad_vertices(0, 0, &glyph, test_color);
 
         // Check positions
         assert_eq!(quad[0].position, [0.0, 0.0]);    // top-left
@@ -768,6 +1007,12 @@ mod tests {
         assert_eq!(quad[1].uv, [0.1, 0.0]);
         assert_eq!(quad[2].uv, [0.1, 0.2]);
         assert_eq!(quad[3].uv, [0.0, 0.2]);
+
+        // Check colors
+        assert_eq!(quad[0].color, test_color);
+        assert_eq!(quad[1].color, test_color);
+        assert_eq!(quad[2].color, test_color);
+        assert_eq!(quad[3].color, test_color);
     }
 
     #[test]
@@ -793,13 +1038,18 @@ mod tests {
         }
     }
 
+    fn test_color() -> [f32; 4] {
+        [1.0, 0.0, 0.0, 0.5]
+    }
+
     #[test]
     fn test_selection_quad_single_char() {
         let glyph_buffer = GlyphBuffer::new(&test_metrics());
         let solid = test_solid_glyph();
+        let color = test_color();
 
         // Selection covering one character at row 0, col 0
-        let quad = glyph_buffer.create_selection_quad(0, 0, 1, &solid);
+        let quad = glyph_buffer.create_selection_quad(0, 0, 1, &solid, color);
 
         // Selection should span from x=0 to x=8 (one glyph width)
         assert_eq!(quad[0].position, [0.0, 0.0]);    // top-left
@@ -812,9 +1062,10 @@ mod tests {
     fn test_selection_quad_multiple_chars() {
         let glyph_buffer = GlyphBuffer::new(&test_metrics());
         let solid = test_solid_glyph();
+        let color = test_color();
 
         // Selection covering cols 2-5 (3 characters) on row 1
-        let quad = glyph_buffer.create_selection_quad(1, 2, 5, &solid);
+        let quad = glyph_buffer.create_selection_quad(1, 2, 5, &solid, color);
 
         // x: col 2 = 16, col 5 = 40
         // y: row 1 = 16
@@ -828,8 +1079,9 @@ mod tests {
     fn test_selection_quad_uses_solid_glyph_uvs() {
         let glyph_buffer = GlyphBuffer::new(&test_metrics());
         let solid = test_solid_glyph();
+        let color = test_color();
 
-        let quad = glyph_buffer.create_selection_quad(0, 0, 3, &solid);
+        let quad = glyph_buffer.create_selection_quad(0, 0, 3, &solid, color);
 
         // UVs should be from the solid glyph
         assert_eq!(quad[0].uv, [0.5, 0.5]);  // top-left
@@ -842,12 +1094,28 @@ mod tests {
     fn test_selection_quad_height_matches_line_height() {
         let glyph_buffer = GlyphBuffer::new(&test_metrics());
         let solid = test_solid_glyph();
+        let color = test_color();
 
-        let quad = glyph_buffer.create_selection_quad(0, 0, 1, &solid);
+        let quad = glyph_buffer.create_selection_quad(0, 0, 1, &solid, color);
 
         // Height should be line_height (16.0), not glyph height
         let height = quad[2].position[1] - quad[0].position[1];
         assert_eq!(height, 16.0);
+    }
+
+    #[test]
+    fn test_selection_quad_color() {
+        let glyph_buffer = GlyphBuffer::new(&test_metrics());
+        let solid = test_solid_glyph();
+        let color = test_color();
+
+        let quad = glyph_buffer.create_selection_quad(0, 0, 1, &solid, color);
+
+        // All vertices should have the same color
+        assert_eq!(quad[0].color, color);
+        assert_eq!(quad[1].color, color);
+        assert_eq!(quad[2].color, color);
+        assert_eq!(quad[3].color, color);
     }
 
     #[test]
