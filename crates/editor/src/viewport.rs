@@ -1,5 +1,6 @@
 // Chunk: docs/chunks/viewport_rendering - Viewport + Buffer-to-Screen Rendering
 // Chunk: docs/chunks/viewport_fractional_scroll - Fractional scroll support
+// Chunk: docs/chunks/row_scroller_extract - Delegation to RowScroller
 //!
 //! Viewport abstraction for mapping buffer coordinates to screen coordinates
 //!
@@ -17,22 +18,27 @@
 //! smooth trackpad scrolling. The integer line index (`first_visible_line()`) is
 //! derived as `(scroll_offset_px / line_height).floor()`, and the fractional
 //! remainder (`scroll_fraction_px()`) is applied as a Y translation in the renderer.
+//!
+//! Internally, `Viewport` delegates all uniform-row scroll arithmetic to a
+//! `RowScroller`. The `Viewport`-only additions are buffer-specific methods:
+//! - `dirty_lines_to_region()` — maps `DirtyLines` to `DirtyRegion`
+//! - `ensure_visible_wrapped()` — handles soft-wrapped lines
 
 use std::ops::Range;
 
 use crate::dirty_region::DirtyRegion;
+use crate::row_scroller::RowScroller;
 use lite_edit_buffer::DirtyLines;
 
 /// A viewport representing the visible portion of a text buffer
+///
+/// Internally delegates uniform-row scroll arithmetic to a `RowScroller`,
+/// adding buffer-specific methods for dirty region mapping and soft-wrapped
+/// line handling.
 #[derive(Debug, Clone)]
 pub struct Viewport {
-    /// Scroll position in pixels (private - use accessor methods)
-    /// This is the distance from the top of the document to the top of the viewport.
-    scroll_offset_px: f32,
-    /// Number of lines that fit in the viewport
-    visible_lines: usize,
-    /// Line height in pixels (used to compute visible_lines from window height)
-    line_height: f32,
+    /// Inner scroller that handles all uniform-row scroll arithmetic
+    scroller: RowScroller,
 }
 
 impl Viewport {
@@ -42,20 +48,26 @@ impl Viewport {
     /// Call `update_size()` to set the visible line count based on window height.
     pub fn new(line_height: f32) -> Self {
         Self {
-            scroll_offset_px: 0.0,
-            visible_lines: 0,
-            line_height,
+            scroller: RowScroller::new(line_height),
         }
+    }
+
+    /// Returns a reference to the inner `RowScroller`.
+    ///
+    /// This allows downstream code (e.g., `SelectorWidget`) to use `RowScroller`
+    /// directly without going through `Viewport`.
+    pub fn row_scroller(&self) -> &RowScroller {
+        &self.scroller
     }
 
     /// Returns the line height in pixels
     pub fn line_height(&self) -> f32 {
-        self.line_height
+        self.scroller.row_height()
     }
 
     /// Returns the number of visible lines in the viewport
     pub fn visible_lines(&self) -> usize {
-        self.visible_lines
+        self.scroller.visible_rows()
     }
 
     /// Returns the first visible buffer line (derived from pixel offset)
@@ -67,10 +79,7 @@ impl Viewport {
     /// and `buffer_line_for_screen_row()` instead. This method assumes a 1:1 mapping
     /// between buffer lines and screen rows, which is only correct without wrapping.
     pub fn first_visible_line(&self) -> usize {
-        if self.line_height <= 0.0 {
-            return 0;
-        }
-        (self.scroll_offset_px / self.line_height).floor() as usize
+        self.scroller.first_visible_row()
     }
 
     // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Wrap-aware scroll position
@@ -137,10 +146,7 @@ impl Viewport {
     ///
     /// Returns a value in the range `[0.0, line_height)`.
     pub fn scroll_fraction_px(&self) -> f32 {
-        if self.line_height <= 0.0 {
-            return 0.0;
-        }
-        self.scroll_offset_px % self.line_height
+        self.scroller.scroll_fraction_px()
     }
 
     /// Returns the raw scroll offset in pixels
@@ -148,7 +154,7 @@ impl Viewport {
     /// This is the authoritative scroll state. Use `first_visible_line()` for
     /// the derived integer line index used in buffer-to-screen mapping.
     pub fn scroll_offset_px(&self) -> f32 {
-        self.scroll_offset_px
+        self.scroller.scroll_offset_px()
     }
 
     /// Sets the scroll offset in pixels, with clamping to valid bounds
@@ -158,20 +164,14 @@ impl Viewport {
     ///
     /// This ensures the viewport doesn't scroll past the start or end of the document.
     pub fn set_scroll_offset_px(&mut self, px: f32, buffer_line_count: usize) {
-        let max_lines = buffer_line_count.saturating_sub(self.visible_lines);
-        let max_offset_px = max_lines as f32 * self.line_height;
-        self.scroll_offset_px = px.clamp(0.0, max_offset_px);
+        self.scroller.set_scroll_offset_px(px, buffer_line_count);
     }
 
     /// Updates the viewport size based on window height in pixels
     ///
     /// This recomputes `visible_lines` = floor(window_height / line_height).
     pub fn update_size(&mut self, window_height: f32) {
-        self.visible_lines = if self.line_height > 0.0 {
-            (window_height / self.line_height).floor() as usize
-        } else {
-            0
-        };
+        self.scroller.update_size(window_height);
     }
 
     /// Returns the range of buffer lines visible in the viewport
@@ -182,12 +182,7 @@ impl Viewport {
     /// Note: When scrolled to a fractional position, this range includes the partially-visible
     /// top line. The renderer handles partial visibility via `scroll_fraction_px()`.
     pub fn visible_range(&self, buffer_line_count: usize) -> Range<usize> {
-        let first_line = self.first_visible_line();
-        let start = first_line;
-        // Add 1 to visible_lines to account for partially visible line at bottom
-        // when scrolled to a fractional position
-        let end = (first_line + self.visible_lines + 1).min(buffer_line_count);
-        start..end
+        self.scroller.visible_range(buffer_line_count)
     }
 
     /// Scrolls the viewport to show the given buffer line at the top
@@ -198,8 +193,7 @@ impl Viewport {
     ///
     /// This snaps to a whole-line boundary (pixel offset is a multiple of line_height).
     pub fn scroll_to(&mut self, line: usize, buffer_line_count: usize) {
-        let target_px = line as f32 * self.line_height;
-        self.set_scroll_offset_px(target_px, buffer_line_count);
+        self.scroller.scroll_to(line, buffer_line_count);
     }
 
     /// Ensures a buffer line is visible, scrolling if necessary
@@ -210,24 +204,7 @@ impl Viewport {
     /// When scrolling is needed, this snaps to a whole-line boundary, ensuring
     /// clean alignment after cursor-following operations.
     pub fn ensure_visible(&mut self, line: usize, buffer_line_count: usize) -> bool {
-        let old_offset_px = self.scroll_offset_px;
-        let first_line = self.first_visible_line();
-
-        if line < first_line {
-            // Line is above viewport - scroll up to put line at top
-            // Snap to whole-line boundary
-            let target_px = line as f32 * self.line_height;
-            self.set_scroll_offset_px(target_px, buffer_line_count);
-        } else if line >= first_line + self.visible_lines {
-            // Line is below viewport - scroll down
-            // Put the line at the bottom of the viewport
-            let new_line = line.saturating_sub(self.visible_lines.saturating_sub(1));
-            // Snap to whole-line boundary
-            let target_px = new_line as f32 * self.line_height;
-            self.set_scroll_offset_px(target_px, buffer_line_count);
-        }
-
-        self.scroll_offset_px != old_offset_px
+        self.scroller.ensure_visible(line, buffer_line_count)
     }
 
     // Chunk: docs/chunks/line_wrap_rendering - Wrap-aware cursor visibility
@@ -257,7 +234,9 @@ impl Viewport {
     where
         F: Fn(usize) -> usize,
     {
-        let old_offset_px = self.scroll_offset_px;
+        let old_offset_px = self.scroll_offset_px();
+        let line_height = self.line_height();
+        let visible_lines = self.visible_lines();
 
         // Calculate the cumulative screen row of the cursor
         // We need to know: "what screen row (from viewport top) is the cursor on?"
@@ -283,29 +262,36 @@ impl Viewport {
             abs_screen_row += cursor_row_offset;
 
             // Scroll to put cursor's screen row at the top
-            let target_px = abs_screen_row as f32 * self.line_height;
+            let target_px = abs_screen_row as f32 * line_height;
             // Use a reasonable max based on wrapping
             // For simplicity, use a large value; proper clamping happens in set_scroll_offset_px
             let max_screen_rows = self.compute_total_screen_rows(line_count, wrap_layout, &line_len_fn);
-            let max_offset_px = max_screen_rows.saturating_sub(self.visible_lines) as f32 * self.line_height;
-            self.scroll_offset_px = target_px.clamp(0.0, max_offset_px);
+            let max_offset_px = max_screen_rows.saturating_sub(visible_lines) as f32 * line_height;
+            self.set_scroll_offset_px_direct(target_px.clamp(0.0, max_offset_px));
         } else {
             // Cursor is at or after first_visible_line
             let cursor_screen_row = cumulative_screen_row + cursor_row_offset;
 
-            if cursor_screen_row >= self.visible_lines {
+            if cursor_screen_row >= visible_lines {
                 // Cursor is below viewport - scroll down
                 // Put the cursor's screen row at the bottom of the viewport
-                let new_top_row = cursor_screen_row.saturating_sub(self.visible_lines.saturating_sub(1));
-                let target_px = new_top_row as f32 * self.line_height;
+                let new_top_row = cursor_screen_row.saturating_sub(visible_lines.saturating_sub(1));
+                let target_px = new_top_row as f32 * line_height;
                 let max_screen_rows = self.compute_total_screen_rows(line_count, wrap_layout, &line_len_fn);
-                let max_offset_px = max_screen_rows.saturating_sub(self.visible_lines) as f32 * self.line_height;
-                self.scroll_offset_px = target_px.clamp(0.0, max_offset_px);
+                let max_offset_px = max_screen_rows.saturating_sub(visible_lines) as f32 * line_height;
+                self.set_scroll_offset_px_direct(target_px.clamp(0.0, max_offset_px));
             }
             // else: cursor is visible, no scroll needed
         }
 
-        self.scroll_offset_px != old_offset_px
+        self.scroll_offset_px() != old_offset_px
+    }
+
+    /// Sets scroll offset directly without clamping (for internal use in wrap handling)
+    fn set_scroll_offset_px_direct(&mut self, px: f32) {
+        // Access the inner scroller's field directly via a helper
+        // This is needed for ensure_visible_wrapped which does its own clamping
+        self.scroller.set_scroll_offset_unclamped(px);
     }
 
     /// Helper: computes total screen rows for all buffer lines
@@ -334,20 +320,14 @@ impl Viewport {
     /// screen line is an integer index. The fractional offset is handled separately
     /// by the renderer via `scroll_fraction_px()`.
     pub fn buffer_line_to_screen_line(&self, buffer_line: usize) -> Option<usize> {
-        let first_line = self.first_visible_line();
-        // Use visible_lines + 1 to account for partially visible bottom line
-        if buffer_line >= first_line && buffer_line < first_line + self.visible_lines + 1 {
-            Some(buffer_line - first_line)
-        } else {
-            None
-        }
+        self.scroller.row_to_visible_offset(buffer_line)
     }
 
     /// Converts a screen line index to a buffer line index
     ///
     /// Returns the buffer line index corresponding to the given screen line.
     pub fn screen_line_to_buffer_line(&self, screen_line: usize) -> usize {
-        self.first_visible_line() + screen_line
+        self.scroller.visible_offset_to_row(screen_line)
     }
 
     /// Converts buffer-space `DirtyLines` to screen-space `DirtyRegion`
@@ -362,7 +342,7 @@ impl Viewport {
     ) -> DirtyRegion {
         let first_line = self.first_visible_line();
         let visible_start = first_line;
-        let visible_end = (first_line + self.visible_lines).min(buffer_line_count);
+        let visible_end = (first_line + self.visible_lines()).min(buffer_line_count);
 
         match dirty {
             DirtyLines::None => DirtyRegion::None,
@@ -445,10 +425,10 @@ mod tests {
     #[test]
     fn test_new() {
         let vp = Viewport::new(16.0);
-        assert_eq!(vp.scroll_offset_px, 0.0);
+        assert_eq!(vp.scroll_offset_px(), 0.0);
         assert_eq!(vp.first_visible_line(), 0);
-        assert_eq!(vp.visible_lines, 0);
-        assert_eq!(vp.line_height, 16.0);
+        assert_eq!(vp.visible_lines(), 0);
+        assert_eq!(vp.line_height(), 16.0);
     }
 
     // ==================== update_size ====================
@@ -457,21 +437,21 @@ mod tests {
     fn test_update_size() {
         let mut vp = Viewport::new(16.0);
         vp.update_size(160.0);
-        assert_eq!(vp.visible_lines, 10); // 160 / 16 = 10
+        assert_eq!(vp.visible_lines(), 10); // 160 / 16 = 10
     }
 
     #[test]
     fn test_update_size_fractional() {
         let mut vp = Viewport::new(16.0);
         vp.update_size(170.0); // 170 / 16 = 10.625
-        assert_eq!(vp.visible_lines, 10); // floor
+        assert_eq!(vp.visible_lines(), 10); // floor
     }
 
     #[test]
     fn test_update_size_zero_height() {
         let mut vp = Viewport::new(0.0);
         vp.update_size(160.0);
-        assert_eq!(vp.visible_lines, 0);
+        assert_eq!(vp.visible_lines(), 0);
     }
 
     // ==================== Fractional scroll tests ====================

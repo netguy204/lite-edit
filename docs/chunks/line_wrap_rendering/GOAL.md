@@ -25,12 +25,10 @@ code_references:
     implements: "Calculate pixel position for a character with wrapping applied"
   - ref: crates/editor/src/glyph_buffer.rs#GlyphBuffer::update_from_buffer_with_wrap
     implements: "Wrap-aware rendering loop that emits selection, border, glyph, and cursor quads for wrapped lines"
-  - ref: crates/editor/src/glyph_buffer.rs#GlyphBuffer::create_border_quad
-    implements: "Creates 2px left-edge border quad for continuation row indicators"
   - ref: crates/editor/src/glyph_buffer.rs#GlyphBuffer::border_range
     implements: "Returns index range for continuation row border quads"
-  - ref: crates/editor/src/buffer_target.rs#pixel_to_buffer_position_wrapped
-    implements: "Wrap-aware hit-testing: converts pixel coordinates to buffer position by walking screen rows"
+  - ref: crates/editor/src/buffer_target.rs
+    implements: "Wrap-aware hit-testing: module provides pixel_to_buffer_position_wrapped (private helper at line 629) for converting pixel coordinates to buffer position by walking screen rows"
   - ref: crates/editor/src/viewport.rs#Viewport::ensure_visible_wrapped
     implements: "Wrap-aware cursor visibility ensuring the specific screen row containing cursor is visible"
   - ref: crates/editor/src/renderer.rs#Renderer::wrap_layout

@@ -1,30 +1,31 @@
 ---
-status: FUTURE
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
-  - crates/editor/src/viewport.rs
-  - crates/editor/src/row_scroller.rs
-code_references: []
+- crates/editor/src/viewport.rs
+- crates/editor/src/row_scroller.rs
+code_references:
+  - ref: crates/editor/src/row_scroller.rs#RowScroller
+    implements: "RowScroller struct with 13 uniform-row scroll methods (new, row_height, visible_rows, first_visible_row, scroll_fraction_px, scroll_offset_px, set_scroll_offset_px, update_size, visible_range, scroll_to, ensure_visible, row_to_visible_offset, visible_offset_to_row)"
+  - ref: crates/editor/src/viewport.rs#Viewport
+    implements: "Viewport refactored to contain and delegate to RowScroller, preserving existing public API while adding row_scroller() accessor"
+  - ref: crates/editor/src/main.rs
+    implements: "Module declaration and pub use export of RowScroller from editor crate"
 narrative: file_picker_viewport
 investigation: null
 subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["renderer_styled_content", "terminal_emulator", "terminal_file_backed_scrollback", "workspace_model", "file_picker_mini_buffer", "mini_buffer_model"]
+created_after:
+- renderer_styled_content
+- terminal_emulator
+- terminal_file_backed_scrollback
+- workspace_model
+- file_picker_mini_buffer
+- mini_buffer_model
 ---
-
-<!--
-╔══════════════════════════════════════════════════════════════════════════════╗
-║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
-║                                                                              ║
-║  AGENT INSTRUCTIONS: When editing this file, preserve this entire comment    ║
-║  block. Only modify the frontmatter YAML and the content sections below      ║
-║  (Minor Goal, Success Criteria, Relationship to Parent). Use targeted edits  ║
-║  that replace specific sections rather than rewriting the entire file.       ║
-╚══════════════════════════════════════════════════════════════════════════════╝
--->
 
 # Chunk Goal
 

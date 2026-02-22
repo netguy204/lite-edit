@@ -42,6 +42,8 @@ mod metal_view;
 // Chunk: docs/chunks/mini_buffer_model - MiniBuffer single-line editing model
 mod mini_buffer;
 mod renderer;
+// Chunk: docs/chunks/row_scroller_extract - Reusable scroll arithmetic
+mod row_scroller;
 mod selector;
 mod selector_overlay;
 mod shader;
@@ -50,6 +52,7 @@ mod workspace;
 mod wrap_layout;
 
 pub use file_index::FileIndex;
+pub use row_scroller::RowScroller;
 
 use std::cell::RefCell;
 use std::ptr::NonNull;
