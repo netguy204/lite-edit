@@ -1,177 +1,173 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+`MiniBuffer` will be a thin composition wrapper around existing primitives:
+- **`TextBuffer`** (from `lite_edit_buffer`): Provides all text editing operations
+- **`Viewport`**: Tracks viewport state (needed by `BufferFocusTarget`)
+- **`BufferFocusTarget`**: Handles key event → command resolution and execution
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The design follows the project's Humble View Architecture (per TESTING_PHILOSOPHY.md):
+MiniBuffer is pure state + update logic with no platform dependencies, making it
+fully testable without windows or GPU.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+**Key insight**: Rather than reimplementing any editing logic, MiniBuffer:
+1. Owns a `TextBuffer` and `Viewport`
+2. Delegates all key handling to a `BufferFocusTarget` via `EditorContext`
+3. Filters only the events that would violate the single-line invariant:
+   - `Key::Return` → no-op (would insert newline)
+   - `Key::Up` / `Key::Down` → no-op (no multi-line cursor movement)
+   - All other keys pass through unchanged
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/mini_buffer_model/GOAL.md)
-with references to the files that you expect to touch.
--->
+This ensures MiniBuffer gets all affordances (word-jump, kill-line, selection,
+clipboard) for free, with minimal code to maintain.
 
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+**TDD approach**: Per TESTING_PHILOSOPHY.md, we write failing tests first for
+behavioral code. Step 1 creates the struct scaffolding (no behavior to test),
+then Step 2 writes failing tests for each success criterion before implementing.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Create the module scaffolding
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create `crates/editor/src/mini_buffer.rs` with:
+- Module-level chunk backreference comment
+- Import statements for required types
+- Empty `MiniBuffer` struct definition with private fields:
+  - `buffer: TextBuffer`
+  - `viewport: Viewport`
+  - `dirty_region: DirtyRegion`
+  - `font_metrics: FontMetrics`
 
-Example:
+Add `mod mini_buffer;` to `crates/editor/src/main.rs` module list.
 
-### Step 1: Define the SegmentHeader struct
+Location: `crates/editor/src/mini_buffer.rs`, `crates/editor/src/main.rs`
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Write failing tests for all success criteria
 
-Location: src/segment/format.rs
+Following TDD, write the test suite first. Tests covering:
+- `new()` creates empty buffer with no selection
+- Typing characters builds `content()`
+- Backspace removes last character; on empty is no-op
+- Alt+Backspace (option: true) deletes word backward
+- Ctrl+K kills to end of line
+- Option+Left / Option+Right move cursor by word
+- Shift+Right extends selection; `selection_range()` returns correct span
+- Return is no-op (no newline inserted)
+- Up and Down are no-ops
+- Cmd+A selects all; `selection_range()` covers full content
+- `clear()` empties content and removes selection
+- `cursor_col()` returns correct position
+- `has_selection()` reflects selection state
 
-### Step 2: Implement header serialization
+Tests should fail initially since methods are not yet implemented.
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Location: `crates/editor/src/mini_buffer.rs` (`#[cfg(test)]` module)
 
-### Step 3: ...
+### Step 3: Implement `MiniBuffer::new(font_metrics: FontMetrics)`
 
----
+Implement the constructor:
+- Create empty `TextBuffer::new()`
+- Create `Viewport::new(font_metrics.line_height as f32)`
+- Initialize `DirtyRegion::None`
+- Store font metrics
 
-**BACKREFERENCE COMMENTS**
+Location: `crates/editor/src/mini_buffer.rs`
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+### Step 4: Implement accessor methods
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+Implement the read-only accessors:
+- `content(&self) -> String` — returns `self.buffer.content()`
+- `cursor_col(&self) -> usize` — returns `self.buffer.cursor_position().col`
+- `selection_range(&self) -> Option<(usize, usize)>` — extracts column range from buffer's selection
+- `has_selection(&self) -> bool` — delegates to `self.buffer.has_selection()`
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+Location: `crates/editor/src/mini_buffer.rs`
 
-Format (place immediately before the symbol):
+### Step 5: Implement `MiniBuffer::handle_key(&mut self, event: KeyEvent)`
+
+The core method that enforces the single-line invariant:
+
+```rust
+pub fn handle_key(&mut self, event: KeyEvent) {
+    // Filter events that would break single-line invariant
+    match &event.key {
+        Key::Return => return,  // No newlines
+        Key::Up | Key::Down => return,  // No vertical movement
+        _ => {}
+    }
+
+    // Create EditorContext and delegate to BufferFocusTarget
+    let mut target = BufferFocusTarget::new();
+    let mut ctx = EditorContext::new(
+        &mut self.buffer,
+        &mut self.viewport,
+        &mut self.dirty_region,
+        self.font_metrics,
+        self.font_metrics.line_height as f32,  // view_height (single line)
+        f32::MAX,  // view_width (no wrapping needed)
+    );
+    target.handle_key(event, &mut ctx);
+}
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+
+Location: `crates/editor/src/mini_buffer.rs`
+
+### Step 6: Implement `MiniBuffer::clear(&mut self)`
+
+Reset the buffer to empty state:
+- Replace `self.buffer` with `TextBuffer::new()`
+- Clear any dirty region
+
+Location: `crates/editor/src/mini_buffer.rs`
+
+### Step 7: Run tests and verify all pass
+
+Execute the test suite:
+```bash
+cargo test -p lite-edit --lib mini_buffer
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+All tests from Step 2 should now pass. If any fail, debug and fix.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Location: Terminal
+
+### Step 8: Add doc comments and finalize
+
+Add rustdoc comments to:
+- Module-level documentation explaining MiniBuffer's purpose
+- Struct-level documentation
+- All public methods
+
+Ensure the code compiles with `cargo build` and passes `cargo clippy`.
+
+Location: `crates/editor/src/mini_buffer.rs`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+- **text_buffer chunk**: Provides `TextBuffer` with full editing API — **ACTIVE**
+- **buffer_view_trait chunk**: Provides `BufferView` trait (not directly used but informs API) — **ACTIVE**
+- **Existing crate dependencies**: `lite_edit_buffer` crate is already a dependency
 
-If there are no dependencies, delete this section.
--->
+No new external libraries needed.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Cmd+Up / Cmd+Down filtering**: The narrative mentions these should also be
+   no-ops. Need to verify if `BufferFocusTarget` handles these differently from
+   plain Up/Down (it does: Cmd+Up → MoveToBufferStart, Cmd+Down → MoveToBufferEnd).
+   These are valid single-line operations (move to start/end of the one line),
+   so they should NOT be filtered. Only vertical movement commands (Up/Down without
+   Cmd) should be filtered.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **content() return type**: GOAL.md says `-> &str` or `-> String`. TextBuffer's
+   `content()` returns `String`. Returning `&str` would require storing the content,
+   which adds complexity. Will use `-> String` for simplicity.
+
+3. **EditorContext view dimensions**: MiniBuffer is single-line, so `view_height`
+   should be `line_height` (one line visible). `view_width` is set to `f32::MAX`
+   to disable line wrapping in the minibuffer context.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- POPULATE DURING IMPLEMENTATION -->
