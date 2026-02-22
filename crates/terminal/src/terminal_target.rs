@@ -19,6 +19,20 @@ use lite_edit_input::{Key, KeyEvent, MouseEvent, ScrollDelta};
 use crate::input_encoder::InputEncoder;
 use crate::terminal_buffer::TerminalBuffer;
 
+// Chunk: docs/chunks/terminal_scrollback_viewport - Scroll action result type
+/// Result of handling a scroll event in a terminal tab.
+///
+/// This tells the caller (EditorState) what action to take:
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollAction {
+    /// No action taken (e.g., scroll delta too small, no PTY attached)
+    None,
+    /// Scroll event was sent to the PTY (alternate screen mode)
+    SentToPty,
+    /// Primary screen: the viewport should be scrolled by EditorState
+    Primary,
+}
+
 /// Focus target for terminal tabs.
 ///
 /// When a terminal tab is focused, this target receives keyboard and mouse
@@ -91,21 +105,68 @@ impl TerminalFocusTarget {
         }
     }
 
+    // Chunk: docs/chunks/terminal_scrollback_viewport - Terminal scroll handling
     /// Handles a scroll event.
     ///
-    /// When scrolled up in the terminal, we show scrollback history.
-    /// When the user types, we should snap back to the live terminal.
-    /// For now, scroll events don't go to the PTY — they control the viewport.
-    pub fn handle_scroll(&mut self, _delta: ScrollDelta) {
-        // Terminal scrollback viewport handling would go here.
-        // This is separate from the PTY — scrolling doesn't send data to the shell.
-        //
-        // In the future, we might implement:
-        // 1. Scroll up: show older scrollback
-        // 2. Scroll down: show newer scrollback / snap to live terminal
-        // 3. If in alternate screen mode (e.g., vim), send scroll events as mouse wheel
-        //
-        // For MVP, scrolling is a no-op.
+    /// The behavior depends on whether the terminal is in primary or alternate screen mode:
+    ///
+    /// - **Primary screen**: Returns `ScrollAction::Primary` to indicate that the
+    ///   viewport should be scrolled. The actual viewport scrolling is handled by
+    ///   EditorState since it owns the Viewport.
+    ///
+    /// - **Alternate screen**: Encodes scroll as mouse wheel sequences and writes
+    ///   them to the PTY. Returns `ScrollAction::SentToPty` or `ScrollAction::None`.
+    ///
+    /// # Arguments
+    ///
+    /// * `delta` - The scroll delta in pixels
+    /// * `mouse_col` - Optional column position for alternate screen encoding (defaults to 0)
+    /// * `mouse_row` - Optional row position for alternate screen encoding (defaults to 0)
+    pub fn handle_scroll(
+        &mut self,
+        delta: ScrollDelta,
+        mouse_col: usize,
+        mouse_row: usize,
+    ) -> ScrollAction {
+        let terminal = self.terminal.borrow();
+        let is_alt_screen = terminal.is_alt_screen();
+        let modes = terminal.term_mode();
+        drop(terminal);
+
+        if is_alt_screen {
+            // Alternate screen mode (vim, htop, less): send scroll to PTY
+            let line_height = self.cell_size.1;
+            if line_height <= 0.0 {
+                return ScrollAction::None;
+            }
+
+            // Convert pixel delta to line count
+            // Use a threshold to avoid sending too many events for small deltas
+            let lines = (delta.dy as f32 / line_height).round() as i32;
+            if lines == 0 {
+                return ScrollAction::None;
+            }
+
+            let bytes = InputEncoder::encode_scroll(
+                lines,
+                mouse_col,
+                mouse_row,
+                &lite_edit_input::Modifiers::default(),
+                modes,
+            );
+
+            if bytes.is_empty() {
+                return ScrollAction::None;
+            }
+
+            match self.terminal.borrow_mut().write_input(&bytes) {
+                Ok(_) => ScrollAction::SentToPty,
+                Err(_) => ScrollAction::None,
+            }
+        } else {
+            // Primary screen: let EditorState handle viewport scrolling
+            ScrollAction::Primary
+        }
     }
 
     /// Handles a mouse event.
@@ -269,5 +330,57 @@ mod tests {
         // Without a PTY attached, write_paste will fail
         let result = target.write_paste("hello");
         assert!(!result);
+    }
+
+    // =========================================================================
+    // Scroll Handling Tests
+    // Chunk: docs/chunks/terminal_scrollback_viewport - Scroll behavior tests
+    // =========================================================================
+
+    #[test]
+    fn test_handle_scroll_primary_screen() {
+        let terminal = create_test_terminal();
+        let mut target = TerminalFocusTarget::new(terminal, 8.0, 16.0);
+
+        // In primary screen mode, scroll should return Primary action
+        // so EditorState can handle viewport scrolling
+        let delta = ScrollDelta::new(0.0, 32.0);
+        let action = target.handle_scroll(delta, 0, 0);
+        assert_eq!(action, ScrollAction::Primary);
+    }
+
+    #[test]
+    fn test_handle_scroll_zero_delta() {
+        let terminal = create_test_terminal();
+        let mut target = TerminalFocusTarget::new(terminal, 8.0, 16.0);
+
+        // Zero delta should still return Primary in primary screen mode
+        // (EditorState can decide to ignore it)
+        let delta = ScrollDelta::new(0.0, 0.0);
+        let action = target.handle_scroll(delta, 0, 0);
+        // In primary mode, we always return Primary (EditorState decides what to do)
+        assert_eq!(action, ScrollAction::Primary);
+    }
+
+    #[test]
+    fn test_handle_scroll_primary_down() {
+        let terminal = create_test_terminal();
+        let mut target = TerminalFocusTarget::new(terminal, 8.0, 16.0);
+
+        // Scroll down (positive dy = content moves up = see older content)
+        let delta = ScrollDelta::new(0.0, 48.0); // 3 lines worth
+        let action = target.handle_scroll(delta, 5, 10);
+        assert_eq!(action, ScrollAction::Primary);
+    }
+
+    #[test]
+    fn test_handle_scroll_primary_up() {
+        let terminal = create_test_terminal();
+        let mut target = TerminalFocusTarget::new(terminal, 8.0, 16.0);
+
+        // Scroll up (negative dy = content moves down = see newer content)
+        let delta = ScrollDelta::new(0.0, -48.0);
+        let action = target.handle_scroll(delta, 5, 10);
+        assert_eq!(action, ScrollAction::Primary);
     }
 }

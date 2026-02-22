@@ -305,6 +305,21 @@ impl Tab {
         }
     }
 
+    // Chunk: docs/chunks/terminal_scrollback_viewport - Terminal viewport access
+    /// Returns mutable references to both the terminal buffer and viewport.
+    ///
+    /// This method is needed for terminal scrollback viewport support, where
+    /// scroll events need access to both the terminal (for mode queries and
+    /// line count) and the viewport (for scroll offset updates).
+    ///
+    /// Returns `None` if this is not a terminal tab.
+    pub fn terminal_and_viewport_mut(&mut self) -> Option<(&mut TerminalBuffer, &mut Viewport)> {
+        match &mut self.buffer {
+            TabBuffer::Terminal(term) => Some((term, &mut self.viewport)),
+            TabBuffer::File(_) | TabBuffer::AgentTerminal => None,
+        }
+    }
+
     // Chunk: docs/chunks/content_tab_bar - Unread badge support
     /// Marks the tab as having unread content.
     ///
@@ -583,15 +598,39 @@ impl Workspace {
     }
 
     // Chunk: docs/chunks/terminal_tab_spawn - Poll standalone terminals
+    // Chunk: docs/chunks/terminal_scrollback_viewport - Auto-follow on new output
     /// Polls PTY events for all standalone terminal tabs.
+    ///
+    /// This method also handles auto-follow behavior: when the viewport is at
+    /// the bottom before polling, new output will advance the viewport to keep
+    /// showing the latest content.
     ///
     /// Returns true if any terminal had output.
     pub fn poll_standalone_terminals(&mut self) -> bool {
+        use lite_edit_buffer::BufferView;
+
         let mut had_events = false;
         for tab in &mut self.tabs {
-            if let Some(terminal) = tab.buffer.as_terminal_buffer_mut() {
+            if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
+                // Track if we're at bottom before polling (for auto-follow)
+                // Also track if we're in alt screen (no auto-follow in alt screen)
+                let was_at_bottom = viewport.is_at_bottom(terminal.line_count());
+                let was_alt_screen = terminal.is_alt_screen();
+
                 if terminal.poll_events() {
                     had_events = true;
+
+                    // Auto-follow behavior: if we were at bottom and in primary screen,
+                    // advance the viewport to show new content
+                    let now_alt_screen = terminal.is_alt_screen();
+
+                    // Handle mode transition: alt -> primary means snap to bottom
+                    if was_alt_screen && !now_alt_screen {
+                        viewport.scroll_to_bottom(terminal.line_count());
+                    } else if !now_alt_screen && was_at_bottom {
+                        // Primary screen auto-follow
+                        viewport.scroll_to_bottom(terminal.line_count());
+                    }
                 }
             }
         }

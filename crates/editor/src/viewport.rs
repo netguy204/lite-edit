@@ -188,6 +188,54 @@ impl Viewport {
         self.scroller.visible_range(buffer_line_count)
     }
 
+    // Chunk: docs/chunks/terminal_scrollback_viewport - Check if viewport is at bottom
+    /// Returns true if the viewport is scrolled to the bottom (or within tolerance).
+    ///
+    /// "At bottom" means the last line of content is visible in the viewport.
+    /// This is used for auto-follow behavior in terminals: when at bottom, new
+    /// output should advance the viewport to keep showing the latest content.
+    ///
+    /// A small tolerance (1 pixel) is allowed to account for rounding errors.
+    pub fn is_at_bottom(&self, line_count: usize) -> bool {
+        if line_count == 0 {
+            return true;
+        }
+        let visible_lines = self.visible_lines();
+        if visible_lines == 0 {
+            // Viewport not initialized yet - treat as "at bottom" since scroll offset is 0
+            return self.scroll_offset_px() <= 0.0;
+        }
+        if line_count <= visible_lines {
+            // All content fits in viewport - always "at bottom"
+            return true;
+        }
+        let max_offset = (line_count - visible_lines) as f32 * self.line_height();
+        let current_offset = self.scroll_offset_px();
+        // At bottom if we're within 1 pixel of max (tolerance for rounding)
+        current_offset >= max_offset - 1.0
+    }
+
+    // Chunk: docs/chunks/terminal_scrollback_viewport - Snap to bottom of content
+    /// Scrolls the viewport to the bottom of the content.
+    ///
+    /// This sets the scroll offset so that the last line of content is at the
+    /// bottom of the viewport. Used for snap-to-bottom on keypress and after
+    /// exiting alternate screen mode.
+    pub fn scroll_to_bottom(&mut self, line_count: usize) {
+        if line_count == 0 {
+            self.scroller.set_scroll_offset_px(0.0, 0);
+            return;
+        }
+        let visible_lines = self.visible_lines();
+        if line_count <= visible_lines {
+            // All content fits - scroll to top
+            self.scroller.set_scroll_offset_px(0.0, line_count);
+            return;
+        }
+        let max_offset = (line_count - visible_lines) as f32 * self.line_height();
+        self.scroller.set_scroll_offset_px(max_offset, line_count);
+    }
+
     /// Scrolls the viewport to show the given buffer line at the top
     ///
     /// The scroll offset is set to align the target line at the top of the viewport.

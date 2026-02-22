@@ -33,7 +33,8 @@ use crate::viewport::Viewport;
 use crate::workspace::Editor;
 use lite_edit_buffer::{Position, TextBuffer};
 // Chunk: docs/chunks/terminal_active_tab_safety - Terminal input encoding
-use lite_edit_terminal::{InputEncoder, TermMode};
+// Chunk: docs/chunks/terminal_scrollback_viewport - Terminal scroll action result
+use lite_edit_terminal::{BufferView, InputEncoder, TermMode};
 
 /// Duration in milliseconds for cursor blink interval
 const CURSOR_BLINK_INTERVAL_MS: u64 = 500;
@@ -1087,8 +1088,17 @@ impl EditorState {
                 content_width,
             );
             self.focus_target.handle_key(event, &mut ctx);
-        } else if let Some(terminal) = tab.as_terminal_buffer_mut() {
+        } else if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
+            // Chunk: docs/chunks/terminal_scrollback_viewport - Snap to bottom on keypress
             // Terminal tab: encode key and send to PTY
+            // First, snap to bottom if scrolled up in primary screen mode
+            if !terminal.is_alt_screen() {
+                let line_count = terminal.line_count();
+                if !viewport.is_at_bottom(line_count) {
+                    viewport.scroll_to_bottom(line_count);
+                }
+            }
+
             let modes = terminal.term_mode();
             let bytes = InputEncoder::encode_key(&event, modes);
 
@@ -1357,12 +1367,44 @@ impl EditorState {
                 content_width,
             );
             self.focus_target.handle_scroll(delta, &mut ctx);
-        } else if tab.as_terminal_buffer().is_some() {
-            // Terminal tab: scroll the terminal's scrollback viewport.
-            // For MVP, terminal scrolling is handled by marking dirty.
-            // A full implementation would integrate with the terminal's
-            // scrollback history.
-            self.dirty_region.merge(DirtyRegion::FullViewport);
+        } else if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
+            // Chunk: docs/chunks/terminal_scrollback_viewport - Terminal scrollback viewport handling
+            // Terminal tab: handle scrolling based on terminal mode
+            let is_alt_screen = terminal.is_alt_screen();
+            let line_count = terminal.line_count();
+            let line_height = self.font_metrics.line_height;
+
+            if is_alt_screen {
+                // Alternate screen mode (vim, htop, less): send scroll to PTY
+                // Convert pixel delta to line count
+                let line_height_f32 = line_height as f32;
+                if line_height_f32 > 0.0 {
+                    let lines = (delta.dy as f32 / line_height_f32).round() as i32;
+                    if lines != 0 {
+                        let modes = terminal.term_mode();
+                        let bytes = InputEncoder::encode_scroll(
+                            lines,
+                            0, // col - use 0 for scroll events
+                            0, // row - use 0 for scroll events
+                            &lite_edit_input::Modifiers::default(),
+                            modes,
+                        );
+                        if !bytes.is_empty() {
+                            let _ = terminal.write_input(&bytes);
+                        }
+                    }
+                }
+            } else {
+                // Primary screen: scroll the viewport through scrollback
+                let current_px = viewport.scroll_offset_px();
+                let new_px = current_px + delta.dy as f32;
+                viewport.set_scroll_offset_px(new_px, line_count);
+
+                // Mark dirty if scroll position changed
+                if (viewport.scroll_offset_px() - current_px).abs() > 0.001 {
+                    self.dirty_region.merge(DirtyRegion::FullViewport);
+                }
+            }
         }
         // Other tab types (AgentOutput, Diff): no-op
     }
@@ -5422,5 +5464,121 @@ mod tests {
             state.overlay_cursor_visible,
             "Typing in overlay should make cursor visible"
         );
+    }
+
+    // =========================================================================
+    // Terminal Scrollback Viewport Tests
+    // Chunk: docs/chunks/terminal_scrollback_viewport - Terminal scroll integration tests
+    // =========================================================================
+
+    #[test]
+    fn test_terminal_scroll_updates_viewport() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Scroll down (positive delta = content moves up = see older content)
+        state.handle_scroll(ScrollDelta::new(0.0, 32.0));
+
+        // With a new terminal, there's no scrollback beyond the visible area,
+        // so offset stays at 0 (clamped to valid range)
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(tab.viewport.scroll_offset_px() >= 0.0);
+    }
+
+    #[test]
+    fn test_terminal_viewport_is_at_bottom_initial() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        use lite_edit_buffer::BufferView;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Check that viewport is at bottom
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        let terminal = tab.as_terminal_buffer().expect("terminal");
+        let line_count = terminal.line_count();
+
+        // For a fresh terminal, it's "at bottom" if:
+        // 1. viewport is uninitialized (visible_lines=0) with scroll_offset=0, OR
+        // 2. line_count <= visible_lines (all content fits), OR
+        // 3. scroll_offset >= max_offset (scrolled to the end)
+        assert!(
+            tab.viewport.is_at_bottom(line_count),
+            "New terminal should have viewport at bottom"
+        );
+    }
+
+    #[test]
+    fn test_viewport_scroll_to_bottom() {
+        // Test the Viewport::scroll_to_bottom helper
+        let mut viewport = crate::viewport::Viewport::new(16.0);
+        viewport.update_size(160.0, 100); // 10 visible lines, 100 total lines
+
+        // Scroll to middle
+        viewport.scroll_to(50, 100);
+        assert!(!viewport.is_at_bottom(100));
+
+        // Scroll to bottom
+        viewport.scroll_to_bottom(100);
+        assert!(viewport.is_at_bottom(100));
+        assert_eq!(viewport.first_visible_line(), 90); // 100 - 10 = 90
+    }
+
+    #[test]
+    fn test_viewport_is_at_bottom_edge_cases() {
+        let mut viewport = crate::viewport::Viewport::new(16.0);
+        viewport.update_size(160.0, 100); // 10 visible lines
+
+        // Empty content is always at bottom
+        assert!(viewport.is_at_bottom(0));
+
+        // Content smaller than viewport is at bottom
+        assert!(viewport.is_at_bottom(5));
+
+        // Exactly filling viewport is at bottom
+        viewport.scroll_to(0, 10);
+        assert!(viewport.is_at_bottom(10));
+
+        // Larger content - check various positions
+        viewport.scroll_to(0, 100);
+        assert!(!viewport.is_at_bottom(100));
+
+        viewport.scroll_to_bottom(100);
+        assert!(viewport.is_at_bottom(100));
+    }
+
+    #[test]
+    fn test_terminal_scroll_clamps_to_bounds() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Try to scroll up past the start (negative delta)
+        state.handle_scroll(ScrollDelta::new(0.0, -1000.0));
+
+        // Viewport should be clamped to 0
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert_eq!(tab.viewport.scroll_offset_px(), 0.0);
+
+        // Try to scroll down past the end
+        state.handle_scroll(ScrollDelta::new(0.0, 100000.0));
+
+        // Viewport should be clamped to max (which is 0 for a fresh terminal)
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(tab.viewport.scroll_offset_px() >= 0.0);
     }
 }

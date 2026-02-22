@@ -317,6 +317,79 @@ impl InputEncoder {
 
         vec![0x1b, b'[', b'M', btn, x, y]
     }
+
+    // Chunk: docs/chunks/terminal_scrollback_viewport - Scroll wheel encoding for alternate screen
+    /// Encode a scroll wheel event for terminal applications.
+    ///
+    /// This encodes scroll events as mouse button 64 (scroll up) or 65 (scroll down).
+    /// These are the standard xterm scroll wheel button codes.
+    ///
+    /// Returns an empty vector if no mouse mode is active.
+    ///
+    /// # Arguments
+    ///
+    /// * `lines` - Number of lines to scroll (positive = down, negative = up)
+    /// * `col` - Column position of the mouse cursor
+    /// * `row` - Row position of the mouse cursor
+    /// * `modifiers` - Active keyboard modifiers
+    /// * `modes` - Terminal mode flags
+    pub fn encode_scroll(
+        lines: i32,
+        col: usize,
+        row: usize,
+        modifiers: &Modifiers,
+        modes: TermMode,
+    ) -> Vec<u8> {
+        // Check if any mouse mode is active
+        if !modes.intersects(
+            TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG,
+        ) {
+            return Vec::new();
+        }
+
+        if lines == 0 {
+            return Vec::new();
+        }
+
+        // Calculate base button code:
+        // - 64 = scroll up (lines < 0)
+        // - 65 = scroll down (lines > 0)
+        let base_button: u8 = if lines < 0 { 64 } else { 65 };
+
+        // Add modifier bits
+        let mut button = base_button;
+        if modifiers.shift {
+            button |= 4;
+        }
+        if modifiers.option {
+            button |= 8;
+        }
+        if modifiers.control {
+            button |= 16;
+        }
+
+        // Generate the sequence for each line of scroll
+        // Most terminal applications expect one event per "scroll tick"
+        let count = lines.abs() as usize;
+        let mut result = Vec::with_capacity(count * 10); // Approximate size
+
+        for _ in 0..count {
+            if modes.contains(TermMode::SGR_MOUSE) {
+                // SGR format: ESC [ < button ; col ; row M
+                // SGR uses 1-based coordinates
+                let seq = format!("\x1b[<{};{};{}M", button, col + 1, row + 1);
+                result.extend_from_slice(seq.as_bytes());
+            } else {
+                // Legacy X10/normal format: ESC [ M button+32 x+32 y+32
+                let x = (col.min(222) + 1 + 32) as u8;
+                let y = (row.min(222) + 1 + 32) as u8;
+                let btn = button + 32;
+                result.extend_from_slice(&[0x1b, b'[', b'M', btn, x, y]);
+            }
+        }
+
+        result
+    }
 }
 
 #[cfg(test)]
@@ -732,5 +805,76 @@ mod tests {
         let result = InputEncoder::encode_mouse(&event, 10, 5, TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE);
         // Button 0 + shift(4) + ctrl(16) = 20
         assert_eq!(result, b"\x1b[<20;11;6M");
+    }
+
+    // =========================================================================
+    // Scroll Encoding Tests
+    // Chunk: docs/chunks/terminal_scrollback_viewport - Scroll wheel encoding tests
+    // =========================================================================
+
+    #[test]
+    fn test_encode_scroll_no_mode() {
+        let result = InputEncoder::encode_scroll(3, 10, 5, &Modifiers::default(), TermMode::NONE);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_encode_scroll_zero_lines() {
+        let result = InputEncoder::encode_scroll(0, 10, 5, &Modifiers::default(), TermMode::MOUSE_REPORT_CLICK);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_encode_scroll_down_sgr() {
+        // Scroll down 1 line
+        let result = InputEncoder::encode_scroll(1, 10, 5, &Modifiers::default(), TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE);
+        // Button 65 (scroll down), col 11 (1-based), row 6 (1-based), M for press
+        assert_eq!(result, b"\x1b[<65;11;6M");
+    }
+
+    #[test]
+    fn test_encode_scroll_up_sgr() {
+        // Scroll up 1 line (negative)
+        let result = InputEncoder::encode_scroll(-1, 10, 5, &Modifiers::default(), TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE);
+        // Button 64 (scroll up)
+        assert_eq!(result, b"\x1b[<64;11;6M");
+    }
+
+    #[test]
+    fn test_encode_scroll_multiple_lines_sgr() {
+        // Scroll down 3 lines - should produce 3 separate events
+        let result = InputEncoder::encode_scroll(3, 10, 5, &Modifiers::default(), TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE);
+        // 3 events: ESC[<65;11;6M repeated 3 times
+        assert_eq!(result, b"\x1b[<65;11;6M\x1b[<65;11;6M\x1b[<65;11;6M");
+    }
+
+    #[test]
+    fn test_encode_scroll_down_legacy() {
+        // Scroll down 1 line in legacy mode
+        let result = InputEncoder::encode_scroll(1, 10, 5, &Modifiers::default(), TermMode::MOUSE_REPORT_CLICK);
+        // ESC [ M, button+32, x+32+1, y+32+1
+        // button=65+32=97='a', x=10+33=43='+', y=5+33=38='&'
+        assert_eq!(result, b"\x1b[Ma+&");
+    }
+
+    #[test]
+    fn test_encode_scroll_up_legacy() {
+        // Scroll up 1 line in legacy mode
+        let result = InputEncoder::encode_scroll(-1, 10, 5, &Modifiers::default(), TermMode::MOUSE_REPORT_CLICK);
+        // button=64+32=96='`'
+        assert_eq!(result, b"\x1b[M`+&");
+    }
+
+    #[test]
+    fn test_encode_scroll_with_modifiers() {
+        // Scroll down with Shift + Ctrl
+        let mods = Modifiers {
+            shift: true,
+            control: true,
+            ..Default::default()
+        };
+        let result = InputEncoder::encode_scroll(1, 10, 5, &mods, TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE);
+        // Button 65 + shift(4) + ctrl(16) = 85
+        assert_eq!(result, b"\x1b[<85;11;6M");
     }
 }
