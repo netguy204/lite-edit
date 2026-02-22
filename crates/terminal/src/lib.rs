@@ -1,5 +1,6 @@
 // Chunk: docs/chunks/terminal_emulator - Terminal emulator backed by alacritty_terminal
 // Chunk: docs/chunks/agent_lifecycle - Agent lifecycle tracking for Composer-like workflows
+// Chunk: docs/chunks/terminal_file_backed_scrollback - File-backed cold scrollback
 //! Terminal emulator crate for lite-edit.
 //!
 //! This crate provides `TerminalBuffer`, a full-featured terminal emulator
@@ -10,6 +11,17 @@
 //! that infers agent lifecycle state (Running, NeedsInput, Stale, Exited) from PTY
 //! behavior. This enables Composer-like multi-agent workflows where multiple AI
 //! coding agents run in parallel and the UI shows their status.
+//!
+//! ## Scrollback
+//!
+//! `TerminalBuffer` supports unlimited scrollback history with bounded memory:
+//! - Recent lines stay in memory (hot scrollback)
+//! - Older lines are persisted to a temp file (cold scrollback)
+//! - The `BufferView::styled_line()` API is transparent — callers don't
+//!   need to know where the data comes from
+//!
+//! This enables 10+ concurrent terminals with 100K+ line histories while
+//! keeping memory usage under ~7MB per terminal.
 //!
 //! # Example: Terminal Buffer
 //!
@@ -56,6 +68,7 @@
 //! ```
 
 mod agent;
+mod cold_scrollback;
 mod event;
 mod pty;
 mod style_convert;

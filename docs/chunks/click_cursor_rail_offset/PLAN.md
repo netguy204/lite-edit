@@ -20,7 +20,7 @@ if we should add it to DECISIONS.md and reference it here.
 Always include tests in your implementation plan and adhere to
 docs/trunk/TESTING_PHILOSOPHY.md in your planning.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/file_backed_scrollback/GOAL.md)
+Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/click_cursor_rail_offset/GOAL.md)
 with references to the files that you expect to touch.
 -->
 

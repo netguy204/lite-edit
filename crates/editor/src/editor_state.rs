@@ -389,7 +389,7 @@ impl EditorState {
         selector.set_visible_items(geometry.visible_items);
 
         // Capture the previous query for change detection
-        let prev_query = selector.query().to_string();
+        let prev_query = selector.query();
 
         // Forward to the selector widget
         let outcome = selector.handle_key(&event);
@@ -401,7 +401,7 @@ impl EditorState {
                 if current_query != prev_query {
                     // Re-query the file index with the new query
                     if let Some(ref file_index) = self.file_index {
-                        let results = file_index.query(current_query);
+                        let results = file_index.query(&current_query);
                         let items: Vec<String> = results
                             .iter()
                             .map(|r| r.path.display().to_string())
@@ -432,7 +432,7 @@ impl EditorState {
 
         // Get items and query from selector
         let (items, query) = if let Some(ref selector) = self.active_selector {
-            (selector.items().to_vec(), selector.query().to_string())
+            (selector.items().to_vec(), selector.query())
         } else {
             return;
         };
@@ -754,7 +754,7 @@ impl EditorState {
         let query = self
             .active_selector
             .as_ref()
-            .map(|s| s.query().to_string())
+            .map(|s| s.query())
             .unwrap_or_default();
 
         let results = file_index.query(&query);

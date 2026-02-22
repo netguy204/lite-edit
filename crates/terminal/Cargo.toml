@@ -17,6 +17,9 @@ portable-pty = "0.8"
 # Low-latency channel for PTY reader thread
 crossbeam-channel = "0.5"
 
+# Temp file creation for cold scrollback storage
+tempfile = "3"
+
 # Internal buffer types (BufferView, Style, Span, StyledLine, DirtyLines, etc.)
 lite-edit-buffer = { path = "../buffer" }
 
