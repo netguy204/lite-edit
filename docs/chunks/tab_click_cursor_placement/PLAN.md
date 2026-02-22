@@ -8,170 +8,144 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The bug is a viewport sizing initialization issue. When a `Tab` is created, its
+`Viewport` is initialized with `visible_lines = 0`. The viewport only receives
+its correct dimensions when `Viewport::update_size` is called, which happens on
+window resize and initial setup—but only for the *active* tab at that moment.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+Tabs created with Cmd+T, tabs switched to via `switch_tab`, and tabs opened via
+the file picker never have their viewports sized if no resize event occurred.
+When `visible_lines = 0`, `dirty_lines_to_region` computes an empty visible
+range `[first_visible_line, first_visible_line + 0)`, and every `DirtyLines`
+variant maps to `DirtyRegion::None`. This causes `render_if_dirty` to skip
+repaints after mouse clicks.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+**Fix strategy**: Propagate the current viewport dimensions to the newly active
+tab's viewport whenever tab activation occurs. The `view_height` field in
+`EditorState` holds the current window height (updated on every resize), so we
+call `update_viewport_size` on the new tab's viewport at these points:
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/tab_click_cursor_placement/GOAL.md)
-with references to the files that you expect to touch.
--->
+1. `EditorState::new_tab` — after `add_tab` switches to the new tab
+2. `EditorState::switch_tab` — after `workspace.switch_tab(index)`
+3. `EditorState::associate_file` — which opens files from the picker into the
+   current tab (the current tab's viewport should already be sized, but we
+   ensure consistency)
+
+Each of these points calls `self.viewport_mut().update_size(...)` with the
+stored `view_height` and the buffer's line count to properly initialize the
+newly active viewport.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems are directly relevant. The fix is a localized change to
+`EditorState` methods.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add helper method to sync viewport size
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create a helper method `EditorState::sync_active_tab_viewport` that:
+- Gets `self.view_height`
+- Gets the active tab's buffer line count
+- Calls `self.viewport_mut().update_size(self.view_height, line_count)`
 
-Example:
+This helper reduces code duplication and ensures consistent viewport sizing.
 
-### Step 1: Define the SegmentHeader struct
+Location: `crates/editor/src/editor_state.rs`
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Call the helper in `new_tab`
 
-Location: src/segment/format.rs
+After `workspace.add_tab(new_tab)` and before `ensure_active_tab_visible`, call
+the helper to size the new tab's viewport.
 
-### Step 2: Implement header serialization
+Location: `crates/editor/src/editor_state.rs`, inside `new_tab`
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+### Step 3: Call the helper in `switch_tab`
 
-### Step 3: ...
+After `workspace.switch_tab(index)` (and before marking dirty), call the helper
+to ensure the switched-to tab has the correct viewport dimensions.
 
----
+Location: `crates/editor/src/editor_state.rs`, inside `switch_tab`
 
-**BACKREFERENCE COMMENTS**
+### Step 4: Ensure `associate_file` calls the helper
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+In `associate_file`, after loading the file content into the buffer and calling
+`scroll_to(0, line_count)`, also call the helper. This handles the file picker
+flow where a new file is opened into the current tab.
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+**Note**: The current tab's viewport is already sized if the user was editing
+in it, but the file picker might open into a newly created tab (Cmd+T then
+Cmd+P), so this ensures consistency.
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+Location: `crates/editor/src/editor_state.rs`, inside `associate_file`
 
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
+### Step 5: Write regression test for Cmd+T flow
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Add a test `test_new_tab_viewport_is_sized`:
+1. Create `EditorState`, call `update_viewport_size(160.0)` (10 visible lines at
+   line height 16)
+2. Call `new_tab()` to create a second tab
+3. Assert that the new tab's `viewport().visible_lines()` equals 10 (not 0)
+4. Insert some text into the buffer
+5. Simulate a mouse click that would place the cursor on line 5
+6. Assert that the dirty region is NOT `None` (the viewport can compute dirty
+   lines correctly because `visible_lines` is correct)
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Location: `crates/editor/src/editor_state.rs`, `#[cfg(test)]` module
+
+### Step 6: Write regression test for switch_tab flow
+
+Add a test `test_switch_tab_viewport_is_sized`:
+1. Create `EditorState`, call `update_viewport_size(160.0)`
+2. Create a second tab with some text
+3. Switch back to tab 0, then switch to tab 1
+4. Assert `viewport().visible_lines()` is correct
+5. Call `ctx.mark_cursor_dirty()` and assert the dirty region is NOT `None`
+
+Location: `crates/editor/src/editor_state.rs`, `#[cfg(test)]` module
+
+### Step 7: Write regression test for file picker confirmation
+
+Add a test `test_associate_file_viewport_is_sized`:
+1. Create a temporary file with known content
+2. Create `EditorState`, call `update_viewport_size`
+3. Call `new_tab()`, then immediately call `associate_file` with the temp file
+4. Assert `viewport().visible_lines()` is correct (not 0)
+5. Assert a cursor dirty mark produces a non-None region
+
+Location: `crates/editor/src/editor_state.rs`, `#[cfg(test)]` module
+
+### Step 8: Run all tests to verify no regressions
+
+Run `cargo test -p editor` to ensure all existing viewport and click-positioning
+tests continue to pass.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+None. This chunk modifies existing code paths in `EditorState`.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Terminal tabs**: Terminal tabs (`TabBuffer::Terminal`) do not have a
+  `TextBuffer`, so `buffer().line_count()` will panic. The fix must handle this
+  by checking `as_text_buffer()` and skipping the viewport sync for non-file
+  tabs, or by using a fallback line count.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+  **Resolution**: The helper should gracefully handle non-file tabs by either:
+  (a) Skipping the sync if no text buffer exists, or (b) Using a reasonable
+  default line count for terminal buffers. Since terminal tabs use a different
+  rendering path and don't have the same dirty region tracking, option (a) is
+  safer.
+
+- **Existing tests**: Existing tests call `update_viewport_size` explicitly
+  after creating `EditorState`, so they should not be affected. However, we
+  should verify that no test relies on `visible_lines` being 0 for some
+  intermediate state.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
 
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
+When reality diverges from the plan, document it here.
 -->

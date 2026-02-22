@@ -7,7 +7,7 @@ code_paths:
   - crates/editor/src/main.rs
 code_references:
   - ref: crates/editor/src/editor_state.rs#EditorState::associated_file
-    implements: "Field storing the file path associated with the buffer"
+    implements: "Getter method accessing the active tab's associated file path"
   - ref: crates/editor/src/editor_state.rs#EditorState::associate_file
     implements: "File loading with UTF-8 lossy conversion, cursor/scroll reset"
   - ref: crates/editor/src/editor_state.rs#EditorState::window_title
