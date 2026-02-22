@@ -123,6 +123,9 @@ pub struct MouseEvent {
     pub position: (f64, f64),
     /// Modifier keys held during the event
     pub modifiers: Modifiers,
+    // Chunk: docs/chunks/word_double_click_select - Double-click word selection
+    /// Number of consecutive clicks (1 for single, 2 for double, etc.)
+    pub click_count: u32,
 }
 
 /// Kind of mouse event.

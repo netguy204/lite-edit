@@ -456,6 +456,7 @@ impl FocusTarget for BufferFocusTarget {
     }
 
     // Chunk: docs/chunks/mouse_drag_selection - Mouse drag selection
+    // Chunk: docs/chunks/word_double_click_select - Double-click word selection
     fn handle_mouse(&mut self, event: MouseEvent, ctx: &mut EditorContext) {
         match event.kind {
             MouseEventKind::Down => {
@@ -468,10 +469,21 @@ impl FocusTarget for BufferFocusTarget {
                     ctx.buffer.line_count(),
                     |line| ctx.buffer.line_len(line),
                 );
-                ctx.buffer.set_cursor(position);
-                // Set selection anchor for potential drag selection
-                ctx.buffer.set_selection_anchor_at_cursor();
-                ctx.mark_cursor_dirty();
+
+                // Spec: docs/trunk/SPEC.md#word-model
+                if event.click_count == 2 {
+                    // Double-click: select word or whitespace run at click position
+                    ctx.buffer.set_cursor(position); // Sets cursor.line
+                    if ctx.buffer.select_word_at(position.col) {
+                        ctx.mark_cursor_dirty();
+                    }
+                } else {
+                    // Single click: position cursor and set anchor for potential drag
+                    ctx.buffer.set_cursor(position);
+                    // Set selection anchor for potential drag selection
+                    ctx.buffer.set_selection_anchor_at_cursor();
+                    ctx.mark_cursor_dirty();
+                }
             }
             MouseEventKind::Moved => {
                 // Drag: extend selection from anchor to new position
@@ -518,6 +530,7 @@ impl FocusTarget for BufferFocusTarget {
     }
 }
 
+// Chunk: docs/chunks/mouse_drag_selection - Coordinate conversion with edge case clamping
 /// Converts pixel coordinates to buffer position.
 ///
 /// This is the core math for mouse click → cursor positioning:
@@ -1206,6 +1219,7 @@ mod tests {
                 kind: MouseEventKind::Down,
                 position: (16.0, 140.0),
                 modifiers: Modifiers::default(),
+                click_count: 1,
             };
             target.handle_mouse(event, &mut ctx);
         }
@@ -2386,6 +2400,7 @@ mod tests {
                 kind: MouseEventKind::Down,
                 position: (16.0, 140.0),
                 modifiers: Modifiers::default(),
+                click_count: 1,
             };
             target.handle_mouse(event, &mut ctx);
         }
@@ -2423,6 +2438,7 @@ mod tests {
                 kind: MouseEventKind::Down,
                 position: (8.0, 155.0),
                 modifiers: Modifiers::default(),
+                click_count: 1,
             };
             target.handle_mouse(event, &mut ctx);
         }
@@ -2445,6 +2461,7 @@ mod tests {
                 kind: MouseEventKind::Moved,
                 position: (24.0, 140.0),
                 modifiers: Modifiers::default(),
+                click_count: 1,
             };
             target.handle_mouse(event, &mut ctx);
         }
@@ -2473,6 +2490,7 @@ mod tests {
                 kind: MouseEventKind::Moved,
                 position: (16.0, 124.0), // flipped_y = 36, line 2, x = 16 for col 2
                 modifiers: Modifiers::default(),
+                click_count: 1,
             };
             target.handle_mouse(event, &mut ctx);
         }
@@ -2506,6 +2524,7 @@ mod tests {
                 kind: MouseEventKind::Down,
                 position: (16.0, 155.0),
                 modifiers: Modifiers::default(),
+                click_count: 1,
             };
             target.handle_mouse(event, &mut ctx);
         }
@@ -2523,6 +2542,7 @@ mod tests {
                 kind: MouseEventKind::Up,
                 position: (16.0, 155.0),
                 modifiers: Modifiers::default(),
+                click_count: 1,
             };
             target.handle_mouse(event, &mut ctx);
         }
@@ -2553,6 +2573,7 @@ mod tests {
                 kind: MouseEventKind::Down,
                 position: (8.0, 155.0),
                 modifiers: Modifiers::default(),
+                click_count: 1,
             };
             target.handle_mouse(event, &mut ctx);
         }
@@ -2570,6 +2591,7 @@ mod tests {
                 kind: MouseEventKind::Moved,
                 position: (32.0, 155.0), // x = 32 for column 4
                 modifiers: Modifiers::default(),
+                click_count: 1,
             };
             target.handle_mouse(event, &mut ctx);
         }
@@ -2587,6 +2609,7 @@ mod tests {
                 kind: MouseEventKind::Up,
                 position: (32.0, 155.0),
                 modifiers: Modifiers::default(),
+                click_count: 1,
             };
             target.handle_mouse(event, &mut ctx);
         }
@@ -2618,6 +2641,7 @@ mod tests {
                 kind: MouseEventKind::Down,
                 position: (0.0, 155.0),
                 modifiers: Modifiers::default(),
+                click_count: 1,
             };
             target.handle_mouse(event, &mut ctx);
         }
@@ -2635,6 +2659,7 @@ mod tests {
                 kind: MouseEventKind::Moved,
                 position: (80.0, 155.0),
                 modifiers: Modifiers::default(),
+                click_count: 1,
             };
             target.handle_mouse(event, &mut ctx);
         }
@@ -2666,6 +2691,7 @@ mod tests {
                 kind: MouseEventKind::Down,
                 position: (0.0, 155.0),
                 modifiers: Modifiers::default(),
+                click_count: 1,
             };
             target.handle_mouse(event, &mut ctx);
         }
@@ -2684,6 +2710,7 @@ mod tests {
                 kind: MouseEventKind::Moved,
                 position: (0.0, 60.0), // flipped_y = 100, line 6 if existed
                 modifiers: Modifiers::default(),
+                click_count: 1,
             };
             target.handle_mouse(event, &mut ctx);
         }
@@ -2714,6 +2741,7 @@ mod tests {
                 kind: MouseEventKind::Down,
                 position: (0.0, 140.0), // line 1
                 modifiers: Modifiers::default(),
+                click_count: 1,
             };
             target.handle_mouse(event, &mut ctx);
         }
@@ -2733,6 +2761,7 @@ mod tests {
                 kind: MouseEventKind::Moved,
                 position: (0.0, 200.0), // y > view_height, flipped_y < 0
                 modifiers: Modifiers::default(),
+                click_count: 1,
             };
             target.handle_mouse(event, &mut ctx);
         }
@@ -2764,6 +2793,7 @@ mod tests {
                     kind: MouseEventKind::Down,
                     position: (8.0, 155.0),
                     modifiers: Modifiers::default(),
+                    click_count: 1,
                 },
                 &mut ctx,
             );
@@ -2786,6 +2816,7 @@ mod tests {
                     kind: MouseEventKind::Moved,
                     position: (16.0, 140.0),
                     modifiers: Modifiers::default(),
+                    click_count: 1,
                 },
                 &mut ctx,
             );
@@ -2810,6 +2841,7 @@ mod tests {
                     kind: MouseEventKind::Moved,
                     position: (8.0, 124.0),
                     modifiers: Modifiers::default(),
+                    click_count: 1,
                 },
                 &mut ctx,
             );
@@ -2832,6 +2864,7 @@ mod tests {
                     kind: MouseEventKind::Up,
                     position: (8.0, 124.0),
                     modifiers: Modifiers::default(),
+                    click_count: 1,
                 },
                 &mut ctx,
             );
@@ -2864,6 +2897,7 @@ mod tests {
                     kind: MouseEventKind::Down,
                     position: (32.0, 155.0),
                     modifiers: Modifiers::default(),
+                    click_count: 1,
                 },
                 &mut ctx,
             );
@@ -2885,6 +2919,7 @@ mod tests {
                     kind: MouseEventKind::Moved,
                     position: (8.0, 155.0),
                     modifiers: Modifiers::default(),
+                    click_count: 1,
                 },
                 &mut ctx,
             );
@@ -2921,6 +2956,7 @@ mod tests {
                     kind: MouseEventKind::Down,
                     position: (0.0, 140.0), // line 1
                     modifiers: Modifiers::default(),
+                    click_count: 1,
                 },
                 &mut ctx,
             );
@@ -2944,6 +2980,7 @@ mod tests {
                     kind: MouseEventKind::Moved,
                     position: (16.0, 108.0), // flipped_y = 52, line 3
                     modifiers: Modifiers::default(),
+                    click_count: 1,
                 },
                 &mut ctx,
             );
@@ -3090,5 +3127,246 @@ mod tests {
         // Should only delete one character
         assert_eq!(buffer.content(), "hello worl");
         assert_eq!(buffer.cursor_position(), Position::new(0, 10));
+    }
+
+    // ==================== Double-Click Word Selection Tests ====================
+    // Chunk: docs/chunks/word_double_click_select - Double-click word selection
+
+    #[test]
+    fn test_double_click_mid_word_selects_word() {
+        // Double-click on 'l' (col 2) in "hello world" → selects "hello"
+        let mut buffer = TextBuffer::from_str("hello world");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Double-click at col 2 (pixel x = 16, col = 16/8 = 2)
+        // Line 0 is at flipped_y in [0, 16), y = 160 - 5 = 155 for flipped_y = 5
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Down,
+                position: (16.0, 155.0), // x = 16 for col 2
+                modifiers: Modifiers::default(),
+                click_count: 2,
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        // Should select "hello" (cols 0-5)
+        assert!(buffer.has_selection());
+        let (start, end) = buffer.selection_range().unwrap();
+        assert_eq!(start, Position::new(0, 0));
+        assert_eq!(end, Position::new(0, 5));
+        assert_eq!(buffer.selected_text(), Some("hello".to_string()));
+        assert!(dirty.is_dirty());
+    }
+
+    #[test]
+    fn test_double_click_at_word_start_selects_word() {
+        // Double-click at col 0 in "hello world" → selects "hello"
+        let mut buffer = TextBuffer::from_str("hello world");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Down,
+                position: (0.0, 155.0), // x = 0 for col 0
+                modifiers: Modifiers::default(),
+                click_count: 2,
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        assert!(buffer.has_selection());
+        let (start, end) = buffer.selection_range().unwrap();
+        assert_eq!(start, Position::new(0, 0));
+        assert_eq!(end, Position::new(0, 5));
+        assert_eq!(buffer.selected_text(), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_double_click_on_whitespace_selects_whitespace() {
+        // Double-click on whitespace between words → selects whitespace run
+        let mut buffer = TextBuffer::from_str("hello  world"); // Two spaces
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Click at col 5 (first space)
+        // x = 5 * 8 = 40
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Down,
+                position: (40.0, 155.0), // x = 40 for col 5
+                modifiers: Modifiers::default(),
+                click_count: 2,
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        assert!(buffer.has_selection());
+        let (start, end) = buffer.selection_range().unwrap();
+        assert_eq!(start, Position::new(0, 5));
+        assert_eq!(end, Position::new(0, 7));
+        assert_eq!(buffer.selected_text(), Some("  ".to_string()));
+    }
+
+    #[test]
+    fn test_double_click_on_empty_line_is_noop() {
+        // Double-click on empty line → no selection, no panic
+        let mut buffer = TextBuffer::from_str("");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Down,
+                position: (0.0, 155.0),
+                modifiers: Modifiers::default(),
+                click_count: 2,
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        // Should be no-op: no selection
+        assert!(!buffer.has_selection());
+    }
+
+    #[test]
+    fn test_double_click_past_line_end_selects_last_run() {
+        // Double-click past line end → selects last run on that line
+        let mut buffer = TextBuffer::from_str("hello");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Click at x = 80 (col 10, past end of "hello" which is 5 chars)
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Down,
+                position: (80.0, 155.0), // Past line end
+                modifiers: Modifiers::default(),
+                click_count: 2,
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        // Should select "hello" (the last/only run)
+        assert!(buffer.has_selection());
+        let (start, end) = buffer.selection_range().unwrap();
+        assert_eq!(start, Position::new(0, 0));
+        assert_eq!(end, Position::new(0, 5));
+        assert_eq!(buffer.selected_text(), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_single_click_still_positions_cursor() {
+        // Single click (click_count: 1) should position cursor without selection
+        let mut buffer = TextBuffer::from_str("hello world");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Down,
+                position: (16.0, 155.0), // col 2
+                modifiers: Modifiers::default(),
+                click_count: 1,
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        // Should position cursor at col 2, no selection
+        assert_eq!(buffer.cursor_position(), Position::new(0, 2));
+        assert!(!buffer.has_selection());
+    }
+
+    #[test]
+    fn test_double_click_on_second_line() {
+        // Double-click on second line selects word on that line
+        let mut buffer = TextBuffer::from_str("first\nsecond word");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Line 1 is at flipped_y in [16, 32)
+        // y = 160 - 20 = 140 for flipped_y = 20
+        // Click at col 2 in "second"
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Down,
+                position: (16.0, 140.0), // line 1, col 2
+                modifiers: Modifiers::default(),
+                click_count: 2,
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        // Should select "second" on line 1
+        assert!(buffer.has_selection());
+        let (start, end) = buffer.selection_range().unwrap();
+        assert_eq!(start, Position::new(1, 0));
+        assert_eq!(end, Position::new(1, 6));
+        assert_eq!(buffer.selected_text(), Some("second".to_string()));
     }
 }
