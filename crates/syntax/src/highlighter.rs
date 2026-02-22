@@ -255,6 +255,21 @@ impl SyntaxHighlighter {
         &self.source
     }
 
+    /// Updates the highlighter with new source content.
+    ///
+    /// This performs a full re-parse rather than incremental update.
+    /// Use `edit()` for better performance when you have edit position information.
+    ///
+    /// This is useful when you don't have precise edit information but need
+    /// to keep the highlighter in sync with buffer content.
+    pub fn update_source(&mut self, new_source: &str) {
+        // Re-parse the entire source (non-incremental)
+        if let Some(new_tree) = self.parser.parse(new_source, None) {
+            self.tree = new_tree;
+        }
+        self.source = new_source.to_string();
+    }
+
     /// Returns the number of lines in the source.
     pub fn line_count(&self) -> usize {
         self.source.chars().filter(|&c| c == '\n').count() + 1
