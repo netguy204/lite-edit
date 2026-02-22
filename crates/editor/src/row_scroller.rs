@@ -20,7 +20,7 @@
 //! use crate::row_scroller::RowScroller;
 //!
 //! let mut scroller = RowScroller::new(20.0); // 20px row height
-//! scroller.update_size(200.0); // 200px viewport = 10 visible rows
+//! scroller.update_size(200.0, 100); // 200px viewport = 10 visible rows, 100 total rows
 //!
 //! // Scroll to show row 5 at the top
 //! scroller.scroll_to(5, 100); // 100 total rows
@@ -121,13 +121,17 @@ impl RowScroller {
 
     /// Updates the viewport size based on height in pixels.
     ///
-    /// This recomputes `visible_rows` = floor(height_px / row_height).
-    pub fn update_size(&mut self, height_px: f32) {
+    /// This recomputes `visible_rows` = floor(height_px / row_height) and re-clamps
+    /// `scroll_offset_px` to the new valid bounds.
+    // Chunk: docs/chunks/resize_click_alignment - Re-clamp scroll offset on resize
+    pub fn update_size(&mut self, height_px: f32, row_count: usize) {
         self.visible_rows = if self.row_height > 0.0 {
             (height_px / self.row_height).floor() as usize
         } else {
             0
         };
+        // Re-clamp scroll offset to new valid bounds
+        self.set_scroll_offset_px(self.scroll_offset_px, row_count);
     }
 
     /// Returns the range of rows visible in the viewport.
@@ -248,21 +252,21 @@ mod tests {
     #[test]
     fn test_update_size() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         assert_eq!(scroller.visible_rows(), 10); // 160 / 16 = 10
     }
 
     #[test]
     fn test_update_size_fractional() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(170.0); // 170 / 16 = 10.625
+        scroller.update_size(170.0, 100); // 170 / 16 = 10.625
         assert_eq!(scroller.visible_rows(), 10); // floor
     }
 
     #[test]
     fn test_update_size_zero_height() {
         let mut scroller = RowScroller::new(0.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         assert_eq!(scroller.visible_rows(), 0);
     }
 
@@ -277,14 +281,14 @@ mod tests {
     #[test]
     fn test_visible_rows_getter() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(80.0);
+        scroller.update_size(80.0, 100);
         assert_eq!(scroller.visible_rows(), 5);
     }
 
     #[test]
     fn test_scroll_offset_px_getter() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         scroller.set_scroll_offset_px(123.5, 100);
         assert!((scroller.scroll_offset_px() - 123.5).abs() < 0.001);
     }
@@ -300,7 +304,7 @@ mod tests {
     #[test]
     fn test_first_visible_row_scrolled() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         scroller.set_scroll_offset_px(32.0, 100); // 2 rows * 16px
         assert_eq!(scroller.first_visible_row(), 2);
     }
@@ -308,7 +312,7 @@ mod tests {
     #[test]
     fn test_first_visible_row_fractional_scroll() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         scroller.set_scroll_offset_px(25.0, 100); // 1.5625 rows
         assert_eq!(scroller.first_visible_row(), 1); // floor(25/16) = 1
     }
@@ -318,7 +322,7 @@ mod tests {
     #[test]
     fn test_scroll_fraction_px_at_boundary() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         scroller.set_scroll_offset_px(32.0, 100); // exactly 2 rows
         assert!((scroller.scroll_fraction_px() - 0.0).abs() < 0.001);
     }
@@ -326,7 +330,7 @@ mod tests {
     #[test]
     fn test_scroll_fraction_px_mid_row() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         scroller.set_scroll_offset_px(25.0, 100); // 25 % 16 = 9
         assert!((scroller.scroll_fraction_px() - 9.0).abs() < 0.001);
     }
@@ -334,7 +338,7 @@ mod tests {
     #[test]
     fn test_scroll_fraction_px_accumulated() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         scroller.set_scroll_offset_px(50.0, 100); // 50 % 16 = 2
         assert_eq!(scroller.first_visible_row(), 3);
         assert!((scroller.scroll_fraction_px() - 2.0).abs() < 0.001);
@@ -345,7 +349,7 @@ mod tests {
     #[test]
     fn test_set_scroll_offset_px_basic() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         scroller.set_scroll_offset_px(100.0, 100);
         assert!((scroller.scroll_offset_px() - 100.0).abs() < 0.001);
     }
@@ -353,7 +357,7 @@ mod tests {
     #[test]
     fn test_set_scroll_offset_px_clamp_negative() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         scroller.set_scroll_offset_px(-10.0, 100);
         assert_eq!(scroller.scroll_offset_px(), 0.0);
     }
@@ -361,7 +365,7 @@ mod tests {
     #[test]
     fn test_set_scroll_offset_px_clamp_max() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0); // 10 visible rows
+        scroller.update_size(160.0, 100); // 10 visible rows
         // max offset = (100 - 10) * 16 = 1440 pixels
         scroller.set_scroll_offset_px(2000.0, 100);
         assert!((scroller.scroll_offset_px() - 1440.0).abs() < 0.001);
@@ -370,7 +374,7 @@ mod tests {
     #[test]
     fn test_set_scroll_offset_px_small_buffer() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0); // 10 visible rows
+        scroller.update_size(160.0, 100); // 10 visible rows
         // With only 5 rows, max offset = 0 (can't scroll)
         scroller.set_scroll_offset_px(100.0, 5);
         assert_eq!(scroller.scroll_offset_px(), 0.0);
@@ -381,7 +385,7 @@ mod tests {
     #[test]
     fn test_visible_range_at_start() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0); // 10 visible rows
+        scroller.update_size(160.0, 100); // 10 visible rows
         let range = scroller.visible_range(100);
         // Includes extra row for partial visibility
         assert_eq!(range, 0..11);
@@ -390,7 +394,7 @@ mod tests {
     #[test]
     fn test_visible_range_scrolled() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         scroller.scroll_to(20, 100);
         let range = scroller.visible_range(100);
         assert_eq!(range, 20..31);
@@ -399,7 +403,7 @@ mod tests {
     #[test]
     fn test_visible_range_at_end() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0); // 10 visible rows
+        scroller.update_size(160.0, 100); // 10 visible rows
         scroller.scroll_to(95, 100); // Clamped to 90
         let range = scroller.visible_range(100);
         assert_eq!(range, 90..100);
@@ -408,7 +412,7 @@ mod tests {
     #[test]
     fn test_visible_range_small_buffer() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0); // 10 visible rows
+        scroller.update_size(160.0, 100); // 10 visible rows
         let range = scroller.visible_range(5);
         assert_eq!(range, 0..5);
     }
@@ -416,7 +420,7 @@ mod tests {
     #[test]
     fn test_visible_range_empty_buffer() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         let range = scroller.visible_range(0);
         assert_eq!(range, 0..0);
     }
@@ -426,7 +430,7 @@ mod tests {
     #[test]
     fn test_scroll_to_valid() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         scroller.scroll_to(20, 100);
         assert_eq!(scroller.first_visible_row(), 20);
         assert!((scroller.scroll_offset_px() - 320.0).abs() < 0.001); // 20 * 16
@@ -435,7 +439,7 @@ mod tests {
     #[test]
     fn test_scroll_to_clamped() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0); // 10 visible rows
+        scroller.update_size(160.0, 100); // 10 visible rows
         scroller.scroll_to(95, 100); // Should clamp to 90
         assert_eq!(scroller.first_visible_row(), 90);
     }
@@ -443,7 +447,7 @@ mod tests {
     #[test]
     fn test_scroll_to_beyond_buffer() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         scroller.scroll_to(200, 100);
         assert_eq!(scroller.first_visible_row(), 90);
     }
@@ -451,7 +455,7 @@ mod tests {
     #[test]
     fn test_scroll_to_small_buffer() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         scroller.scroll_to(5, 5); // Buffer smaller than viewport
         assert_eq!(scroller.first_visible_row(), 0); // Can't scroll
     }
@@ -461,7 +465,7 @@ mod tests {
     #[test]
     fn test_ensure_visible_already_visible() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         let scrolled = scroller.ensure_visible(5, 100);
         assert!(!scrolled);
         assert_eq!(scroller.first_visible_row(), 0);
@@ -470,7 +474,7 @@ mod tests {
     #[test]
     fn test_ensure_visible_scroll_up() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         scroller.scroll_to(20, 100);
         let scrolled = scroller.ensure_visible(10, 100);
         assert!(scrolled);
@@ -480,7 +484,7 @@ mod tests {
     #[test]
     fn test_ensure_visible_scroll_down() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0); // 10 visible rows
+        scroller.update_size(160.0, 100); // 10 visible rows
         let scrolled = scroller.ensure_visible(25, 100);
         assert!(scrolled);
         // Should put row 25 at the bottom: 25 - 9 = 16
@@ -490,7 +494,7 @@ mod tests {
     #[test]
     fn test_ensure_visible_at_boundary() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0); // 10 visible rows, showing 0..10
+        scroller.update_size(160.0, 100); // 10 visible rows, showing 0..10
         // Row 9 is the last fully visible row
         let scrolled = scroller.ensure_visible(9, 100);
         assert!(!scrolled);
@@ -502,7 +506,7 @@ mod tests {
     #[test]
     fn test_ensure_visible_snaps_to_whole_row() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         // Start with fractional scroll position
         scroller.set_scroll_offset_px(25.0, 100); // Row 1, fraction 9px
         assert_eq!(scroller.first_visible_row(), 1);
@@ -517,7 +521,7 @@ mod tests {
     #[test]
     fn test_row_to_visible_offset_visible() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         scroller.scroll_to(10, 100);
         assert_eq!(scroller.row_to_visible_offset(10), Some(0));
         assert_eq!(scroller.row_to_visible_offset(15), Some(5));
@@ -527,7 +531,7 @@ mod tests {
     #[test]
     fn test_row_to_visible_offset_above() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         scroller.scroll_to(10, 100);
         assert_eq!(scroller.row_to_visible_offset(5), None);
         assert_eq!(scroller.row_to_visible_offset(9), None);
@@ -536,7 +540,7 @@ mod tests {
     #[test]
     fn test_row_to_visible_offset_below() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         scroller.scroll_to(10, 100);
         // Row 21 is beyond visible_rows + 1 (for partial visibility)
         assert_eq!(scroller.row_to_visible_offset(22), None);
@@ -548,7 +552,7 @@ mod tests {
     #[test]
     fn test_visible_offset_to_row() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         scroller.scroll_to(10, 100);
         assert_eq!(scroller.visible_offset_to_row(0), 10);
         assert_eq!(scroller.visible_offset_to_row(5), 15);
@@ -560,7 +564,7 @@ mod tests {
     #[test]
     fn test_sub_line_delta_accumulates_without_row_change() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         // Scroll 5 pixels (less than row_height of 16)
         scroller.set_scroll_offset_px(5.0, 100);
         assert_eq!(scroller.first_visible_row(), 0);
@@ -574,7 +578,7 @@ mod tests {
     #[test]
     fn test_crossing_row_boundary() {
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0);
+        scroller.update_size(160.0, 100);
         // Scroll exactly one row
         scroller.set_scroll_offset_px(16.0, 100);
         assert_eq!(scroller.first_visible_row(), 1);
@@ -587,5 +591,32 @@ mod tests {
         scroller.set_scroll_offset_px(32.0, 100);
         assert_eq!(scroller.first_visible_row(), 2);
         assert!((scroller.scroll_fraction_px() - 0.0).abs() < 0.001);
+    }
+
+    // Chunk: docs/chunks/resize_click_alignment - Regression test for resize clamping
+    #[test]
+    fn test_resize_clamps_scroll_offset() {
+        // Scenario: viewport resizes to show more rows, reducing max_offset_px.
+        // If scroll_offset_px is not re-clamped, first_visible_row() will be
+        // larger than the renderer's actual first row, causing click misalignment.
+        let mut scroller = RowScroller::new(16.0);
+        scroller.update_size(160.0, 100); // 10 visible rows
+
+        // Scroll to near-max for a 100-row buffer:
+        // max_offset_px = (100 - 10) * 16 = 1440 pixels
+        scroller.scroll_to(90, 100); // scroll_offset_px = 1440.0
+        assert_eq!(scroller.first_visible_row(), 90);
+        assert!((scroller.scroll_offset_px() - 1440.0).abs() < 0.001);
+
+        // Now simulate a resize that INCREASES viewport height (e.g., going fullscreen).
+        // 320px / 16px = 20 visible rows
+        // New max_offset_px = (100 - 20) * 16 = 1280 pixels
+        scroller.update_size(320.0, 100);
+
+        // After resize, scroll_offset_px should be clamped to new max (1280)
+        assert!((scroller.scroll_offset_px() - 1280.0).abs() < 0.001);
+        // And first_visible_row() should reflect the clamped position
+        assert_eq!(scroller.first_visible_row(), 80); // 1280 / 16 = 80
+        assert_eq!(scroller.visible_rows(), 20);
     }
 }

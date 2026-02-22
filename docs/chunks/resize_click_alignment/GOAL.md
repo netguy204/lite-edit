@@ -1,8 +1,11 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/editor/src/row_scroller.rs
+- crates/editor/src/viewport.rs
+- crates/editor/src/editor_state.rs
 code_references: []
 narrative: null
 investigation: null
@@ -10,9 +13,12 @@ subsystems: []
 friction_entries: []
 bug_type: semantic
 depends_on: null
-created_after: ["terminal_input_encoding", "find_in_file", "cursor_wrap_scroll_alignment", "row_scroller_extract"]
+created_after:
+- terminal_input_encoding
+- find_in_file
+- cursor_wrap_scroll_alignment
+- row_scroller_extract
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

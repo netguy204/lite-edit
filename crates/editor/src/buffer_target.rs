@@ -730,7 +730,7 @@ mod tests {
     fn create_test_context() -> (TextBuffer, Viewport, DirtyRegion) {
         let buffer = TextBuffer::new();
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0); // 10 visible lines
+        viewport.update_size(160.0, 100); // 10 visible lines
         let dirty = DirtyRegion::None;
         (buffer, viewport, dirty)
     }
@@ -786,7 +786,7 @@ mod tests {
     fn test_arrow_keys_move_cursor() {
         let mut buffer = TextBuffer::from_str("hello\nworld");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -876,7 +876,7 @@ mod tests {
     fn test_delete_forward() {
         let mut buffer = TextBuffer::from_str("hello");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -900,7 +900,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello world");
         buffer.set_cursor(Position::new(0, 6));
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -931,7 +931,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello world");
         buffer.set_cursor(Position::new(0, 0));
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -962,7 +962,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello");
         buffer.set_cursor(Position::new(0, 3));
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -993,7 +993,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello");
         buffer.set_cursor(Position::new(0, 0));
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1024,7 +1024,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello world");
         buffer.set_cursor(Position::new(0, 6));
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1049,7 +1049,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello world");
         buffer.set_cursor(Position::new(0, 0));
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1078,7 +1078,7 @@ mod tests {
             .join("\n");
         let mut buffer = TextBuffer::from_str(&content);
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0); // 10 visible lines
+        viewport.update_size(160.0, 100); // 10 visible lines
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1137,7 +1137,7 @@ mod tests {
     fn test_multiple_events_accumulate_dirty_regions() {
         let mut buffer = TextBuffer::from_str("hello\nworld\nfoo\nbar");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1321,7 +1321,7 @@ mod tests {
         // Integration test: click event positions cursor
         let mut buffer = TextBuffer::from_str("hello\nworld\nfoo");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1358,7 +1358,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello world");
         buffer.set_cursor(Position::new(0, 5)); // After "hello"
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1392,7 +1392,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello\nworld");
         buffer.set_cursor(Position::new(0, 5)); // At end of "hello"
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1425,7 +1425,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello");
         buffer.move_to_buffer_end();
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1457,7 +1457,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello");
         buffer.set_cursor(Position::new(0, 0)); // At start
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1492,7 +1492,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello");
         buffer.set_cursor(Position::new(0, 0));
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1531,7 +1531,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello");
         buffer.set_cursor(Position::new(0, 0));
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1571,7 +1571,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello");
         buffer.set_cursor(Position::new(0, 0));
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1620,7 +1620,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello\nworld");
         buffer.set_cursor(Position::new(0, 2)); // At "l" in "hello"
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1654,7 +1654,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello");
         buffer.set_cursor(Position::new(0, 0));
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1692,7 +1692,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello world");
         buffer.set_cursor(Position::new(0, 6)); // At "w" in "world"
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1725,7 +1725,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello world");
         buffer.set_cursor(Position::new(0, 5)); // At space
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1761,7 +1761,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello");
         buffer.set_cursor(Position::new(0, 0));
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1803,7 +1803,7 @@ mod tests {
         buffer.set_selection_anchor(Position::new(0, 0));
 
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1838,7 +1838,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello");
         buffer.set_cursor(Position::new(0, 3));
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1872,7 +1872,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello");
         buffer.set_cursor(Position::new(0, 2));
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1906,7 +1906,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello\nworld\ntest");
         buffer.set_cursor(Position::new(1, 3)); // At 'l' in "world"
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1940,7 +1940,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello\nworld\ntest");
         buffer.set_cursor(Position::new(0, 2)); // At 'l' in "hello"
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -1974,7 +1974,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello");
         buffer.set_cursor(Position::new(0, 3)); // At second 'l'
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -2008,7 +2008,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello\nworld");
         buffer.set_cursor(Position::new(1, 3)); // At 'l' in "world"
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -2042,7 +2042,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello world");
         buffer.set_cursor(Position::new(0, 8)); // At 'r' in "world"
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -2076,7 +2076,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello world");
         buffer.set_cursor(Position::new(0, 3)); // At second 'l' in "hello"
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -2171,7 +2171,7 @@ mod tests {
     fn test_cmd_a_selects_entire_buffer() {
         let mut buffer = TextBuffer::from_str("hello\nworld");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -2203,7 +2203,7 @@ mod tests {
     fn test_cmd_c_with_no_selection_is_noop() {
         let mut buffer = TextBuffer::from_str("hello");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -2240,7 +2240,7 @@ mod tests {
         // Test that Cmd+A selects all, then typing replaces the selection
         let mut buffer = TextBuffer::from_str("hello");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -2282,7 +2282,7 @@ mod tests {
         buffer.set_selection_anchor(lite_edit_buffer::Position::new(0, 0));
 
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -2347,7 +2347,7 @@ mod tests {
             .join("\n");
         let mut buffer = TextBuffer::from_str(&content);
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0); // 10 visible lines
+        viewport.update_size(160.0, 100); // 10 visible lines
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -2380,7 +2380,7 @@ mod tests {
             .join("\n");
         let mut buffer = TextBuffer::from_str(&content);
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         viewport.scroll_to(10, 50); // Start scrolled down
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
@@ -2410,7 +2410,7 @@ mod tests {
             .join("\n");
         let mut buffer = TextBuffer::from_str(&content);
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0); // 10 visible lines, 20 total lines
+        viewport.update_size(160.0, 100); // 10 visible lines, 20 total lines
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -2440,7 +2440,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str(&content);
         buffer.set_cursor(Position::new(5, 3));
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -2471,7 +2471,7 @@ mod tests {
             .join("\n");
         let mut buffer = TextBuffer::from_str(&content);
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -2505,7 +2505,7 @@ mod tests {
             .join("\n");
         let mut buffer = TextBuffer::from_str(&content);
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut target = BufferFocusTarget::new();
 
         // Scroll 7 pixels three times = 21 pixels = 1 line + 5 pixels
@@ -2536,7 +2536,7 @@ mod tests {
         // After a mouse down event, the selection anchor should be set at the clicked position
         let mut buffer = TextBuffer::from_str("hello\nworld\nfoo");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -2575,7 +2575,7 @@ mod tests {
         // Simulate down → moved → moved sequence and verify selection
         let mut buffer = TextBuffer::from_str("hello\nworld\nfoo");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -2666,7 +2666,7 @@ mod tests {
         assert!(buffer.has_selection());
 
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -2717,7 +2717,7 @@ mod tests {
         // Drag to create selection, then release - selection should remain
         let mut buffer = TextBuffer::from_str("hello");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -2788,7 +2788,7 @@ mod tests {
         // Click, drag past line end, verify column clamped
         let mut buffer = TextBuffer::from_str("hi\nworld");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -2840,7 +2840,7 @@ mod tests {
         // Drag below buffer, verify line clamped
         let mut buffer = TextBuffer::from_str("hello\nworld");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -2892,7 +2892,7 @@ mod tests {
         // Drag with y that results in negative screen line (above view)
         let mut buffer = TextBuffer::from_str("hello\nworld");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -2945,7 +2945,7 @@ mod tests {
         // Full lifecycle test: down → moved → moved → up
         let mut buffer = TextBuffer::from_str("hello\nworld\nfoo\nbar");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -3053,7 +3053,7 @@ mod tests {
         // Verify selection_range() returns correct ordered range at each step
         let mut buffer = TextBuffer::from_str("hello");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -3114,7 +3114,7 @@ mod tests {
         // Verify correct lines are marked dirty during drag
         let mut buffer = TextBuffer::from_str("line0\nline1\nline2\nline3");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -3188,7 +3188,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello world");
         buffer.set_cursor(Position::new(0, 11)); // After "world"
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -3222,7 +3222,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello   ");
         buffer.set_cursor(Position::new(0, 8)); // After trailing spaces
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -3254,7 +3254,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello");
         // Cursor at start
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -3288,7 +3288,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello world");
         buffer.set_cursor(Position::new(0, 11)); // After "world"
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -3319,7 +3319,7 @@ mod tests {
         // Double-click on 'l' (col 2) in "hello world" → selects "hello"
         let mut buffer = TextBuffer::from_str("hello world");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -3357,7 +3357,7 @@ mod tests {
         // Double-click at col 0 in "hello world" → selects "hello"
         let mut buffer = TextBuffer::from_str("hello world");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -3391,7 +3391,7 @@ mod tests {
         // Double-click on whitespace between words → selects whitespace run
         let mut buffer = TextBuffer::from_str("hello  world"); // Two spaces
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -3427,7 +3427,7 @@ mod tests {
         // Double-click on empty line → no selection, no panic
         let mut buffer = TextBuffer::from_str("");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -3458,7 +3458,7 @@ mod tests {
         // Double-click past line end → selects last run on that line
         let mut buffer = TextBuffer::from_str("hello");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -3494,7 +3494,7 @@ mod tests {
         // Single click (click_count: 1) should position cursor without selection
         let mut buffer = TextBuffer::from_str("hello world");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
@@ -3526,7 +3526,7 @@ mod tests {
         // Double-click on second line selects word on that line
         let mut buffer = TextBuffer::from_str("first\nsecond word");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
         let mut target = BufferFocusTarget::new();
 
