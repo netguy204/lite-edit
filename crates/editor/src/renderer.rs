@@ -264,6 +264,15 @@ impl Renderer {
         self.glyph_buffer.set_x_offset(offset);
     }
 
+    // Chunk: docs/chunks/content_tab_bar - Content area y offset for tab bar
+    /// Sets the content area vertical offset.
+    ///
+    /// When the tab bar is visible, pass `TAB_BAR_HEIGHT` to shift all editor content
+    /// down, making room for the tab bar at the top.
+    pub fn set_content_y_offset(&mut self, offset: f32) {
+        self.glyph_buffer.set_y_offset(offset);
+    }
+
     /// Converts buffer-space DirtyLines to screen-space DirtyRegion
     ///
     /// This is used in the drain-all-then-render loop to determine what
@@ -860,8 +869,10 @@ impl Renderer {
         selector: Option<&SelectorWidget>,
         selector_cursor_visible: bool,
     ) {
-        // Set content area offset to account for left rail
+        // Set content area offset to account for left rail and tab bar
         self.set_content_x_offset(RAIL_WIDTH);
+        // Chunk: docs/chunks/content_tab_bar - Content area y offset for tab bar
+        self.set_content_y_offset(TAB_BAR_HEIGHT);
 
         // Update glyph buffer from TextBuffer if available
         self.update_glyph_buffer();
