@@ -8,170 +8,89 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+Extend the fuzzy matching in `query_fuzzy()` to score against the **full relative path** instead of just the filename. The key insight is that matching against the path should be additive—if a query matches directory segments but not the filename, the file should still appear in results. However, filename matches must remain primary so that exact hits don't get drowned by incidental path matches.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+Strategy:
+1. **Two-pass scoring**: Score the query against both the filename and the full path. The final score combines these with a heavy bias toward filename matches (e.g., filename score * 2 + path score).
+2. **Fallback to path-only**: If the query doesn't match the filename at all but does match the full path, use the path score (allowing directory-based filtering).
+3. **Preserve existing heuristics**: The prefix bonus, consecutive-run bonus, and shorter-filename bonus continue to apply to filename matches, ensuring current behavior is retained.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+This approach builds on the existing `score_match()` and `find_match_positions()` functions. A new helper `score_path_match()` will handle the path-aware scoring, and `query_fuzzy()` will call both.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/file_search_path_matching/GOAL.md)
-with references to the files that you expect to touch.
--->
-
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Following the TESTING_PHILOSOPHY.md TDD approach, we'll write failing tests first for the new path-matching behavior, then implement.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing tests for path-segment matching
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create test cases in the `#[cfg(test)]` module that verify the new behavior:
 
-Example:
+1. `test_query_directory_name_matches_files_within` — Typing `file_search` should match files under `docs/chunks/file_search_path_matching/`.
+2. `test_query_partial_path_matches` — Typing `chunks/term` should match files under `docs/chunks/terminal_tab_spawn/`.
+3. `test_filename_matches_still_rank_highest` — When a query matches both a filename prefix and a path segment, the filename match should score higher.
+4. `test_path_only_match_returns_results` — A query that matches only directory segments (not the filename) still returns results.
 
-### Step 1: Define the SegmentHeader struct
+Location: `crates/editor/src/file_index.rs` in the `mod tests` block.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Create `score_path_match()` helper
 
-Location: src/segment/format.rs
+Add a new function that scores a query against a full relative path string (e.g., `docs/chunks/file_search_path_matching/GOAL.md`). This function:
 
-### Step 2: Implement header serialization
+- Converts the path to a string and lowercases it
+- Uses `find_match_positions()` to find subsequence matches
+- Applies a base score and the consecutive-run bonus (reusing logic from `score_match`)
+- Does NOT apply the filename-prefix bonus or shorter-length bonus (those are filename-specific)
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+Signature:
+```rust
+fn score_path_match(query: &str, path: &Path) -> Option<u32>
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `crates/editor/src/file_index.rs`
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 3: Update `query_fuzzy()` to combine filename and path scores
 
-## Dependencies
+Modify the `query_fuzzy()` method to:
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+1. For each path in the cache:
+   - Compute `filename_score = score_match(query, filename)` (existing behavior)
+   - Compute `path_score = score_path_match(query, path)`
+2. Compute final score:
+   - If `filename_score.is_some()`: use `filename_score * 2 + path_score.unwrap_or(0)`
+   - Else if `path_score.is_some()`: use `path_score` as the sole score
+   - Else: filter out the path (no match)
+3. Return results sorted by descending score, then alphabetically by path.
 
-If there are no dependencies, delete this section.
--->
+This ensures:
+- Filename matches dominate (2× weight)
+- Path-only matches still appear (users can type directory names)
+- Both bonuses stack when query matches both
+
+Location: `crates/editor/src/file_index.rs#FileIndex::query_fuzzy`
+
+### Step 4: Verify existing tests still pass
+
+Run `cargo test` in `crates/editor` to confirm:
+- All existing scoring tests pass (no regression in filename-first ranking)
+- New path-matching tests pass
+
+### Step 5: Add edge-case tests
+
+Add tests for:
+- Query with `/` characters (e.g., `src/main`) — should match paths containing that sequence
+- Empty path components — shouldn't panic or behave unexpectedly
+- Very long paths — no performance regression for typical query lengths
+
+Location: `crates/editor/src/file_index.rs` in the `mod tests` block.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
-
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Score overflow**: Combining `filename_score * 2 + path_score` could overflow `u32` in extreme cases. The current scoring is bounded (base 100 + bonuses capped by string length), so this is unlikely, but we should add a `.saturating_add()` to be safe.
+- **Performance**: Scoring every path twice (filename + full path) doubles the work. For typical codebase sizes (10K–100K files), this should be negligible since it's just subsequence matching on in-memory strings, but worth watching.
+- **Slash handling**: Users may type `/` expecting directory separators. On Windows the cache uses `\`. This chunk assumes macOS/Linux (per lite-edit's target), so forward slashes should work. If cross-platform support is needed later, normalize separators before matching.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->
