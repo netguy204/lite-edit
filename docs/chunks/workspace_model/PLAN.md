@@ -559,6 +559,4 @@ When implementing code, add backreference comments:
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
--->
+None. The implementation followed the plan closely.
