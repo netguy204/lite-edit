@@ -183,6 +183,7 @@ impl TabBuffer {
 // Tab
 // =============================================================================
 
+// Chunk: docs/chunks/content_tab_bar - Per-tab model: kind, buffer ref, dirty flag, unread badge
 /// A tab within a workspace.
 ///
 /// Each tab owns its own buffer and viewport (for independent scroll positions).
@@ -341,6 +342,7 @@ impl Tab {
 // Workspace
 // =============================================================================
 
+// Chunk: docs/chunks/content_tab_bar - Owns tab list and tab_bar_view_offset for horizontal scroll
 /// A workspace containing multiple tabs.
 ///
 /// Each workspace represents an independent working context (e.g., a worktree,

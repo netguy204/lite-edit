@@ -1810,6 +1810,7 @@ impl EditorState {
     /// Switches to the tab at the given index in the active workspace.
     ///
     /// Does nothing if the index is out of bounds or if it's the current tab.
+    // Chunk: docs/chunks/content_tab_bar - Switch active tab; clears unread badge
     // Chunk: docs/chunks/tab_bar_interaction - Click-to-switch tab activation
     // Chunk: docs/chunks/tab_click_cursor_placement - Sync viewport on tab switch
     pub fn switch_tab(&mut self, index: usize) {
@@ -1906,6 +1907,7 @@ impl EditorState {
     ///
     /// This is triggered by Cmd+T. For now, this creates an empty file tab.
     /// Terminal tab creation will be added in the terminal_emulator chunk.
+    // Chunk: docs/chunks/content_tab_bar - Create new empty file tab (Cmd+T)
     // Chunk: docs/chunks/tab_click_cursor_placement - Sync viewport on tab creation
     pub fn new_tab(&mut self) {
         let tab_id = self.editor.gen_tab_id();
@@ -2074,6 +2076,7 @@ impl EditorState {
 
     /// Handles a mouse click in the tab bar region.
     ///
+    // Chunk: docs/chunks/content_tab_bar - Click-to-switch and close-button hit testing
     // Chunk: docs/chunks/tab_bar_interaction - Tab click coordinate transformation
     /// Determines which tab was clicked and switches to it, or handles
     /// close button clicks.
