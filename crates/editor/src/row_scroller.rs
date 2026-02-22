@@ -1,3 +1,4 @@
+// Subsystem: docs/subsystems/viewport_scroll - Viewport mapping & scroll arithmetic
 // Chunk: docs/chunks/row_scroller_extract - RowScroller extraction from Viewport
 //!
 //! Reusable scroll arithmetic for uniform-height row lists.

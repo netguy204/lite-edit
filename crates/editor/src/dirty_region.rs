@@ -1,3 +1,4 @@
+// Subsystem: docs/subsystems/viewport_scroll - Viewport mapping & scroll arithmetic
 // Chunk: docs/chunks/viewport_rendering - Viewport + Buffer-to-Screen Rendering
 //!
 //! Dirty region tracking for screen-space rendering

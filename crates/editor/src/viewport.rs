@@ -1,3 +1,4 @@
+// Subsystem: docs/subsystems/viewport_scroll - Viewport mapping & scroll arithmetic
 // Chunk: docs/chunks/viewport_rendering - Viewport + Buffer-to-Screen Rendering
 // Chunk: docs/chunks/viewport_fractional_scroll - Fractional scroll support
 // Chunk: docs/chunks/row_scroller_extract - Delegation to RowScroller

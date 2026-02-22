@@ -1,3 +1,4 @@
+// Subsystem: docs/subsystems/viewport_scroll - Viewport mapping & scroll arithmetic
 // Chunk: docs/chunks/line_wrap_rendering - Soft line wrapping coordinate mapping
 //!
 //! Wrap layout calculation for soft line wrapping
