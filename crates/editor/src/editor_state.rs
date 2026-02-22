@@ -5,6 +5,7 @@
 // Chunk: docs/chunks/file_picker - File picker (Cmd+P) integration
 // Chunk: docs/chunks/file_save - File-buffer association and Cmd+S save
 // Chunk: docs/chunks/workspace_model - Workspace model and left rail UI
+// Chunk: docs/chunks/tab_bar_interaction - Click coordinate transformation for tab switching
 //!
 //! Editor state container.
 //!
@@ -1512,8 +1513,13 @@ impl EditorState {
 
     /// Handles a mouse click in the tab bar region.
     ///
+    // Chunk: docs/chunks/tab_bar_interaction - Tab click coordinate transformation
     /// Determines which tab was clicked and switches to it, or handles
     /// close button clicks.
+    ///
+    /// The mouse coordinates are in NSView space (origin at bottom-left).
+    /// Tab bar geometry is in a coordinate system with y=0 at the top of the tab bar.
+    /// We need to transform the y-coordinate before checking containment.
     fn handle_tab_bar_click(&mut self, mouse_x: f32, mouse_y: f32) {
         if let Some(workspace) = self.editor.active_workspace() {
             let tabs = tabs_from_workspace(workspace);
@@ -1525,11 +1531,19 @@ impl EditorState {
                 workspace.tab_bar_view_offset,
             );
 
+            // Transform y from NSView coords to tab bar local coords
+            // NSView: y=0 is at bottom, y=view_height is at top
+            // Tab bar: y=0 is at top of tab bar, y=TAB_BAR_HEIGHT is at bottom
+            // The tab bar occupies NSView y ∈ [view_height - TAB_BAR_HEIGHT, view_height]
+            // So: tab_bar_y = view_height - mouse_y (which gives 0 at top of window)
+            //     But tab bar starts at top, so: tab_bar_y = view_height - mouse_y
+            let tab_bar_y = self.view_height - mouse_y;
+
             // Check each tab rect
             for (idx, tab_rect) in geometry.tab_rects.iter().enumerate() {
-                if tab_rect.contains(mouse_x, mouse_y) {
+                if tab_rect.contains(mouse_x, tab_bar_y) {
                     // Check if close button was clicked (close button is part of TabRect)
-                    if tab_rect.is_close_button(mouse_x, mouse_y) {
+                    if tab_rect.is_close_button(mouse_x, tab_bar_y) {
                         self.close_tab(idx);
                         return;
                     }
@@ -3706,5 +3720,132 @@ mod tests {
         state.new_tab();
 
         assert!(state.is_dirty());
+    }
+
+    // =========================================================================
+    // Tab Bar Click Tests (Chunk: docs/chunks/tab_bar_interaction)
+    // =========================================================================
+
+    #[test]
+    fn test_click_tab_switches_to_that_tab() {
+        use crate::left_rail::RAIL_WIDTH;
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        // Set view width larger to accommodate tabs
+        state.view_width = 800.0;
+        state.view_height = 320.0;
+        state.update_viewport_size(320.0);
+
+        // Add a second tab
+        {
+            let tab_id = state.editor.gen_tab_id();
+            let line_height = state.editor.line_height();
+            let tab = crate::workspace::Tab::empty_file(tab_id, line_height);
+            state.editor.active_workspace_mut().unwrap().add_tab(tab);
+        }
+
+        // Should have 2 tabs, active_tab is 1 (switched to new tab on add)
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 2);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 1);
+
+        // Clear dirty state
+        let _ = state.take_dirty_region();
+
+        // Click on the first tab (tab index 0)
+        // Tab bar Y is at the TOP of the view (flipped coordinates mean high y values)
+        // In macOS NSView coords (origin at bottom-left):
+        // - Tab bar is at y = view_height - TAB_BAR_HEIGHT to y = view_height
+        // - Clicking at y = view_height - TAB_BAR_HEIGHT/2 should be in the tab bar
+        let tab_bar_y = (320.0 - TAB_BAR_HEIGHT / 2.0) as f64;
+        // First tab starts at RAIL_WIDTH
+        let first_tab_x = (RAIL_WIDTH + 20.0) as f64;
+
+        let click_event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (first_tab_x, tab_bar_y),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        state.handle_mouse(click_event);
+
+        // Should have switched to tab 0
+        assert_eq!(
+            state.editor.active_workspace().unwrap().active_tab,
+            0,
+            "Clicking on first tab should switch to tab 0"
+        );
+        assert!(state.is_dirty(), "Switching tabs should mark dirty");
+    }
+
+    #[test]
+    fn test_click_active_tab_is_noop() {
+        use crate::left_rail::RAIL_WIDTH;
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.view_width = 800.0;
+        state.view_height = 320.0;
+        state.update_viewport_size(320.0);
+
+        // Only 1 tab exists, and it's active
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+
+        // Clear dirty state
+        let _ = state.take_dirty_region();
+
+        // Click on the active tab - should be a no-op (no state change)
+        let tab_bar_y = (320.0 - TAB_BAR_HEIGHT / 2.0) as f64;
+        let first_tab_x = (RAIL_WIDTH + 20.0) as f64;
+
+        let click_event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (first_tab_x, tab_bar_y),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        state.handle_mouse(click_event);
+
+        // Should still be on tab 0
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+        // Switching to the same tab shouldn't mark dirty
+        assert!(!state.is_dirty(), "Clicking active tab should not mark dirty");
+    }
+
+    #[test]
+    fn test_tab_geometry_matches_workspace_indices() {
+        // Verify that the tab_index in TabRect matches the workspace tab indices
+        use crate::tab_bar::{calculate_tab_bar_geometry, tabs_from_workspace};
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.view_width = 800.0;
+
+        // Add multiple tabs
+        for _ in 0..3 {
+            let tab_id = state.editor.gen_tab_id();
+            let line_height = state.editor.line_height();
+            let tab = crate::workspace::Tab::empty_file(tab_id, line_height);
+            state.editor.active_workspace_mut().unwrap().add_tab(tab);
+        }
+
+        let workspace = state.editor.active_workspace().unwrap();
+        let tabs = tabs_from_workspace(workspace);
+        let glyph_width = state.font_metrics.advance_width as f32;
+        let geometry = calculate_tab_bar_geometry(
+            state.view_width,
+            &tabs,
+            glyph_width,
+            workspace.tab_bar_view_offset,
+        );
+
+        // Each tab_rect.tab_index should match its position
+        for (i, tab_rect) in geometry.tab_rects.iter().enumerate() {
+            assert_eq!(
+                tab_rect.tab_index, i,
+                "TabRect {} should have tab_index {}, got {}",
+                i, i, tab_rect.tab_index
+            );
+        }
     }
 }
