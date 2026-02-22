@@ -1,10 +1,16 @@
 // Chunk: docs/chunks/terminal_emulator - Terminal emulator backed by alacritty_terminal
+// Chunk: docs/chunks/agent_lifecycle - Agent lifecycle tracking for Composer-like workflows
 // Chunk: docs/chunks/terminal_file_backed_scrollback - File-backed cold scrollback
 //! Terminal emulator crate for lite-edit.
 //!
 //! This crate provides `TerminalBuffer`, a full-featured terminal emulator
 //! that implements the `BufferView` trait. It wraps `alacritty_terminal` for
 //! escape sequence interpretation and manages PTY I/O for process communication.
+//!
+//! Additionally, this crate provides `AgentHandle`, a wrapper around `TerminalBuffer`
+//! that infers agent lifecycle state (Running, NeedsInput, Stale, Exited) from PTY
+//! behavior. This enables Composer-like multi-agent workflows where multiple AI
+//! coding agents run in parallel and the UI shows their status.
 //!
 //! ## Scrollback
 //!
@@ -17,7 +23,7 @@
 //! This enables 10+ concurrent terminals with 100K+ line histories while
 //! keeping memory usage under ~7MB per terminal.
 //!
-//! # Example
+//! # Example: Terminal Buffer
 //!
 //! ```no_run
 //! use lite_edit_terminal::{TerminalBuffer, BufferView};
@@ -34,7 +40,34 @@
 //!     }
 //! }
 //! ```
+//!
+//! # Example: Agent Handle
+//!
+//! ```no_run
+//! use lite_edit_terminal::{AgentHandle, AgentConfig, AgentState};
+//! use std::path::PathBuf;
+//! use std::time::Duration;
+//!
+//! let config = AgentConfig::new("claude")
+//!     .with_cwd(PathBuf::from("/home/user/project"))
+//!     .with_needs_input_timeout(Duration::from_secs(5));
+//!
+//! let mut agent = AgentHandle::spawn(config, 80, 24).unwrap();
+//!
+//! // Poll each frame to update state
+//! loop {
+//!     agent.poll();
+//!     match agent.state() {
+//!         AgentState::Running => { /* green indicator */ }
+//!         AgentState::NeedsInput { .. } => { /* yellow indicator */ }
+//!         AgentState::Exited { code: 0 } => { /* success */ break; }
+//!         AgentState::Exited { .. } => { /* error */ break; }
+//!         _ => {}
+//!     }
+//! }
+//! ```
 
+mod agent;
 mod cold_scrollback;
 mod event;
 // Chunk: docs/chunks/terminal_input_encoding - Terminal input encoding
@@ -45,6 +78,7 @@ mod terminal_buffer;
 // Chunk: docs/chunks/terminal_input_encoding - Terminal input encoding
 mod terminal_target;
 
+pub use agent::{AgentConfig, AgentHandle, AgentState, AgentStateMachine};
 // Chunk: docs/chunks/terminal_input_encoding - Terminal input encoding
 pub use input_encoder::InputEncoder;
 pub use terminal_buffer::TerminalBuffer;

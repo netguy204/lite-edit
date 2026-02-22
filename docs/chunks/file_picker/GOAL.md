@@ -29,7 +29,7 @@ code_references:
   - ref: crates/editor/src/editor_state.rs#EditorState::handle_mouse_selector
     implements: "Mouse forwarding to SelectorWidget with overlay geometry"
   - ref: crates/editor/src/editor_state.rs#EditorState::handle_scroll
-    implements: "Scroll event ignoring when selector is open"
+    implements: "Scroll event routing to selector widget when selector is open"
   - ref: crates/editor/src/editor_state.rs#EditorState::tick_picker
     implements: "Streaming refresh mechanism for background file index updates"
   - ref: crates/editor/src/main.rs#EditorController::toggle_cursor_blink

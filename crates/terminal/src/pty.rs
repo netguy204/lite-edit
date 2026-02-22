@@ -172,16 +172,38 @@ impl PtyHandle {
             Err(_) => Some(-1), // Error checking status, assume dead
         }
     }
+
+    /// Kills the child process.
+    ///
+    /// This sends SIGKILL to immediately terminate the process.
+    pub fn kill(&mut self) -> std::io::Result<()> {
+        self.child
+            .kill()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }
+
+    /// Returns the process ID of the child process, if available.
+    ///
+    /// This is used for sending signals (e.g., SIGTERM for graceful shutdown).
+    pub fn process_id(&self) -> Option<u32> {
+        self.child.process_id()
+    }
 }
 
 impl Drop for PtyHandle {
     fn drop(&mut self) {
+        // Kill the process if it's still running to ensure the reader thread
+        // will hit EOF or an error and exit.
+        let _ = self.child.kill();
+
         // The reader thread will exit when it hits EOF or an error
-        // after the PTY is closed. We don't need to explicitly signal it.
-        if let Some(thread) = self.reader_thread.take() {
-            // Give the thread a moment to clean up, but don't block forever
-            let _ = thread.join();
-        }
+        // after the PTY is closed. We don't join it to avoid blocking.
+        // The thread will be detached and cleaned up by the OS.
+        //
+        // Note: We explicitly don't join here because the reader thread
+        // may be blocked on read() and killing the process may not
+        // immediately unblock it on all platforms.
+        self.reader_thread.take();
     }
 }
 
