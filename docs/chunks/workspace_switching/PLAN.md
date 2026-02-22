@@ -8,170 +8,170 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk fixes two bugs in workspace switching:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Y-coordinate flip bug in left rail hit-testing**: The `handle_mouse` method in
+   `EditorState` passes raw NSView coordinates (y=0 at bottom) to
+   `calculate_left_rail_geometry`, which produces tile rects in top-down screen
+   space (y=0 at top, starts at `TOP_MARGIN`). The fix is to flip the y-coordinate
+   before hit-testing: `let flipped_y = self.view_height - mouse_y as f32`.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **Missing Cmd+[/] workspace cycling shortcuts**: Following the existing pattern
+   for `Cmd+Shift+[/]` tab cycling (`prev_tab`/`next_tab`), we add `Cmd+[` and
+   `Cmd+]` (without Shift) to cycle through workspaces.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/workspace_switching/GOAL.md)
-with references to the files that you expect to touch.
--->
+Both fixes are straightforward and follow existing patterns in the codebase:
+- The y-flip pattern is already used in `handle_mouse_selector` (line 1032)
+- The bracket key handling is already in place for tab cycling (lines 373-387)
+- The `prev_tab`/`next_tab` pattern (lines 1518-1540) is directly applicable
+
+Tests will follow TDD per TESTING_PHILOSOPHY.md: write failing tests first, then
+implement the fix, then verify the tests pass.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems are relevant to this chunk. This is a localized bug fix in
+`editor_state.rs` that doesn't touch cross-cutting patterns.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add unit test for y-coordinate flip in left rail hit-testing
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Write a test that verifies clicking on a workspace tile correctly switches
+workspaces. The test should:
+- Create an EditorState with multiple workspaces
+- Set a known view_height
+- Simulate a mouse click at coordinates that should hit workspace 1 (not 0)
+- Assert that the active workspace changes
 
-Example:
+The test will fail initially because the y-coordinate is not being flipped.
 
-### Step 1: Define the SegmentHeader struct
+Location: `crates/editor/src/editor_state.rs` in the `#[cfg(test)]` module
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Fix the y-coordinate flip bug in handle_mouse
 
-Location: src/segment/format.rs
+In `EditorState::handle_mouse`, before checking `tile_rect.contains()`, flip the
+y-coordinate to convert from NSView coordinates (bottom-left origin) to the
+top-down screen space used by `calculate_left_rail_geometry`:
 
-### Step 2: Implement header serialization
+```rust
+// Current (buggy):
+if tile_rect.contains(mouse_x as f32, mouse_y as f32) {
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+// Fixed:
+let flipped_y = self.view_height - mouse_y as f32;
+if tile_rect.contains(mouse_x as f32, flipped_y) {
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `crates/editor/src/editor_state.rs`, in `handle_mouse` method around
+lines 973-974
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 3: Add unit tests for prev_workspace and next_workspace methods
+
+Write tests for workspace cycling:
+- `test_next_workspace_cycles_forward` - cycles 0→1→2→0
+- `test_prev_workspace_cycles_backward` - cycles 2→1→0→2
+- `test_next_workspace_single_workspace_is_noop` - no change with 1 workspace
+- `test_prev_workspace_single_workspace_is_noop` - no change with 1 workspace
+
+These tests mirror the existing `test_next_tab_cycles_forward` and
+`test_prev_tab_cycles_backward` tests.
+
+Location: `crates/editor/src/editor_state.rs` in the `#[cfg(test)]` module
+
+### Step 4: Implement prev_workspace and next_workspace methods
+
+Add two new public methods to `EditorState`:
+
+```rust
+/// Cycles to the next workspace (wraps from last to first).
+///
+/// Does nothing if there's only one workspace.
+pub fn next_workspace(&mut self) {
+    let count = self.editor.workspace_count();
+    if count > 1 {
+        let next = (self.editor.active_workspace + 1) % count;
+        self.switch_workspace(next);
+    }
+}
+
+/// Cycles to the previous workspace (wraps from first to last).
+///
+/// Does nothing if there's only one workspace.
+pub fn prev_workspace(&mut self) {
+    let count = self.editor.workspace_count();
+    if count > 1 {
+        let prev = if self.editor.active_workspace == 0 {
+            count - 1
+        } else {
+            self.editor.active_workspace - 1
+        };
+        self.switch_workspace(prev);
+    }
+}
+```
+
+Location: `crates/editor/src/editor_state.rs`, near the existing `switch_workspace`
+method (around line 1439)
+
+### Step 5: Add keyboard shortcut tests for Cmd+[ and Cmd+]
+
+Write tests that verify the keyboard shortcuts trigger workspace cycling:
+- `test_cmd_right_bracket_next_workspace` - Cmd+] cycles to next workspace
+- `test_cmd_left_bracket_prev_workspace` - Cmd+[ cycles to previous workspace
+
+These tests mirror `test_cmd_shift_right_bracket_next_tab` and
+`test_cmd_shift_left_bracket_prev_tab`.
+
+Location: `crates/editor/src/editor_state.rs` in the `#[cfg(test)]` module
+
+### Step 6: Add Cmd+[ and Cmd+] keyboard shortcuts
+
+In `handle_key`, add handlers for `Cmd+[` and `Cmd+]` (without Shift) to call
+`prev_workspace` and `next_workspace`. Add these right after the existing
+`Cmd+Shift+[/]` handlers:
+
+```rust
+// Cmd+] (without Shift) cycles to next workspace
+if let Key::Char(']') = event.key {
+    if !event.modifiers.shift {
+        self.next_workspace();
+        return;
+    }
+}
+
+// Cmd+[ (without Shift) cycles to previous workspace
+if let Key::Char('[') = event.key {
+    if !event.modifiers.shift {
+        self.prev_workspace();
+        return;
+    }
+}
+```
+
+Location: `crates/editor/src/editor_state.rs`, in `handle_key` after the
+`Cmd+Shift+[/]` handlers (around line 387)
+
+### Step 7: Run tests and verify
+
+Run `cargo test` to verify all new and existing tests pass. Specifically:
+- All new workspace switching tests pass
+- Existing tab cycling tests (`test_cmd_shift_right_bracket_next_tab`, etc.) still pass
+- Existing workspace tests still pass
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+This chunk depends on the `workspace_model` chunk, which is already ACTIVE.
+No external dependencies need to be added.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Keyboard shortcut conflict**: Cmd+[ and Cmd+] may conflict with other macOS
+  text editing conventions. However, these are standard browser/IDE shortcuts for
+  navigation (back/forward in Safari, indent/outdent in some editors), so using
+  them for workspace cycling is a reasonable choice. The existing Cmd+Shift+[/]
+  shortcuts for tab cycling suggest this pattern is intentional.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
-
-## Deviations
-
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+- **Y-flip correctness verification**: The fix assumes `view_height` is always
+  correctly updated before `handle_mouse` is called. This is already the case for
+  other y-flip operations in the codebase (e.g., `handle_mouse_selector`).
