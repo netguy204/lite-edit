@@ -1,0 +1,14 @@
+# Chunk: docs/chunks/terminal_input_encoding - Shared input types
+#
+# This crate provides input event types (KeyEvent, MouseEvent, Modifiers)
+# that are shared between the editor and terminal crates.
+
+[package]
+name = "lite-edit-input"
+version.workspace = true
+edition.workspace = true
+description = "Input event types for lite-edit"
+license.workspace = true
+
+[dependencies]
+# No dependencies - this is a pure types crate
