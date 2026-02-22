@@ -216,6 +216,7 @@ impl EditorController {
     ///
     /// After processing the event, checks if the app should quit (Cmd+Q)
     /// and terminates the application if so.
+    // Chunk: docs/chunks/quit_command - Checks quit flag and triggers app termination
     fn handle_key(&mut self, event: KeyEvent) {
         self.state.handle_key(event);
 
@@ -223,6 +224,14 @@ impl EditorController {
         if self.state.should_quit {
             self.terminate_app();
             return;
+        }
+
+        // Chunk: docs/chunks/terminal_input_render_bug - Poll immediately after input
+        // For terminal tabs, poll PTY output immediately after sending input
+        // to ensure echoed characters appear without waiting for the next timer tick.
+        let terminal_dirty = self.state.poll_agents();
+        if terminal_dirty.is_dirty() {
+            self.state.dirty_region.merge(terminal_dirty);
         }
 
         // Poll for file index updates so picker results stream in on every keystroke
@@ -239,6 +248,13 @@ impl EditorController {
     fn handle_mouse(&mut self, event: MouseEvent) {
         self.state.handle_mouse(event);
 
+        // Chunk: docs/chunks/terminal_input_render_bug - Poll immediately after input
+        // For terminal tabs, poll PTY output immediately after mouse input.
+        let terminal_dirty = self.state.poll_agents();
+        if terminal_dirty.is_dirty() {
+            self.state.dirty_region.merge(terminal_dirty);
+        }
+
         // Poll for file index updates so picker results stream in on mouse interaction
         // Chunk: docs/chunks/picker_eager_index
         let picker_dirty = self.state.tick_picker();
@@ -249,11 +265,19 @@ impl EditorController {
         self.render_if_dirty();
     }
 
+    // Chunk: docs/chunks/viewport_scrolling - Controller scroll event forwarding
     /// Handles a scroll event by forwarding to the editor state.
     ///
     /// Scroll events only affect the viewport position, not the cursor.
     fn handle_scroll(&mut self, delta: ScrollDelta) {
         self.state.handle_scroll(delta);
+
+        // Chunk: docs/chunks/terminal_input_render_bug - Poll immediately after input
+        // For terminal tabs, poll PTY output immediately after scroll input.
+        let terminal_dirty = self.state.poll_agents();
+        if terminal_dirty.is_dirty() {
+            self.state.dirty_region.merge(terminal_dirty);
+        }
 
         // Poll for file index updates so picker results stream in on scroll
         // Chunk: docs/chunks/picker_eager_index
@@ -270,6 +294,7 @@ impl EditorController {
     /// This is called when the user presses Cmd+Q. It obtains a MainThreadMarker
     /// (which is safe since EditorController only runs on the main thread) and
     /// calls NSApplication::terminate to perform a clean shutdown.
+    // Chunk: docs/chunks/quit_command - Calls NSApplication::terminate for clean macOS shutdown
     fn terminate_app(&self) {
         // SAFETY: EditorController is only accessed from the main thread
         // (via callbacks from the NSRunLoop), so MainThreadMarker::new() will succeed.
@@ -279,13 +304,21 @@ impl EditorController {
         app.terminate(None);
     }
 
-    /// Toggles cursor blink, checks for picker updates, and re-renders if needed.
+    /// Toggles cursor blink, polls PTY events, checks for picker updates, and re-renders if needed.
     /// Chunk: docs/chunks/file_picker - Integration of tick_picker into timer-driven refresh loop
     fn toggle_cursor_blink(&mut self) {
         // Toggle cursor blink
         let cursor_dirty = self.state.toggle_cursor_blink();
         if cursor_dirty.is_dirty() {
             self.state.dirty_region.merge(cursor_dirty);
+        }
+
+        // Chunk: docs/chunks/terminal_input_render_bug - Poll PTY events
+        // Poll all agent and standalone terminal PTY events.
+        // This processes shell output and updates TerminalBuffer content.
+        let terminal_dirty = self.state.poll_agents();
+        if terminal_dirty.is_dirty() {
+            self.state.dirty_region.merge(terminal_dirty);
         }
 
         // Check for picker streaming updates

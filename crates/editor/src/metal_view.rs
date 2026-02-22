@@ -300,6 +300,7 @@ define_class!(
             }
         }
 
+        // Chunk: docs/chunks/viewport_scrolling - macOS scrollWheel event handler
         /// Handle scroll wheel events (trackpad, mouse wheel)
         #[unsafe(method(scrollWheel:))]
         fn __scroll_wheel(&self, event: &NSEvent) {
@@ -438,6 +439,7 @@ impl MetalView {
         *self.ivars().mouse_handler.borrow_mut() = Some(Box::new(handler));
     }
 
+    // Chunk: docs/chunks/viewport_scrolling - Scroll handler registration
     /// Sets the scroll event handler callback
     ///
     /// The handler will be called for each scrollWheel event, with the
@@ -527,6 +529,7 @@ impl MetalView {
 
     /// Converts an NSEvent scroll wheel event to our ScrollDelta type
     ///
+    // Chunk: docs/chunks/viewport_scrolling - NSEvent to ScrollDelta conversion
     /// macOS scroll wheel events provide delta values in points. For trackpads
     /// with "natural scrolling" enabled (the default), scrolling down (content
     /// moves up) produces positive deltaY values.

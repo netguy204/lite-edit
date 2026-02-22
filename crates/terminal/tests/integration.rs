@@ -298,3 +298,74 @@ fn test_cursor_with_cold_scrollback() {
         cold_count
     );
 }
+
+// =============================================================================
+// Terminal input/output integration tests
+// Chunk: docs/chunks/terminal_input_render_bug - PTY polling integration
+// =============================================================================
+
+/// Test that a shell prompt appears after spawning a shell.
+///
+/// This verifies the end-to-end flow: shell spawn → PTY output → poll_events → buffer content.
+#[test]
+fn test_shell_prompt_appears() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Use /bin/sh as it's always available
+    terminal.spawn_shell("/bin/sh", Path::new("/tmp")).unwrap();
+
+    // Poll until we see a prompt ($ or #)
+    let mut attempts = 0;
+    while attempts < 100 {
+        if terminal.poll_events() {
+            for line in 0..terminal.line_count() {
+                if let Some(styled) = terminal.styled_line(line) {
+                    let text: String = styled.spans.iter().map(|s| &s.text[..]).collect();
+                    // Look for common shell prompt characters
+                    if text.contains('$') || text.contains('#') || text.contains('%') {
+                        return; // Success!
+                    }
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        attempts += 1;
+    }
+
+    panic!("No shell prompt appeared within timeout");
+}
+
+/// Test that PTY input/output round-trip works.
+///
+/// This verifies: write_input → PTY → poll_events → buffer contains echoed output.
+#[test]
+fn test_pty_input_output_roundtrip() {
+    // Spawn a cat process that echoes input
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+    terminal
+        .spawn_command("cat", &[], Path::new("/tmp"))
+        .unwrap();
+
+    // Write input
+    terminal.write_input(b"hello\n").unwrap();
+
+    // Poll until we see output (with timeout)
+    let mut attempts = 0;
+    while attempts < 50 {
+        if terminal.poll_events() {
+            // Check if "hello" appears in the buffer
+            for line in 0..terminal.line_count() {
+                if let Some(styled) = terminal.styled_line(line) {
+                    let text: String = styled.spans.iter().map(|s| &s.text[..]).collect();
+                    if text.contains("hello") {
+                        return; // Success!
+                    }
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        attempts += 1;
+    }
+
+    panic!("Did not see echoed input within timeout");
+}
