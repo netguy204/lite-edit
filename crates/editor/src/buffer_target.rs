@@ -530,6 +530,7 @@ impl FocusTarget for BufferFocusTarget {
     }
 }
 
+// Chunk: docs/chunks/mouse_drag_selection - Coordinate conversion with edge case clamping
 /// Converts pixel coordinates to buffer position.
 ///
 /// This is the core math for mouse click → cursor positioning:
