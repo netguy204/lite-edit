@@ -8,153 +8,153 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk adds comprehensive tests to verify that the selector's hit-testing
+(click → item selection) is correct across the full space of scroll positions,
+item heights, and list geometries. The prior chunks (`selector_coord_flip`,
+`selector_row_scroller`, `selector_smooth_render`) implemented the fixes; this
+chunk proves they work and guards against regression.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Testing strategy:**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. **Parameterised property tests** — Verify the core invariant: clicking the
+   pixel centre of any rendered row selects exactly that row. We parameterise
+   over:
+   - Multiple `scroll_offset_px` values (including non-zero fractional parts)
+   - A range of `item_height` values
+   - Clicking first, middle, and last visible items
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/selector_hittest_tests/GOAL.md)
-with references to the files that you expect to touch.
--->
+2. **Regression tests for original bugs** — Explicit tests that would have
+   failed before the fixes:
+   - **Coordinate-flip bug**: A click near the top of the overlay (large raw y,
+     small flipped y) selects the topmost visible item, not an out-of-bounds
+     index.
+   - **Scroll-rounding bug**: Accumulating small scroll deltas (each < item_height)
+     preserves the fractional parts without rounding loss.
 
-## Subsystem Considerations
+3. **Boundary condition tests** — Edge cases where off-by-one errors are most
+   likely:
+   - Clicking exactly on a row boundary selects that row, not the previous one.
+   - Clicking when `scroll_fraction_px == 0` (whole-row alignment) works.
+   - Clicking below the last rendered item is a no-op.
+   - Clicking above `list_origin_y` is a no-op.
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+Following `docs/trunk/TESTING_PHILOSOPHY.md`, all tests are pure unit tests
+against `SelectorWidget` — no Metal, no macOS, no mocking. The tests exercise
+the actual `handle_mouse` method with varying geometry parameters, asserting on
+`selected_index()` after each event.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Location: `crates/editor/src/selector.rs`, inside the existing `#[cfg(test)]`
+module.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add parameterised centre-click property test
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create a test function `click_row_centre_selects_that_row` that verifies:
+for each combination of:
+- `scroll_offset_px` ∈ {0.0, 8.5, 17.2} (three fractional values)
+- `item_height` ∈ {16.0, 20.0} (two common heights)
+- `clicked_visible_row` ∈ {0, visible_rows/2, visible_rows-1}
 
-Example:
-
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+compute the pixel centre of the rendered row:
+```rust
+let y = list_origin_y - scroll_fraction_px + clicked_visible_row * item_height + item_height / 2.0;
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Call `handle_mouse((x, y), MouseEventKind::Down, item_height, list_origin_y)` and
+assert `selected_index() == first_visible_item() + clicked_visible_row`.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+This test parameterises using nested loops (not a separate test framework), keeping
+dependencies minimal.
+
+Location: `crates/editor/src/selector.rs` → `mod tests`
+
+### Step 2: Add coordinate-flip regression test
+
+Create a test function `coordinate_flip_regression_raw_y_near_top_selects_topmost`
+that simulates a click on the selector list where the raw macOS y-coordinate is
+near `view_height` (i.e., the top of the screen):
+
+1. Set up a widget with 20 items, visible_size=80px, item_height=16px.
+2. Scroll to offset 0 so first_visible_item=0.
+3. The renderer places item 0 at y=`list_origin_y` (e.g., 100.0).
+4. To click on item 0's centre, the flipped y is `list_origin_y + item_height/2`.
+   If we were receiving raw macOS y, the correct raw y would be:
+   `raw_y = view_height - flipped_y`
+5. But `handle_mouse` expects already-flipped coordinates (done by
+   `handle_mouse_selector`). So we pass `(x, list_origin_y + item_height/2.0)`
+   and assert selected_index=0.
+
+This test documents the coordinate system convention and guards against
+re-introducing the flip bug.
+
+Location: `crates/editor/src/selector.rs` → `mod tests`
+
+### Step 3: Add scroll-rounding regression test
+
+Create a test function `scroll_rounding_regression_sub_row_deltas_accumulate`
+that verifies fractional scroll deltas accumulate without rounding:
+
+1. Set up a widget with 20 items, item_height=16px (from default FontMetrics).
+2. Apply 10 scroll deltas of `0.4 * item_height = 6.4` pixels each.
+3. Assert total `scroll_offset_px == 64.0` (exactly 4 rows).
+4. Assert `first_visible_item() == 4`.
+5. Assert `scroll_fraction_px() == 0.0` (64.0 mod 16.0 = 0).
+
+This would have failed before `selector_row_scroller` because each delta would
+have been rounded to the nearest integer row (0), producing zero net scroll.
+
+Location: `crates/editor/src/selector.rs` → `mod tests`
+
+### Step 4: Add boundary condition tests
+
+Create three boundary tests:
+
+1. **`click_on_row_boundary_top_pixel_selects_that_row`** —
+   Click at `y = list_origin_y - scroll_fraction_px + row * item_height` (the
+   exact top pixel of a row). Assert it selects `first_visible_item() + row`.
+
+2. **`click_when_scroll_fraction_is_zero`** —
+   Set scroll_offset_px to an exact multiple of item_height (e.g., 32.0).
+   Assert `scroll_fraction_px() == 0.0`. Click the centre of row 0 and assert
+   selection is correct.
+
+3. **`click_below_last_rendered_item_is_noop`** —
+   With 10 items and 5 visible, click at y beyond the last item's bottom edge.
+   Assert `selected_index()` is unchanged.
+
+4. **`click_above_list_origin_is_noop`** —
+   Click at y < list_origin_y. Assert `selected_index()` is unchanged.
+
+Location: `crates/editor/src/selector.rs` → `mod tests`
+
+### Step 5: Verify all tests pass and no new suppressions
+
+Run `cargo test -p editor` and confirm:
+- All new tests pass.
+- All existing selector tests continue to pass.
+- No new `#[allow(...)]` suppressions were added.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **selector_row_scroller** (ACTIVE) — Provides `RowScroller` integration in
+  `SelectorWidget`, including `scroll_fraction_px()` and `first_visible_item()`.
+- **selector_smooth_render** (ACTIVE) — Ensures the renderer's placement formula
+  matches the hit-testing formula (both use `list_y - scroll_fraction_px`).
+- **selector_coord_flip** (HISTORICAL) — The Y-coordinate flip fix in
+  `handle_mouse_selector` that this chunk's regression test guards.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Test coverage vs. execution time** — The parameterised test uses nested loops
+  rather than a property-testing framework like `proptest`. This keeps
+  dependencies minimal but limits exploration. The chosen parameter values
+  (3 scroll offsets × 2 item heights × 3 row positions = 18 cases) cover the
+  interesting boundaries without excessive runtime.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Floating-point precision** — The tests use `f32` arithmetic for scroll
+  offsets and positions. Assertions should use approximate equality where
+  exact match isn't expected (e.g., `(actual - expected).abs() < 0.001`).
 
 ## Deviations
 

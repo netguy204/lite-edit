@@ -137,10 +137,10 @@ impl SelectorWidget {
     // Chunk: docs/chunks/file_picker_scroll - Setter for visible area height
     /// Updates the visible size from the pixel height of the list area.
     ///
-    /// This forwards to `RowScroller::update_size(height_px)`, which computes
-    /// visible_rows from `height_px / row_height`.
+    /// This forwards to `RowScroller::update_size(height_px, row_count)`, which computes
+    /// visible_rows from `height_px / row_height` and clamps scroll offset.
     pub fn update_visible_size(&mut self, height_px: f32) {
-        self.scroll.update_size(height_px);
+        self.scroll.update_size(height_px, self.items.len());
     }
 
     /// Sets the row height (item height) in pixels.
@@ -151,7 +151,7 @@ impl SelectorWidget {
         let offset = self.scroll.scroll_offset_px();
         let visible_rows = self.scroll.visible_rows();
         self.scroll = RowScroller::new(height);
-        self.scroll.update_size(visible_rows as f32 * height);
+        self.scroll.update_size(visible_rows as f32 * height, self.items.len());
         self.scroll.set_scroll_offset_px(offset, self.items.len());
     }
 
@@ -1247,5 +1247,333 @@ mod tests {
         let outcome = widget.handle_mouse((50.0, 5.0), MouseEventKind::Down, 16.0, 0.0);
         assert_eq!(outcome, SelectorOutcome::Pending);
         assert_eq!(widget.selected_index(), 1);
+    }
+
+    // =========================================================================
+    // Chunk: selector_hittest_tests - Parameterised hit-testing property tests
+    // =========================================================================
+
+    /// Step 1: Parameterised property test verifying that clicking the pixel centre
+    /// of any rendered row selects exactly that row.
+    ///
+    /// This parameterises over:
+    /// - Multiple scroll_offset_px values (including non-zero fractional parts)
+    /// - A range of item_height values
+    /// - Clicking first, middle, and last visible items
+    ///
+    /// Chunk: docs/chunks/selector_hittest_tests
+    #[test]
+    fn click_row_centre_selects_that_row() {
+        // Parameters: scroll offsets with fractional parts
+        let scroll_offsets = [0.0_f64, 8.5, 17.2];
+        // Parameters: item heights
+        let item_heights = [16.0_f64, 20.0];
+        // Visible rows for the test
+        let visible_rows = 5_usize;
+        // Test clicking first, middle, and last visible rows
+        let clicked_rows = [0_usize, visible_rows / 2, visible_rows - 1];
+        let list_origin_y = 100.0; // arbitrary non-zero origin
+
+        for &scroll_offset_px in &scroll_offsets {
+            for &item_height in &item_heights {
+                for &clicked_visible_row in &clicked_rows {
+                    // Set up a fresh widget for each test case
+                    let mut widget = SelectorWidget::new();
+                    widget.set_item_height(item_height as f32);
+                    widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
+                    widget.update_visible_size((visible_rows as f64 * item_height) as f32);
+
+                    // Apply the scroll offset
+                    widget.handle_scroll(scroll_offset_px);
+
+                    let first_visible = widget.first_visible_item();
+                    let scroll_frac = widget.scroll_fraction_px() as f64;
+
+                    // Compute the pixel centre of the rendered row
+                    // Renderer places row i at: y = list_origin_y - scroll_fraction_px + i * item_height
+                    // Centre is at y + item_height / 2
+                    let y = list_origin_y - scroll_frac
+                        + clicked_visible_row as f64 * item_height
+                        + item_height / 2.0;
+
+                    let outcome = widget.handle_mouse(
+                        (50.0, y),
+                        MouseEventKind::Down,
+                        item_height,
+                        list_origin_y,
+                    );
+
+                    let expected_index = first_visible + clicked_visible_row;
+
+                    assert_eq!(
+                        outcome,
+                        SelectorOutcome::Pending,
+                        "scroll={}, height={}, row={}: expected Pending",
+                        scroll_offset_px, item_height, clicked_visible_row
+                    );
+                    assert_eq!(
+                        widget.selected_index(),
+                        expected_index,
+                        "scroll={}, height={}, clicked_row={}: expected index {}, got {}",
+                        scroll_offset_px, item_height, clicked_visible_row,
+                        expected_index, widget.selected_index()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Step 2: Regression test for the coordinate-flip bug.
+    ///
+    /// This test documents and guards the coordinate system convention:
+    /// `handle_mouse` expects already-flipped coordinates (done by `handle_mouse_selector`
+    /// in buffer_target.rs via `view_height - raw_y`).
+    ///
+    /// A click near the top of the overlay (in flipped coordinates, y is small and near
+    /// `list_origin_y`) must select a row near the top of the list. Before the
+    /// `selector_coord_flip` fix, raw macOS y-coordinates were passed directly, causing
+    /// clicks near the top of the screen to produce out-of-bounds indices.
+    ///
+    /// Chunk: docs/chunks/selector_hittest_tests
+    #[test]
+    fn coordinate_flip_regression_raw_y_near_top_selects_topmost() {
+        let mut widget = SelectorWidget::new();
+        let item_height = 16.0_f64;
+        widget.set_item_height(item_height as f32);
+
+        // 20 items, 5 visible (80px visible area)
+        widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
+        widget.update_visible_size(80.0);
+
+        // Scroll is at 0, so first_visible_item = 0
+        assert_eq!(widget.first_visible_item(), 0);
+
+        // The list starts at y = list_origin_y (e.g., 100.0)
+        // Item 0 is rendered from y=100 to y=116
+        // Item 0's centre is at y = 100 + 8 = 108
+        let list_origin_y = 100.0_f64;
+        let item_0_centre = list_origin_y + item_height / 2.0;
+
+        // Click on item 0's centre using flipped coordinates (which handle_mouse expects)
+        let outcome = widget.handle_mouse(
+            (50.0, item_0_centre),
+            MouseEventKind::Down,
+            item_height,
+            list_origin_y,
+        );
+
+        assert_eq!(outcome, SelectorOutcome::Pending);
+        assert_eq!(
+            widget.selected_index(),
+            0,
+            "Click near top of list (flipped y={}) should select item 0, not {}",
+            item_0_centre,
+            widget.selected_index()
+        );
+
+        // Verify that clicking near the top edge (just inside item 0) also selects item 0
+        let near_top = list_origin_y + 1.0;
+        widget.handle_mouse((50.0, near_top), MouseEventKind::Down, item_height, list_origin_y);
+        assert_eq!(
+            widget.selected_index(),
+            0,
+            "Click just below list_origin_y should select item 0"
+        );
+    }
+
+    /// Step 3: Regression test for the scroll-rounding bug.
+    ///
+    /// Before `selector_row_scroller`, each scroll delta was rounded to the nearest
+    /// integer row, so a sequence of sub-row deltas (e.g., 0.4 * item_height each)
+    /// would produce zero net scroll.
+    ///
+    /// This test verifies that fractional scroll deltas accumulate correctly:
+    /// 10 deltas of `0.4 * item_height` should produce `4.0 * item_height` total
+    /// (exactly 4 rows).
+    ///
+    /// Chunk: docs/chunks/selector_hittest_tests
+    #[test]
+    fn scroll_rounding_regression_sub_row_deltas_accumulate() {
+        let mut widget = SelectorWidget::new();
+        // Default item_height from FontMetrics is 16.0
+        let item_height = 16.0_f32;
+        widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
+        widget.update_visible_size(80.0); // 5 visible rows
+
+        assert_eq!(widget.first_visible_item(), 0);
+        assert!((widget.scroll_fraction_px() - 0.0).abs() < 0.001);
+
+        // Apply 10 scroll deltas of 0.4 * item_height = 6.4 pixels each
+        let delta = 0.4 * item_height as f64;
+        for _ in 0..10 {
+            widget.handle_scroll(delta);
+        }
+
+        // Total scroll should be 10 * 6.4 = 64.0 pixels = 4 rows exactly
+        let expected_offset = 64.0_f32;
+        let actual_offset = widget.first_visible_item() as f32 * item_height
+            + widget.scroll_fraction_px();
+
+        assert!(
+            (actual_offset - expected_offset).abs() < 0.001,
+            "Expected scroll_offset_px = {}, got first_visible={} + frac={}",
+            expected_offset,
+            widget.first_visible_item(),
+            widget.scroll_fraction_px()
+        );
+
+        // Verify derived values
+        assert_eq!(
+            widget.first_visible_item(),
+            4,
+            "Expected first_visible_item = 4 (64px / 16px)"
+        );
+        assert!(
+            widget.scroll_fraction_px().abs() < 0.001,
+            "Expected scroll_fraction_px = 0.0 (64.0 mod 16.0), got {}",
+            widget.scroll_fraction_px()
+        );
+    }
+
+    // =========================================================================
+    // Step 4: Boundary condition tests
+    // =========================================================================
+
+    /// Clicking exactly on a row boundary (top pixel of a row) selects that row,
+    /// not the previous one.
+    ///
+    /// Chunk: docs/chunks/selector_hittest_tests
+    #[test]
+    fn click_on_row_boundary_top_pixel_selects_that_row() {
+        let mut widget = SelectorWidget::new();
+        let item_height = 16.0_f64;
+        widget.set_item_height(item_height as f32);
+        widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
+        widget.update_visible_size(80.0); // 5 visible rows
+
+        // Scroll to a fractional position (8.5 pixels)
+        widget.handle_scroll(8.5);
+        let first_visible = widget.first_visible_item();
+        let scroll_frac = widget.scroll_fraction_px() as f64;
+        let list_origin_y = 100.0_f64;
+
+        // Test clicking the exact top pixel of row 2 (visible row index 2)
+        let row = 2_usize;
+        // Row starts at: list_origin_y - scroll_fraction_px + row * item_height
+        let row_top_y = list_origin_y - scroll_frac + row as f64 * item_height;
+
+        widget.handle_mouse((50.0, row_top_y), MouseEventKind::Down, item_height, list_origin_y);
+
+        let expected_index = first_visible + row;
+        assert_eq!(
+            widget.selected_index(),
+            expected_index,
+            "Click on exact top pixel of row {} should select item {}, got {}",
+            row,
+            expected_index,
+            widget.selected_index()
+        );
+    }
+
+    /// When scroll_fraction_px == 0 (whole-row alignment), clicking works correctly.
+    ///
+    /// Chunk: docs/chunks/selector_hittest_tests
+    #[test]
+    fn click_when_scroll_fraction_is_zero() {
+        let mut widget = SelectorWidget::new();
+        let item_height = 16.0_f64;
+        widget.set_item_height(item_height as f32);
+        widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
+        widget.update_visible_size(80.0); // 5 visible rows
+
+        // Scroll to an exact multiple of item_height (32.0 = 2 rows)
+        widget.handle_scroll(32.0);
+        assert_eq!(widget.first_visible_item(), 2);
+        assert!(
+            widget.scroll_fraction_px().abs() < 0.001,
+            "Expected scroll_fraction_px == 0, got {}",
+            widget.scroll_fraction_px()
+        );
+
+        let list_origin_y = 100.0_f64;
+
+        // Click the centre of visible row 0 (which is item 2)
+        let y = list_origin_y + item_height / 2.0;
+        widget.handle_mouse((50.0, y), MouseEventKind::Down, item_height, list_origin_y);
+
+        assert_eq!(
+            widget.selected_index(),
+            2,
+            "With scroll_fraction=0, clicking row 0 centre should select item 2"
+        );
+    }
+
+    /// Clicking below the last rendered item is a no-op.
+    ///
+    /// Chunk: docs/chunks/selector_hittest_tests
+    #[test]
+    fn click_below_last_rendered_item_is_noop() {
+        let mut widget = SelectorWidget::new();
+        let item_height = 16.0_f64;
+        widget.set_item_height(item_height as f32);
+        // Only 10 items, 5 visible
+        widget.set_items((0..10).map(|i| format!("item{}", i)).collect());
+        widget.update_visible_size(80.0); // 5 visible rows
+
+        // Navigate to item 7 first, which will auto-scroll to keep it visible
+        for _ in 0..7 {
+            widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
+        }
+        assert_eq!(widget.selected_index(), 7);
+        // After navigating to item 7, the viewport should have scrolled
+        // so item 7 is visible (first_visible should be around 3 or more)
+
+        let list_origin_y = 100.0_f64;
+
+        // Click below the last item in the list (item 9)
+        // With 10 items and we're showing items starting from first_visible,
+        // we click at a y position that would map to a row index >= 10
+        // The visible rows start at list_origin_y, so clicking far below
+        // should be out of bounds
+        let far_below_y = list_origin_y + 20.0 * item_height; // Way beyond item 9
+
+        let outcome = widget.handle_mouse((50.0, far_below_y), MouseEventKind::Down, item_height, list_origin_y);
+
+        assert_eq!(outcome, SelectorOutcome::Pending);
+        assert_eq!(
+            widget.selected_index(),
+            7,
+            "Click below last item should be a no-op, selection should remain at 7"
+        );
+    }
+
+    /// Clicking above list_origin_y is a no-op.
+    ///
+    /// Chunk: docs/chunks/selector_hittest_tests
+    #[test]
+    fn click_above_list_origin_is_noop() {
+        let mut widget = SelectorWidget::new();
+        let item_height = 16.0_f64;
+        widget.set_item_height(item_height as f32);
+        widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
+        widget.update_visible_size(80.0); // 5 visible rows
+
+        // Pre-select item 3 to verify click doesn't change it
+        widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
+        widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
+        widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
+        assert_eq!(widget.selected_index(), 3);
+
+        let list_origin_y = 100.0_f64;
+
+        // Click above the list origin (y=50, which is above list_origin_y=100)
+        let outcome = widget.handle_mouse((50.0, 50.0), MouseEventKind::Down, item_height, list_origin_y);
+
+        assert_eq!(outcome, SelectorOutcome::Pending);
+        assert_eq!(
+            widget.selected_index(),
+            3,
+            "Click above list_origin_y should be a no-op, selection should remain at 3"
+        );
     }
 }

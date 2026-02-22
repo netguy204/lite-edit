@@ -1,30 +1,41 @@
 ---
-status: FUTURE
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
-  - crates/editor/src/selector.rs
-  - crates/editor/src/editor_state.rs
-code_references: []
+- crates/editor/src/selector.rs
+- crates/editor/src/editor_state.rs
+code_references:
+  - ref: crates/editor/src/selector.rs#tests::click_row_centre_selects_that_row
+    implements: "Parameterised property test verifying click-to-row-selection across scroll offsets, item heights, and visible positions"
+  - ref: crates/editor/src/selector.rs#tests::coordinate_flip_regression_raw_y_near_top_selects_topmost
+    implements: "Regression test guarding against coordinate-flip bug (flipped Y from macOS coordinates)"
+  - ref: crates/editor/src/selector.rs#tests::scroll_rounding_regression_sub_row_deltas_accumulate
+    implements: "Regression test verifying fractional scroll deltas accumulate without rounding loss"
+  - ref: crates/editor/src/selector.rs#tests::click_on_row_boundary_top_pixel_selects_that_row
+    implements: "Boundary test: clicking exact top pixel of row selects that row"
+  - ref: crates/editor/src/selector.rs#tests::click_when_scroll_fraction_is_zero
+    implements: "Boundary test: clicking works correctly at whole-row scroll alignment"
+  - ref: crates/editor/src/selector.rs#tests::click_below_last_rendered_item_is_noop
+    implements: "Boundary test: out-of-bounds clicks below list are no-ops"
+  - ref: crates/editor/src/selector.rs#tests::click_above_list_origin_is_noop
+    implements: "Boundary test: out-of-bounds clicks above list origin are no-ops"
 narrative: file_picker_viewport
 investigation: null
 subsystems: []
 friction_entries: []
 bug_type: null
-depends_on: ["selector_row_scroller", "selector_smooth_render"]
-created_after: ["renderer_styled_content", "terminal_emulator", "terminal_file_backed_scrollback", "workspace_model", "file_picker_mini_buffer", "mini_buffer_model"]
+depends_on:
+- selector_row_scroller
+- selector_smooth_render
+created_after:
+- renderer_styled_content
+- terminal_emulator
+- terminal_file_backed_scrollback
+- workspace_model
+- file_picker_mini_buffer
+- mini_buffer_model
 ---
-
-<!--
-╔══════════════════════════════════════════════════════════════════════════════╗
-║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
-║                                                                              ║
-║  AGENT INSTRUCTIONS: When editing this file, preserve this entire comment    ║
-║  block. Only modify the frontmatter YAML and the content sections below      ║
-║  (Minor Goal, Success Criteria, Relationship to Parent). Use targeted edits  ║
-║  that replace specific sections rather than rewriting the entire file.       ║
-╚══════════════════════════════════════════════════════════════════════════════╝
--->
 
 # Chunk Goal
 
