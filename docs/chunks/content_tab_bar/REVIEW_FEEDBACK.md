@@ -1,25 +1,25 @@
 # Review Feedback
 
-**Iteration:** 1
+**Iteration:** 2
 **Decision:** FEEDBACK
 
 ## Summary
 
-Most tab bar functionality implemented well, but Cmd+T shortcut for creating new tabs is missing and unread badge clear on tab switch is not implemented.
+Core tab bar functionality is solid but Cmd+T shortcut (new tab) and unread badge clearing on tab switch are still not implemented from iteration 1 feedback.
 
 ## Issues to Address
 
 ### Issue 1: crates/editor/src/editor_state.rs:260-330
 
-**Concern:** Cmd+T shortcut for creating new tabs is not implemented despite being specified in PLAN.md Step 6
+**Concern:** Cmd+T shortcut for creating new tabs is not implemented. This was flagged in iteration 1 and remains unaddressed. PLAN.md Step 6 explicitly requires this shortcut.
 
-**Suggestion:** Add Key::Char('t') handler with command modifier that creates an empty tab via a new_tab() method
+**Suggestion:** Add a Key::Char('t') handler in the command modifier section (around line 286) that calls a new new_empty_tab() method. The method should generate a tab ID, create an empty file tab, add it to the workspace, and mark dirty.
 
 ### Issue 2: crates/editor/src/editor_state.rs:1027-1036
 
-**Concern:** Unread badge not cleared when switching to a tab, as specified in PLAN.md Step 8
+**Concern:** When switching to a tab, the unread flag is not cleared. This was flagged in iteration 1 and remains unaddressed. PLAN.md Step 8 explicitly states 'When switching tabs, call clear_unread() on the newly active tab.'
 
-**Suggestion:** In switch_tab(), set workspace.tabs[index].unread = false after changing active tab
+**Suggestion:** In switch_tab(), after calling workspace.switch_tab(index), add: if let Some(tab) = workspace.tabs.get_mut(index) { tab.unread = false; }
 
 
 ---

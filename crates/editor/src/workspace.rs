@@ -194,6 +194,22 @@ impl Tab {
             TabBuffer::File(buf) => Some((buf, &mut self.viewport)),
         }
     }
+
+    // Chunk: docs/chunks/content_tab_bar - Unread badge support
+    /// Marks the tab as having unread content.
+    ///
+    /// This is typically used for terminal tabs when output arrives while the
+    /// tab is not active.
+    pub fn mark_unread(&mut self) {
+        self.unread = true;
+    }
+
+    /// Clears the unread state.
+    ///
+    /// Called when the tab becomes active to indicate the user has seen the content.
+    pub fn clear_unread(&mut self) {
+        self.unread = false;
+    }
 }
 
 // =============================================================================
@@ -295,10 +311,13 @@ impl Workspace {
 
     /// Switches to the tab at the given index.
     ///
-    /// Does nothing if the index is out of bounds.
+    /// Does nothing if the index is out of bounds. When switching to a new tab,
+    /// clears its unread state.
     pub fn switch_tab(&mut self, index: usize) {
         if index < self.tabs.len() {
             self.active_tab = index;
+            // Chunk: docs/chunks/content_tab_bar - Clear unread when switching tabs
+            self.tabs[index].clear_unread();
         }
     }
 
@@ -710,5 +729,46 @@ mod tests {
         assert_ne!(id1, id2);
         assert_ne!(id2, id3);
         assert_ne!(id1, id3);
+    }
+
+    // =========================================================================
+    // Unread Badge Tests (Chunk: docs/chunks/content_tab_bar)
+    // =========================================================================
+
+    #[test]
+    fn test_tab_mark_unread() {
+        let mut tab = Tab::empty_file(1, TEST_LINE_HEIGHT);
+        assert!(!tab.unread);
+
+        tab.mark_unread();
+        assert!(tab.unread);
+    }
+
+    #[test]
+    fn test_tab_clear_unread() {
+        let mut tab = Tab::empty_file(1, TEST_LINE_HEIGHT);
+        tab.mark_unread();
+        assert!(tab.unread);
+
+        tab.clear_unread();
+        assert!(!tab.unread);
+    }
+
+    #[test]
+    fn test_switch_tab_clears_unread() {
+        let mut ws = Workspace::with_empty_tab(1, 1, "test".to_string(), PathBuf::from("/test"), TEST_LINE_HEIGHT);
+
+        // Add a second tab and mark it unread
+        let mut tab2 = Tab::empty_file(2, TEST_LINE_HEIGHT);
+        tab2.mark_unread();
+        ws.add_tab(tab2);
+
+        // Switch back to first tab
+        ws.switch_tab(0);
+
+        // Now switch to the second tab - its unread state should clear
+        assert!(ws.tabs[1].unread); // Still unread before switch
+        ws.switch_tab(1);
+        assert!(!ws.tabs[1].unread); // Cleared after switch
     }
 }
