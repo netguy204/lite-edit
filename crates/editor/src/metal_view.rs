@@ -179,6 +179,7 @@ define_class!(
             // Currently not needed since we capture modifiers with each key event
         }
 
+        // Chunk: docs/chunks/mouse_click_cursor - NSView mouseDown: override - receives macOS mouse events
         /// Handle mouse down events
         #[unsafe(method(mouseDown:))]
         fn __mouse_down(&self, event: &NSEvent) {
@@ -312,6 +313,7 @@ impl MetalView {
         *self.ivars().key_handler.borrow_mut() = Some(Box::new(handler));
     }
 
+    // Chunk: docs/chunks/mouse_click_cursor - Mouse handler callback registration (parallel to set_key_handler)
     /// Sets the mouse event handler callback
     ///
     /// The handler will be called for each mouseDown event, with the
@@ -335,6 +337,7 @@ impl MetalView {
         Some(KeyEvent::new(key, modifiers))
     }
 
+    // Chunk: docs/chunks/mouse_click_cursor - NSEvent to MouseEvent conversion with scale factor handling
     /// Converts an NSEvent to our MouseEvent type
     ///
     /// # Arguments

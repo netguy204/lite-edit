@@ -470,6 +470,7 @@ impl FocusTarget for BufferFocusTarget {
         }
     }
 
+    // Chunk: docs/chunks/mouse_click_cursor - Mouse event handling: converts click coordinates to cursor position
     // Chunk: docs/chunks/mouse_drag_selection - Mouse drag selection
     // Chunk: docs/chunks/word_double_click_select - Double-click word selection
     // Chunk: docs/chunks/line_wrap_rendering - Wrap-aware hit-testing
@@ -551,6 +552,7 @@ impl FocusTarget for BufferFocusTarget {
     }
 }
 
+// Chunk: docs/chunks/mouse_click_cursor - Core pixel-to-buffer coordinate conversion
 // Chunk: docs/chunks/mouse_drag_selection - Coordinate conversion with edge case clamping
 /// Converts pixel coordinates to buffer position.
 ///
