@@ -169,10 +169,8 @@ impl GlyphAtlas {
         let glyph_id = match font.glyph_for_char(c) {
             Some(id) => id,
             None => {
-                // No glyph for this character; use space as fallback
-                if c != ' ' {
-                    return self.add_glyph(font, ' ');
-                }
+                // No glyph for this character; return false to trigger
+                // fallback to space glyph in ensure_glyph
                 return false;
             }
         };
@@ -582,9 +580,11 @@ mod tests {
             "Non-BMP char should fall back to space glyph"
         );
 
+        // Copy the glyph data to release the borrow
+        let emoji_glyph = glyph.unwrap().clone();
+
         // The glyph returned should be the space glyph (same UV coordinates)
         let space_glyph = atlas.get_glyph(' ').unwrap();
-        let emoji_glyph = glyph.unwrap();
         assert_eq!(
             space_glyph.uv_min, emoji_glyph.uv_min,
             "Non-BMP char should get space glyph UV coords"
@@ -598,13 +598,16 @@ mod tests {
         let mut atlas = GlyphAtlas::new(&device, &font);
 
         // Call ensure_glyph multiple times for the same character
+        // Clone first result to release the borrow before second call
         let glyph1 = atlas.ensure_glyph(&font, '─');
+        assert!(glyph1.is_some());
+        let g1 = glyph1.unwrap().clone();
+
         let glyph2 = atlas.ensure_glyph(&font, '─');
+        assert!(glyph2.is_some());
+        let g2 = glyph2.unwrap();
 
         // Should return the same glyph info (same UV coordinates)
-        assert!(glyph1.is_some() && glyph2.is_some());
-        let g1 = glyph1.unwrap();
-        let g2 = glyph2.unwrap();
         assert_eq!(g1.uv_min, g2.uv_min, "ensure_glyph should be idempotent");
         assert_eq!(g1.uv_max, g2.uv_max, "ensure_glyph should be idempotent");
     }
