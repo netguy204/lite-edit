@@ -77,6 +77,7 @@ fn flags_to_underline_style(flags: Flags) -> UnderlineStyle {
 
 // Chunk: docs/chunks/terminal_styling_fidelity - Terminal cell to Style conversion with proper DIM flag detection
 /// Convert a cell to our Style type.
+// Chunk: docs/chunks/terminal_styling_fidelity - Terminal cell to Style conversion with proper DIM flag detection
 pub fn cell_to_style(cell: &Cell) -> Style {
     let flags = cell.flags;
 
@@ -117,6 +118,7 @@ pub fn cell_to_style(cell: &Cell) -> Style {
 /// This function iterates through cells, coalescing adjacent cells with identical
 /// styles into spans. It handles wide characters (WIDE_CHAR flag) and skips
 /// the spacer cells that follow wide characters (WIDE_CHAR_SPACER flag).
+// Chunk: docs/chunks/terminal_styling_fidelity - Row-to-StyledLine conversion preserving per-span styles
 pub fn row_to_styled_line<'a, I>(cells: I, num_cols: usize) -> StyledLine
 where
     I: IntoIterator<Item = &'a Cell>,
