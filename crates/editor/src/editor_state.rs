@@ -4,6 +4,7 @@
 // Chunk: docs/chunks/quit_command - Cmd+Q quit flag and key interception
 // Chunk: docs/chunks/file_picker - File picker (Cmd+P) integration
 // Chunk: docs/chunks/file_save - File-buffer association and Cmd+S save
+// Chunk: docs/chunks/workspace_model - Workspace model and left rail UI
 //!
 //! Editor state container.
 //!
@@ -21,9 +22,11 @@ use crate::file_index::FileIndex;
 use crate::focus::FocusTarget;
 use crate::font::FontMetrics;
 use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
+use crate::left_rail::{calculate_left_rail_geometry, RAIL_WIDTH};
 use crate::selector::{SelectorOutcome, SelectorWidget};
 use crate::selector_overlay::calculate_overlay_geometry;
 use crate::viewport::Viewport;
+use crate::workspace::Editor;
 use lite_edit_buffer::TextBuffer;
 
 /// Duration in milliseconds for cursor blink interval
@@ -42,19 +45,19 @@ pub enum EditorFocus {
 /// Consolidated editor state.
 ///
 /// This struct holds all mutable state that the main loop needs:
-/// - The text buffer being edited
-/// - The viewport (scroll state)
+/// - The workspace/tab model (Editor) containing buffers and viewports
 /// - The active focus target
 /// - Cursor visibility state
 /// - Dirty region tracking
 /// - Font metrics for pixel-to-position conversion
 /// - Application quit flag
 /// - File picker state (focus, selector widget, file index)
+///
+/// The `buffer`, `viewport`, and `associated_file` are now accessed through
+/// delegate methods that forward to the active workspace's active tab.
 pub struct EditorState {
-    /// The text buffer being edited
-    pub buffer: TextBuffer,
-    /// The viewport for buffer-to-screen coordinate mapping
-    pub viewport: Viewport,
+    /// The workspace/tab model containing all buffers and viewports
+    pub editor: Editor,
     /// Accumulated dirty region for the current event batch
     pub dirty_region: DirtyRegion,
     /// The active focus target (currently always the buffer target)
@@ -82,10 +85,90 @@ pub struct EditorState {
     /// The resolved path from the last selector confirmation
     /// (consumed by file_save chunk for buffer association)
     pub resolved_path: Option<PathBuf>,
-    /// The file currently associated with the buffer (if any).
-    /// When `Some`, this is the path that Cmd+S writes to.
-    pub associated_file: Option<PathBuf>,
 }
+
+// =============================================================================
+// Delegate accessors for backward compatibility
+// =============================================================================
+
+impl EditorState {
+    /// Returns a reference to the active tab's buffer.
+    ///
+    /// # Panics
+    /// Panics if there is no active workspace or active tab (should never happen
+    /// as EditorState always creates at least one workspace with one tab).
+    pub fn buffer(&self) -> &TextBuffer {
+        self.editor
+            .active_workspace()
+            .expect("no active workspace")
+            .active_tab()
+            .expect("no active tab")
+            .as_text_buffer()
+            .expect("active tab is not a file tab")
+    }
+
+    /// Returns a mutable reference to the active tab's buffer.
+    ///
+    /// # Panics
+    /// Panics if there is no active workspace or active tab.
+    pub fn buffer_mut(&mut self) -> &mut TextBuffer {
+        self.editor
+            .active_workspace_mut()
+            .expect("no active workspace")
+            .active_tab_mut()
+            .expect("no active tab")
+            .as_text_buffer_mut()
+            .expect("active tab is not a file tab")
+    }
+
+    /// Returns a reference to the active tab's viewport.
+    ///
+    /// # Panics
+    /// Panics if there is no active workspace or active tab.
+    pub fn viewport(&self) -> &Viewport {
+        &self.editor
+            .active_workspace()
+            .expect("no active workspace")
+            .active_tab()
+            .expect("no active tab")
+            .viewport
+    }
+
+    /// Returns a mutable reference to the active tab's viewport.
+    ///
+    /// # Panics
+    /// Panics if there is no active workspace or active tab.
+    pub fn viewport_mut(&mut self) -> &mut Viewport {
+        &mut self.editor
+            .active_workspace_mut()
+            .expect("no active workspace")
+            .active_tab_mut()
+            .expect("no active tab")
+            .viewport
+    }
+
+    /// Returns a reference to the active tab's associated file path.
+    pub fn associated_file(&self) -> Option<&PathBuf> {
+        self.editor
+            .active_workspace()
+            .and_then(|ws| ws.active_tab())
+            .and_then(|tab| tab.associated_file.as_ref())
+    }
+
+    /// Sets the associated file for the active tab.
+    fn set_associated_file(&mut self, path: Option<PathBuf>) {
+        if let Some(tab) = self.editor
+            .active_workspace_mut()
+            .and_then(|ws| ws.active_tab_mut())
+        {
+            tab.associated_file = path;
+        }
+    }
+}
+
+// =============================================================================
+// Core EditorState methods
+// =============================================================================
 
 impl EditorState {
     /// Creates a new EditorState with the given buffer and font metrics.
@@ -95,9 +178,21 @@ impl EditorState {
     /// * `font_metrics` - Font metrics for pixel-to-position conversion
     pub fn new(buffer: TextBuffer, font_metrics: FontMetrics) -> Self {
         let line_height = font_metrics.line_height as f32;
+
+        // Create editor with one workspace
+        let mut editor = Editor::new(line_height);
+
+        // Replace the empty buffer in the first workspace's first tab with the provided buffer
+        if let Some(ws) = editor.active_workspace_mut() {
+            if let Some(tab) = ws.active_tab_mut() {
+                if let Some(text_buf) = tab.as_text_buffer_mut() {
+                    *text_buf = buffer;
+                }
+            }
+        }
+
         Self {
-            buffer,
-            viewport: Viewport::new(line_height),
+            editor,
             dirty_region: DirtyRegion::None,
             focus_target: BufferFocusTarget::new(),
             cursor_visible: true,
@@ -111,7 +206,6 @@ impl EditorState {
             file_index: None,
             last_cache_version: 0,
             resolved_path: None,
-            associated_file: None,
         }
     }
 
@@ -130,7 +224,7 @@ impl EditorState {
     /// This also updates the stored view_height and view_width for
     /// mouse event coordinate flipping and selector overlay geometry.
     pub fn update_viewport_size(&mut self, window_height: f32) {
-        self.viewport.update_size(window_height);
+        self.viewport_mut().update_size(window_height);
         self.view_height = window_height;
     }
 
@@ -138,7 +232,7 @@ impl EditorState {
     ///
     /// This is the preferred method when both dimensions are available.
     pub fn update_viewport_dimensions(&mut self, window_width: f32, window_height: f32) {
-        self.viewport.update_size(window_height);
+        self.viewport_mut().update_size(window_height);
         self.view_height = window_height;
         self.view_width = window_width;
     }
@@ -174,6 +268,35 @@ impl EditorState {
             if let Key::Char('s') = event.key {
                 self.save_file();
                 return;
+            }
+
+            // Cmd+N (without Shift) creates a new workspace
+            if let Key::Char('n') = event.key {
+                if !event.modifiers.shift {
+                    self.new_workspace();
+                    return;
+                }
+            }
+
+            // Cmd+Shift+W closes the active workspace
+            if let Key::Char('w') = event.key {
+                if event.modifiers.shift {
+                    self.close_active_workspace();
+                    return;
+                }
+            }
+
+            // Cmd+1..9 switches workspaces
+            if let Key::Char(c) = event.key {
+                if !event.modifiers.shift {
+                    if let Some(digit) = c.to_digit(10) {
+                        if digit >= 1 && digit <= 9 {
+                            let idx = (digit - 1) as usize;
+                            self.switch_workspace(idx);
+                            return;
+                        }
+                    }
+                }
             }
         }
 
@@ -365,10 +488,10 @@ impl EditorState {
         if !self.cursor_visible {
             self.cursor_visible = true;
             // Mark cursor line dirty to show it
-            let cursor_line = self.buffer.cursor_position().line;
-            let dirty = self.viewport.dirty_lines_to_region(
+            let cursor_line = self.buffer().cursor_position().line;
+            let dirty = self.viewport().dirty_lines_to_region(
                 &lite_edit_buffer::DirtyLines::Single(cursor_line),
-                self.buffer.line_count(),
+                self.buffer().line_count(),
             );
             self.dirty_region.merge(dirty);
         }
@@ -377,27 +500,34 @@ impl EditorState {
         // to make the cursor visible BEFORE processing the keystroke.
         // This ensures typing after scrolling doesn't edit at a position
         // the user can't see.
-        let cursor_line = self.buffer.cursor_position().line;
+        let cursor_line = self.buffer().cursor_position().line;
         if self
-            .viewport
+            .viewport()
             .buffer_line_to_screen_line(cursor_line)
             .is_none()
         {
             // Cursor is off-screen - scroll to make it visible
-            let line_count = self.buffer.line_count();
-            if self.viewport.ensure_visible(cursor_line, line_count) {
+            let line_count = self.buffer().line_count();
+            if self.viewport_mut().ensure_visible(cursor_line, line_count) {
                 // Viewport scrolled - mark full viewport dirty
                 self.dirty_region.merge(DirtyRegion::FullViewport);
             }
         }
 
         // Create context and forward to focus target
+        // We need to borrow the active tab's buffer and viewport
+        let font_metrics = self.font_metrics;
+        let view_height = self.view_height;
+        let ws = self.editor.active_workspace_mut().expect("no active workspace");
+        let tab = ws.active_tab_mut().expect("no active tab");
+        let (buffer, viewport) = tab.buffer_and_viewport_mut().expect("not a file tab");
+
         let mut ctx = EditorContext::new(
-            &mut self.buffer,
-            &mut self.viewport,
+            buffer,
+            viewport,
             &mut self.dirty_region,
-            self.font_metrics,
-            self.view_height,
+            font_metrics,
+            view_height,
         );
         self.focus_target.handle_key(event, &mut ctx);
     }
@@ -409,7 +539,28 @@ impl EditorState {
     ///
     /// When the selector is focused, mouse events are forwarded to the selector
     /// widget using the overlay geometry.
+    ///
+    /// Mouse clicks in the left rail switch workspaces.
     pub fn handle_mouse(&mut self, event: MouseEvent) {
+        use crate::input::MouseEventKind;
+
+        // Check if click is in left rail region
+        let (mouse_x, mouse_y) = event.position;
+        if mouse_x < RAIL_WIDTH as f64 {
+            if let MouseEventKind::Down = event.kind {
+                // Calculate which workspace was clicked
+                let geometry = calculate_left_rail_geometry(self.view_height, self.editor.workspace_count());
+                for (idx, tile_rect) in geometry.tile_rects.iter().enumerate() {
+                    if tile_rect.contains(mouse_x as f32, mouse_y as f32) {
+                        self.switch_workspace(idx);
+                        return;
+                    }
+                }
+            }
+            // Don't forward rail clicks to buffer
+            return;
+        }
+
         // Route based on current focus
         match self.focus {
             EditorFocus::Selector => {
@@ -475,21 +626,27 @@ impl EditorState {
         if !self.cursor_visible {
             self.cursor_visible = true;
             // Mark cursor line dirty to show it
-            let cursor_line = self.buffer.cursor_position().line;
-            let dirty = self.viewport.dirty_lines_to_region(
+            let cursor_line = self.buffer().cursor_position().line;
+            let dirty = self.viewport().dirty_lines_to_region(
                 &lite_edit_buffer::DirtyLines::Single(cursor_line),
-                self.buffer.line_count(),
+                self.buffer().line_count(),
             );
             self.dirty_region.merge(dirty);
         }
 
         // Create context and forward to focus target
+        let font_metrics = self.font_metrics;
+        let view_height = self.view_height;
+        let ws = self.editor.active_workspace_mut().expect("no active workspace");
+        let tab = ws.active_tab_mut().expect("no active tab");
+        let (buffer, viewport) = tab.buffer_and_viewport_mut().expect("not a file tab");
+
         let mut ctx = EditorContext::new(
-            &mut self.buffer,
-            &mut self.viewport,
+            buffer,
+            viewport,
             &mut self.dirty_region,
-            self.font_metrics,
-            self.view_height,
+            font_metrics,
+            view_height,
         );
         self.focus_target.handle_mouse(event, &mut ctx);
     }
@@ -509,12 +666,18 @@ impl EditorState {
         }
 
         // Create context and forward to focus target
+        let font_metrics = self.font_metrics;
+        let view_height = self.view_height;
+        let ws = self.editor.active_workspace_mut().expect("no active workspace");
+        let tab = ws.active_tab_mut().expect("no active tab");
+        let (buffer, viewport) = tab.buffer_and_viewport_mut().expect("not a file tab");
+
         let mut ctx = EditorContext::new(
-            &mut self.buffer,
-            &mut self.viewport,
+            buffer,
+            viewport,
             &mut self.dirty_region,
-            self.font_metrics,
-            self.view_height,
+            font_metrics,
+            view_height,
         );
         self.focus_target.handle_scroll(delta, &mut ctx);
     }
@@ -633,10 +796,10 @@ impl EditorState {
 
     /// Returns the dirty region for just the cursor line.
     fn cursor_dirty_region(&self) -> DirtyRegion {
-        let cursor_line = self.buffer.cursor_position().line;
-        self.viewport.dirty_lines_to_region(
+        let cursor_line = self.buffer().cursor_position().line;
+        self.viewport().dirty_lines_to_region(
             &lite_edit_buffer::DirtyLines::Single(cursor_line),
-            self.buffer.line_count(),
+            self.buffer().line_count(),
         )
     }
 
@@ -669,10 +832,10 @@ impl EditorState {
             match std::fs::read(&path) {
                 Ok(bytes) => {
                     let contents = String::from_utf8_lossy(&bytes);
-                    self.buffer = TextBuffer::from_str(&contents);
-                    self.buffer.set_cursor(lite_edit_buffer::Position::new(0, 0));
-                    let line_count = self.buffer.line_count();
-                    self.viewport.scroll_to(0, line_count);
+                    *self.buffer_mut() = TextBuffer::from_str(&contents);
+                    self.buffer_mut().set_cursor(lite_edit_buffer::Position::new(0, 0));
+                    let line_count = self.buffer().line_count();
+                    self.viewport_mut().scroll_to(0, line_count);
                 }
                 Err(_) => {
                     // Silently ignore read errors (out of scope for this chunk)
@@ -681,22 +844,27 @@ impl EditorState {
         }
         // For non-existent files, leave buffer as-is (file picker already created empty file)
 
-        self.associated_file = Some(path);
+        self.set_associated_file(Some(path));
         self.dirty_region.merge(DirtyRegion::FullViewport);
     }
 
     /// Returns the window title based on the current file association.
     ///
     /// Returns the filename if a file is associated, or "Untitled" otherwise.
+    /// When multiple workspaces exist, includes the workspace label.
     pub fn window_title(&self) -> String {
-        match &self.associated_file {
-            Some(path) => path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("Untitled")
-                .to_string(),
-            None => "Untitled".to_string(),
+        let tab_name = self.associated_file()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("Untitled");
+
+        if self.editor.workspace_count() > 1 {
+            if let Some(workspace) = self.editor.active_workspace() {
+                return format!("{} — {}", tab_name, workspace.label);
+            }
         }
+
+        tab_name.to_string()
     }
 
     /// Saves the buffer content to the associated file.
@@ -704,12 +872,12 @@ impl EditorState {
     /// If no file is associated, this is a no-op.
     /// On write error, this silently fails (error reporting is out of scope).
     fn save_file(&mut self) {
-        let path = match &self.associated_file {
+        let path = match self.associated_file() {
             Some(p) => p.clone(),
             None => return, // No file associated - no-op
         };
 
-        let content = self.buffer.content();
+        let content = self.buffer().content();
         let _ = std::fs::write(&path, content.as_bytes());
         // Silently ignore write errors (out of scope for this chunk)
 
@@ -729,6 +897,41 @@ impl Default for EditorState {
             point_size: 14.0,
         };
         Self::empty(font_metrics)
+    }
+}
+
+// =============================================================================
+// Workspace Commands (Chunk: docs/chunks/workspace_model)
+// =============================================================================
+
+impl EditorState {
+    /// Creates a new workspace and switches to it.
+    ///
+    /// The new workspace has one empty tab.
+    pub fn new_workspace(&mut self) {
+        let root_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        self.editor.new_workspace("untitled".to_string(), root_path);
+        self.dirty_region.merge(DirtyRegion::FullViewport);
+    }
+
+    /// Closes the active workspace.
+    ///
+    /// Does nothing if this is the last workspace.
+    pub fn close_active_workspace(&mut self) {
+        if self.editor.workspace_count() > 1 {
+            self.editor.close_workspace(self.editor.active_workspace);
+            self.dirty_region.merge(DirtyRegion::FullViewport);
+        }
+    }
+
+    /// Switches to the workspace at the given index (0-based).
+    ///
+    /// Does nothing if the index is out of bounds.
+    pub fn switch_workspace(&mut self, index: usize) {
+        if index < self.editor.workspace_count() && index != self.editor.active_workspace {
+            self.editor.switch_workspace(index);
+            self.dirty_region.merge(DirtyRegion::FullViewport);
+        }
     }
 }
 
@@ -753,7 +956,7 @@ mod tests {
     #[test]
     fn test_new_state() {
         let state = EditorState::empty(test_font_metrics());
-        assert!(state.buffer.is_empty());
+        assert!(state.buffer().is_empty());
         assert!(!state.is_dirty());
         assert!(state.cursor_visible);
         assert!(!state.should_quit);
@@ -767,7 +970,7 @@ mod tests {
         state.handle_key(KeyEvent::char('a'));
 
         assert!(state.is_dirty());
-        assert_eq!(state.buffer.content(), "a");
+        assert_eq!(state.buffer().content(), "a");
     }
 
     #[test]
@@ -827,7 +1030,7 @@ mod tests {
         let mut state = EditorState::empty(test_font_metrics());
         state.update_viewport_size(320.0);
 
-        assert_eq!(state.viewport.visible_lines(), 20); // 320 / 16 = 20
+        assert_eq!(state.viewport().visible_lines(), 20); // 320 / 16 = 20
         assert_eq!(state.view_height, 320.0);
     }
 
@@ -860,7 +1063,7 @@ mod tests {
 
         // Type some content first
         state.handle_key(KeyEvent::char('a'));
-        assert_eq!(state.buffer.content(), "a");
+        assert_eq!(state.buffer().content(), "a");
 
         // Cmd+Q should NOT add 'q' to the buffer
         let cmd_q = KeyEvent::new(
@@ -873,7 +1076,7 @@ mod tests {
         state.handle_key(cmd_q);
 
         // Buffer should be unchanged
-        assert_eq!(state.buffer.content(), "a");
+        assert_eq!(state.buffer().content(), "a");
         assert!(state.should_quit);
     }
 
@@ -941,7 +1144,7 @@ mod tests {
         state.handle_key(KeyEvent::char('q'));
 
         assert!(!state.should_quit);
-        assert_eq!(state.buffer.content(), "q");
+        assert_eq!(state.buffer().content(), "q");
     }
 
     // =========================================================================
@@ -962,14 +1165,14 @@ mod tests {
         state.update_viewport_size(160.0); // 10 visible lines
 
         // Initial scroll offset should be 0
-        assert_eq!(state.viewport.first_visible_line(), 0);
+        assert_eq!(state.viewport().first_visible_line(), 0);
 
         // Scroll down by 5 lines (positive dy = scroll down)
         // line_height is 16.0, so 5 lines = 80 pixels
         state.handle_scroll(ScrollDelta::new(0.0, 80.0));
 
         // Viewport should have scrolled
-        assert_eq!(state.viewport.first_visible_line(), 5);
+        assert_eq!(state.viewport().first_visible_line(), 5);
         assert!(state.is_dirty()); // Should be dirty after scroll
     }
 
@@ -987,14 +1190,14 @@ mod tests {
         state.update_viewport_size(160.0);
 
         // Set cursor to line 3
-        state.buffer.set_cursor(lite_edit_buffer::Position::new(3, 5));
+        state.buffer_mut().set_cursor(lite_edit_buffer::Position::new(3, 5));
 
         // Scroll down by 10 lines
         state.handle_scroll(ScrollDelta::new(0.0, 160.0));
 
         // Cursor position should be unchanged
         assert_eq!(
-            state.buffer.cursor_position(),
+            state.buffer().cursor_position(),
             lite_edit_buffer::Position::new(3, 5)
         );
     }
@@ -1013,11 +1216,11 @@ mod tests {
         state.update_viewport_size(160.0); // 10 visible lines
 
         // Cursor starts at line 0
-        assert_eq!(state.buffer.cursor_position().line, 0);
+        assert_eq!(state.buffer().cursor_position().line, 0);
 
         // Scroll down so cursor is off-screen (scroll to show lines 15-24)
         state.handle_scroll(ScrollDelta::new(0.0, 15.0 * 16.0)); // 15 lines * 16 pixels
-        assert_eq!(state.viewport.first_visible_line(), 15);
+        assert_eq!(state.viewport().first_visible_line(), 15);
 
         // Clear dirty flag
         let _ = state.take_dirty_region();
@@ -1027,8 +1230,8 @@ mod tests {
 
         // Cursor should still be at line 0, and viewport should have scrolled
         // back to make line 0 visible
-        assert_eq!(state.buffer.cursor_position().line, 0);
-        assert_eq!(state.viewport.first_visible_line(), 0);
+        assert_eq!(state.buffer().cursor_position().line, 0);
+        assert_eq!(state.viewport().first_visible_line(), 0);
         assert!(state.is_dirty()); // Should be dirty after snap-back
     }
 
@@ -1046,11 +1249,11 @@ mod tests {
         state.update_viewport_size(160.0); // 10 visible lines
 
         // Move cursor to line 15
-        state.buffer.set_cursor(lite_edit_buffer::Position::new(15, 0));
+        state.buffer_mut().set_cursor(lite_edit_buffer::Position::new(15, 0));
 
         // Scroll to make line 15 visible (show lines 10-19)
-        state.viewport.scroll_to(10, 50);
-        assert_eq!(state.viewport.first_visible_line(), 10);
+        state.viewport_mut().scroll_to(10, 50);
+        assert_eq!(state.viewport().first_visible_line(), 10);
 
         // Clear dirty flag
         let _ = state.take_dirty_region();
@@ -1059,7 +1262,7 @@ mod tests {
         state.handle_key(KeyEvent::char('X'));
 
         // Scroll offset should remain at 10
-        assert_eq!(state.viewport.first_visible_line(), 10);
+        assert_eq!(state.viewport().first_visible_line(), 10);
     }
 
     // =========================================================================
@@ -1127,7 +1330,7 @@ mod tests {
         state.handle_key(cmd_p);
 
         // Buffer should remain empty - 'p' should not be inserted
-        assert!(state.buffer.is_empty());
+        assert!(state.buffer().is_empty());
     }
 
     #[test]
@@ -1245,7 +1448,7 @@ mod tests {
         state.update_viewport_dimensions(800.0, 160.0); // 10 visible lines
 
         // Initial scroll offset should be 0
-        assert_eq!(state.viewport.scroll_offset(), 0);
+        assert_eq!(state.viewport().scroll_offset(), 0);
 
         // Open the selector
         let cmd_p = KeyEvent::new(
@@ -1267,7 +1470,7 @@ mod tests {
         state.handle_scroll(ScrollDelta::new(0.0, 80.0));
 
         // Buffer viewport should NOT have scrolled
-        assert_eq!(state.viewport.scroll_offset(), 0);
+        assert_eq!(state.viewport().scroll_offset(), 0);
 
         // But the selector should have scrolled
         let view_offset = state.active_selector.as_ref().unwrap().view_offset();
@@ -1321,7 +1524,7 @@ mod tests {
         state.update_viewport_dimensions(800.0, 160.0); // 10 visible lines
 
         // Initial scroll offset should be 0
-        assert_eq!(state.viewport.scroll_offset(), 0);
+        assert_eq!(state.viewport().scroll_offset(), 0);
 
         // Ensure we're in buffer focus (default)
         assert_eq!(state.focus, EditorFocus::Buffer);
@@ -1330,7 +1533,7 @@ mod tests {
         state.handle_scroll(ScrollDelta::new(0.0, 80.0));
 
         // Buffer viewport should have scrolled
-        assert_eq!(state.viewport.first_visible_line(), 5);
+        assert_eq!(state.viewport().first_visible_line(), 5);
     }
 
     #[test]
@@ -1377,7 +1580,7 @@ mod tests {
     #[test]
     fn test_initial_associated_file_is_none() {
         let state = EditorState::empty(test_font_metrics());
-        assert!(state.associated_file.is_none());
+        assert!(state.associated_file().is_none());
     }
 
     #[test]
@@ -1397,7 +1600,7 @@ mod tests {
         state.associate_file(temp_file.clone());
 
         // Buffer should contain the file content
-        assert_eq!(state.buffer.content(), "Hello, world!\nLine two\n");
+        assert_eq!(state.buffer().content(), "Hello, world!\nLine two\n");
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_file);
@@ -1412,7 +1615,7 @@ mod tests {
         // Type some content and move cursor
         state.handle_key(KeyEvent::char('a'));
         state.handle_key(KeyEvent::char('b'));
-        assert_eq!(state.buffer.cursor_position().col, 2);
+        assert_eq!(state.buffer().cursor_position().col, 2);
 
         // Create a temporary file
         let temp_dir = std::env::temp_dir();
@@ -1425,8 +1628,8 @@ mod tests {
         state.associate_file(temp_file.clone());
 
         // Cursor should be at (0, 0)
-        assert_eq!(state.buffer.cursor_position().line, 0);
-        assert_eq!(state.buffer.cursor_position().col, 0);
+        assert_eq!(state.buffer().cursor_position().line, 0);
+        assert_eq!(state.buffer().cursor_position().col, 0);
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_file);
@@ -1449,7 +1652,7 @@ mod tests {
         state.associate_file(temp_file.clone());
 
         // associated_file should be Some(path)
-        assert_eq!(state.associated_file, Some(temp_file.clone()));
+        assert_eq!(state.associated_file(), Some(&temp_file));
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_file);
@@ -1463,14 +1666,14 @@ mod tests {
         // Type some content
         state.handle_key(KeyEvent::char('a'));
         state.handle_key(KeyEvent::char('b'));
-        assert_eq!(state.buffer.content(), "ab");
+        assert_eq!(state.buffer().content(), "ab");
 
         // Associate with a non-existent file
         let nonexistent_path = PathBuf::from("/nonexistent/path/to/file.txt");
         state.associate_file(nonexistent_path.clone());
 
         // Buffer should be unchanged
-        assert_eq!(state.buffer.content(), "ab");
+        assert_eq!(state.buffer().content(), "ab");
     }
 
     #[test]
@@ -1482,7 +1685,7 @@ mod tests {
         state.associate_file(nonexistent_path.clone());
 
         // associated_file should be Some(path)
-        assert_eq!(state.associated_file, Some(nonexistent_path));
+        assert_eq!(state.associated_file(), Some(&nonexistent_path));
     }
 
     #[test]
@@ -1492,8 +1695,8 @@ mod tests {
         state.update_viewport_size(160.0); // 10 visible lines
 
         // Manually set scroll offset
-        state.viewport.scroll_to(10, 100);
-        assert_eq!(state.viewport.scroll_offset(), 10);
+        state.viewport_mut().scroll_to(10, 100);
+        assert_eq!(state.viewport().scroll_offset(), 10);
 
         // Create a temporary file
         let temp_dir = std::env::temp_dir();
@@ -1506,7 +1709,7 @@ mod tests {
         state.associate_file(temp_file.clone());
 
         // Scroll offset should be reset to 0
-        assert_eq!(state.viewport.scroll_offset(), 0);
+        assert_eq!(state.viewport().scroll_offset(), 0);
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_file);
@@ -1554,7 +1757,7 @@ mod tests {
         let mut state = EditorState::empty(test_font_metrics());
 
         let path = PathBuf::from("/some/path/to/myfile.rs");
-        state.associated_file = Some(path);
+        state.set_associated_file(Some(path));
 
         assert_eq!(state.window_title(), "myfile.rs");
     }
@@ -1564,7 +1767,7 @@ mod tests {
         let mut state = EditorState::empty(test_font_metrics());
 
         let path = PathBuf::from("/Users/btaylor/Projects/lite-edit/src/main.rs");
-        state.associated_file = Some(path);
+        state.set_associated_file(Some(path));
 
         assert_eq!(state.window_title(), "main.rs");
     }
@@ -1596,7 +1799,7 @@ mod tests {
         state.handle_key(cmd_s);
 
         // Buffer should be unchanged
-        assert_eq!(state.buffer.content(), "ab");
+        assert_eq!(state.buffer().content(), "ab");
     }
 
     #[test]
@@ -1609,7 +1812,7 @@ mod tests {
         let temp_file = temp_dir.join("test_cmd_s_save.txt");
 
         // Set up the associated file
-        state.associated_file = Some(temp_file.clone());
+        state.set_associated_file(Some(temp_file.clone()));
 
         // Type some content
         state.handle_key(KeyEvent::char('H'));
@@ -1643,13 +1846,13 @@ mod tests {
         let temp_dir = std::env::temp_dir();
         let temp_file = temp_dir.join("test_cmd_s_no_modify.txt");
 
-        state.associated_file = Some(temp_file.clone());
+        state.set_associated_file(Some(temp_file.clone()));
 
         // Type content
         state.handle_key(KeyEvent::char('a'));
         state.handle_key(KeyEvent::char('b'));
 
-        let content_before = state.buffer.content();
+        let content_before = state.buffer().content();
 
         // Press Cmd+S
         let cmd_s = KeyEvent::new(
@@ -1662,7 +1865,7 @@ mod tests {
         state.handle_key(cmd_s);
 
         // Buffer content should be unchanged
-        assert_eq!(state.buffer.content(), content_before);
+        assert_eq!(state.buffer().content(), content_before);
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_file);
@@ -1677,14 +1880,14 @@ mod tests {
         let temp_dir = std::env::temp_dir();
         let temp_file = temp_dir.join("test_cmd_s_cursor.txt");
 
-        state.associated_file = Some(temp_file.clone());
+        state.set_associated_file(Some(temp_file.clone()));
 
         // Type content
         state.handle_key(KeyEvent::char('a'));
         state.handle_key(KeyEvent::char('b'));
         state.handle_key(KeyEvent::char('c'));
 
-        let cursor_before = state.buffer.cursor_position();
+        let cursor_before = state.buffer().cursor_position();
 
         // Press Cmd+S
         let cmd_s = KeyEvent::new(
@@ -1697,7 +1900,7 @@ mod tests {
         state.handle_key(cmd_s);
 
         // Cursor should be unchanged
-        assert_eq!(state.buffer.cursor_position(), cursor_before);
+        assert_eq!(state.buffer().cursor_position(), cursor_before);
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_file);
@@ -1712,7 +1915,7 @@ mod tests {
         let temp_dir = std::env::temp_dir();
         let temp_file = temp_dir.join("test_cmd_s_dirty.txt");
 
-        state.associated_file = Some(temp_file.clone());
+        state.set_associated_file(Some(temp_file.clone()));
 
         // Type content
         state.handle_key(KeyEvent::char('a'));
@@ -1744,7 +1947,7 @@ mod tests {
         state.update_viewport_size(160.0);
 
         // Buffer should be empty
-        assert!(state.buffer.is_empty());
+        assert!(state.buffer().is_empty());
 
         // Press Cmd+S
         let cmd_s = KeyEvent::new(
@@ -1757,7 +1960,7 @@ mod tests {
         state.handle_key(cmd_s);
 
         // Buffer should still be empty (no 's' inserted)
-        assert!(state.buffer.is_empty());
+        assert!(state.buffer().is_empty());
     }
 
     #[test]
@@ -1778,6 +1981,171 @@ mod tests {
 
         // No file associated, so nothing should crash
         // (we just verify it doesn't trigger save behavior)
-        assert!(state.associated_file.is_none());
+        assert!(state.associated_file().is_none());
+    }
+
+    // =========================================================================
+    // Workspace command tests (Chunk: docs/chunks/workspace_model)
+    // =========================================================================
+
+    #[test]
+    fn test_cmd_n_creates_new_workspace() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        assert_eq!(state.editor.workspace_count(), 1);
+
+        let cmd_n = KeyEvent::new(
+            Key::Char('n'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_n);
+
+        assert_eq!(state.editor.workspace_count(), 2);
+        assert_eq!(state.editor.active_workspace, 1); // Switched to new workspace
+        assert!(state.is_dirty()); // Should mark dirty for UI update
+    }
+
+    #[test]
+    fn test_cmd_shift_w_closes_workspace() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Create a second workspace
+        state.new_workspace();
+        assert_eq!(state.editor.workspace_count(), 2);
+
+        let _ = state.take_dirty_region(); // Clear dirty
+
+        // Close the active workspace
+        let cmd_shift_w = KeyEvent::new(
+            Key::Char('w'),
+            Modifiers {
+                command: true,
+                shift: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_shift_w);
+
+        assert_eq!(state.editor.workspace_count(), 1);
+        assert!(state.is_dirty());
+    }
+
+    #[test]
+    fn test_cmd_shift_w_does_not_close_last_workspace() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        assert_eq!(state.editor.workspace_count(), 1);
+
+        let cmd_shift_w = KeyEvent::new(
+            Key::Char('w'),
+            Modifiers {
+                command: true,
+                shift: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_shift_w);
+
+        // Should still have one workspace
+        assert_eq!(state.editor.workspace_count(), 1);
+    }
+
+    #[test]
+    fn test_cmd_1_switches_to_first_workspace() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Create a second workspace (switches to it)
+        state.new_workspace();
+        assert_eq!(state.editor.active_workspace, 1);
+
+        let _ = state.take_dirty_region(); // Clear dirty
+
+        // Press Cmd+1 to switch to first workspace
+        let cmd_1 = KeyEvent::new(
+            Key::Char('1'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_1);
+
+        assert_eq!(state.editor.active_workspace, 0);
+        assert!(state.is_dirty());
+    }
+
+    #[test]
+    fn test_cmd_2_switches_to_second_workspace() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Create a second workspace
+        state.new_workspace();
+        // Switch back to first
+        state.switch_workspace(0);
+        assert_eq!(state.editor.active_workspace, 0);
+
+        let _ = state.take_dirty_region();
+
+        // Press Cmd+2 to switch to second workspace
+        let cmd_2 = KeyEvent::new(
+            Key::Char('2'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_2);
+
+        assert_eq!(state.editor.active_workspace, 1);
+        assert!(state.is_dirty());
+    }
+
+    #[test]
+    fn test_cmd_digit_out_of_range_is_noop() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Only one workspace exists
+        assert_eq!(state.editor.workspace_count(), 1);
+        assert_eq!(state.editor.active_workspace, 0);
+
+        // Press Cmd+3 (no third workspace)
+        let cmd_3 = KeyEvent::new(
+            Key::Char('3'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_3);
+
+        // Should remain unchanged
+        assert_eq!(state.editor.active_workspace, 0);
+    }
+
+    #[test]
+    fn test_window_title_includes_workspace_label_when_multiple() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // With one workspace, title should just be "Untitled"
+        assert_eq!(state.window_title(), "Untitled");
+
+        // Create a second workspace
+        state.new_workspace();
+        assert_eq!(state.editor.workspace_count(), 2);
+
+        // Now title should include workspace label
+        let title = state.window_title();
+        assert!(title.contains("—")); // em-dash separator
+        assert!(title.contains("untitled")); // workspace label
     }
 }
