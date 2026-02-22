@@ -1086,10 +1086,11 @@ impl EditorState {
             let ws = self.editor.active_workspace_mut().expect("no active workspace");
             let tab = ws.active_tab_mut().expect("no active tab");
 
+            // Check for highlighter before getting mutable borrow
+            needs_highlighter_sync = tab.highlighter().is_some();
+
             // Try to get the text buffer and viewport for file tabs
             if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
-                // Mark that we'll need to sync highlighter after the edit
-                needs_highlighter_sync = tab.highlighter().is_some();
             // File tab: use the existing BufferFocusTarget path
             // Ensure cursor blink visibility is on when typing
             if !self.cursor_visible {
