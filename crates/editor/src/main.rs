@@ -6,6 +6,7 @@
 // Chunk: docs/chunks/mouse_click_cursor - Mouse click cursor positioning
 // Chunk: docs/chunks/viewport_scrolling - Scroll event handling
 // Chunk: docs/chunks/quit_command - Cmd+Q app termination handling
+// Chunk: docs/chunks/file_picker - File picker (Cmd+P) integration
 // Chunk: docs/chunks/file_save - File-buffer association and Cmd+S save
 //!
 //! lite-edit: A lightweight, GPU-accelerated text editor for macOS
