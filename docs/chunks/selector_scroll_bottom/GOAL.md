@@ -1,11 +1,15 @@
 ---
-status: IMPLEMENTING
+status: HISTORICAL
 ticket: null
 parent_chunk: null
 code_paths:
 - crates/editor/src/selector.rs
 - crates/editor/src/editor_state.rs
-code_references: []
+code_references:
+- ref: crates/editor/src/editor_state.rs#EditorState::open_file_picker
+  implements: "Bug A fix: call update_visible_size after set_items"
+- ref: crates/editor/src/editor_state.rs#EditorState::handle_key_selector
+  implements: "Bug B fix: call update_visible_size after set_items in typing branch"
 narrative: null
 investigation: null
 subsystems: []
@@ -16,16 +20,6 @@ created_after:
 - tab_bar_content_clip
 - click_scroll_fraction_alignment
 ---
-<!--
-╔══════════════════════════════════════════════════════════════════════════════╗
-║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
-║                                                                              ║
-║  AGENT INSTRUCTIONS: When editing this file, preserve this entire comment    ║
-║  block. Only modify the frontmatter YAML and the content sections below      ║
-║  (Minor Goal, Success Criteria, Relationship to Parent). Use targeted edits  ║
-║  that replace specific sections rather than rewriting the entire file.       ║
-╚══════════════════════════════════════════════════════════════════════════════╝
--->
 
 # Chunk Goal
 
