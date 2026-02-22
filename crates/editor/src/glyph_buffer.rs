@@ -3,6 +3,7 @@
 // Chunk: docs/chunks/text_selection_rendering - Selection highlight rendering
 // Chunk: docs/chunks/line_wrap_rendering - Soft line wrapping support
 // Chunk: docs/chunks/workspace_model - Content area x offset for left rail
+// Chunk: docs/chunks/terminal_background_box_drawing - On-demand glyph addition for terminal rendering
 //!
 //! Glyph vertex buffer construction
 //!
@@ -39,7 +40,7 @@ use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLDevice, MTLResourceOptions};
 
 use crate::color_palette::ColorPalette;
-use crate::font::FontMetrics;
+use crate::font::{Font, FontMetrics};
 use crate::glyph_atlas::{GlyphAtlas, GlyphInfo};
 use crate::shader::VERTEX_SIZE;
 use crate::viewport::Viewport;
@@ -381,13 +382,16 @@ impl GlyphBuffer {
     ///
     /// # Arguments
     /// * `device` - The Metal device for buffer creation
-    /// * `atlas` - The glyph atlas containing character UV mappings
+    /// * `atlas` - The glyph atlas containing character UV mappings (mutable for on-demand glyph addition)
+    /// * `font` - The font for on-demand glyph rasterization
     /// * `lines` - The text lines to render
     // Chunk: docs/chunks/renderer_styled_content - Uses default text color
+    // Chunk: docs/chunks/terminal_background_box_drawing - Mutable atlas for on-demand glyph addition
     pub fn update(
         &mut self,
         device: &ProtocolObject<dyn MTLDevice>,
-        atlas: &GlyphAtlas,
+        atlas: &mut GlyphAtlas,
+        font: &Font,
         lines: &[&str],
     ) {
         // Count total characters to size the buffers
@@ -416,11 +420,12 @@ impl GlyphBuffer {
                     continue;
                 }
 
-                // Get the glyph info from the atlas
-                let glyph = match atlas.get_glyph(c) {
+                // Get the glyph info from the atlas (adding on-demand if needed)
+                // Chunk: docs/chunks/terminal_background_box_drawing - On-demand glyph addition
+                let glyph = match atlas.ensure_glyph(font, c) {
                     Some(g) => g,
                     None => {
-                        // Character not in atlas, skip it
+                        // Character not in atlas and can't be added, skip it
                         continue;
                     }
                 };
@@ -491,18 +496,21 @@ impl GlyphBuffer {
     ///
     /// # Arguments
     /// * `device` - The Metal device for buffer creation
-    /// * `atlas` - The glyph atlas containing character UV mappings
+    /// * `atlas` - The glyph atlas containing character UV mappings (mutable for on-demand glyph addition)
+    /// * `font` - The font for on-demand glyph rasterization
     /// * `view` - The buffer view to render from
     /// * `viewport` - The viewport defining which lines are visible
     // Chunk: docs/chunks/buffer_view_trait - Accept BufferView trait instead of TextBuffer
+    // Chunk: docs/chunks/terminal_background_box_drawing - Mutable atlas for on-demand glyph addition
     pub fn update_from_buffer(
         &mut self,
         device: &ProtocolObject<dyn MTLDevice>,
-        atlas: &GlyphAtlas,
+        atlas: &mut GlyphAtlas,
+        font: &Font,
         view: &dyn BufferView,
         viewport: &Viewport,
     ) {
-        self.update_from_buffer_with_cursor(device, atlas, view, viewport, true, 0.0);
+        self.update_from_buffer_with_cursor(device, atlas, font, view, viewport, true, 0.0);
     }
 
     /// Updates the buffers with content from a BufferView, including cursor and selection rendering
@@ -519,7 +527,8 @@ impl GlyphBuffer {
     ///
     /// # Arguments
     /// * `device` - The Metal device for buffer creation
-    /// * `atlas` - The glyph atlas containing character UV mappings
+    /// * `atlas` - The glyph atlas containing character UV mappings (mutable for on-demand glyph addition)
+    /// * `font` - The font for on-demand glyph rasterization
     /// * `view` - The buffer view to render from
     /// * `viewport` - The viewport defining which lines are visible
     /// * `cursor_visible` - Whether to render the cursor (for future blink support)
@@ -530,10 +539,12 @@ impl GlyphBuffer {
     // Chunk: docs/chunks/buffer_view_trait - Accept BufferView trait instead of TextBuffer
     // Chunk: docs/chunks/text_selection_rendering - Three-phase quad emission: selection -> glyphs -> cursor with per-category index ranges
     // Chunk: docs/chunks/renderer_styled_content - Per-span colors, backgrounds, underlines, cursor shapes
+    // Chunk: docs/chunks/terminal_background_box_drawing - Mutable atlas for on-demand glyph addition
     pub fn update_from_buffer_with_cursor(
         &mut self,
         device: &ProtocolObject<dyn MTLDevice>,
-        atlas: &GlyphAtlas,
+        atlas: &mut GlyphAtlas,
+        font: &Font,
         view: &dyn BufferView,
         viewport: &Viewport,
         cursor_visible: bool,
@@ -577,7 +588,9 @@ impl GlyphBuffer {
         let mut indices: Vec<u32> = Vec::with_capacity(total_estimated * 6);
         let mut vertex_offset: u32 = 0;
 
-        let solid_glyph = atlas.solid_glyph();
+        // Copy the solid glyph info to avoid borrowing atlas during later mutable operations
+        // Chunk: docs/chunks/terminal_background_box_drawing - Copy solid glyph to avoid borrow conflict
+        let solid_glyph = *atlas.solid_glyph();
 
         // Selection color (Catppuccin Mocha surface2 at 40% alpha)
         let selection_color: [f32; 4] = [0.345, 0.357, 0.439, 0.4];
@@ -601,7 +614,7 @@ impl GlyphBuffer {
                     if !self.palette.is_default_background(span.style.bg) {
                         let (_, bg) = self.palette.resolve_style_colors(&span.style);
                         let quad = self.create_selection_quad_with_offset(
-                            screen_row, col, end_col, solid_glyph, y_offset, bg
+                            screen_row, col, end_col, &solid_glyph, y_offset, bg
                         );
                         vertices.extend_from_slice(&quad);
 
@@ -651,7 +664,7 @@ impl GlyphBuffer {
                 }
 
                 let quad = self.create_selection_quad_with_offset(
-                    screen_row, start_col, end_col, solid_glyph, y_offset, selection_color
+                    screen_row, start_col, end_col, &solid_glyph, y_offset, selection_color
                 );
                 vertices.extend_from_slice(&quad);
 
@@ -695,8 +708,9 @@ impl GlyphBuffer {
                             continue;
                         }
 
-                        // Get the glyph info from the atlas
-                        let glyph = match atlas.get_glyph(c) {
+                        // Get the glyph info from the atlas (adding on-demand if needed)
+                        // Chunk: docs/chunks/terminal_background_box_drawing - On-demand glyph addition
+                        let glyph = match atlas.ensure_glyph(font, c) {
                             Some(g) => g,
                             None => {
                                 col += 1;
@@ -753,7 +767,7 @@ impl GlyphBuffer {
                         };
 
                         let quad = self.create_underline_quad(
-                            screen_row, col, end_col, solid_glyph, y_offset, underline_color
+                            screen_row, col, end_col, &solid_glyph, y_offset, underline_color
                         );
                         vertices.extend_from_slice(&quad);
 
@@ -789,7 +803,7 @@ impl GlyphBuffer {
                             screen_line,
                             cursor_pos.col,
                             cursor_info.shape,
-                            solid_glyph,
+                            &solid_glyph,
                             y_offset,
                             cursor_color,
                         );
@@ -1103,10 +1117,12 @@ impl GlyphBuffer {
     /// 3. Glyph quads (text characters)
     /// 4. Cursor quad
     // Chunk: docs/chunks/buffer_view_trait - Accept BufferView trait instead of TextBuffer
+    // Chunk: docs/chunks/terminal_background_box_drawing - Mutable atlas for on-demand glyph addition
     pub fn update_from_buffer_with_wrap(
         &mut self,
         device: &ProtocolObject<dyn MTLDevice>,
-        atlas: &GlyphAtlas,
+        atlas: &mut GlyphAtlas,
+        font: &Font,
         view: &dyn BufferView,
         viewport: &Viewport,
         wrap_layout: &WrapLayout,
@@ -1477,8 +1493,9 @@ impl GlyphBuffer {
                             continue;
                         }
 
-                        // Get the glyph info from the atlas
-                        let glyph = match atlas.get_glyph(c) {
+                        // Get the glyph info from the atlas (adding on-demand if needed)
+                        // Chunk: docs/chunks/terminal_background_box_drawing - On-demand glyph addition
+                        let glyph = match atlas.ensure_glyph(font, c) {
                             Some(g) => g,
                             None => {
                                 col += 1;
