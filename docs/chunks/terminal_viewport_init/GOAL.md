@@ -1,5 +1,5 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: terminal_tab_initial_render
 code_paths:
@@ -17,7 +17,6 @@ created_after:
 - terminal_alt_backspace
 - terminal_tab_initial_render
 ---
-
 # Chunk Goal
 
 ## Minor Goal
