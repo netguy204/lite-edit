@@ -234,6 +234,15 @@ impl EditorController {
             self.state.dirty_region.merge(terminal_dirty);
         }
 
+        // Chunk: docs/chunks/terminal_tab_initial_render - Deferred PTY poll for initial content
+        // When a terminal tab was just created, spin-poll to capture the shell's
+        // initial prompt output before rendering. This gives the shell up to 100ms
+        // to start and produce its prompt.
+        let startup_dirty = self.state.spin_poll_terminal_startup();
+        if startup_dirty.is_dirty() {
+            self.state.dirty_region.merge(startup_dirty);
+        }
+
         // Poll for file index updates so picker results stream in on every keystroke
         // Chunk: docs/chunks/picker_eager_index
         let picker_dirty = self.state.tick_picker();
