@@ -259,6 +259,36 @@ impl EditorState {
         self.view_width = window_width;
     }
 
+    /// Syncs the active tab's viewport to the current window dimensions.
+    ///
+    /// This must be called whenever a tab becomes active (via `new_tab`,
+    /// `switch_tab`, or file picker confirmation) to ensure its viewport has
+    /// the correct `visible_lines` value for dirty region calculations.
+    ///
+    /// Skips syncing for non-file tabs (e.g., terminals) which don't have
+    /// a `TextBuffer` and use a different rendering path.
+    // Chunk: docs/chunks/tab_click_cursor_placement - Viewport sync on tab activation
+    fn sync_active_tab_viewport(&mut self) {
+        // Skip if view_height hasn't been set yet (initial state before first resize)
+        let view_height = self.view_height;
+        if view_height == 0.0 {
+            return;
+        }
+
+        // Get the line count from the active tab's text buffer, if it exists.
+        // Terminal tabs don't have a TextBuffer, so we skip viewport sync for them.
+        let line_count = match self.editor.active_workspace()
+            .and_then(|ws| ws.active_tab())
+            .and_then(|tab| tab.as_text_buffer())
+        {
+            Some(buf) => buf.line_count(),
+            None => return, // Non-file tab, skip viewport sync
+        };
+
+        // Sync the viewport to the current window height
+        self.viewport_mut().update_size(view_height, line_count);
+    }
+
     /// Handles a key event by forwarding to the active focus target.
     ///
     /// This records the keystroke time (for cursor blink reset) and
@@ -1242,6 +1272,7 @@ impl EditorState {
     /// In both cases:
     /// - Stores `path` in `associated_file`
     /// - Marks `DirtyRegion::FullViewport`
+    // Chunk: docs/chunks/tab_click_cursor_placement - Sync viewport on file association
     pub fn associate_file(&mut self, path: PathBuf) {
         if path.exists() {
             // Read file contents with UTF-8 lossy conversion
@@ -1261,6 +1292,10 @@ impl EditorState {
         // For non-existent files, leave buffer as-is (file picker already created empty file)
 
         self.set_associated_file(Some(path));
+
+        // Sync viewport to ensure dirty region calculations work correctly
+        // (handles case of file picker confirming into a newly created tab)
+        self.sync_active_tab_viewport();
         self.dirty_region.merge(DirtyRegion::FullViewport);
     }
 
@@ -1357,16 +1392,28 @@ impl EditorState {
     /// Switches to the tab at the given index in the active workspace.
     ///
     /// Does nothing if the index is out of bounds or if it's the current tab.
+    // Chunk: docs/chunks/tab_click_cursor_placement - Sync viewport on tab switch
     pub fn switch_tab(&mut self, index: usize) {
-        if let Some(workspace) = self.editor.active_workspace_mut() {
+        let switched = if let Some(workspace) = self.editor.active_workspace_mut() {
             if index < workspace.tabs.len() && index != workspace.active_tab {
                 workspace.switch_tab(index);
                 // Clear unread badge when switching to a tab
                 if let Some(tab) = workspace.tabs.get_mut(index) {
                     tab.unread = false;
                 }
-                self.dirty_region.merge(DirtyRegion::FullViewport);
+                true
+            } else {
+                false
             }
+        } else {
+            false
+        };
+
+        if switched {
+            // Sync viewport to ensure dirty region calculations work correctly
+            // (must be done after workspace.switch_tab so active_tab is updated)
+            self.sync_active_tab_viewport();
+            self.dirty_region.merge(DirtyRegion::FullViewport);
         }
     }
 
@@ -1439,6 +1486,7 @@ impl EditorState {
     ///
     /// This is triggered by Cmd+T. For now, this creates an empty file tab.
     /// Terminal tab creation will be added in the terminal_emulator chunk.
+    // Chunk: docs/chunks/tab_click_cursor_placement - Sync viewport on tab creation
     pub fn new_tab(&mut self) {
         let tab_id = self.editor.gen_tab_id();
         let line_height = self.editor.line_height();
@@ -1447,6 +1495,9 @@ impl EditorState {
         if let Some(workspace) = self.editor.active_workspace_mut() {
             workspace.add_tab(new_tab);
         }
+
+        // Sync viewport to ensure dirty region calculations work correctly
+        self.sync_active_tab_viewport();
 
         // Ensure the new tab is visible in the tab bar
         self.ensure_active_tab_visible();
@@ -3847,5 +3898,176 @@ mod tests {
                 i, i, tab_rect.tab_index
             );
         }
+    }
+
+    // =========================================================================
+    // Tab viewport sync regression tests
+    // Chunk: docs/chunks/tab_click_cursor_placement - Viewport sync tests
+    // =========================================================================
+
+    /// Tests that new tabs created with Cmd+T have their viewport sized correctly.
+    ///
+    /// Bug: Before the fix, new tabs had visible_lines = 0, causing dirty region
+    /// calculations to produce DirtyRegion::None for all mutations, preventing
+    /// cursor repaints after mouse clicks.
+    #[test]
+    fn test_new_tab_viewport_is_sized() {
+        let mut state = EditorState::empty(test_font_metrics());
+        // Set viewport size (simulating initial window setup)
+        // 160 pixels / 16 line_height = 10 visible lines
+        state.update_viewport_size(160.0);
+
+        // Verify first tab has correct viewport
+        assert_eq!(
+            state.viewport().visible_lines(),
+            10,
+            "First tab should have 10 visible lines"
+        );
+
+        // Create a new tab (simulates Cmd+T)
+        state.new_tab();
+
+        // The new tab should also have correctly sized viewport
+        assert_eq!(
+            state.viewport().visible_lines(),
+            10,
+            "New tab should have 10 visible lines (not 0)"
+        );
+
+        // Insert some text into the new buffer
+        state.buffer_mut().insert_str("Line 1\nLine 2\nLine 3\nLine 4\nLine 5");
+
+        // Clear the dirty region from insertion and new_tab
+        let _ = state.take_dirty_region();
+
+        // Simulate a cursor move that would mark the cursor dirty
+        // In the real flow, this happens via handle_mouse_down
+        // Here we directly use viewport to test dirty_lines_to_region
+        let dirty_lines = lite_edit_buffer::DirtyLines::Single(2);
+        let line_count = state.buffer().line_count();
+        let dirty_region = state.viewport().dirty_lines_to_region(&dirty_lines, line_count);
+
+        // The dirty region should NOT be None (the bug was that it was always None)
+        assert!(
+            dirty_region.is_dirty(),
+            "Dirty region for line 2 should not be None; got {:?}",
+            dirty_region
+        );
+    }
+
+    /// Tests that switching tabs correctly syncs the viewport.
+    ///
+    /// Bug: Before the fix, switching to a tab that was created but never activated
+    /// would leave visible_lines = 0, preventing cursor repaints.
+    #[test]
+    fn test_switch_tab_viewport_is_sized() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Create a second tab
+        state.new_tab();
+
+        // Insert text in tab 1 (the new tab is now active)
+        state.buffer_mut().insert_str("Tab 1 content");
+
+        // Switch back to tab 0
+        state.switch_tab(0);
+        assert_eq!(
+            state.viewport().visible_lines(),
+            10,
+            "Tab 0 should have correct visible_lines after switching"
+        );
+
+        // Switch to tab 1
+        state.switch_tab(1);
+        assert_eq!(
+            state.viewport().visible_lines(),
+            10,
+            "Tab 1 should have correct visible_lines after switching back"
+        );
+
+        // Clear the dirty region from all the tab operations
+        let _ = state.take_dirty_region();
+
+        // Mark a line dirty and verify region is computed correctly
+        let dirty_lines = lite_edit_buffer::DirtyLines::Single(0);
+        let line_count = state.buffer().line_count();
+        let dirty_region = state.viewport().dirty_lines_to_region(&dirty_lines, line_count);
+
+        assert!(
+            dirty_region.is_dirty(),
+            "Dirty region for line 0 should not be None after tab switch"
+        );
+    }
+
+    /// Tests that associating a file (file picker confirmation) syncs the viewport.
+    ///
+    /// Bug: Before the fix, Cmd+T followed by file picker confirmation would leave
+    /// the new tab with visible_lines = 0.
+    #[test]
+    fn test_associate_file_viewport_is_sized() {
+        use std::io::Write;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Create a temporary file with known content
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_associate_file_viewport.txt");
+        {
+            let mut file = std::fs::File::create(&temp_file).unwrap();
+            writeln!(file, "Line 1").unwrap();
+            writeln!(file, "Line 2").unwrap();
+            writeln!(file, "Line 3").unwrap();
+        }
+
+        // Create a new tab (simulates Cmd+T)
+        state.new_tab();
+
+        // Associate file (simulates file picker confirmation)
+        state.associate_file(temp_file.clone());
+
+        // Viewport should be correctly sized
+        assert_eq!(
+            state.viewport().visible_lines(),
+            10,
+            "Viewport should have 10 visible lines after associate_file"
+        );
+
+        // Clear the dirty region
+        let _ = state.take_dirty_region();
+
+        // Verify dirty region calculation works
+        let dirty_lines = lite_edit_buffer::DirtyLines::Single(1);
+        let line_count = state.buffer().line_count();
+        let dirty_region = state.viewport().dirty_lines_to_region(&dirty_lines, line_count);
+
+        assert!(
+            dirty_region.is_dirty(),
+            "Dirty region should not be None after associate_file"
+        );
+
+        // Clean up
+        let _ = std::fs::remove_file(temp_file);
+    }
+
+    /// Tests that the helper skips syncing when view_height is not set.
+    ///
+    /// This tests the early return in sync_active_tab_viewport for the initial
+    /// state before the first window resize.
+    #[test]
+    fn test_sync_viewport_skips_when_no_view_height() {
+        let mut state = EditorState::empty(test_font_metrics());
+        // Don't call update_viewport_size - view_height is 0.0
+
+        // Create a new tab - should not panic even with view_height = 0
+        state.new_tab();
+
+        // Viewport should remain at 0 visible lines (no sync happened)
+        assert_eq!(
+            state.viewport().visible_lines(),
+            0,
+            "Viewport should have 0 visible lines when view_height is not set"
+        );
     }
 }
