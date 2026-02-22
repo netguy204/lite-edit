@@ -145,6 +145,30 @@ fn full_viewport_scissor_rect(view_width: f32, view_height: f32) -> MTLScissorRe
     }
 }
 
+// Chunk: docs/chunks/tab_bar_content_clip - Clip buffer content below tab bar
+/// Creates a scissor rect for clipping buffer content to the area below the tab bar.
+///
+/// The rect starts at `tab_bar_height` and extends to the bottom of the viewport,
+/// preventing buffer content from bleeding into the tab bar region.
+fn buffer_content_scissor_rect(
+    tab_bar_height: f32,
+    view_width: f32,
+    view_height: f32,
+) -> MTLScissorRect {
+    // Y coordinate: tab_bar_height (top of buffer region)
+    let y = (tab_bar_height as usize).min(view_height as usize);
+
+    // Height: from tab_bar_height to bottom of viewport
+    let height = (view_height as usize).saturating_sub(y);
+
+    MTLScissorRect {
+        x: 0,
+        y,
+        width: view_width as usize,
+        height,
+    }
+}
+
 // =============================================================================
 // Renderer
 // =============================================================================
@@ -992,6 +1016,13 @@ impl Renderer {
                 }
             };
 
+        // Chunk: docs/chunks/tab_bar_content_clip - Extract view dimensions for scissor rect
+        // Get view dimensions early for scissor rect calculation
+        let frame = view.frame();
+        let scale = view.scale_factor();
+        let view_width = (frame.size.width * scale) as f32;
+        let view_height = (frame.size.height * scale) as f32;
+
         // Render left rail first (background layer)
         self.draw_left_rail(&encoder, view, editor);
 
@@ -999,10 +1030,20 @@ impl Renderer {
         // Render tab bar at top of content area
         self.draw_tab_bar(&encoder, view, editor);
 
+        // Chunk: docs/chunks/tab_bar_content_clip - Clip buffer content to area below tab bar
+        // Apply scissor rect to prevent buffer text from bleeding into tab bar region.
+        let content_scissor = buffer_content_scissor_rect(TAB_BAR_HEIGHT, view_width, view_height);
+        encoder.setScissorRect(content_scissor);
+
         // Render editor text content (offset by RAIL_WIDTH and TAB_BAR_HEIGHT)
         if self.glyph_buffer.index_count() > 0 {
             self.render_text(&encoder, view);
         }
+
+        // Chunk: docs/chunks/tab_bar_content_clip - Reset scissor for selector overlay
+        // Restore full viewport scissor so selector overlay renders correctly.
+        let full_scissor = full_viewport_scissor_rect(view_width, view_height);
+        encoder.setScissorRect(full_scissor);
 
         // Render selector overlay on top if active
         if let Some(widget) = selector {

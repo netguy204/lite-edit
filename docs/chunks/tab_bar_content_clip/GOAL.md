@@ -1,8 +1,9 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: content_tab_bar
-code_paths: []
+code_paths:
+  - crates/editor/src/renderer.rs
 code_references: []
 narrative: null
 investigation: null
@@ -10,9 +11,9 @@ subsystems: []
 friction_entries: []
 bug_type: implementation
 depends_on: []
-created_after: ["scroll_max_last_line"]
+created_after:
+- scroll_max_last_line
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

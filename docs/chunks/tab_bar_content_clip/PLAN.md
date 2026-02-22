@@ -1,177 +1,209 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+Clip the buffer content rendering pass using Metal's scissor rect API. When the
+buffer is scrolled near the top, glyphs are rendered at y-coordinates that
+overlap the tab bar region. The scissor rect constrains fragment output to the
+area below `TAB_BAR_HEIGHT`, preventing buffer content from bleeding into the
+tab bar.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Strategy:**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+This follows the exact pattern established by `selector_list_clipping`:
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/tab_bar_content_clip/GOAL.md)
-with references to the files that you expect to touch.
--->
+1. In `render_with_editor`, after drawing the tab bar but **before** drawing the
+   buffer content, set a scissor rect that excludes the tab bar region: from
+   `TAB_BAR_HEIGHT` to the bottom of the viewport.
 
-## Subsystem Considerations
+2. Draw the buffer content (glyphs, selection, cursor, etc.) with the scissor
+   rect active.
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+3. Reset the scissor rect to the full viewport after the buffer content draw
+   so subsequent rendering (selector overlay) is unaffected.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
+**Metal API used:**
 
-If no subsystems are relevant, delete this section.
+- `MTLRenderCommandEncoder::setScissorRect(MTLScissorRect)` — sets the clipping
+  rectangle in pixel coordinates (origin at top-left, Y increases downward).
 
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
+- Reuse the existing `full_viewport_scissor_rect` helper for resetting.
 
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
+**No changes to:**
 
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
+- `GlyphBuffer` or `glyph_buffer.rs` — vertex generation is unchanged.
+- `TabBarGlyphBuffer` or tab bar rendering — it renders before the scissor.
+- `Viewport` or scroll calculations — the scissor is a purely GPU-side clip.
+- Buffer model or cursor positioning — no model changes.
 
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
+**Testing:**
 
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
+Per the project's Humble View Architecture (TESTING_PHILOSOPHY.md), scissor rect
+application is a renderer-side concern in the humble view layer. It cannot be
+meaningfully unit-tested without a GPU. Visual verification will confirm:
+- Buffer content never appears above `TAB_BAR_HEIGHT`.
+- Tab bar labels and close buttons remain fully visible.
+- No regression at normal scroll positions (away from top).
 
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Existing geometry tests in `tab_bar.rs` and `glyph_buffer.rs` remain valid.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add helper function for buffer content scissor rect
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create a helper function in `renderer.rs` that computes the scissor rect for
+the buffer content area. The rect excludes the tab bar by starting at
+`TAB_BAR_HEIGHT` and extending to the bottom of the viewport.
 
-Example:
+```rust
+// Chunk: docs/chunks/tab_bar_content_clip - Clip buffer content below tab bar
+/// Creates a scissor rect for clipping buffer content to the area below the tab bar.
+///
+/// The rect starts at `TAB_BAR_HEIGHT` and extends to the bottom of the viewport,
+/// preventing buffer content from bleeding into the tab bar region.
+fn buffer_content_scissor_rect(
+    tab_bar_height: f32,
+    view_width: f32,
+    view_height: f32,
+) -> MTLScissorRect {
+    // Y coordinate: tab_bar_height (top of buffer region)
+    let y = (tab_bar_height as usize).min(view_height as usize);
 
-### Step 1: Define the SegmentHeader struct
+    // Height: from tab_bar_height to bottom of viewport
+    let height = (view_height as usize).saturating_sub(y);
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+    MTLScissorRect {
+        x: 0,
+        y,
+        width: view_width as usize,
+        height,
+    }
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `crates/editor/src/renderer.rs` (in the "Scissor Rect Helpers" section,
+after `full_viewport_scissor_rect`)
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 2: Modify render_with_editor to apply scissor rect
+
+Update `render_with_editor` to bracket the buffer content draw call with
+scissor rect changes:
+
+1. After `draw_tab_bar(&encoder, view, editor)` completes, apply the buffer
+   content scissor rect.
+
+2. Draw the buffer content (existing `render_text` call).
+
+3. Reset the scissor rect to full viewport before drawing the selector overlay.
+
+The modified code structure in `render_with_editor`:
+
+```rust
+// Draw tab bar at top of content area
+self.draw_tab_bar(&encoder, view, editor);
+
+// Chunk: docs/chunks/tab_bar_content_clip - Clip buffer content to area below tab bar
+// Apply scissor rect to prevent buffer text from bleeding into tab bar region.
+let content_scissor = buffer_content_scissor_rect(TAB_BAR_HEIGHT, view_width, view_height);
+encoder.setScissorRect(content_scissor);
+
+// Render editor text content (offset by RAIL_WIDTH and TAB_BAR_HEIGHT)
+if self.glyph_buffer.index_count() > 0 {
+    self.render_text(&encoder, view);
+}
+
+// Chunk: docs/chunks/tab_bar_content_clip - Reset scissor for selector overlay
+// Restore full viewport scissor so selector overlay renders correctly.
+let full_scissor = full_viewport_scissor_rect(view_width, view_height);
+encoder.setScissorRect(full_scissor);
+
+// Render selector overlay on top if active
+if let Some(widget) = selector {
+    self.draw_selector_overlay(&encoder, view, widget, selector_cursor_visible);
+}
+```
+
+Location: `crates/editor/src/renderer.rs#render_with_editor`
+
+### Step 3: Extract view dimensions earlier in render_with_editor
+
+The scissor rect helper needs `view_width` and `view_height`. Currently these
+values are computed locally within `draw_tab_bar`. Extract them to the top of
+`render_with_editor` so they're available for the scissor rect calculation.
+
+```rust
+// Get view dimensions for scissor rect calculation
+let frame = view.frame();
+let scale = view.scale_factor();
+let view_width = (frame.size.width * scale) as f32;
+let view_height = (frame.size.height * scale) as f32;
+```
+
+Location: `crates/editor/src/renderer.rs#render_with_editor` (early in the method)
+
+### Step 4: Update code_paths in GOAL.md
+
+Add `crates/editor/src/renderer.rs` to the `code_paths` field in the chunk's
+GOAL.md frontmatter.
+
+Location: `docs/chunks/tab_bar_content_clip/GOAL.md`
+
+### Step 5: Visual verification
+
+Build and run the editor. With the tab bar visible:
+
+1. Open a file with content.
+2. Scroll the buffer to the very top (line 1 visible at top of content area).
+3. Continue scrolling until the buffer's first line would be positioned at y=0.
+4. Verify that no buffer text, cursor, or gutter pixels appear above the tab bar.
+5. Verify that tab bar labels and close buttons remain fully visible and legible.
+6. Scroll to a normal position and verify buffer renders correctly.
+7. Open the selector (Cmd+P) and verify it renders correctly (not clipped).
+
+This is a manual verification step per the project's Humble View Architecture.
+
+### Step 6: Run existing tests
+
+Run all existing tests to ensure no regressions:
+
+```bash
+cargo test -p editor
+```
+
+All tests should pass — this change is renderer-only and does not affect
+geometry calculations or buffer behavior tested in existing unit tests.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+- **content_tab_bar** (ACTIVE, parent chunk): Provides `TAB_BAR_HEIGHT` constant
+  and the tab bar rendering infrastructure. This chunk fixes a visual artifact
+  that `content_tab_bar` did not address.
 
-If there are no dependencies, delete this section.
--->
+- **selector_list_clipping** (ACTIVE): Provides the pattern for scissor rect
+  clipping. The helper function `full_viewport_scissor_rect` is reused.
+
+Both dependencies are satisfied.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Scissor rect coordinate system:** Metal uses top-left origin with Y
+   increasing downward, matching our screen coordinate system. This is the
+   same system used by `selector_list_clipping`, so the pattern is validated.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Left rail clipping:** The buffer content scissor rect starts at x=0, which
+   includes the left rail region. This is intentional — the left rail renders
+   before the scissor is applied, and the buffer content already starts at
+   `RAIL_WIDTH` due to the x_offset. No issue expected.
+
+3. **Selector overlay interaction:** The scissor rect is reset before drawing
+   the selector overlay, so the file picker and command palette will render
+   correctly over the full viewport.
+
+4. **Performance:** `setScissorRect` is a trivial GPU state change with
+   negligible cost. No performance impact expected.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->
