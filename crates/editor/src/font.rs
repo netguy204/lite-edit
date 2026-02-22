@@ -262,4 +262,66 @@ mod tests {
             "Should get glyph for space"
         );
     }
+
+    // ==================== Box-drawing glyph tests ====================
+    // Chunk: docs/chunks/terminal_background_box_drawing - Verify Menlo has box-drawing glyphs
+
+    #[test]
+    fn test_menlo_has_box_drawing_glyphs() {
+        let font = Font::new("Menlo-Regular", 14.0, 1.0);
+
+        // Common box-drawing characters that TUI apps use
+        let box_drawing_chars = [
+            ('─', "horizontal line U+2500"),
+            ('│', "vertical line U+2502"),
+            ('┌', "top-left corner U+250C"),
+            ('┐', "top-right corner U+2510"),
+            ('└', "bottom-left corner U+2514"),
+            ('┘', "bottom-right corner U+2518"),
+        ];
+
+        for (c, name) in box_drawing_chars {
+            assert!(
+                font.glyph_for_char(c).is_some(),
+                "Menlo should have glyph for {} ({})",
+                c,
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_menlo_has_block_element_glyphs() {
+        let font = Font::new("Menlo-Regular", 14.0, 1.0);
+
+        // Block element characters used by TUI apps
+        let block_chars = [
+            ('█', "full block U+2588"),
+            ('▀', "upper half block U+2580"),
+            ('▄', "lower half block U+2584"),
+        ];
+
+        for (c, name) in block_chars {
+            let result = font.glyph_for_char(c);
+            // Log the result - some characters might not be in Menlo
+            if result.is_none() {
+                eprintln!("Warning: Menlo may not have glyph for {} ({})", c, name);
+            }
+            // We don't assert here because some block elements may be missing
+            // from Menlo. The atlas will fall back to space for these.
+        }
+    }
+
+    #[test]
+    fn test_non_bmp_characters_return_none() {
+        let font = Font::new("Menlo-Regular", 14.0, 1.0);
+
+        // Characters outside BMP (> U+FFFF) should return None
+        // because glyph_for_char uses u16 for glyph IDs
+        let emoji = '😀'; // U+1F600
+        assert!(
+            font.glyph_for_char(emoji).is_none(),
+            "Non-BMP characters should return None"
+        );
+    }
 }

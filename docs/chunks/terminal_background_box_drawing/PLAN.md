@@ -8,170 +8,151 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk addresses two rendering gaps in the terminal:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Background colors not rendering** — The `terminal_styling_fidelity` chunk added per-span background quad emission to `update_from_buffer_with_wrap`. However, background quads may not be appearing visually. We need to verify the pipeline is working end-to-end and fix any remaining issues.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **Box-drawing glyphs not rendering** — The glyph atlas was originally built to handle printable ASCII (0x20-0x7E). Unicode box-drawing characters (U+2500–U+257F), block elements (U+2580–U+259F), and other TUI glyphs are not pre-populated. When these characters are encountered, `GlyphAtlas::get_glyph()` returns `None`, and the character is silently skipped.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/terminal_background_box_drawing/GOAL.md)
-with references to the files that you expect to touch.
--->
+### Strategy
+
+**Background rendering** is already implemented in `glyph_buffer.rs` Phase 1 (Background Quads) and drawn in `renderer.rs` `render_text()`. We will verify this is working correctly and add integration tests to cover background color scenarios.
+
+**Box-drawing glyph rendering** requires extending the atlas to support on-demand rasterization of non-ASCII characters. The atlas already has `ensure_glyph()` which calls `add_glyph()` when a character is missing. However, the rendering path in `glyph_buffer.rs` uses `get_glyph()` which doesn't trigger on-demand addition. We will:
+
+1. Change the rendering path to use `ensure_glyph()` via a mutable atlas reference
+2. Verify Core Text can rasterize box-drawing and block element characters from the font
+3. Test that the atlas doesn't overflow with reasonable terminal workloads
+
+This approach maintains performance (on-demand rasterization only for new characters) while extending coverage beyond ASCII.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No existing subsystems are directly relevant. This chunk builds on the glyph rendering infrastructure from `glyph_rendering` and the terminal styling work from `terminal_styling_fidelity`.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add integration tests for background colors in terminal output
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Location: `crates/terminal/tests/integration.rs`
 
-Example:
+Add tests verifying:
+- Background colors are captured in `StyledLine` spans (this is already covered)
+- 256-color indexed backgrounds work
+- RGB truecolor backgrounds work
+- Combined foreground + background scenarios work
 
-### Step 1: Define the SegmentHeader struct
+These tests verify the data pipeline before rendering. If backgrounds show up in `styled_line()` but don't render, the issue is in the glyph buffer or renderer.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Add test for glyph atlas on-demand extension
 
-Location: src/segment/format.rs
+Location: `crates/editor/src/glyph_atlas.rs`
 
-### Step 2: Implement header serialization
+Add tests verifying:
+- `ensure_glyph()` adds non-ASCII characters on demand
+- Box-drawing characters (e.g., `'─'` U+2500, `'│'` U+2502, `'┌'` U+250C) can be rasterized
+- Block elements (e.g., `'█'` U+2588, `'▀'` U+2580) can be rasterized
+- Characters outside BMP (> U+FFFF) gracefully fall back to space
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+### Step 3: Change glyph buffer rendering to use mutable atlas
 
-### Step 3: ...
+Location: `crates/editor/src/glyph_buffer.rs`
 
----
+The current rendering paths (`update_from_buffer_with_cursor`, `update_from_buffer_with_wrap`) take `&GlyphAtlas` (immutable). To support on-demand glyph addition:
 
-**BACKREFERENCE COMMENTS**
+1. Change signature to take `&mut GlyphAtlas`
+2. Change `atlas.get_glyph(c)` calls to `atlas.ensure_glyph(&font, c)`
+3. This requires also passing `&Font` to the rendering methods
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+Update call sites in:
+- `GlyphBuffer::update()`
+- `GlyphBuffer::update_from_buffer()`
+- `GlyphBuffer::update_from_buffer_with_cursor()`
+- `GlyphBuffer::update_from_buffer_with_wrap()`
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+And in `Renderer`:
+- `update_glyph_buffer()` must pass `&mut self.atlas` and `&self.font`
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+### Step 4: Update Renderer to pass mutable atlas and font reference
 
-Format (place immediately before the symbol):
+Location: `crates/editor/src/renderer.rs`
+
+Modify `Renderer::update_glyph_buffer()` to pass mutable atlas and font:
+
+```rust
+fn update_glyph_buffer(&mut self, view: &dyn BufferView) {
+    // ... existing code ...
+    self.glyph_buffer.update_from_buffer_with_wrap(
+        &self.device,
+        &mut self.atlas,  // Changed: mutable
+        &self.font,       // Added: font for on-demand rasterization
+        view,
+        &self.viewport,
+        &wrap_layout,
+        self.cursor_visible,
+        y_offset,
+    );
+}
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+This change propagates through all rendering paths that use the glyph buffer.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 5: Add integration test for box-drawing characters in terminal
+
+Location: `crates/terminal/tests/integration.rs`
+
+Add tests that:
+1. Spawn a command that outputs box-drawing characters
+2. Verify the characters appear in `styled_line()` output
+3. This confirms the terminal emulator preserves Unicode characters
+
+Example: `printf "┌──┐\n│  │\n└──┘\n"` should produce a small box.
+
+### Step 6: Visual verification of terminal rendering
+
+Test the full pipeline by running:
+
+1. `htop` or `top` — TUI with status bars, borders, and colored sections
+2. `vim` with a colorscheme — syntax highlighting with background highlights
+3. `echo -e '\e[44mBlue BG\e[0m'` — blue background should be visible
+4. `printf "┌──────┐\n│ Test │\n└──────┘\n"` — box should render with connected lines
+5. Custom test: `printf '\e[48;5;196m RED BG \e[0m'` — 256-color red background
+
+Document any visual issues found for follow-up.
+
+### Step 7: Verify Menlo font has box-drawing glyphs
+
+Location: `crates/editor/src/font.rs` (test code)
+
+Add a test that verifies the font we use (Menlo-Regular) has glyphs for common box-drawing characters:
+- U+2500 `─` (horizontal line)
+- U+2502 `│` (vertical line)
+- U+250C `┌` (top-left corner)
+- U+2510 `┐` (top-right corner)
+- U+2514 `└` (bottom-left corner)
+- U+2518 `┘` (bottom-right corner)
+- U+2588 `█` (full block)
+
+If any are missing from Menlo, we may need a fallback font strategy (future work).
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- `terminal_styling_fidelity` chunk (ACTIVE): Provides the per-span background quad emission we're verifying
+- `glyph_rendering` chunk (ACTIVE): Provides the atlas infrastructure we're extending
+- `renderer_styled_content` chunk (ACTIVE): Provides per-vertex color rendering
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Font coverage**: Menlo may not have all box-drawing or block element glyphs. If `glyph_for_char()` returns `None`, we fall back to space. This is acceptable but produces broken TUI layouts. A fallback font could be added in future work.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Atlas capacity**: The atlas is 1024x1024 pixels. Adding many non-ASCII glyphs could exhaust space. We should monitor atlas utilization and add a warning or metric. The current warning in `add_glyph()` is sufficient for now.
+
+3. **Performance**: On-demand glyph rasterization happens synchronously during rendering. For the first render of a TUI app with many unique characters, this could cause a stutter. The atlas caches glyphs, so subsequent renders are fast.
+
+4. **Non-BMP characters**: Characters outside the Basic Multilingual Plane (> U+FFFF) like emoji cannot be looked up with a single `u16` in Core Text's glyph API. These gracefully fall back to space. Proper emoji support would require switching to UTF-16 surrogate pair handling.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

@@ -1,4 +1,5 @@
 // Chunk: docs/chunks/terminal_emulator - Terminal emulator backed by alacritty_terminal
+// Chunk: docs/chunks/terminal_background_box_drawing - Background color and box-drawing character tests
 //! Integration tests for the terminal crate.
 //!
 //! These tests verify that the terminal buffer works correctly with real
@@ -725,5 +726,236 @@ fn test_combined_attributes_captured() {
     assert!(
         found_combined,
         "Expected 'COMBINED' text with red, bold, and underline attributes"
+    );
+}
+
+// =============================================================================
+// Background color rendering tests
+// Chunk: docs/chunks/terminal_background_box_drawing - Background color verification
+// =============================================================================
+
+/// Test that 256-color indexed background colors are captured.
+#[test]
+fn test_indexed_background_color_captured() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Output text with 256-color background: \e[48;5;196m sets bg to color 196 (red)
+    terminal
+        .spawn_command(
+            "printf",
+            &["\\033[48;5;196mREDBG256\\033[0m"],
+            Path::new("/tmp"),
+        )
+        .unwrap();
+
+    // Wait for output
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Find "REDBG256" and verify it has indexed background color 196
+    let mut found_indexed_bg = false;
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            for span in &styled.spans {
+                if span.text.contains("REDBG256") {
+                    if let Color::Indexed(idx) = span.style.bg {
+                        if idx == 196 {
+                            found_indexed_bg = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if found_indexed_bg {
+            break;
+        }
+    }
+    assert!(
+        found_indexed_bg,
+        "Expected 'REDBG256' text with indexed background color 196"
+    );
+}
+
+/// Test that RGB truecolor background is captured.
+#[test]
+fn test_rgb_background_color_captured() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Output text with RGB truecolor background: \e[48;2;64;128;255m sets bg to RGB(64, 128, 255)
+    terminal
+        .spawn_command(
+            "printf",
+            &["\\033[48;2;64;128;255mRGBBG\\033[0m"],
+            Path::new("/tmp"),
+        )
+        .unwrap();
+
+    // Wait for output
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Find "RGBBG" and verify it has the correct RGB background color
+    let mut found_rgb_bg = false;
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            for span in &styled.spans {
+                if span.text.contains("RGBBG") {
+                    if let Color::Rgb { r, g, b } = span.style.bg {
+                        if r == 64 && g == 128 && b == 255 {
+                            found_rgb_bg = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if found_rgb_bg {
+            break;
+        }
+    }
+    assert!(
+        found_rgb_bg,
+        "Expected 'RGBBG' text with RGB background color (64, 128, 255)"
+    );
+}
+
+/// Test that combined foreground and background colors are captured.
+#[test]
+fn test_combined_fg_bg_colors_captured() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Output text with red foreground on blue background: \e[31;44m
+    terminal
+        .spawn_command(
+            "printf",
+            &["\\033[31;44mFGBG\\033[0m"],
+            Path::new("/tmp"),
+        )
+        .unwrap();
+
+    // Wait for output
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Find "FGBG" and verify it has red foreground and blue background
+    let mut found_combined = false;
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            for span in &styled.spans {
+                if span.text.contains("FGBG") {
+                    if span.style.fg == Color::Named(NamedColor::Red)
+                        && span.style.bg == Color::Named(NamedColor::Blue)
+                    {
+                        found_combined = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if found_combined {
+            break;
+        }
+    }
+    assert!(
+        found_combined,
+        "Expected 'FGBG' text with red foreground and blue background"
+    );
+}
+
+// =============================================================================
+// Box-drawing character tests
+// Chunk: docs/chunks/terminal_background_box_drawing - Box-drawing character verification
+// =============================================================================
+
+/// Test that box-drawing characters are captured in terminal output.
+#[test]
+fn test_box_drawing_characters_captured() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Output a simple box using Unicode box-drawing characters
+    // ┌──┐
+    // │  │
+    // └──┘
+    terminal
+        .spawn_command(
+            "printf",
+            &["\\u250C\\u2500\\u2500\\u2510\\n\\u2502  \\u2502\\n\\u2514\\u2500\\u2500\\u2518\\n"],
+            Path::new("/tmp"),
+        )
+        .unwrap();
+
+    // Wait for output
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Find box-drawing characters in output
+    let mut found_horizontal = false;  // ─ U+2500
+    let mut found_vertical = false;    // │ U+2502
+    let mut found_corner = false;      // ┌ U+250C
+
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            for span in &styled.spans {
+                if span.text.contains('─') {
+                    found_horizontal = true;
+                }
+                if span.text.contains('│') {
+                    found_vertical = true;
+                }
+                if span.text.contains('┌') {
+                    found_corner = true;
+                }
+            }
+        }
+    }
+    assert!(
+        found_horizontal && found_vertical && found_corner,
+        "Expected box-drawing characters: horizontal={}, vertical={}, corner={}",
+        found_horizontal,
+        found_vertical,
+        found_corner
+    );
+}
+
+/// Test that block element characters are captured in terminal output.
+#[test]
+fn test_block_element_characters_captured() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Output block elements: █ (full block U+2588), ▀ (upper half U+2580)
+    terminal
+        .spawn_command(
+            "printf",
+            &["\\u2588\\u2580"],
+            Path::new("/tmp"),
+        )
+        .unwrap();
+
+    // Wait for output
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Find block element characters in output
+    let mut found_full_block = false;   // █ U+2588
+    let mut found_upper_half = false;   // ▀ U+2580
+
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            for span in &styled.spans {
+                if span.text.contains('█') {
+                    found_full_block = true;
+                }
+                if span.text.contains('▀') {
+                    found_upper_half = true;
+                }
+            }
+        }
+    }
+    assert!(
+        found_full_block && found_upper_half,
+        "Expected block elements: full_block={}, upper_half={}",
+        found_full_block,
+        found_upper_half
     );
 }

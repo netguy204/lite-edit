@@ -379,6 +379,7 @@ impl Renderer {
     // Chunk: docs/chunks/viewport_fractional_scroll - Pass y_offset for smooth scrolling
     // Chunk: docs/chunks/line_wrap_rendering - Use WrapLayout for soft wrapping
     // Chunk: docs/chunks/renderer_polymorphic_buffer - Accept &dyn BufferView for polymorphic rendering
+    // Chunk: docs/chunks/terminal_background_box_drawing - Pass mutable atlas and font for on-demand glyph addition
     /// Updates the glyph buffer from the given buffer view and viewport
     fn update_glyph_buffer(&mut self, view: &dyn BufferView) {
         // Get the fractional scroll offset for smooth scrolling
@@ -387,10 +388,11 @@ impl Renderer {
         // Create wrap layout for current viewport width
         let wrap_layout = WrapLayout::new(self.viewport_width_px, &self.font.metrics);
 
-        // Use wrap-aware rendering
+        // Use wrap-aware rendering with mutable atlas for on-demand glyph addition
         self.glyph_buffer.update_from_buffer_with_wrap(
             &self.device,
-            &self.atlas,
+            &mut self.atlas,
+            &self.font,
             view,
             &self.viewport,
             &wrap_layout,
@@ -404,7 +406,7 @@ impl Renderer {
     /// # Arguments
     /// * `lines` - The text lines to render
     pub fn set_content(&mut self, lines: &[&str]) {
-        self.glyph_buffer.update(&self.device, &self.atlas, lines);
+        self.glyph_buffer.update(&self.device, &mut self.atlas, &self.font, lines);
     }
 
     // Chunk: docs/chunks/renderer_polymorphic_buffer - Legacy method, not used with workspace model
