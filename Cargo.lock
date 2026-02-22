@@ -370,6 +370,7 @@ version = "0.1.0"
 dependencies = [
  "block2",
  "lite-edit-buffer",
+ "lite-edit-input",
  "notify",
  "objc2",
  "objc2-app-kit",
@@ -387,12 +388,17 @@ name = "lite-edit-buffer"
 version = "0.1.0"
 
 [[package]]
+name = "lite-edit-input"
+version = "0.1.0"
+
+[[package]]
 name = "lite-edit-terminal"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "crossbeam-channel",
  "lite-edit-buffer",
+ "lite-edit-input",
  "portable-pty",
 ]
 

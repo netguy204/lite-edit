@@ -20,5 +20,9 @@ crossbeam-channel = "0.5"
 # Internal buffer types (BufferView, Style, Span, StyledLine, DirtyLines, etc.)
 lite-edit-buffer = { path = "../buffer" }
 
+# Chunk: docs/chunks/terminal_input_encoding - Terminal input encoding
+# Input types (KeyEvent, MouseEvent, Modifiers, etc.)
+lite-edit-input = { path = "../input" }
+
 [dev-dependencies]
 # No dev dependencies needed currently

@@ -194,6 +194,15 @@ impl TerminalBuffer {
         self.term.mode().contains(TermMode::ALT_SCREEN)
     }
 
+    // Chunk: docs/chunks/terminal_input_encoding - Terminal input encoding
+    /// Returns the current terminal mode flags.
+    ///
+    /// This is used by the input encoder to determine how to encode
+    /// keys and mouse events (e.g., APP_CURSOR mode, SGR_MOUSE mode).
+    pub fn term_mode(&self) -> TermMode {
+        *self.term.mode()
+    }
+
     /// Returns the number of lines in scrollback.
     fn history_size(&self) -> usize {
         self.term.grid().history_size()

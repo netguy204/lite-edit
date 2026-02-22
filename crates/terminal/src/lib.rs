@@ -24,11 +24,18 @@
 //! ```
 
 mod event;
+// Chunk: docs/chunks/terminal_input_encoding - Terminal input encoding
+mod input_encoder;
 mod pty;
 mod style_convert;
 mod terminal_buffer;
+// Chunk: docs/chunks/terminal_input_encoding - Terminal input encoding
+mod terminal_target;
 
+// Chunk: docs/chunks/terminal_input_encoding - Terminal input encoding
+pub use input_encoder::InputEncoder;
 pub use terminal_buffer::TerminalBuffer;
+pub use terminal_target::TerminalFocusTarget;
 
 // Re-export BufferView and related types for convenience
 pub use lite_edit_buffer::{BufferView, CursorInfo, CursorShape, DirtyLines, Position, StyledLine};
