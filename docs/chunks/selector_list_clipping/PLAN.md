@@ -1,177 +1,257 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+Clip the file picker's item list and selection highlight using Metal's scissor
+rect API. When `scroll_fraction_px > 0`, items drawn at `list_origin_y -
+scroll_fraction_px` bleed above `list_origin_y` into the query/separator region.
+Similarly, the extra row rendered for partial bottom visibility bleeds below
+`panel_y + panel_height`. The scissor rect constrains fragment output to the
+list region.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Strategy:**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. Before drawing the selection highlight and item text in `draw_selector_overlay`,
+   set a scissor rect covering only the list region: from `list_origin_y` down to
+   `panel_y + panel_height`.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/selector_list_clipping/GOAL.md)
-with references to the files that you expect to touch.
--->
+2. Draw the selection highlight and item text (phases 2 and 6 in current code).
 
-## Subsystem Considerations
+3. Reset the scissor rect to the full viewport so subsequent rendering (main
+   buffer, tab bar, etc.) is unaffected.
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+**Metal API used:**
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
+- `MTLRenderCommandEncoder::setScissorRect(MTLScissorRect)` — sets the clipping
+  rectangle in pixel coordinates (origin at top-left, Y increases downward,
+  matching our coordinate system).
 
-If no subsystems are relevant, delete this section.
+- `MTLScissorRect { x, y, width, height }` — all fields are `NSUInteger` (usize).
 
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
+**No changes to:**
 
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
+- `SelectorGlyphBuffer` — it already positions items correctly with fractional
+  offsets; only the renderer clips output.
+- `OverlayGeometry` or `calculate_overlay_geometry` — existing geometry is
+  sufficient; the new scissor rect values derive from `geometry.list_origin_y`,
+  `geometry.panel_y`, and `geometry.panel_height`.
+- The scroll model (`RowScroller`) — remains unchanged.
 
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
+**Testing:**
 
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Per the project's Humble View Architecture, scissor rect application is a
+renderer-side concern that cannot be meaningfully unit-tested without a GPU.
+Visual verification will confirm correctness. Existing geometry tests in
+`selector_overlay.rs` and `SelectorGlyphBuffer` tests remain valid.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Import MTLScissorRect in renderer.rs
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add `MTLScissorRect` to the `objc2_metal` imports at the top of `renderer.rs`:
 
-Example:
-
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+use objc2_metal::{
+    MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLDevice, MTLDrawable,
+    MTLIndexType, MTLLoadAction, MTLPrimitiveType, MTLRenderCommandEncoder,
+    MTLRenderPassDescriptor, MTLScissorRect, MTLStoreAction,
+};
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `crates/editor/src/renderer.rs` (imports section)
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 2: Create helper function for scissor rect from geometry
+
+Add a helper function to convert floating-point geometry values to a
+`MTLScissorRect`. Metal requires integer pixel coordinates and the rect must
+be clamped to the viewport bounds to avoid validation errors.
+
+```rust
+/// Creates a scissor rect for clipping the selector item list.
+///
+/// The rect spans from `list_origin_y` to `panel_y + panel_height`,
+/// clipped to the viewport bounds.
+fn selector_list_scissor_rect(
+    geometry: &OverlayGeometry,
+    view_width: f32,
+    view_height: f32,
+) -> MTLScissorRect {
+    // Y coordinate: list_origin_y (top of list region)
+    let y = (geometry.list_origin_y as usize).min(view_height as usize);
+
+    // Height: from list_origin_y to panel bottom
+    let bottom = geometry.panel_y + geometry.panel_height;
+    let height = ((bottom - geometry.list_origin_y).max(0.0) as usize)
+        .min((view_height as usize).saturating_sub(y));
+
+    MTLScissorRect {
+        x: 0,
+        y,
+        width: view_width as usize,
+        height,
+    }
+}
+```
+
+Location: `crates/editor/src/renderer.rs` (helper functions section, near the
+Renderer impl)
+
+### Step 3: Create helper function for full viewport scissor rect
+
+Add a second helper function to restore the scissor rect to the full viewport.
+
+```rust
+/// Creates a scissor rect covering the entire viewport.
+fn full_viewport_scissor_rect(view_width: f32, view_height: f32) -> MTLScissorRect {
+    MTLScissorRect {
+        x: 0,
+        y: 0,
+        width: view_width as usize,
+        height: view_height as usize,
+    }
+}
+```
+
+Location: `crates/editor/src/renderer.rs` (same section as Step 2)
+
+### Step 4: Modify draw_selector_overlay to apply scissor rect
+
+Update `draw_selector_overlay` to bracket the selection highlight and item text
+draw calls with scissor rect changes:
+
+1. After drawing the separator (phase 3) and query text/cursor (phases 4-5), but
+   before drawing the selection highlight (currently phase 2 in render order —
+   note: we need to reorder phases or apply scissor before phase 2 and maintain
+   it through phase 6).
+
+   Actually, looking at the current code structure, the selection highlight is
+   drawn as phase 2 (after background), and item text is phase 6 (after cursor).
+   Both need to be clipped. The scissor rect should be set before drawing the
+   selection highlight and reset after drawing item text.
+
+   **Revised approach:** Set scissor rect before the selection highlight draw,
+   keep it through item text draw, then reset it after item text.
+
+2. Before the "Draw Selection Highlight" section, add:
+
+```rust
+// Chunk: docs/chunks/selector_list_clipping - Clip item list to panel bounds
+// Apply scissor rect to clip selection highlight and items to the list region.
+// This prevents fractionally-scrolled items from bleeding into query/separator.
+let list_scissor = selector_list_scissor_rect(&geometry, view_width, view_height);
+encoder.setScissorRect(list_scissor);
+```
+
+3. After the "Draw Item Text" section, add:
+
+```rust
+// Chunk: docs/chunks/selector_list_clipping - Reset scissor for subsequent rendering
+// Restore full viewport scissor so other render passes (if any) are not clipped.
+let full_scissor = full_viewport_scissor_rect(view_width, view_height);
+encoder.setScissorRect(full_scissor);
+```
+
+**Note on draw order:** The current draw order is:
+1. Background (should NOT be clipped — covers full panel)
+2. Selection highlight (SHOULD be clipped)
+3. Separator (should NOT be clipped — above list region)
+4. Query text (should NOT be clipped)
+5. Query cursor (should NOT be clipped)
+6. Item text (SHOULD be clipped)
+
+This means we need to reorder the draws or apply scissor selectively. The
+simplest approach is:
+
+**Option A:** Move selection highlight draw to be immediately before item text
+draw, then bracket both with the scissor rect.
+
+**Option B:** Apply/reset scissor twice: once around selection highlight, once
+around item text.
+
+**Chosen approach:** Option A is cleaner. Move the selection highlight draw
+(phase 2) to after the query cursor draw, immediately before item text. Then
+apply scissor before both and reset after.
+
+Location: `crates/editor/src/renderer.rs#draw_selector_overlay`
+
+### Step 5: Reorder draw phases in draw_selector_overlay
+
+Move the selection highlight draw to after the query cursor draw. The new order
+will be:
+
+1. Background (unclipped)
+2. Separator (unclipped)
+3. Query text (unclipped)
+4. Query cursor (unclipped)
+5. **[Apply scissor rect]**
+6. Selection highlight (clipped)
+7. Item text (clipped)
+8. **[Reset scissor rect]**
+
+This minimizes scissor state changes (1 set, 1 reset) and groups all clipped
+draws together.
+
+**Implementation:**
+
+- Move the "Draw Selection Highlight" block from its current position (after
+  background) to after "Draw Query Cursor".
+- Insert scissor rect set before selection highlight.
+- Insert scissor rect reset after item text.
+
+Location: `crates/editor/src/renderer.rs#draw_selector_overlay`
+
+### Step 6: Visual verification
+
+Build and run the editor. Open the file picker, scroll to a fractional position,
+and verify:
+
+- No item text or selection highlight appears above `list_origin_y` (over the
+  separator or query row).
+- No item text or selection highlight appears below the panel's bottom edge.
+- The background, separator, and query text are unaffected.
+- Other UI elements (main buffer, tab bar, left rail) render correctly.
+
+This is a manual verification step per the project's Humble View Architecture.
+
+### Step 7: Run existing tests
+
+Run all existing tests to ensure no regressions:
+
+```bash
+cargo test -p editor
+```
+
+All tests should pass — this change is renderer-only and does not affect the
+geometry calculations or selector behavior tested in existing unit tests.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+- **selector_smooth_render** (ACTIVE): Provides the fractional scroll offset
+  that causes items to bleed past panel boundaries. This chunk fixes the
+  resulting visual artifact.
 
-If there are no dependencies, delete this section.
--->
+- **selector_row_scroller** (ACTIVE): Provides `scroll_fraction_px()` and
+  `visible_item_range()` on `SelectorWidget`.
+
+Both dependencies are satisfied (status: ACTIVE).
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Scissor rect coordinate system:** Metal uses top-left origin with Y
+   increasing downward, matching our screen coordinate system. Verified by
+   reading Metal documentation and existing codebase patterns.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Integer rounding:** `MTLScissorRect` fields are `NSUInteger`. Truncation
+   from `f32` may cause ±1 pixel error at boundaries. This is acceptable —
+   single-pixel errors are not visually noticeable and do not affect
+   correctness.
+
+3. **Scissor rect validation:** Metal requires the scissor rect to be within
+   the render target bounds. The helper function clamps values to viewport
+   dimensions to prevent validation errors.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

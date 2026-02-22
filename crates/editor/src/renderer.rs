@@ -29,7 +29,7 @@ use objc2::runtime::ProtocolObject;
 use objc2_metal::{
     MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLDevice, MTLDrawable,
     MTLIndexType, MTLLoadAction, MTLPrimitiveType, MTLRenderCommandEncoder,
-    MTLRenderPassDescriptor, MTLStoreAction,
+    MTLRenderPassDescriptor, MTLScissorRect, MTLStoreAction,
 };
 use objc2_quartz_core::CAMetalDrawable;
 
@@ -44,7 +44,7 @@ use crate::selector::SelectorWidget;
 // Chunk: docs/chunks/find_in_file - Find strip rendering
 use crate::selector_overlay::{
     calculate_find_strip_geometry, calculate_overlay_geometry, FindStripGlyphBuffer,
-    SelectorGlyphBuffer,
+    OverlayGeometry, SelectorGlyphBuffer,
 };
 use crate::shader::GlyphPipeline;
 // Chunk: docs/chunks/content_tab_bar - Content tab bar rendering
@@ -102,6 +102,47 @@ const BORDER_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 struct Uniforms {
     /// Viewport size in pixels
     viewport_size: [f32; 2],
+}
+
+// =============================================================================
+// Scissor Rect Helpers
+// =============================================================================
+
+// Chunk: docs/chunks/selector_list_clipping - Clip item list to panel bounds
+/// Creates a scissor rect for clipping the selector item list.
+///
+/// The rect spans from `list_origin_y` to `panel_y + panel_height`,
+/// clipped to the viewport bounds.
+fn selector_list_scissor_rect(
+    geometry: &OverlayGeometry,
+    view_width: f32,
+    view_height: f32,
+) -> MTLScissorRect {
+    // Y coordinate: list_origin_y (top of list region)
+    let y = (geometry.list_origin_y as usize).min(view_height as usize);
+
+    // Height: from list_origin_y to panel bottom
+    let bottom = geometry.panel_y + geometry.panel_height;
+    let height = ((bottom - geometry.list_origin_y).max(0.0) as usize)
+        .min((view_height as usize).saturating_sub(y));
+
+    MTLScissorRect {
+        x: 0,
+        y,
+        width: view_width as usize,
+        height,
+    }
+}
+
+// Chunk: docs/chunks/selector_list_clipping - Reset scissor for subsequent rendering
+/// Creates a scissor rect covering the entire viewport.
+fn full_viewport_scissor_rect(view_width: f32, view_height: f32) -> MTLScissorRect {
+    MTLScissorRect {
+        x: 0,
+        y: 0,
+        width: view_width as usize,
+        height: view_height as usize,
+    }
 }
 
 // =============================================================================
@@ -771,7 +812,10 @@ impl Renderer {
         }
 
         // Chunk: docs/chunks/renderer_styled_content - Per-vertex colors, no per-draw uniforms needed
+        // Chunk: docs/chunks/selector_list_clipping - Reordered draws for scissor rect clipping
         // With per-vertex colors, we draw all selector quads in order with no uniform changes.
+        // Draw order: Background, Separator, Query Text, Query Cursor (unclipped),
+        // then Selection Highlight and Item Text (clipped to list region).
 
         // ==================== Draw Background ====================
         let bg_range = selector_buffer.background_range();
@@ -781,21 +825,6 @@ impl Renderer {
                 encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
                     MTLPrimitiveType::Triangle,
                     bg_range.count,
-                    MTLIndexType::UInt32,
-                    index_buffer,
-                    index_offset,
-                );
-            }
-        }
-
-        // ==================== Draw Selection Highlight ====================
-        let sel_range = selector_buffer.selection_range();
-        if !sel_range.is_empty() {
-            let index_offset = sel_range.start * std::mem::size_of::<u32>();
-            unsafe {
-                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
-                    MTLPrimitiveType::Triangle,
-                    sel_range.count,
                     MTLIndexType::UInt32,
                     index_buffer,
                     index_offset,
@@ -848,7 +877,28 @@ impl Renderer {
             }
         }
 
-        // ==================== Draw Item Text ====================
+        // Chunk: docs/chunks/selector_list_clipping - Apply scissor rect for list region
+        // Clip selection highlight and item text to the list region, preventing
+        // fractionally-scrolled items from bleeding into query/separator area.
+        let list_scissor = selector_list_scissor_rect(&geometry, view_width, view_height);
+        encoder.setScissorRect(list_scissor);
+
+        // ==================== Draw Selection Highlight (clipped) ====================
+        let sel_range = selector_buffer.selection_range();
+        if !sel_range.is_empty() {
+            let index_offset = sel_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    sel_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
+        // ==================== Draw Item Text (clipped) ====================
         let item_range = selector_buffer.item_text_range();
         if !item_range.is_empty() {
             let index_offset = item_range.start * std::mem::size_of::<u32>();
@@ -862,6 +912,11 @@ impl Renderer {
                 );
             }
         }
+
+        // Chunk: docs/chunks/selector_list_clipping - Reset scissor for subsequent rendering
+        // Restore full viewport scissor so other render passes are not clipped.
+        let full_scissor = full_viewport_scissor_rect(view_width, view_height);
+        encoder.setScissorRect(full_scissor);
     }
 
     // Chunk: docs/chunks/workspace_model - Left rail rendering
