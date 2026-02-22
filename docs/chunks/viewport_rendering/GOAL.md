@@ -35,9 +35,7 @@ code_references:
   - ref: crates/editor/src/glyph_buffer.rs#GlyphBuffer::create_cursor_quad
     implements: "Cursor rendering as a block quad at cursor position"
   - ref: crates/editor/src/renderer.rs#Renderer
-    implements: "Extended to hold Viewport and TextBuffer for rendering"
-  - ref: crates/editor/src/renderer.rs#Renderer::set_buffer
-    implements: "Sets TextBuffer for viewport-based rendering"
+    implements: "Extended to hold Viewport for rendering (no longer owns TextBuffer after renderer_polymorphic_buffer)"
   - ref: crates/editor/src/renderer.rs#Renderer::update_viewport_size
     implements: "Updates viewport when window resizes"
   - ref: crates/editor/src/renderer.rs#Renderer::apply_mutation

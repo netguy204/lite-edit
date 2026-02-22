@@ -47,6 +47,7 @@ pub enum EditorFocus {
     Buffer,
     /// Selector overlay is active (file picker, command palette, etc.)
     Selector,
+    // Chunk: docs/chunks/find_in_file - Find-in-file focus variant
     /// Find-in-file strip is active
     FindInFile,
 }
@@ -101,6 +102,7 @@ pub struct EditorState {
     /// The resolved path from the last selector confirmation
     /// (consumed by file_save chunk for buffer association)
     pub resolved_path: Option<PathBuf>,
+    // Chunk: docs/chunks/find_in_file - Find-in-file mode state
     /// The MiniBuffer for the find query (when focus == FindInFile)
     pub find_mini_buffer: Option<MiniBuffer>,
     /// The buffer position from which the current search started
