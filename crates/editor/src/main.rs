@@ -340,13 +340,19 @@ impl EditorController {
 
         if self.state.is_dirty() {
             // Chunk: docs/chunks/renderer_polymorphic_buffer - Sync viewport scroll offset
+            // Chunk: docs/chunks/scroll_bottom_deadzone_v3 - Use unclamped sync to preserve wrap-aware clamping
             // The renderer's viewport needs the scroll offset from the editor state.
             // We sync this here rather than in render_with_editor because the EditorState
             // owns the authoritative scroll position.
-            if let Some(buffer_view) = self.state.editor.active_buffer_view() {
-                let line_count = buffer_view.line_count();
+            //
+            // Important: Use set_scroll_offset_px_unclamped because the EditorState's scroll
+            // position was already clamped using wrap-aware logic (set_scroll_offset_px_wrapped).
+            // Re-clamping with set_scroll_offset_px would incorrectly reduce the max scroll
+            // position when wrapped lines exist, causing the renderer to show different content
+            // than what hit-testing expects (the scroll deadzone bug).
+            if let Some(_buffer_view) = self.state.editor.active_buffer_view() {
                 let state_scroll_px = self.state.viewport().scroll_offset_px();
-                self.renderer.viewport_mut().set_scroll_offset_px(state_scroll_px, line_count);
+                self.renderer.viewport_mut().set_scroll_offset_px_unclamped(state_scroll_px);
             }
 
             // Take the dirty region
