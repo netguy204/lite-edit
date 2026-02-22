@@ -1576,4 +1576,131 @@ mod tests {
             "Click above list_origin_y should be a no-op, selection should remain at 3"
         );
     }
+
+    // =========================================================================
+    // Chunk: docs/chunks/selector_scroll_bottom - Bug A / Bug B scroll fix tests
+    // =========================================================================
+
+    /// Step 1 (PLAN.md): Test that visible_item_range returns a proper range
+    /// when update_visible_size is called after set_items with appropriate geometry.
+    ///
+    /// This test demonstrates Bug A's root cause: without calling update_visible_size,
+    /// visible_item_range() returns 0..1 because visible_rows is initialized to 0.
+    ///
+    /// Chunk: docs/chunks/selector_scroll_bottom
+    #[test]
+    fn visible_item_range_correct_after_update_visible_size() {
+        let mut widget = SelectorWidget::new();
+        // Set up 20 items
+        widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
+
+        // Before update_visible_size, visible_rows is 0, so range is 0..1
+        assert_eq!(
+            widget.visible_item_range(),
+            0..1,
+            "Without update_visible_size, visible_item_range should be 0..1 (Bug A root cause)"
+        );
+
+        // Now call update_visible_size with 80px height (row_height=16, so 5 visible rows)
+        widget.update_visible_size(80.0);
+
+        // After update_visible_size, visible_item_range should be 0..6 (5 visible + 1 for partial)
+        assert_eq!(
+            widget.visible_item_range(),
+            0..6,
+            "After update_visible_size(80.0), visible_item_range should be 0..6"
+        );
+    }
+
+    /// Step 2 (PLAN.md): Test that navigating to the last item of a list larger than
+    /// visible_rows leaves the selection at draw_idx == visible_rows - 1.
+    ///
+    /// This verifies ensure_visible keeps the selection within the scissor-clipped area.
+    ///
+    /// Chunk: docs/chunks/selector_scroll_bottom
+    #[test]
+    fn navigate_to_last_item_keeps_selection_at_bottom_of_viewport() {
+        let mut widget = SelectorWidget::new();
+        // 20 items, row_height=16, 5 visible rows (80px)
+        widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
+        widget.update_visible_size(80.0); // 5 visible rows
+
+        // Navigate to the last item (index 19)
+        for _ in 0..19 {
+            widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
+        }
+
+        assert_eq!(widget.selected_index(), 19);
+
+        // The selection should be at draw_idx = visible_rows - 1 = 4
+        // draw_idx = selected_index - first_visible_item()
+        let first_visible = widget.first_visible_item();
+        let draw_idx = widget.selected_index() - first_visible;
+
+        // With 20 items and 5 visible rows, when selection is at 19:
+        // first_visible should be 15 (so items 15-19 are visible)
+        // draw_idx = 19 - 15 = 4 = visible_rows - 1
+        assert_eq!(
+            first_visible, 15,
+            "first_visible_item should be 15 when selection is at last item"
+        );
+        assert_eq!(
+            draw_idx, 4,
+            "Selection at last item should have draw_idx = visible_rows - 1 = 4"
+        );
+
+        // Verify the selection is within visible_item_range
+        let range = widget.visible_item_range();
+        assert!(
+            range.contains(&widget.selected_index()),
+            "Selection {} should be within visible_item_range {:?}",
+            widget.selected_index(),
+            range
+        );
+    }
+
+    /// Additional test: verify that navigating down one item at a time
+    /// keeps the selection within the visible window at every step.
+    ///
+    /// Chunk: docs/chunks/selector_scroll_bottom
+    #[test]
+    fn navigate_down_keeps_selection_visible_at_every_step() {
+        let mut widget = SelectorWidget::new();
+        // 20 items, 5 visible rows
+        widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
+        widget.update_visible_size(80.0); // row_height=16, 5 visible rows
+
+        // Navigate down one item at a time, checking visibility at each step
+        for i in 0..19 {
+            let range = widget.visible_item_range();
+            assert!(
+                range.contains(&widget.selected_index()),
+                "At step {}, selection {} should be in visible_item_range {:?}",
+                i,
+                widget.selected_index(),
+                range
+            );
+
+            // Also verify draw_idx is within [0, visible_rows - 1]
+            let first_visible = widget.first_visible_item();
+            let draw_idx = widget.selected_index().saturating_sub(first_visible);
+            assert!(
+                draw_idx <= 4, // visible_rows - 1 = 4
+                "At step {}, draw_idx {} should be <= visible_rows - 1 (4)",
+                i,
+                draw_idx
+            );
+
+            widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
+        }
+
+        // Final check at the last item
+        let range = widget.visible_item_range();
+        assert!(
+            range.contains(&widget.selected_index()),
+            "At last item, selection {} should be in visible_item_range {:?}",
+            widget.selected_index(),
+            range
+        );
+    }
 }

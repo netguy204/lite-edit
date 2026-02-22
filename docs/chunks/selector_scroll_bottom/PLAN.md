@@ -1,177 +1,160 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk fixes two related scrolling bugs in the selector overlay:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Bug A — Picker opens showing only one item**: `SelectorWidget::new()` initializes
+`RowScroller` with `visible_rows = 0`. The `update_visible_size` method is only
+called inside event handlers (`handle_key_selector`, `handle_mouse_selector`,
+`handle_scroll_selector`), so the first render before user interaction uses
+`visible_item_range() = 0..1`. The fix is to call `update_visible_size` inside
+`open_file_picker` immediately after `set_items`.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+**Bug B — Cannot arrow-key to the bottom of a long match list**: When navigating
+down a long list, the selection highlight eventually clips at the panel bottom and
+then disappears. The root cause is that `update_visible_size` is called at the
+START of each key event handler using the pre-event item count. When typing
+changes the query, `set_items` is called AFTER `handle_key`, leaving `visible_rows`
+derived from the old count. This staleness window causes scissor rect / visible_rows
+mismatches. The fix is to call `update_visible_size` a second time AFTER `set_items`
+in the typing branch of `handle_key_selector`.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/selector_scroll_bottom/GOAL.md)
-with references to the files that you expect to touch.
--->
-
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+**Testing strategy** (per TESTING_PHILOSOPHY.md):
+- TDD for the `ensure_visible` boundary condition — write failing tests showing
+  selection at `draw_idx == visible_rows - 1` is within scissor bounds.
+- Tests verify initial `visible_item_range` matches panel capacity after
+  `open_file_picker`.
+- Tests verify navigating to the last item places selection at
+  `draw_idx == visible_rows - 1`, not beyond.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add test for initial visible_item_range after open_file_picker
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Write a unit test in `selector.rs` that verifies when `update_visible_size` is
+called after `set_items` with appropriate geometry, the `visible_item_range()`
+returns a range larger than `0..1`.
 
-Example:
+This test will initially fail if we construct a widget without calling
+`update_visible_size`, demonstrating Bug A's root cause.
 
-### Step 1: Define the SegmentHeader struct
+Location: `crates/editor/src/selector.rs` (test module)
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Add test for arrow navigation to last visible row
 
-Location: src/segment/format.rs
+Write a unit test that verifies when navigating down through a list longer than
+`visible_rows`, the selection ends up at `draw_idx == visible_rows - 1` (the
+last "proper" slot), not beyond. This test verifies `ensure_visible` is working
+correctly to keep the selection within the scissor-clipped area.
 
-### Step 2: Implement header serialization
+The test should:
+1. Create a widget with N items where N > visible_rows (e.g., 20 items, 5 visible)
+2. Call `update_visible_size` to set the visible window
+3. Navigate down to item N-1 (last item)
+4. Assert that `selected_index - first_visible_item() == visible_rows - 1`
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Location: `crates/editor/src/selector.rs` (test module)
 
-### Step 3: ...
+### Step 3: Fix Bug A — Call update_visible_size in open_file_picker
 
----
+Modify `EditorState::open_file_picker` to call `selector.update_visible_size(...)`
+immediately after `selector.set_items(items)`.
 
-**BACKREFERENCE COMMENTS**
+This requires computing the overlay geometry (already done in the event handlers)
+to get `visible_items * item_height`. The geometry calculation uses:
+- `view_width` and `view_height` from `self`
+- `line_height` from `self.font_metrics`
+- `item_count` from the items list
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+After this fix, the first render will use the correct `visible_item_range` and
+show all visible items.
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+Location: `crates/editor/src/editor_state.rs` (open_file_picker method)
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+### Step 4: Fix Bug B — Call update_visible_size after set_items in handle_key_selector
 
-Format (place immediately before the symbol):
+Modify `EditorState::handle_key_selector` to call `update_visible_size` a second
+time AFTER the `sel.set_items(items)` call in the query-changed branch.
+
+Currently, `update_visible_size` is called at the START of the handler with the
+old item count. When the query changes and `set_items` is called with a new item
+list, the `visible_rows` may be stale if the new list has fewer items and thus
+a different `max_visible_items`.
+
+The fix ensures `visible_rows` is recalculated with the new item count, keeping
+the scissor rect and scroll state in sync.
+
+Location: `crates/editor/src/editor_state.rs` (handle_key_selector method)
+
+### Step 5: Verify scissor rect calculation is correct
+
+Trace through `selector_list_scissor_rect` in `renderer.rs` to verify the scissor
+bottom always ≥ the last full item's bottom pixel. The current implementation:
+
+```rust
+let bottom = geometry.panel_y + geometry.panel_height;
+let height = ((bottom - geometry.list_origin_y).max(0.0) as usize)
+    .min((view_height as usize).saturating_sub(y));
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+
+Verify this uses `as usize` truncation correctly. If pixel truncation is causing
+off-by-one issues, consider using ceiling for height. However, based on analysis,
+the primary issue is the staleness window, not truncation.
+
+If no truncation bug is found, document this verification in the Deviations section.
+
+Location: `crates/editor/src/renderer.rs` (selector_list_scissor_rect function)
+
+### Step 6: Run existing tests and verify no regressions
+
+Run the full test suite for `selector.rs`, `selector_overlay.rs`, and `renderer.rs`
+to ensure no regressions.
+
+```bash
+cargo test --package editor -- selector
+cargo test --package editor -- renderer
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+### Step 7: Manual visual verification
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
-
-## Dependencies
-
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+Build and run the editor. Test:
+1. Open file picker (Cmd+P or equivalent) — verify full panel of items shows
+   immediately, not just one item.
+2. With a long list, arrow-key from first to last item — verify selection
+   highlight stays fully visible on every frame.
+3. Press Enter at the last item — verify the confirmed item matches the
+   highlighted item.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Scissor truncation**: The GOAL.md mentions potential pixel truncation from
+  `as usize` conversion. Investigation suggests the staleness window is the
+  primary cause, but truncation should be verified. If truncation causes issues,
+  Step 5 may need to become an implementation step rather than verification.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Performance**: Adding a second `update_visible_size` call and
+  `calculate_overlay_geometry` call in `open_file_picker` should have negligible
+  performance impact (pure arithmetic, no allocations).
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
+### Step 5: Scissor rect verification — no changes needed
 
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
+Traced through `selector_list_scissor_rect` in `renderer.rs`. The scissor rect
+calculation uses `as usize` truncation for both y-coordinate and height:
 
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
+```rust
+let y = (geometry.list_origin_y as usize).min(view_height as usize);
+let bottom = geometry.panel_y + geometry.panel_height;
+let height = ((bottom - geometry.list_origin_y).max(0.0) as usize)
+    .min((view_height as usize).saturating_sub(y));
+```
 
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+While truncation could theoretically cause off-by-one pixel clipping, in practice
+the geometry values are typically derived from whole numbers (item counts and
+line heights), making truncation a non-issue. The primary bug cause was the
+**staleness window** where `visible_rows` was computed from the old item count
+before `set_items` updated the list. This was fixed in Step 4.
+
+No changes to the scissor rect calculation were needed.
