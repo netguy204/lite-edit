@@ -13,11 +13,44 @@ use crate::gap_buffer::GapBuffer;
 use crate::line_index::LineIndex;
 use crate::types::{DirtyLines, Position};
 
-// Chunk: docs/chunks/word_boundary_primitives - Word boundary scanning primitives
+// Chunk: docs/chunks/word_triclass_boundaries - Three-class word boundary classification
+// Spec: docs/trunk/SPEC.md#word-model
+/// Character classification for word boundary detection.
+///
+/// A "word" is a contiguous run of same-class characters. Boundary detection
+/// stops when the character class changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CharClass {
+    /// Whitespace characters (space, tab, newline, etc.)
+    Whitespace,
+    /// Letters: a-z, A-Z, 0-9, underscore
+    Letter,
+    /// Symbols: everything else (punctuation, operators, etc.)
+    Symbol,
+}
+
+// Chunk: docs/chunks/word_triclass_boundaries - Three-class word boundary classification
+// Spec: docs/trunk/SPEC.md#word-model
+/// Classifies a character into one of three classes for word boundary detection.
+///
+/// - `Whitespace`: Any character where `char::is_whitespace()` returns true
+/// - `Letter`: ASCII letters (a-z, A-Z), digits (0-9), underscore (_)
+/// - `Symbol`: Everything else (punctuation, operators, etc.)
+fn char_class(c: char) -> CharClass {
+    if c.is_whitespace() {
+        CharClass::Whitespace
+    } else if c.is_ascii_alphanumeric() || c == '_' {
+        CharClass::Letter
+    } else {
+        CharClass::Symbol
+    }
+}
+
+// Chunk: docs/chunks/word_triclass_boundaries - Three-class word boundary classification
 // Spec: docs/trunk/SPEC.md#word-model
 /// Returns the start column of the contiguous run containing `chars[col - 1]`.
 ///
-/// Uses `char::is_whitespace()` as the sole classifier. A "run" is a maximal
+/// Uses the three-class model (Whitespace, Letter, Symbol). A "run" is a maximal
 /// contiguous sequence of same-class characters.
 ///
 /// Returns `col` unchanged when `col == 0` or `chars` is empty.
@@ -26,10 +59,10 @@ fn word_boundary_left(chars: &[char], col: usize) -> usize {
         return col;
     }
     let col = col.min(chars.len()); // clamp to valid range
-    let target_is_whitespace = chars[col - 1].is_whitespace();
+    let target_class = char_class(chars[col - 1]);
     let mut boundary = col;
     while boundary > 0 {
-        if chars[boundary - 1].is_whitespace() != target_is_whitespace {
+        if char_class(chars[boundary - 1]) != target_class {
             break;
         }
         boundary -= 1;
@@ -37,11 +70,11 @@ fn word_boundary_left(chars: &[char], col: usize) -> usize {
     boundary
 }
 
-// Chunk: docs/chunks/word_boundary_primitives - Word boundary scanning primitives
+// Chunk: docs/chunks/word_triclass_boundaries - Three-class word boundary classification
 // Spec: docs/trunk/SPEC.md#word-model
 /// Returns the first column past the end of the contiguous run starting at `chars[col]`.
 ///
-/// Uses `char::is_whitespace()` as the sole classifier. A "run" is a maximal
+/// Uses the three-class model (Whitespace, Letter, Symbol). A "run" is a maximal
 /// contiguous sequence of same-class characters.
 ///
 /// Returns `col` unchanged when `col >= chars.len()` or `chars` is empty.
@@ -49,10 +82,10 @@ fn word_boundary_right(chars: &[char], col: usize) -> usize {
     if col >= chars.len() || chars.is_empty() {
         return col;
     }
-    let target_is_whitespace = chars[col].is_whitespace();
+    let target_class = char_class(chars[col]);
     let mut boundary = col;
     while boundary < chars.len() {
-        if chars[boundary].is_whitespace() != target_is_whitespace {
+        if char_class(chars[boundary]) != target_class {
             break;
         }
         boundary += 1;
@@ -452,7 +485,7 @@ impl TextBuffer {
             return;
         }
 
-        let cursor_on_whitespace = line_chars[self.cursor.col].is_whitespace();
+        let cursor_on_whitespace = char_class(line_chars[self.cursor.col]) == CharClass::Whitespace;
 
         if cursor_on_whitespace {
             // Started on whitespace: skip whitespace, then skip to end of next word
@@ -490,7 +523,7 @@ impl TextBuffer {
 
         // Check char immediately before cursor to determine if we're on whitespace
         // (word_boundary_left looks at chars[col-1])
-        let prev_char_is_whitespace = line_chars[self.cursor.col - 1].is_whitespace();
+        let prev_char_is_whitespace = char_class(line_chars[self.cursor.col - 1]) == CharClass::Whitespace;
 
         if prev_char_is_whitespace {
             // Started on whitespace (or just after it): skip whitespace, then go to start of preceding word
@@ -2329,6 +2362,138 @@ mod tests {
         assert_eq!(word_boundary_right(&chars, 2), 5);
     }
 
+    // ==================== CharClass Tests ====================
+    // Chunk: docs/chunks/word_triclass_boundaries - Three-class word boundary classification
+
+    #[test]
+    fn test_char_class_whitespace() {
+        assert_eq!(char_class(' '), CharClass::Whitespace);
+        assert_eq!(char_class('\t'), CharClass::Whitespace);
+        assert_eq!(char_class('\n'), CharClass::Whitespace);
+        assert_eq!(char_class('\r'), CharClass::Whitespace);
+    }
+
+    #[test]
+    fn test_char_class_letter_lowercase() {
+        for c in 'a'..='z' {
+            assert_eq!(char_class(c), CharClass::Letter);
+        }
+    }
+
+    #[test]
+    fn test_char_class_letter_uppercase() {
+        for c in 'A'..='Z' {
+            assert_eq!(char_class(c), CharClass::Letter);
+        }
+    }
+
+    #[test]
+    fn test_char_class_letter_digits() {
+        for c in '0'..='9' {
+            assert_eq!(char_class(c), CharClass::Letter);
+        }
+    }
+
+    #[test]
+    fn test_char_class_letter_underscore() {
+        assert_eq!(char_class('_'), CharClass::Letter);
+    }
+
+    #[test]
+    fn test_char_class_symbol() {
+        // Common programming symbols
+        for c in ['.', '+', '-', '*', '/', '(', ')', '{', '}', '[', ']', ':', ';', '"', '\'', '!', '@', '#', '$', '%', '^', '&', '=', '<', '>', '?', '|', '\\', '`', '~', ','] {
+            assert_eq!(char_class(c), CharClass::Symbol, "Expected Symbol for '{}'", c);
+        }
+    }
+
+    // ==================== Triclass Boundary Tests ====================
+    // Chunk: docs/chunks/word_triclass_boundaries - Three-class word boundary classification
+
+    #[test]
+    fn test_word_boundary_left_letter_symbol_transition() {
+        // "foo.bar" - cursor after 'r' at col 7 → boundary at col 4 (start of "bar")
+        let chars: Vec<char> = "foo.bar".chars().collect();
+        assert_eq!(word_boundary_left(&chars, 7), 4);
+    }
+
+    #[test]
+    fn test_word_boundary_left_symbol_letter_transition() {
+        // "foo.bar" - cursor after '.' at col 4 → boundary at col 3 (start of ".")
+        let chars: Vec<char> = "foo.bar".chars().collect();
+        assert_eq!(word_boundary_left(&chars, 4), 3);
+    }
+
+    #[test]
+    fn test_word_boundary_left_symbol_run() {
+        // "..abc" - cursor after second '.' at col 2 → boundary at col 0
+        let chars: Vec<char> = "..abc".chars().collect();
+        assert_eq!(word_boundary_left(&chars, 2), 0);
+    }
+
+    #[test]
+    fn test_word_boundary_left_mixed_operators() {
+        // "result+=value" - cursor after '=' at col 8 → boundary at col 6 (start of "+=")
+        let chars: Vec<char> = "result+=value".chars().collect();
+        assert_eq!(word_boundary_left(&chars, 8), 6);
+    }
+
+    #[test]
+    fn test_word_boundary_left_underscore_as_letter() {
+        // "my_var" - cursor at col 6 → boundary at col 0 (underscore is a letter)
+        let chars: Vec<char> = "my_var".chars().collect();
+        assert_eq!(word_boundary_left(&chars, 6), 0);
+    }
+
+    #[test]
+    fn test_word_boundary_left_digits_as_letter() {
+        // "x42" - cursor at col 3 → boundary at col 0 (digits are letters)
+        let chars: Vec<char> = "x42".chars().collect();
+        assert_eq!(word_boundary_left(&chars, 3), 0);
+    }
+
+    #[test]
+    fn test_word_boundary_right_letter_symbol_transition() {
+        // "foo.bar" - cursor at col 0 → boundary at col 3 (end of "foo")
+        let chars: Vec<char> = "foo.bar".chars().collect();
+        assert_eq!(word_boundary_right(&chars, 0), 3);
+    }
+
+    #[test]
+    fn test_word_boundary_right_symbol_letter_transition() {
+        // "foo.bar" - cursor at col 3 → boundary at col 4 (end of ".")
+        let chars: Vec<char> = "foo.bar".chars().collect();
+        assert_eq!(word_boundary_right(&chars, 3), 4);
+    }
+
+    #[test]
+    fn test_word_boundary_right_symbol_run() {
+        // "fn(x)" - cursor at col 2 → boundary at col 3 (end of "(")
+        let chars: Vec<char> = "fn(x)".chars().collect();
+        assert_eq!(word_boundary_right(&chars, 2), 3);
+    }
+
+    #[test]
+    fn test_word_boundary_right_mixed_expression() {
+        // "fn(x) + y" - cursor at col 6 → boundary at col 7 (end of "+")
+        let chars: Vec<char> = "fn(x) + y".chars().collect();
+        assert_eq!(word_boundary_right(&chars, 6), 7);
+    }
+
+    #[test]
+    fn test_word_boundary_right_underscore_as_letter() {
+        // "_foo" - cursor at col 0 → boundary at col 4 (underscore is a letter)
+        let chars: Vec<char> = "_foo".chars().collect();
+        assert_eq!(word_boundary_right(&chars, 0), 4);
+    }
+
+    #[test]
+    fn test_word_boundary_right_digits_as_letter() {
+        // "var123" - cursor at col 0 → boundary at col 6 (digits are letters)
+        let chars: Vec<char> = "var123".chars().collect();
+        assert_eq!(word_boundary_right(&chars, 0), 6);
+    }
+
     // ==================== Move Word Right Tests ====================
     // Chunk: docs/chunks/word_jump_navigation - Word jump navigation
 
@@ -2767,6 +2932,93 @@ mod tests {
         assert_eq!(start, Position::new(1, 0));
         assert_eq!(end, Position::new(1, 6));
         assert_eq!(buf.selected_text(), Some("second".to_string()));
+    }
+
+    // ==================== Triclass Word Operation Integration Tests ====================
+    // Chunk: docs/chunks/word_triclass_boundaries - Three-class word boundary classification
+
+    #[test]
+    fn test_delete_backward_word_stops_at_symbol() {
+        // "foo.bar" with cursor at col 7 → deletes "bar" → "foo."
+        let mut buf = TextBuffer::from_str("foo.bar");
+        buf.set_cursor(Position::new(0, 7));
+        buf.delete_backward_word();
+        assert_eq!(buf.content(), "foo.");
+        assert_eq!(buf.cursor_position(), Position::new(0, 4));
+    }
+
+    #[test]
+    fn test_delete_backward_word_deletes_symbol_run() {
+        // "foo.bar" with cursor at col 4 → deletes "." → "foobar"
+        let mut buf = TextBuffer::from_str("foo.bar");
+        buf.set_cursor(Position::new(0, 4));
+        buf.delete_backward_word();
+        assert_eq!(buf.content(), "foobar");
+        assert_eq!(buf.cursor_position(), Position::new(0, 3));
+    }
+
+    #[test]
+    fn test_delete_forward_word_stops_at_symbol() {
+        // "foo.bar" with cursor at col 0 → deletes "foo" → ".bar"
+        let mut buf = TextBuffer::from_str("foo.bar");
+        buf.set_cursor(Position::new(0, 0));
+        buf.delete_forward_word();
+        assert_eq!(buf.content(), ".bar");
+        assert_eq!(buf.cursor_position(), Position::new(0, 0));
+    }
+
+    #[test]
+    fn test_move_word_right_stops_at_symbol() {
+        // "foo.bar" with cursor at col 0 → moves to col 3 (end of "foo")
+        let mut buf = TextBuffer::from_str("foo.bar");
+        buf.set_cursor(Position::new(0, 0));
+        buf.move_word_right();
+        assert_eq!(buf.cursor_position(), Position::new(0, 3));
+    }
+
+    #[test]
+    fn test_move_word_left_stops_at_symbol() {
+        // "foo.bar" with cursor at col 7 → moves to col 4 (start of "bar")
+        let mut buf = TextBuffer::from_str("foo.bar");
+        buf.set_cursor(Position::new(0, 7));
+        buf.move_word_left();
+        assert_eq!(buf.cursor_position(), Position::new(0, 4));
+    }
+
+    #[test]
+    fn test_select_word_at_selects_letter_only() {
+        // "foo.bar" double-click on 'b' at col 4 → selects "bar" only
+        let mut buf = TextBuffer::from_str("foo.bar");
+        buf.set_cursor(Position::new(0, 4));
+        buf.select_word_at(4);
+        assert_eq!(buf.selected_text(), Some("bar".to_string()));
+    }
+
+    #[test]
+    fn test_select_word_at_selects_symbol_only() {
+        // "foo.bar" double-click on '.' at col 3 → selects "." only
+        let mut buf = TextBuffer::from_str("foo.bar");
+        buf.set_cursor(Position::new(0, 3));
+        buf.select_word_at(3);
+        assert_eq!(buf.selected_text(), Some(".".to_string()));
+    }
+
+    #[test]
+    fn test_underscore_included_in_word() {
+        // "my_var" with cursor at col 6 → delete backward deletes entire "my_var"
+        let mut buf = TextBuffer::from_str("my_var");
+        buf.set_cursor(Position::new(0, 6));
+        buf.delete_backward_word();
+        assert_eq!(buf.content(), "");
+    }
+
+    #[test]
+    fn test_digits_included_in_word() {
+        // "x42" with cursor at col 3 → delete backward deletes entire "x42"
+        let mut buf = TextBuffer::from_str("x42");
+        buf.set_cursor(Position::new(0, 3));
+        buf.delete_backward_word();
+        assert_eq!(buf.content(), "");
     }
 
     // ==================== BufferView Implementation Tests ====================
