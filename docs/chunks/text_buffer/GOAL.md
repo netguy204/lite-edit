@@ -1,9 +1,26 @@
 ---
-status: FUTURE
+status: ACTIVE
 ticket: null
 parent_chunk: null
-code_paths: []
-code_references: []
+code_paths:
+- crates/buffer/src/lib.rs
+- crates/buffer/src/types.rs
+- crates/buffer/src/gap_buffer.rs
+- crates/buffer/src/line_index.rs
+- crates/buffer/src/text_buffer.rs
+code_references:
+- ref: crates/buffer/src/gap_buffer.rs#GapBuffer
+  implements: "Gap buffer backing store \u2014 O(1) amortized insert/delete at cursor"
+- ref: crates/buffer/src/line_index.rs#LineIndex
+  implements: Incremental line-start offset table for O(1) line count and O(log n)
+    line lookup
+- ref: crates/buffer/src/types.rs#Position
+  implements: Cursor/selection position as 0-indexed (line, col)
+- ref: crates/buffer/src/types.rs#DirtyLines
+  implements: Dirty line tracking enum returned by all mutation operations
+- ref: crates/buffer/src/text_buffer.rs#TextBuffer
+  implements: "Main public API \u2014 combines gap buffer, line index, cursor, and\
+    \ selection anchor"
 narrative: null
 investigation: editor_core_architecture
 subsystems: []
@@ -12,7 +29,6 @@ bug_type: null
 depends_on: []
 created_after: []
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
