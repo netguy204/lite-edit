@@ -296,14 +296,12 @@ impl EditorController {
 
     /// Renders if there's a dirty region.
     /// Chunk: docs/chunks/file_picker - Conditional render_with_selector when focus is Selector
+    /// Chunk: docs/chunks/cursor_blink_focus - Focus-aware cursor visibility for buffer vs overlay
     fn render_if_dirty(&mut self) {
         // Update window title if needed (even if not rendering)
         self.update_window_title_if_needed();
 
         if self.state.is_dirty() {
-            // Update renderer state from editor state
-            self.renderer.set_cursor_visible(self.state.cursor_visible);
-
             // Update renderer's buffer from editor state
             // Note: We need to sync the buffer - the renderer has a copy
             // For now, we'll create a fresh buffer each time (not ideal, but correct)
@@ -314,29 +312,38 @@ impl EditorController {
 
             // Chunk: docs/chunks/workspace_model - Render with left rail
             // Chunk: docs/chunks/find_in_file - Render with find strip when active
+            // Chunk: docs/chunks/cursor_blink_focus - Pass appropriate cursor visibility per focus
             match self.state.focus {
                 EditorFocus::Selector => {
-                    // Render with selector overlay
+                    // When selector is focused, main buffer cursor stays static (visible),
+                    // overlay cursor blinks via overlay_cursor_visible
+                    self.renderer.set_cursor_visible(self.state.cursor_visible);
+                    // Render with selector overlay, passing overlay cursor visibility
                     self.renderer.render_with_editor(
                         &self.metal_view,
                         &self.state.editor,
                         self.state.active_selector.as_ref(),
-                        self.state.cursor_visible,
+                        self.state.overlay_cursor_visible,
                     );
                 }
                 EditorFocus::FindInFile => {
-                    // Render with find strip at bottom
+                    // When find strip is focused, main buffer cursor stays static (visible),
+                    // find strip cursor blinks via overlay_cursor_visible
+                    self.renderer.set_cursor_visible(self.state.cursor_visible);
+                    // Render with find strip at bottom, passing overlay cursor visibility
                     if let Some(ref mini_buffer) = self.state.find_mini_buffer {
                         self.renderer.render_with_find_strip(
                             &self.metal_view,
                             &self.state.editor,
                             &mini_buffer.content(),
                             mini_buffer.cursor_col(),
-                            self.state.cursor_visible,
+                            self.state.overlay_cursor_visible,
                         );
                     }
                 }
                 EditorFocus::Buffer => {
+                    // Normal buffer focus - main cursor blinks
+                    self.renderer.set_cursor_visible(self.state.cursor_visible);
                     // Normal rendering with left rail (no overlay)
                     self.renderer.render_with_editor(
                         &self.metal_view,
