@@ -1,8 +1,9 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/editor/src/editor_state.rs
 code_references: []
 narrative: null
 investigation: null
@@ -11,9 +12,10 @@ friction_entries: []
 bug_type: semantic
 depends_on:
 - terminal_tab_spawn
-created_after: ["file_search_path_matching", "terminal_tab_spawn"]
+created_after:
+- file_search_path_matching
+- terminal_tab_spawn
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

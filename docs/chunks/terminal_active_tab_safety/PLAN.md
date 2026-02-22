@@ -8,153 +8,181 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The crash occurs because `EditorState::buffer()` and `buffer_mut()` unconditionally call `.expect("active tab is not a file tab")` on the result of `as_text_buffer()`. When a terminal tab is active, this expectation fails.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The strategy is **Option-returning helpers with guarded call sites**:
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. **Change `buffer()` / `buffer_mut()` to return `Option`** rather than panicking. This is the safest approach because it makes every call site explicitly handle the terminal-tab case.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/terminal_active_tab_safety/GOAL.md)
-with references to the files that you expect to touch.
--->
+2. **Add `try_buffer()` / `try_buffer_mut()` helper methods** that return `Option<&TextBuffer>` for call sites that can gracefully no-op when no text buffer is available.
 
-## Subsystem Considerations
+3. **Guard all existing call sites** to either:
+   - Early-return/no-op when the active tab is not a file tab (keyboard handling, cursor blink, search, etc.)
+   - Skip the operation (viewport sync, dirty region calculation)
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+4. **Terminal tab keyboard handling** should delegate to `TerminalFocusTarget` when the active tab is a terminal. The existing `terminal_target.rs` module provides this capability.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
+This follows the Humble View architecture from TESTING_PHILOSOPHY.md: all decision logic stays in testable pure Rust code, and we push the "what kind of tab is this?" question to the call sites.
 
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+**No changes to the rendering path**: The renderer already handles terminal tabs separately via `BufferView` trait dispatch. This chunk focuses purely on the event-handling/state-management side.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add `try_buffer()` and `try_buffer_mut()` to EditorState
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add new Option-returning accessor methods that don't panic:
 
-Example:
+```rust
+/// Returns a reference to the active tab's TextBuffer, if it's a file tab.
+pub fn try_buffer(&self) -> Option<&TextBuffer> { ... }
 
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+/// Returns a mutable reference to the active tab's TextBuffer, if it's a file tab.
+pub fn try_buffer_mut(&mut self) -> Option<&mut TextBuffer> { ... }
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Leave the existing `buffer()` and `buffer_mut()` methods unchanged for now to avoid breaking all call sites at once. They will be deprecated after migration.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Location: `crates/editor/src/editor_state.rs`
+
+### Step 2: Add `active_tab_is_file()` helper
+
+Add a helper method to check if the active tab is a file tab without accessing the buffer:
+
+```rust
+/// Returns true if the active tab is a file tab (has a TextBuffer).
+pub fn active_tab_is_file(&self) -> bool { ... }
+```
+
+This provides a cheap check for code paths that need to early-return.
+
+Location: `crates/editor/src/editor_state.rs`
+
+### Step 3: Guard `update_viewport_size()` and `update_viewport_dimensions()`
+
+These methods call `self.buffer().line_count()` which panics on terminal tabs.
+
+Change to:
+```rust
+pub fn update_viewport_size(&mut self, window_height: f32) {
+    let line_count = self.try_buffer().map(|b| b.line_count()).unwrap_or(0);
+    // ... rest unchanged
+}
+```
+
+Terminal tabs don't use the Viewport in the same way, so a line_count of 0 is harmless.
+
+Location: `crates/editor/src/editor_state.rs` (lines 254-277)
+
+### Step 4: Guard `handle_cmd_f()` find-in-file
+
+The find strip should only open when a file tab is active. Terminal tabs use the shell's search.
+
+Change to early-return if `!self.active_tab_is_file()`.
+
+Location: `crates/editor/src/editor_state.rs` (line 508-530)
+
+### Step 5: Guard `run_live_search()` and `advance_to_next_match()`
+
+These methods use `self.buffer()` and `self.buffer_mut()`. Guard them with early returns.
+
+Location: `crates/editor/src/editor_state.rs` (lines 693-764)
+
+### Step 6: Guard `handle_key_buffer()` to route terminal tabs separately
+
+This is the key method. When `focus == Buffer` and the active tab is a terminal, keyboard input should go to `TerminalFocusTarget` instead of `BufferFocusTarget`.
+
+```rust
+fn handle_key_buffer(&mut self, event: KeyEvent) {
+    // Check if active tab is a terminal
+    let ws = self.editor.active_workspace_mut().expect("no active workspace");
+    let tab = ws.active_tab_mut().expect("no active tab");
+
+    if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
+        // Existing file-tab handling path
+        // ...
+    } else if let Some(terminal) = tab.buffer.as_terminal_buffer_mut() {
+        // Terminal tab: encode and send to PTY
+        // Use InputEncoder or TerminalFocusTarget pattern
+        // ...
+    }
+    // Other tab types (AgentOutput, Diff): no-op
+}
+```
+
+Location: `crates/editor/src/editor_state.rs` (lines 899-954)
+
+### Step 7: Guard `handle_mouse_buffer()` for terminal tabs
+
+Similar to Step 6, route mouse events to the terminal when a terminal tab is active.
+
+Location: `crates/editor/src/editor_state.rs` (lines 1060-1119)
+
+### Step 8: Guard `handle_scroll()` for terminal tabs
+
+Scroll events on terminal tabs should scroll the terminal's viewport, not the text buffer viewport.
+
+Location: `crates/editor/src/editor_state.rs` (lines 1122-1163)
+
+### Step 9: Guard `cursor_dirty_region()` and `toggle_cursor_blink()`
+
+These use `self.buffer().cursor_position()`. For terminal tabs, return `DirtyRegion::FullViewport` since the cursor is part of the terminal grid.
+
+Location: `crates/editor/src/editor_state.rs` (lines 1289-1317)
+
+### Step 10: Guard `associate_file()` and `save_file()`
+
+These should no-op for terminal tabs. Add early-return guards.
+
+Location: `crates/editor/src/editor_state.rs` (lines 1343-1403)
+
+### Step 11: Add tests for terminal tab safety
+
+Write tests that:
+1. Create an EditorState with a file tab
+2. Add a terminal tab and switch to it
+3. Simulate key events, mouse events, scroll events
+4. Verify no panics occur and state remains consistent
+5. Switch back to file tab and verify normal operation
+
+Follow TESTING_PHILOSOPHY.md patterns:
+- Use `EditorState::default()` for setup
+- Test boundary conditions (switch to terminal, type, switch back)
+- Assert semantic properties (cursor position preserved, no crash)
+
+Location: `crates/editor/src/editor_state.rs` (tests module)
+
+### Step 12: Migrate call sites from `buffer()` to `try_buffer()`
+
+After all guards are in place, audit remaining uses of `buffer()` / `buffer_mut()`:
+- Change them to `try_buffer()` / `try_buffer_mut()` with appropriate guards
+- Or verify they're only reachable when active tab is known to be a file tab
+
+Location: `crates/editor/src/editor_state.rs` (throughout)
+
+### Step 13: Update `buffer()` / `buffer_mut()` to be safe
+
+Option A: Change signatures to return `Option<&TextBuffer>` (breaking change but complete safety)
+
+Option B: Keep existing signatures but add `debug_assert!(self.active_tab_is_file())` to catch misuse in tests
+
+This step depends on how many external callers exist. For an internal-only API, Option A is cleaner.
+
+Location: `crates/editor/src/editor_state.rs`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **terminal_tab_spawn** (complete): Provides `Tab::new_terminal()`, `TerminalBuffer`, and the `Cmd+Shift+T` keybinding that triggers the crash.
+- **terminal_input_encoding** (complete): Provides `InputEncoder` and `TerminalFocusTarget` for routing keyboard input to terminal tabs.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Terminal scroll state**: The current `Viewport` is designed for text buffers with line counts. Terminal scrollback works differently (fixed screen + scrollback history). We may need to handle viewport operations as no-ops for terminals or introduce a separate viewport concept.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Dirty region tracking**: Terminal tabs may need different dirty region semantics. For now, treating all terminal activity as `FullViewport` is conservative but correct.
+
+3. **Focus target architecture**: The existing `BufferFocusTarget` field on `EditorState` assumes a single focus target. With terminal tabs, we need conditional dispatch. The plan uses inline checks rather than a polymorphic focus target to avoid larger refactoring.
+
+4. **Test infrastructure**: Creating `TerminalBuffer` instances for tests may require mocking PTY operations. We may need to test at a higher level (e.g., verify no panic rather than verify specific behavior).
 
 ## Deviations
 
