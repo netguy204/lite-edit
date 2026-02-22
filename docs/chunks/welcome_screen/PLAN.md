@@ -8,170 +8,140 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The welcome screen will be implemented as a **virtual overlay** that renders in place of buffer content when a file tab contains an empty `TextBuffer`. This approach avoids modifying the actual buffer content and integrates cleanly with the existing rendering pipeline.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Key design decisions:**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. **Detection**: Check if the active tab is a file tab (`TabKind::File`) with an empty buffer (`buffer.is_empty()`). The welcome screen is never shown for terminal tabs.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/welcome_screen/GOAL.md)
-with references to the files that you expect to touch.
--->
+2. **Rendering**: Create a new `WelcomeScreenBuffer` struct (similar to `SelectorGlyphBuffer`, `TabBarGlyphBuffer`) that generates glyph quads for the ASCII art logo, editor name, and hotkey table. This reuses the existing `GlyphBuffer`/`GlyphLayout` infrastructure.
+
+3. **Centering**: Calculate the welcome content dimensions (width in chars, height in lines) and offset rendering to center it both horizontally and vertically within the content viewport (accounting for `RAIL_WIDTH` and `TAB_BAR_HEIGHT` offsets).
+
+4. **Colors**: Use Catppuccin Mocha accent colors from `color_palette.rs`:
+   - Logo: Gradient using lavender (#b4befe), mauve (#cba6f7), and blue (#89b4fa)
+   - Editor name: Bright white (#cdd6f4)
+   - Key combos: Blue (#89b4fa)
+   - Descriptions: Dimmed text (Subtext1: #bac2de)
+
+5. **Dismissal**: The welcome screen disappears when:
+   - Any printable character is typed (handled naturally—character inserts into buffer, which becomes non-empty)
+   - A file is opened into the tab (replaces buffer content)
+   - The tab switches away and back (re-evaluated on each render)
+
+6. **No state machine needed**: The welcome screen is purely a function of buffer state. Empty buffer → show welcome. Non-empty buffer → normal render.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems are directly relevant to this chunk. The viewport_scroll subsystem deals with scroll offset management, but the welcome screen will be centered content that doesn't scroll.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Define welcome screen content constants
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create a new module `welcome_screen.rs` in `crates/editor/src/` containing:
+- ASCII art feather logo as a `const` array of `&str` lines
+- Per-line color specifications for the logo gradient
+- Editor name and tagline strings
+- Hotkey definitions as a `const` array of `(category, &[(&str, &str)])` tuples
 
-Example:
+Location: `crates/editor/src/welcome_screen.rs`
 
-### Step 1: Define the SegmentHeader struct
+### Step 2: Create WelcomeScreenGlyphBuffer struct
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Define a glyph buffer similar to `SelectorGlyphBuffer` that:
+- Takes `GlyphLayout` for positioning
+- Has `update()` method accepting viewport dimensions and line height
+- Computes centered position based on content size vs viewport size
+- Emits colored quads for logo, name, tagline, and hotkey table
+- Tracks separate quad ranges for each color category
 
-Location: src/segment/format.rs
+Location: `crates/editor/src/welcome_screen.rs`
 
-### Step 2: Implement header serialization
+### Step 3: Add is_welcome_screen_visible helper
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Add a method to `Tab` or a helper function that checks:
+- `tab.kind == TabKind::File`
+- `tab.as_text_buffer().map_or(false, |b| b.is_empty())`
 
-### Step 3: ...
+This encapsulates the welcome screen visibility logic.
+
+Location: `crates/editor/src/workspace.rs`
+
+### Step 4: Add welcome screen rendering to Renderer
+
+Extend `Renderer` to:
+1. Add `welcome_screen_buffer: Option<WelcomeScreenGlyphBuffer>` field
+2. In `render_with_editor()`, after setting content offsets:
+   - Check if active tab should show welcome screen
+   - If yes, call `draw_welcome_screen()` instead of `update_glyph_buffer()` + `render_text()`
+3. Implement `draw_welcome_screen()` method that:
+   - Initializes/updates `welcome_screen_buffer`
+   - Renders the welcome content using the glyph pipeline
+
+Location: `crates/editor/src/renderer.rs`
+
+### Step 5: Add accent color constants
+
+Add Catppuccin Mocha accent colors to use for the welcome screen:
+- Lavender: #b4befe → [0.706, 0.745, 0.996, 1.0]
+- Mauve: #cba6f7 → [0.796, 0.651, 0.969, 1.0]
+- Blue: #89b4fa → [0.537, 0.706, 0.980, 1.0]
+- Subtext1: #bac2de → [0.729, 0.761, 0.871, 1.0]
+
+These can be defined in `welcome_screen.rs` or referenced from `color_palette.rs`.
+
+Location: `crates/editor/src/welcome_screen.rs`
+
+### Step 6: Add module to lib.rs
+
+Register the new module in the editor crate's `lib.rs`.
+
+Location: `crates/editor/src/lib.rs`
+
+### Step 7: Test welcome screen rendering
+
+Verify manually (and with a smoke test if feasible):
+- Launch editor with no file args → welcome screen appears
+- Type any character → welcome screen disappears, character appears in buffer
+- Cmd+T (new tab) → new tab shows welcome screen
+- Open file → welcome screen replaced with file content
+- Terminal tabs never show welcome screen
+
+Location: Manual testing + optional `crates/editor/tests/welcome_test.rs`
 
 ---
 
 **BACKREFERENCE COMMENTS**
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
+Add at module level in `welcome_screen.rs`:
+```rust
+// Chunk: docs/chunks/welcome_screen - Vim-style welcome/intro screen on empty tabs
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
-
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
-
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+This chunk depends on:
+- **terminal_cmd_backspace** (ACTIVE): Terminal functionality must be complete
+- **terminal_paste_render** (ACTIVE): Terminal paste rendering complete
+- **terminal_viewport_init** (ACTIVE): Terminal viewport initialization complete
 
-If there are no dependencies, delete this section.
--->
+These are listed in `created_after` and represent prior shipped work, not implementation blockers.
+
+No external library dependencies.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Logo design**: The ASCII art feather logo needs to be designed. Risk: may require iteration to look good at typical terminal font sizes. Mitigation: Start with a simple ~10-15 line design; can refine later.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Hotkey accuracy**: The hotkey list should match actual current bindings. Need to audit `buffer_target.rs` and `editor_state.rs` to ensure accuracy.
+
+3. **Viewport size edge cases**: Very small viewports (< 40 cols or < 20 lines) may not fit the welcome content. Decision: Simply render what fits; content will be clipped. No special handling needed.
+
+4. **Performance**: Rendering the welcome screen should be negligible (~100 quads max). No concerns.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

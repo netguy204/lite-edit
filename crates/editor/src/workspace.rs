@@ -802,6 +802,39 @@ impl Editor {
             Some(tab.buffer())
         }
     }
+
+    // Chunk: docs/chunks/welcome_screen - Welcome screen visibility check
+    /// Returns true if the welcome screen should be shown for the active tab.
+    ///
+    /// The welcome screen is displayed when:
+    /// - There is an active workspace with an active tab
+    /// - The active tab is a File tab (not Terminal or AgentOutput)
+    /// - The tab's TextBuffer is empty
+    ///
+    /// This provides a Vim-style welcome/intro screen on initial launch and
+    /// when creating new empty tabs.
+    pub fn should_show_welcome_screen(&self) -> bool {
+        let workspace = match self.active_workspace() {
+            Some(ws) => ws,
+            None => return false,
+        };
+
+        let tab = match workspace.active_tab() {
+            Some(t) => t,
+            None => return false,
+        };
+
+        // Only show welcome screen for File tabs
+        if tab.kind != TabKind::File {
+            return false;
+        }
+
+        // Check if the buffer is empty
+        match tab.as_text_buffer() {
+            Some(buffer) => buffer.is_empty(),
+            None => false,
+        }
+    }
 }
 
 // =============================================================================

@@ -204,6 +204,9 @@ pub struct Renderer {
     tab_bar_buffer: Option<TabBarGlyphBuffer>,
     /// The glyph buffer for find strip rendering (lazy-initialized)
     find_strip_buffer: Option<FindStripGlyphBuffer>,
+    // Chunk: docs/chunks/welcome_screen - Welcome screen rendering
+    /// The glyph buffer for welcome screen rendering (lazy-initialized)
+    welcome_screen_buffer: Option<crate::welcome_screen::WelcomeScreenGlyphBuffer>,
     /// Current viewport width in pixels (for wrap layout calculation)
     viewport_width_px: f32,
     // Chunk: docs/chunks/wrap_click_offset - Content width for consistent wrap calculation
@@ -275,6 +278,7 @@ impl Renderer {
             left_rail_buffer: None,
             tab_bar_buffer: None,
             find_strip_buffer: None,
+            welcome_screen_buffer: None,
             viewport_width_px,
             content_width_px,
         }
@@ -1057,9 +1061,16 @@ impl Renderer {
         let content_scissor = buffer_content_scissor_rect(TAB_BAR_HEIGHT, view_width, view_height);
         encoder.setScissorRect(content_scissor);
 
-        // Render editor text content (offset by RAIL_WIDTH and TAB_BAR_HEIGHT)
-        if self.glyph_buffer.index_count() > 0 {
-            self.render_text(&encoder, view);
+        // Chunk: docs/chunks/welcome_screen - Welcome screen or normal buffer rendering
+        // Check if welcome screen should be shown (empty file tab)
+        if editor.should_show_welcome_screen() {
+            // Render welcome screen instead of buffer content
+            self.draw_welcome_screen(&encoder, view);
+        } else {
+            // Render editor text content (offset by RAIL_WIDTH and TAB_BAR_HEIGHT)
+            if self.glyph_buffer.index_count() > 0 {
+                self.render_text(&encoder, view);
+            }
         }
 
         // Chunk: docs/chunks/tab_bar_content_clip - Reset scissor for selector overlay
@@ -1705,6 +1716,114 @@ impl Renderer {
                     MTLIndexType::UInt32,
                     index_buffer,
                     label_range.start * std::mem::size_of::<u32>(),
+                );
+            }
+        }
+    }
+
+    // Chunk: docs/chunks/welcome_screen - Welcome screen rendering
+    /// Draws the welcome screen when the active tab has an empty buffer.
+    ///
+    /// The welcome screen shows a feather ASCII art logo, the editor name,
+    /// tagline, and a hotkey reference table. The content is centered both
+    /// horizontally and vertically within the content viewport area.
+    ///
+    /// # Arguments
+    /// * `encoder` - The active render command encoder
+    /// * `view` - The Metal view (for viewport dimensions)
+    fn draw_welcome_screen(
+        &mut self,
+        encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        view: &MetalView,
+    ) {
+        use crate::welcome_screen::{calculate_welcome_geometry, WelcomeScreenGlyphBuffer};
+
+        let frame = view.frame();
+        let scale = view.scale_factor();
+        let view_width = (frame.size.width * scale) as f32;
+        let view_height = (frame.size.height * scale) as f32;
+
+        // Calculate content area (excluding left rail and tab bar)
+        let content_width = view_width - RAIL_WIDTH;
+        let content_height = view_height - TAB_BAR_HEIGHT;
+
+        // Skip if content area is too small
+        if content_width <= 0.0 || content_height <= 0.0 {
+            return;
+        }
+
+        // Calculate welcome screen geometry (centered in content area)
+        let glyph_width = self.font.metrics.advance_width as f32;
+        let line_height = self.font.metrics.line_height as f32;
+        let mut geometry = calculate_welcome_geometry(
+            content_width,
+            content_height,
+            glyph_width,
+            line_height,
+        );
+
+        // Offset the geometry to account for left rail and tab bar
+        geometry.content_x += RAIL_WIDTH;
+        geometry.content_y += TAB_BAR_HEIGHT;
+
+        // Ensure welcome screen buffer is initialized
+        if self.welcome_screen_buffer.is_none() {
+            let layout = GlyphLayout::from_metrics(&self.font.metrics);
+            self.welcome_screen_buffer = Some(WelcomeScreenGlyphBuffer::new(layout));
+        }
+
+        // Update the welcome screen buffer
+        let welcome_buffer = self.welcome_screen_buffer.as_mut().unwrap();
+        welcome_buffer.update(&self.device, &self.atlas, &geometry);
+
+        // Get buffers
+        let vertex_buffer = match welcome_buffer.vertex_buffer() {
+            Some(b) => b,
+            None => return,
+        };
+        let index_buffer = match welcome_buffer.index_buffer() {
+            Some(b) => b,
+            None => return,
+        };
+
+        // Set the render pipeline state
+        encoder.setRenderPipelineState(self.pipeline.pipeline_state());
+
+        // Set the vertex buffer
+        unsafe {
+            encoder.setVertexBuffer_offset_atIndex(Some(vertex_buffer), 0, 0);
+        }
+
+        // Set uniforms (viewport size)
+        let uniforms = Uniforms {
+            viewport_size: [view_width, view_height],
+        };
+        let uniforms_ptr =
+            NonNull::new(&uniforms as *const Uniforms as *mut std::ffi::c_void).unwrap();
+        unsafe {
+            encoder.setVertexBytes_length_atIndex(
+                uniforms_ptr,
+                std::mem::size_of::<Uniforms>(),
+                1,
+            );
+        }
+
+        // Set the atlas texture
+        unsafe {
+            encoder.setFragmentTexture_atIndex(Some(self.atlas.texture()), 0);
+        }
+
+        // Draw all welcome screen content in a single pass
+        // (per-vertex colors are embedded in the vertex data)
+        let total_indices = welcome_buffer.index_count();
+        if total_indices > 0 {
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    total_indices,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    0,
                 );
             }
         }

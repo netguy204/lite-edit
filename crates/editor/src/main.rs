@@ -49,6 +49,8 @@ mod selector;
 mod selector_overlay;
 mod shader;
 mod viewport;
+// Chunk: docs/chunks/welcome_screen - Welcome screen for empty file tabs
+mod welcome_screen;
 mod workspace;
 mod wrap_layout;
 

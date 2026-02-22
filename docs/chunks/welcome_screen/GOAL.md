@@ -1,8 +1,12 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/editor/src/welcome_screen.rs
+- crates/editor/src/renderer.rs
+- crates/editor/src/workspace.rs
+- crates/editor/src/lib.rs
 code_references: []
 narrative: null
 investigation: null
@@ -10,9 +14,11 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["terminal_cmd_backspace", "terminal_paste_render", "terminal_viewport_init"]
+created_after:
+- terminal_cmd_backspace
+- terminal_paste_render
+- terminal_viewport_init
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
