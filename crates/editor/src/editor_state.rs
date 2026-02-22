@@ -1341,6 +1341,12 @@ impl EditorState {
     /// If this is the last tab, creates a new empty tab instead of closing.
     pub fn close_tab(&mut self, index: usize) {
         if let Some(workspace) = self.editor.active_workspace_mut() {
+            // Guard: don't close dirty tabs (confirmation UI is future work)
+            if let Some(tab) = workspace.tabs.get(index) {
+                if tab.dirty {
+                    return;
+                }
+            }
             if workspace.tabs.len() > 1 {
                 workspace.close_tab(index);
             } else {
