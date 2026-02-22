@@ -33,6 +33,8 @@ use crate::selector_overlay::calculate_overlay_geometry;
 use crate::viewport::Viewport;
 use crate::workspace::Editor;
 use lite_edit_buffer::{Position, TextBuffer};
+// Chunk: docs/chunks/syntax_highlighting - Syntax highlighting support
+use lite_edit_syntax::{LanguageRegistry, SyntaxTheme};
 // Chunk: docs/chunks/terminal_active_tab_safety - Terminal input encoding
 // Chunk: docs/chunks/terminal_scrollback_viewport - Terminal scroll action result
 // Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
@@ -116,6 +118,9 @@ pub struct EditorState {
     /// Factory for creating PTY wakeup callbacks.
     /// Set by main.rs after controller creation.
     pty_wakeup_factory: Option<Arc<dyn Fn() -> PtyWakeup + Send + Sync>>,
+    // Chunk: docs/chunks/syntax_highlighting - Language registry for extension lookup
+    /// Language registry for syntax highlighting.
+    language_registry: LanguageRegistry,
 }
 
 // =============================================================================
@@ -285,6 +290,8 @@ impl EditorState {
             search_origin: Position::new(0, 0),
             // Chunk: docs/chunks/terminal_pty_wakeup - Initialize wakeup factory as None
             pty_wakeup_factory: None,
+            // Chunk: docs/chunks/syntax_highlighting - Initialize language registry
+            language_registry: LanguageRegistry::new(),
         }
     }
 
@@ -1070,12 +1077,20 @@ impl EditorState {
         // Record keystroke time for cursor blink reset
         self.last_keystroke = Instant::now();
 
-        // Check if the active tab is a file tab or terminal tab
-        let ws = self.editor.active_workspace_mut().expect("no active workspace");
-        let tab = ws.active_tab_mut().expect("no active tab");
+        // Chunk: docs/chunks/syntax_highlighting - Track whether we need to sync highlighter
+        let mut needs_highlighter_sync = false;
 
-        // Try to get the text buffer and viewport for file tabs
-        if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
+        // Check if the active tab is a file tab or terminal tab
+        // Use a block to limit the borrow scope
+        {
+            let ws = self.editor.active_workspace_mut().expect("no active workspace");
+            let tab = ws.active_tab_mut().expect("no active tab");
+
+            // Check for highlighter before getting mutable borrow
+            needs_highlighter_sync = tab.highlighter().is_some();
+
+            // Try to get the text buffer and viewport for file tabs
+            if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
             // File tab: use the existing BufferFocusTarget path
             // Ensure cursor blink visibility is on when typing
             if !self.cursor_visible {
@@ -1178,6 +1193,12 @@ impl EditorState {
             self.dirty_region.merge(DirtyRegion::FullViewport);
         }
         // Other tab types (AgentOutput, Diff): no-op
+        } // End of borrow scope
+
+        // Chunk: docs/chunks/syntax_highlighting - Sync highlighter after buffer mutation
+        if needs_highlighter_sync {
+            self.sync_active_tab_highlighter();
+        }
     }
 
     /// Handles a mouse event by forwarding to the active focus target.
@@ -1792,6 +1813,7 @@ impl EditorState {
     /// - Marks `DirtyRegion::FullViewport`
     // Chunk: docs/chunks/tab_click_cursor_placement - Sync viewport on file association
     // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
+    // Chunk: docs/chunks/syntax_highlighting - Setup syntax highlighting on file open
     pub fn associate_file(&mut self, path: PathBuf) {
         // File association only makes sense for file tabs.
         // Terminal tabs don't have a TextBuffer to load into.
@@ -1816,12 +1838,47 @@ impl EditorState {
         }
         // For non-existent files, leave buffer as-is (file picker already created empty file)
 
-        self.set_associated_file(Some(path));
+        self.set_associated_file(Some(path.clone()));
+
+        // Chunk: docs/chunks/syntax_highlighting - Set up syntax highlighting
+        // Try to set up syntax highlighting based on file extension
+        self.setup_active_tab_highlighting();
 
         // Sync viewport to ensure dirty region calculations work correctly
         // (handles case of file picker confirming into a newly created tab)
         self.sync_active_tab_viewport();
         self.dirty_region.merge(DirtyRegion::FullViewport);
+    }
+
+    // Chunk: docs/chunks/syntax_highlighting - Setup syntax highlighting helper
+    /// Sets up syntax highlighting for the active tab based on its file extension.
+    ///
+    /// This is called after loading file content to enable syntax highlighting
+    /// for recognized file types. If the extension is not recognized, the tab
+    /// remains without a highlighter (plain text).
+    fn setup_active_tab_highlighting(&mut self) {
+        // Extract what we need before the mutable borrow
+        let theme = SyntaxTheme::catppuccin_mocha();
+
+        // Get the active tab and set up highlighting
+        if let Some(ws) = self.editor.active_workspace_mut() {
+            if let Some(tab) = ws.active_tab_mut() {
+                tab.setup_highlighting(&self.language_registry, theme);
+            }
+        }
+    }
+
+    // Chunk: docs/chunks/syntax_highlighting - Sync highlighter after buffer edit
+    /// Syncs the active tab's highlighter with the current buffer content.
+    ///
+    /// Call this after any buffer mutation to keep syntax highlighting in sync.
+    /// This performs a full re-parse rather than incremental update.
+    fn sync_active_tab_highlighter(&mut self) {
+        if let Some(ws) = self.editor.active_workspace_mut() {
+            if let Some(tab) = ws.active_tab_mut() {
+                tab.sync_highlighter();
+            }
+        }
     }
 
     /// Returns the window title based on the current file association.

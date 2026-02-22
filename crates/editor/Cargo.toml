@@ -14,6 +14,8 @@ repository = "https://github.com/example/lite-edit"
 [dependencies]
 # Text buffer for editing operations
 lite-edit-buffer = { path = "../buffer" }
+# Chunk: docs/chunks/syntax_highlighting - Syntax highlighting support
+lite-edit-syntax = { path = "../syntax" }
 # Terminal emulator and agent lifecycle
 lite-edit-terminal = { path = "../terminal" }
 
