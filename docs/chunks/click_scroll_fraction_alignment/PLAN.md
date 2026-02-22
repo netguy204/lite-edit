@@ -8,98 +8,257 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The bug is that `pixel_to_buffer_position` and `pixel_to_buffer_position_wrapped` compute
+target screen row without accounting for the renderer's `scroll_fraction_px` vertical
+offset. The renderer translates all content by `-scroll_fraction_px`, but the hit-test
+math assumes row 0 starts at pixel 0.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Pattern to follow**: The `selector.rs` module already handles this correctly in
+`handle_mouse`:
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+```rust
+let frac = self.scroll.scroll_fraction_px() as f64;
+let relative_y = position.1 - list_origin_y + frac;
+let row = (relative_y / item_height).floor() as usize;
+```
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/click_scroll_fraction_alignment/GOAL.md)
-with references to the files that you expect to touch.
--->
+We apply the same fix: add `scroll_fraction_px` to `flipped_y` before dividing by
+`line_height`. This compensates for the visual shift the renderer applies.
+
+**Implementation strategy**:
+1. Add `scroll_fraction_px: f32` as a new parameter to both hit-test functions
+2. Adjust `target_screen_row` calculation: `((flipped_y + scroll_fraction_px) / line_height).floor()`
+3. Update call sites in `handle_mouse` to pass `ctx.viewport.scroll_fraction_px()`
+4. Add regression tests that verify clicking with non-zero `scroll_fraction_px`
+
+The fix is minimal and localized to `buffer_target.rs`.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems exist in this project yet. This chunk does not warrant creating one.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add scroll_fraction_px parameter to pixel_to_buffer_position
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+**Location**: `crates/editor/src/buffer_target.rs`
 
-Example:
+Update the non-wrapped `pixel_to_buffer_position` function:
 
-### Step 1: Define the SegmentHeader struct
+1. Add a new parameter `scroll_fraction_px: f32` after `view_height`
+2. Update the screen line calculation:
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+```rust
+// Before:
+let screen_line = if flipped_y >= 0.0 && line_height > 0.0 {
+    (flipped_y / line_height).floor() as usize
+} else {
+    0
+};
 
-Location: src/segment/format.rs
+// After:
+let screen_line = if flipped_y >= 0.0 && line_height > 0.0 {
+    ((flipped_y + scroll_fraction_px as f64) / line_height).floor() as usize
+} else {
+    0
+};
+```
 
-### Step 2: Implement header serialization
+3. Update the function's doc comment to explain that `scroll_fraction_px` compensates
+   for the renderer's vertical translation.
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+This function is a legacy fallback; adding the parameter keeps its signature in sync
+with the wrapped version.
 
-### Step 3: ...
+### Step 2: Add scroll_fraction_px parameter to pixel_to_buffer_position_wrapped
+
+**Location**: `crates/editor/src/buffer_target.rs`
+
+Update the wrap-aware `pixel_to_buffer_position_wrapped` function:
+
+1. Add a new parameter `scroll_fraction_px: f32` after `wrap_layout`
+2. Update the target screen row calculation:
+
+```rust
+// Before:
+let target_screen_row = if flipped_y >= 0.0 && line_height > 0.0 {
+    (flipped_y / line_height as f64).floor() as usize
+} else {
+    0
+};
+
+// After:
+let target_screen_row = if flipped_y >= 0.0 && line_height > 0.0 {
+    ((flipped_y + scroll_fraction_px as f64) / line_height as f64).floor() as usize
+} else {
+    0
+};
+```
+
+3. Update the function's doc comment to explain the scroll fraction compensation.
+
+### Step 3: Update call sites in handle_mouse
+
+**Location**: `crates/editor/src/buffer_target.rs`, `BufferFocusTarget::handle_mouse`
+
+There are two calls to `pixel_to_buffer_position_wrapped` in `handle_mouse`:
+1. In the `MouseEventKind::Down` arm (line ~472)
+2. In the `MouseEventKind::Moved` arm (line ~501)
+
+Update both calls to pass `ctx.viewport.scroll_fraction_px()`:
+
+```rust
+// Before:
+let position = pixel_to_buffer_position_wrapped(
+    event.position,
+    ctx.view_height,
+    &wrap_layout,
+    ctx.viewport.first_visible_line(),
+    ctx.buffer.line_count(),
+    |line| ctx.buffer.line_len(line),
+);
+
+// After:
+let position = pixel_to_buffer_position_wrapped(
+    event.position,
+    ctx.view_height,
+    &wrap_layout,
+    ctx.viewport.scroll_fraction_px(),  // NEW
+    ctx.viewport.first_visible_line(),
+    ctx.buffer.line_count(),
+    |line| ctx.buffer.line_len(line),
+);
+```
+
+### Step 4: Update existing unit tests for pixel_to_buffer_position
+
+**Location**: `crates/editor/src/buffer_target.rs`, `mod tests`
+
+The existing tests for `pixel_to_buffer_position` pass `0.0` as `scroll_fraction_px`
+since they don't involve scrolling. Update each call to include the new parameter:
+
+- `test_pixel_to_position_line_0` → add `0.0` for scroll_fraction_px
+- `test_pixel_to_position_line_1` → add `0.0` for scroll_fraction_px
+- `test_pixel_to_position_column` → add `0.0` for scroll_fraction_px
+- `test_pixel_to_position_past_line_end` → add `0.0` for scroll_fraction_px
+- `test_pixel_to_position_past_buffer_end` → add `0.0` for scroll_fraction_px
+- `test_pixel_to_position_with_scroll` → add `0.0` for scroll_fraction_px
+- `test_pixel_to_position_empty_buffer` → add `0.0` for scroll_fraction_px
+- `test_pixel_to_position_negative_x` → add `0.0` for scroll_fraction_px
+- `test_pixel_to_position_fractional_x` → add `0.0` for scroll_fraction_px
+
+### Step 5: Add regression test for fractional scroll click
+
+**Location**: `crates/editor/src/buffer_target.rs`, `mod tests`
+
+Add a new test `test_click_with_scroll_fraction_positions_correctly` that verifies
+the bug is fixed:
+
+```rust
+// Chunk: docs/chunks/click_scroll_fraction_alignment - Regression test
+#[test]
+fn test_click_with_scroll_fraction_positions_correctly() {
+    // Setup: scroll to a fractional position (line 5 + 8 pixels)
+    // scroll_fraction_px = 8.0, line_height = 16.0
+    //
+    // Renderer places line 5 at y_visual = -scroll_fraction_px = -8
+    // (partially clipped off the top). Line 6 is at y_visual = 8, etc.
+    //
+    // A click at screen y = 155 (macOS coords, bottom-left origin) where
+    // view_height = 160 gives:
+    //   flipped_y = 160 - 155 = 5 (5 pixels from top)
+    //
+    // WITHOUT scroll_fraction_px compensation:
+    //   target_row = floor(5 / 16) = 0 → would map to line 5 (first_visible)
+    //
+    // WITH scroll_fraction_px = 8 compensation:
+    //   target_row = floor((5 + 8) / 16) = floor(0.8125) = 0 → still line 5
+    //
+    // But consider y = 150 (flipped_y = 10):
+    // WITHOUT: floor(10/16) = 0 → line 5
+    // WITH 8px: floor((10+8)/16) = floor(1.125) = 1 → line 6 (CORRECT)
+    //
+    // The visual center of line 5 (first visible) is at flipped_y = -8 + 8 = 0
+    // The visual center of line 6 is at flipped_y = 8 + 8 = 16
+    //
+    // Clicking at flipped_y = 10 is visually in line 6's region, so we
+    // expect buffer line 6.
+
+    let content = (0..20).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+    let mut buffer = TextBuffer::from_str(&content);
+    let mut viewport = Viewport::new(16.0);
+    viewport.update_size(160.0, 100);
+    let mut dirty = DirtyRegion::None;
+    let mut target = BufferFocusTarget::new();
+
+    // Scroll to line 5 + 8 pixels (fractional)
+    viewport.set_scroll_offset_px(5.0 * 16.0 + 8.0, buffer.line_count());
+    assert_eq!(viewport.first_visible_line(), 5);
+    assert!((viewport.scroll_fraction_px() - 8.0).abs() < 0.001);
+
+    {
+        let mut ctx = EditorContext::new(
+            &mut buffer,
+            &mut viewport,
+            &mut dirty,
+            test_font_metrics(),
+            160.0,
+            800.0,
+        );
+        // Click at flipped_y = 10 (y = 150 in macOS coords)
+        // This is visually in line 6's row (line 5 is partially clipped at top)
+        let event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (0.0, 150.0), // flipped_y = 10
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        target.handle_mouse(event, &mut ctx);
+    }
+
+    // Should select line 6, NOT line 5
+    assert_eq!(
+        buffer.cursor_position().line,
+        6,
+        "With scroll_fraction_px=8, clicking at flipped_y=10 should select line 6"
+    );
+}
+```
+
+### Step 6: Add unit test for pixel_to_buffer_position with scroll_fraction
+
+**Location**: `crates/editor/src/buffer_target.rs`, `mod tests`
+
+Add a unit test that directly tests the non-wrapped function with a non-zero
+scroll_fraction_px:
+
+```rust
+// Chunk: docs/chunks/click_scroll_fraction_alignment - Unit test for scroll fraction
+#[test]
+fn test_pixel_to_position_with_scroll_fraction() {
+    // line_height = 16, scroll_fraction_px = 8
+    // flipped_y = 10, without fraction: line 0, with fraction: line 1
+    let metrics = test_font_metrics();
+    let position = super::pixel_to_buffer_position(
+        (0.0, 150.0), // flipped_y = 160 - 150 = 10
+        160.0,
+        &metrics,
+        8.0, // scroll_fraction_px
+        0,   // scroll_offset (first_visible_line)
+        5,   // line_count
+        |_| 10,
+    );
+    // (10 + 8) / 16 = 1.125 → line 1
+    assert_eq!(position.line, 1);
+}
+```
+
+### Step 7: Run tests and verify
+
+Run `cargo test -p editor` to verify:
+1. All existing tests still pass (with the added scroll_fraction_px=0 parameter)
+2. The new regression tests pass
+3. No other tests are affected
 
 ---
 
@@ -108,70 +267,26 @@ Use little-endian encoding per SPEC.md Section 3.1.
 When implementing code, add backreference comments to help future agents trace
 code back to its governing documentation.
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
+Add a chunk backreference near the modified calculation in each function:
+```rust
+// Chunk: docs/chunks/click_scroll_fraction_alignment - Account for renderer Y offset
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
-
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
-
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+None. The required infrastructure (`viewport.scroll_fraction_px()`) already exists
+from the `viewport_fractional_scroll` and `selector_row_scroller` chunks.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Parameter ordering**: The new `scroll_fraction_px` parameter is inserted after
+  `view_height` but before `wrap_layout` / `font_metrics`. This ordering groups the
+  view-related parameters together. If this feels awkward, consider a struct for
+  view parameters, but that's scope creep for this bug fix.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Negative flipped_y with fraction**: If `flipped_y + scroll_fraction_px` is still
+  negative (click above viewport), we clamp to line 0. This matches current behavior.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- Populate during implementation. -->

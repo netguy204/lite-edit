@@ -473,6 +473,7 @@ impl FocusTarget for BufferFocusTarget {
                     event.position,
                     ctx.view_height,
                     &wrap_layout,
+                    ctx.viewport.scroll_fraction_px(),
                     ctx.viewport.first_visible_line(),
                     ctx.buffer.line_count(),
                     |line| ctx.buffer.line_len(line),
@@ -502,6 +503,7 @@ impl FocusTarget for BufferFocusTarget {
                     event.position,
                     ctx.view_height,
                     &wrap_layout,
+                    ctx.viewport.scroll_fraction_px(),
                     ctx.viewport.first_visible_line(),
                     ctx.buffer.line_count(),
                     |line| ctx.buffer.line_len(line),
@@ -551,6 +553,8 @@ impl FocusTarget for BufferFocusTarget {
 /// * `position` - Pixel position (x, y) in view coordinates
 /// * `view_height` - Total view height in pixels
 /// * `font_metrics` - Font metrics for character dimensions
+/// * `scroll_fraction_px` - Fractional scroll offset in pixels. The renderer translates
+///   content by `-scroll_fraction_px`, so we add it back to `flipped_y` to compensate.
 /// * `scroll_offset` - Current viewport scroll offset (first visible buffer line)
 /// * `line_count` - Total number of lines in the buffer
 /// * `line_len_fn` - Closure to get the length of a specific line
@@ -561,6 +565,7 @@ fn pixel_to_buffer_position<F>(
     position: (f64, f64),
     view_height: f32,
     font_metrics: &FontMetrics,
+    scroll_fraction_px: f32,
     scroll_offset: usize,
     line_count: usize,
     line_len_fn: F,
@@ -575,11 +580,13 @@ where
     // Flip y-coordinate: macOS uses bottom-left origin, buffer uses top-left
     let flipped_y = (view_height as f64) - y;
 
+    // Chunk: docs/chunks/click_scroll_fraction_alignment - Account for renderer Y offset
     // Compute screen line (which line on screen, 0-indexed from top)
     // Use truncation (floor for positive values) so clicking in the top half
     // of a line targets that line
+    // Add scroll_fraction_px to compensate for the renderer's vertical translation
     let screen_line = if flipped_y >= 0.0 && line_height > 0.0 {
-        (flipped_y / line_height).floor() as usize
+        ((flipped_y + scroll_fraction_px as f64) / line_height).floor() as usize
     } else {
         0
     };
@@ -620,6 +627,8 @@ where
 /// * `position` - Pixel position (x, y) in view coordinates
 /// * `view_height` - Total view height in pixels
 /// * `wrap_layout` - WrapLayout for computing screen rows per line
+/// * `scroll_fraction_px` - Fractional scroll offset in pixels. The renderer translates
+///   content by `-scroll_fraction_px`, so we add it back to `flipped_y` to compensate.
 /// * `first_visible_line` - The first visible buffer line (scroll offset)
 /// * `line_count` - Total number of lines in the buffer
 /// * `line_len_fn` - Closure to get the character count of a specific buffer line
@@ -630,6 +639,7 @@ fn pixel_to_buffer_position_wrapped<F>(
     position: (f64, f64),
     view_height: f32,
     wrap_layout: &WrapLayout,
+    scroll_fraction_px: f32,
     first_visible_line: usize,
     line_count: usize,
     line_len_fn: F,
@@ -644,9 +654,11 @@ where
     // Flip y-coordinate: macOS uses bottom-left origin, buffer uses top-left
     let flipped_y = (view_height as f64) - y;
 
+    // Chunk: docs/chunks/click_scroll_fraction_alignment - Account for renderer Y offset
     // Compute screen row (which row on screen, 0-indexed from top)
+    // Add scroll_fraction_px to compensate for the renderer's vertical translation
     let target_screen_row = if flipped_y >= 0.0 && line_height > 0.0 {
-        (flipped_y / line_height as f64).floor() as usize
+        ((flipped_y + scroll_fraction_px as f64) / line_height as f64).floor() as usize
     } else {
         0
     };
@@ -1178,8 +1190,9 @@ mod tests {
             (0.0, 155.0), // x=0, y near top (160-155=5, which is in first line)
             160.0,
             &metrics,
-            0, // no scroll
-            5, // 5 lines
+            0.0, // no scroll fraction
+            0,   // no scroll
+            5,   // 5 lines
             |_| 10, // all lines have 10 chars
         );
         assert_eq!(position, Position::new(0, 0));
@@ -1195,6 +1208,7 @@ mod tests {
             (0.0, 140.0), // flipped_y = 20, line 1
             160.0,
             &metrics,
+            0.0, // no scroll fraction
             0,
             5,
             |_| 10,
@@ -1211,6 +1225,7 @@ mod tests {
             (24.0, 155.0), // x=24, line 0
             160.0,
             &metrics,
+            0.0, // no scroll fraction
             0,
             5,
             |_| 10,
@@ -1226,6 +1241,7 @@ mod tests {
             (80.0, 155.0), // x=80, would be col 10, but line only has 5 chars
             160.0,
             &metrics,
+            0.0, // no scroll fraction
             0,
             5,
             |_| 5, // lines have 5 chars
@@ -1244,6 +1260,7 @@ mod tests {
             (0.0, 75.0), // would be line 5 if it existed
             160.0,
             &metrics,
+            0.0, // no scroll fraction
             0,
             3, // only 3 lines
             |line| if line < 3 { 10 } else { 0 },
@@ -1261,8 +1278,9 @@ mod tests {
             (0.0, 155.0), // screen line 0
             160.0,
             &metrics,
-            5, // scrolled 5 lines
-            20, // 20 lines total
+            0.0, // no scroll fraction
+            5,   // scrolled 5 lines
+            20,  // 20 lines total
             |_| 10,
         );
         assert_eq!(position, Position::new(5, 0));
@@ -1276,6 +1294,7 @@ mod tests {
             (50.0, 100.0),
             160.0,
             &metrics,
+            0.0, // no scroll fraction
             0,
             0, // empty buffer
             |_| 0,
@@ -1292,6 +1311,7 @@ mod tests {
             (-10.0, 155.0),
             160.0,
             &metrics,
+            0.0, // no scroll fraction
             0,
             5,
             |_| 10,
@@ -1308,6 +1328,7 @@ mod tests {
             (12.7, 155.0),
             160.0,
             &metrics,
+            0.0, // no scroll fraction
             0,
             5,
             |_| 10,
@@ -1349,6 +1370,94 @@ mod tests {
 
         assert_eq!(buffer.cursor_position(), Position::new(1, 2));
         assert!(dirty.is_dirty()); // Should have marked cursor line dirty
+    }
+
+    // Chunk: docs/chunks/click_scroll_fraction_alignment - Regression test
+    #[test]
+    fn test_click_with_scroll_fraction_positions_correctly() {
+        // Setup: scroll to a fractional position (line 5 + 8 pixels)
+        // scroll_fraction_px = 8.0, line_height = 16.0
+        //
+        // Renderer places line 5 at y_visual = -scroll_fraction_px = -8
+        // (partially clipped off the top). Line 6 is at y_visual = 8, etc.
+        //
+        // A click at screen y = 155 (macOS coords, bottom-left origin) where
+        // view_height = 160 gives:
+        //   flipped_y = 160 - 155 = 5 (5 pixels from top)
+        //
+        // WITHOUT scroll_fraction_px compensation:
+        //   target_row = floor(5 / 16) = 0 → would map to line 5 (first_visible)
+        //
+        // WITH scroll_fraction_px = 8 compensation:
+        //   target_row = floor((5 + 8) / 16) = floor(0.8125) = 0 → still line 5
+        //
+        // But consider y = 150 (flipped_y = 10):
+        // WITHOUT: floor(10/16) = 0 → line 5
+        // WITH 8px: floor((10+8)/16) = floor(1.125) = 1 → line 6 (CORRECT)
+        //
+        // The visual center of line 5 (first visible) is at flipped_y = -8 + 8 = 0
+        // The visual center of line 6 is at flipped_y = 8 + 8 = 16
+        //
+        // Clicking at flipped_y = 10 is visually in line 6's region, so we
+        // expect buffer line 6.
+
+        let content = (0..20).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+        let mut buffer = TextBuffer::from_str(&content);
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0, 100);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Scroll to line 5 + 8 pixels (fractional)
+        viewport.set_scroll_offset_px(5.0 * 16.0 + 8.0, buffer.line_count());
+        assert_eq!(viewport.first_visible_line(), 5);
+        assert!((viewport.scroll_fraction_px() - 8.0).abs() < 0.001);
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+                800.0,
+            );
+            // Click at flipped_y = 10 (y = 150 in macOS coords)
+            // This is visually in line 6's row (line 5 is partially clipped at top)
+            let event = MouseEvent {
+                kind: MouseEventKind::Down,
+                position: (0.0, 150.0), // flipped_y = 10
+                modifiers: Modifiers::default(),
+                click_count: 1,
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        // Should select line 6, NOT line 5
+        assert_eq!(
+            buffer.cursor_position().line,
+            6,
+            "With scroll_fraction_px=8, clicking at flipped_y=10 should select line 6"
+        );
+    }
+
+    // Chunk: docs/chunks/click_scroll_fraction_alignment - Unit test for scroll fraction
+    #[test]
+    fn test_pixel_to_position_with_scroll_fraction() {
+        // line_height = 16, scroll_fraction_px = 8
+        // flipped_y = 10, without fraction: line 0, with fraction: line 1
+        let metrics = test_font_metrics();
+        let position = super::pixel_to_buffer_position(
+            (0.0, 150.0), // flipped_y = 160 - 150 = 10
+            160.0,
+            &metrics,
+            8.0, // scroll_fraction_px
+            0,   // scroll_offset (first_visible_line)
+            5,   // line_count
+            |_| 10,
+        );
+        // (10 + 8) / 16 = 1.125 → line 1
+        assert_eq!(position.line, 1);
     }
 
     // ==================== Ctrl+K Kill Line Tests ====================
