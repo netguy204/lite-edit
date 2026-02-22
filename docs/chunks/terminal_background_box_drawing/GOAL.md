@@ -2,16 +2,7 @@
 status: FUTURE
 ticket: null
 parent_chunk: null
-code_paths:
-  - crates/terminal/Cargo.toml
-  - crates/terminal/src/lib.rs
-  - crates/terminal/src/pty.rs
-  - crates/terminal/src/pty_wakeup.rs
-  - crates/terminal/src/terminal_buffer.rs
-  - crates/editor/src/main.rs
-  - crates/editor/src/editor_state.rs
-  - crates/editor/src/workspace.rs
-  - crates/terminal/tests/wakeup_integration.rs
+code_paths: []
 code_references: []
 narrative: null
 investigation: null
@@ -19,9 +10,9 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after:
-- terminal_input_render_bug
+created_after: ["scroll_bottom_deadzone_v3", "terminal_styling_fidelity"]
 ---
+
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
@@ -239,51 +230,21 @@ VALIDATION:
 
 ## Minor Goal
 
-Eliminate up to 500ms input-to-display latency in terminal tabs by waking the
-main thread when PTY data arrives, instead of waiting for the cursor blink timer.
+Two rendering gaps remain after the `terminal_styling_fidelity` chunk landed foreground colors and text attributes:
 
-### Root Cause Analysis
+1. **Background colors not reaching the renderer.** Terminal programs emit background color escape sequences (e.g., ANSI `\x1b[44m` for blue background, 256-color, and truecolor RGB backgrounds), and `style_convert.rs` converts them into `Style` objects with background color data. However, the rendering pipeline does not produce visible background quads — all terminal content renders against the default editor background. TUI apps like Pi, htop, and Vim with colorschemes rely on per-cell background colors to draw status bars, highlighted lines, selection regions, and UI chrome.
 
-The current input echo path for terminal tabs:
+2. **Box-drawing and line-drawing glyphs not rendering.** Unicode box-drawing characters (U+2500–U+257F) and other special glyphs used by TUI frameworks to draw borders, horizontal rules, and panels either render as missing-glyph placeholders or are absent entirely. These characters are essential for TUI applications — without them, borders appear broken and layouts are illegible.
 
-1. **Key press** → `EditorController::handle_key()` → `EditorState::handle_key_buffer()` writes encoded bytes to PTY via `terminal.write_input()`
-2. **Immediate poll** → `poll_agents()` calls `try_recv()` on crossbeam channel — **channel is empty** because the shell hasn't had time to echo the character yet
-3. **Render** — renders without the echoed character
-4. **Wait up to 500ms** — the only periodic polling is the cursor blink timer (`CURSOR_BLINK_INTERVAL = 0.5s` in `main.rs`)
-5. **Next timer tick** → `toggle_cursor_blink()` calls `poll_agents()` → crossbeam channel now has the echoed output → renders
-
-The PTY reader thread (`pty.rs`) reads output in a background thread and sends
-`TerminalEvent::PtyOutput` via a crossbeam channel, but nothing wakes the
-NSRunLoop when data arrives. The main thread is asleep between timer ticks.
-
-### Solution Direction
-
-Add a run-loop wakeup mechanism so the main thread renders within ~1ms of PTY
-data arriving. The recommended approach:
-
-**Option A (preferred): Post a custom NSEvent from the reader thread.** When the
-PTY reader thread sends data to the crossbeam channel, also post a
-`NSApplication::postEvent` (or use `CFRunLoopSourceSignal` + `CFRunLoopWakeUp`)
-to wake the NSRunLoop. A `kCFRunLoopBeforeWaiting` observer or the event handler
-then calls `poll_agents()` and renders.
-
-**Option B: `dispatch_source` on PTY file descriptor.** Create a
-`dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, pty_fd, ...)` that fires on
-the main queue when the PTY master has data available. This avoids the
-crossbeam channel entirely for wakeup (though the channel can remain for data
-transfer).
-
-**Option C: Short poll timer.** Replace the 500ms blink timer with a ~2ms poll
-timer. Simple but wasteful — burns CPU even when idle.
-
-Key files:
-- `crates/editor/src/main.rs` — NSRunLoop, timer setup, EditorController
-- `crates/terminal/src/pty.rs` — PTY reader thread, crossbeam channel
-- `crates/editor/src/editor_state.rs` — `poll_agents()`
+Both issues likely trace to the glyph buffer and atlas pipeline: background quads may not be emitted for cells with non-default background colors, and the glyph atlas may not be rasterizing glyphs outside the basic ASCII range (0x20–0x7E) that the `glyph_rendering` chunk originally targeted.
 
 ## Success Criteria
 
-- Typing a character in a terminal tab and seeing it appear takes < 5ms end-to-end (measured from `write_input()` to render completion)
-- No increase in idle CPU usage (must not busy-poll)
-- Cursor blink continues to work at its current 500ms interval
-- All existing terminal integration tests pass
+- Per-cell background colors from terminal output are rendered as filled quads behind the glyph for that cell
+- ANSI 16-color, 256-color indexed, and 24-bit truecolor backgrounds all produce visible colored rectangles
+- Running a TUI app (e.g., htop, Pi) shows colored status bars, highlighted rows, and panel backgrounds
+- Vim with a colorscheme shows line-highlight and visual-selection backgrounds
+- Unicode box-drawing characters (U+2500–U+257F) render correctly — TUI borders and horizontal rules appear as connected lines, not missing-glyph boxes
+- Other common TUI glyphs (block elements U+2580–U+259F, powerline symbols) render when present in the font
+- The glyph atlas accommodates non-ASCII codepoints on demand without performance regression
+- Existing ASCII glyph rendering and foreground color styling are not regressed

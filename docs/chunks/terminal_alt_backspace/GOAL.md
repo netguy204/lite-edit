@@ -2,16 +2,7 @@
 status: FUTURE
 ticket: null
 parent_chunk: null
-code_paths:
-  - crates/terminal/Cargo.toml
-  - crates/terminal/src/lib.rs
-  - crates/terminal/src/pty.rs
-  - crates/terminal/src/pty_wakeup.rs
-  - crates/terminal/src/terminal_buffer.rs
-  - crates/editor/src/main.rs
-  - crates/editor/src/editor_state.rs
-  - crates/editor/src/workspace.rs
-  - crates/terminal/tests/wakeup_integration.rs
+code_paths: []
 code_references: []
 narrative: null
 investigation: null
@@ -19,9 +10,9 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after:
-- terminal_input_render_bug
+created_after: ["scroll_bottom_deadzone_v3", "terminal_styling_fidelity"]
 ---
+
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
@@ -239,51 +230,15 @@ VALIDATION:
 
 ## Minor Goal
 
-Eliminate up to 500ms input-to-display latency in terminal tabs by waking the
-main thread when PTY data arrives, instead of waiting for the cursor blink timer.
+Alt+Backspace (Option+Delete) does not perform backward-word-delete when a terminal tab is focused. In standard terminal emulators, Alt+Backspace sends `\x1b\x7f` (ESC followed by DEL) to the PTY, which readline, zsh line editor, and other line-editing libraries interpret as "delete word backward." This is a fundamental terminal editing shortcut.
 
-### Root Cause Analysis
+The existing `delete_backward_word` chunk implemented Alt+Backspace for the editor's `TextBuffer` (file editing), but the `terminal_input_encoding` chunk's `InputEncoder` does not handle this key combination for terminal contexts. When a terminal tab is focused, Alt+Backspace is either silently dropped or encoded incorrectly — the escape sequence `\x1b\x7f` never reaches the PTY.
 
-The current input echo path for terminal tabs:
-
-1. **Key press** → `EditorController::handle_key()` → `EditorState::handle_key_buffer()` writes encoded bytes to PTY via `terminal.write_input()`
-2. **Immediate poll** → `poll_agents()` calls `try_recv()` on crossbeam channel — **channel is empty** because the shell hasn't had time to echo the character yet
-3. **Render** — renders without the echoed character
-4. **Wait up to 500ms** — the only periodic polling is the cursor blink timer (`CURSOR_BLINK_INTERVAL = 0.5s` in `main.rs`)
-5. **Next timer tick** → `toggle_cursor_blink()` calls `poll_agents()` → crossbeam channel now has the echoed output → renders
-
-The PTY reader thread (`pty.rs`) reads output in a background thread and sends
-`TerminalEvent::PtyOutput` via a crossbeam channel, but nothing wakes the
-NSRunLoop when data arrives. The main thread is asleep between timer ticks.
-
-### Solution Direction
-
-Add a run-loop wakeup mechanism so the main thread renders within ~1ms of PTY
-data arriving. The recommended approach:
-
-**Option A (preferred): Post a custom NSEvent from the reader thread.** When the
-PTY reader thread sends data to the crossbeam channel, also post a
-`NSApplication::postEvent` (or use `CFRunLoopSourceSignal` + `CFRunLoopWakeUp`)
-to wake the NSRunLoop. A `kCFRunLoopBeforeWaiting` observer or the event handler
-then calls `poll_agents()` and renders.
-
-**Option B: `dispatch_source` on PTY file descriptor.** Create a
-`dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, pty_fd, ...)` that fires on
-the main queue when the PTY master has data available. This avoids the
-crossbeam channel entirely for wakeup (though the channel can remain for data
-transfer).
-
-**Option C: Short poll timer.** Replace the 500ms blink timer with a ~2ms poll
-timer. Simple but wasteful — burns CPU even when idle.
-
-Key files:
-- `crates/editor/src/main.rs` — NSRunLoop, timer setup, EditorController
-- `crates/terminal/src/pty.rs` — PTY reader thread, crossbeam channel
-- `crates/editor/src/editor_state.rs` — `poll_agents()`
+Context: Alt+Arrow navigation already works correctly in terminal readline contexts (confirming that Alt/Option modifier detection works), and Ctrl+A works as expected. The gap is specifically in the Alt+Backspace → `\x1b\x7f` encoding path in `InputEncoder`.
 
 ## Success Criteria
 
-- Typing a character in a terminal tab and seeing it appear takes < 5ms end-to-end (measured from `write_input()` to render completion)
-- No increase in idle CPU usage (must not busy-poll)
-- Cursor blink continues to work at its current 500ms interval
-- All existing terminal integration tests pass
+- Alt+Backspace in a terminal tab sends `\x1b\x7f` (ESC + DEL) to the PTY
+- Bash/zsh readline deletes the word before the cursor when Alt+Backspace is pressed
+- The fix does not interfere with Alt+Backspace behavior in file-editing tabs (which should continue to use the TextBuffer `delete_backward_word` path)
+- Other Alt+key combinations that already work (Alt+Arrow, Alt+F, Alt+B) continue to function correctly
