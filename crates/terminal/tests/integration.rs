@@ -853,7 +853,7 @@ fn test_selected_text_extraction() {
 
 // =============================================================================
 // Initial render tests
-// Chunk: docs/chunks/terminal_tab_initial_render - Tests for initial terminal content
+// Chunk: docs/chunks/terminal_viewport_init - Tests for terminal viewport initialization
 // =============================================================================
 
 /// Test that a shell produces visible content after spawning.

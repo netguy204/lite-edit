@@ -116,10 +116,6 @@ pub struct EditorState {
     /// Factory for creating PTY wakeup callbacks.
     /// Set by main.rs after controller creation.
     pty_wakeup_factory: Option<Arc<dyn Fn() -> PtyWakeup + Send + Sync>>,
-    // Chunk: docs/chunks/terminal_tab_initial_render - Deferred PTY poll for initial content
-    /// Flag indicating that a terminal tab was just created and needs
-    /// a deferred poll loop to capture the shell's initial output.
-    pending_terminal_created: bool,
 }
 
 // =============================================================================
@@ -289,8 +285,6 @@ impl EditorState {
             search_origin: Position::new(0, 0),
             // Chunk: docs/chunks/terminal_pty_wakeup - Initialize wakeup factory as None
             pty_wakeup_factory: None,
-            // Chunk: docs/chunks/terminal_tab_initial_render - Deferred PTY poll for initial content
-            pending_terminal_created: false,
         }
     }
 
@@ -1363,18 +1357,33 @@ impl EditorState {
             );
             self.focus_target.handle_mouse(adjusted_event, &mut ctx);
         } else if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
+            // Chunk: docs/chunks/terminal_mouse_offset - Fixed terminal mouse Y coordinate calculation
             // Chunk: docs/chunks/terminal_clipboard_selection - Terminal mouse selection
             // Terminal tab: handle mouse events for selection or forward to PTY
             let modes = terminal.term_mode();
 
             // Calculate cell position from pixel coordinates
+            // Use the same coordinate transformation pattern as file buffers:
+            // 1. Subtract RAIL_WIDTH from x (content starts after left rail)
+            // 2. Flip y using content_height (NSView y=0 at bottom → content y=0 at top)
+            // 3. Add scroll_fraction_px to compensate for renderer's Y offset
             let cell_width = self.font_metrics.advance_width;
             let cell_height = self.font_metrics.line_height as f32;
 
             let (x, y) = event.position;
+
+            // X coordinate: subtract rail width
             let adjusted_x = (x - RAIL_WIDTH as f64).max(0.0);
-            // NSView uses bottom-left origin, flip to get top-down coordinates
-            let adjusted_y = self.view_height as f64 - TAB_BAR_HEIGHT as f64 - y;
+
+            // Y coordinate: flip using content_height (same as file buffer path)
+            // content_height = view_height - TAB_BAR_HEIGHT
+            let content_height = self.view_height as f64 - TAB_BAR_HEIGHT as f64;
+            let flipped_y = content_height - y;
+
+            // Account for scroll_fraction_px, matching pixel_to_buffer_position
+            // The renderer translates content by -scroll_fraction_px, so we add it back
+            let scroll_fraction_px = viewport.scroll_fraction_px() as f64;
+            let adjusted_y = (flipped_y + scroll_fraction_px).max(0.0);
 
             let col = (adjusted_x / cell_width as f64) as usize;
             let row = (adjusted_y / cell_height as f64) as usize;
@@ -1657,41 +1666,6 @@ impl EditorState {
         } else {
             DirtyRegion::None
         }
-    }
-
-    // Chunk: docs/chunks/terminal_tab_initial_render - Deferred PTY poll for initial content
-    /// Performs a spin-poll loop to capture a newly created terminal's initial output.
-    ///
-    /// When a terminal tab is created via `new_terminal_tab()`, the shell needs a few
-    /// milliseconds to start and produce its initial prompt. This method polls repeatedly
-    /// (up to 100ms total) until PTY output is detected, giving the shell time to start.
-    ///
-    /// This is called from the EditorController after key events to ensure the terminal
-    /// prompt appears immediately rather than waiting for the next timer tick (500ms).
-    ///
-    /// Returns `DirtyRegion::FullViewport` if any terminal activity was detected,
-    /// otherwise `DirtyRegion::None`.
-    pub fn spin_poll_terminal_startup(&mut self) -> DirtyRegion {
-        use std::time::Duration;
-
-        // Only do the spin-poll if a terminal was just created
-        if !self.pending_terminal_created {
-            return DirtyRegion::None;
-        }
-
-        // Clear the flag immediately
-        self.pending_terminal_created = false;
-
-        // Spin-poll for up to 100ms (10 iterations × 10ms) to give the shell time to start
-        for _ in 0..10 {
-            std::thread::sleep(Duration::from_millis(10));
-            let dirty = self.poll_agents();
-            if dirty.is_dirty() {
-                return dirty;
-            }
-        }
-
-        DirtyRegion::None
     }
 
     /// Takes the dirty region, leaving `DirtyRegion::None` in its place.
@@ -2181,17 +2155,24 @@ impl EditorState {
             workspace.add_tab(new_tab);
         }
 
+        // Chunk: docs/chunks/terminal_viewport_init - Initialize terminal viewport dimensions
+        // Initialize the new terminal tab's viewport so scroll_to_bottom computes correct
+        // offsets. Without this, visible_rows=0 causes scroll_to_bottom to scroll past
+        // all content, producing a blank screen until a window resize.
+        if let Some(workspace) = self.editor.active_workspace_mut() {
+            if let Some(tab) = workspace.active_tab_mut() {
+                let line_count = tab.buffer().line_count();
+                tab.viewport.update_size(content_height, line_count);
+            }
+        }
+
         // Sync viewport to ensure dirty region calculations work correctly
+        // (This is a no-op for terminal tabs but kept for consistency)
         self.sync_active_tab_viewport();
 
         // Ensure the new tab is visible in the tab bar
         self.ensure_active_tab_visible();
         self.dirty_region.merge(DirtyRegion::FullViewport);
-
-        // Chunk: docs/chunks/terminal_tab_initial_render - Signal that a terminal needs startup polling
-        // Mark that a terminal was created so the controller can do a spin-poll
-        // to capture the shell's initial output (prompt) before rendering.
-        self.pending_terminal_created = true;
     }
 
     /// Scrolls the tab bar horizontally.
@@ -5768,7 +5749,7 @@ mod tests {
 
     // =========================================================================
     // Terminal Initial Render Tests
-    // Chunk: docs/chunks/terminal_tab_initial_render - Tests for initial terminal rendering
+    // Chunk: docs/chunks/terminal_viewport_init - Tests for terminal viewport initialization
     // =========================================================================
 
     /// Tests that poll_agents returns dirty after a new terminal tab is created
@@ -5826,6 +5807,45 @@ mod tests {
         assert!(
             state.is_dirty(),
             "EditorState should be dirty after creating a terminal tab"
+        );
+    }
+
+    /// Tests that the terminal viewport has correct visible_rows immediately after creation.
+    ///
+    /// This validates the root fix from terminal_viewport_init: terminal tab viewports must
+    /// have non-zero visible_rows immediately after creation, so scroll_to_bottom computes
+    /// correct offsets. Without this, visible_rows=0 causes scroll_to_bottom to scroll past
+    /// all content, producing a blank screen.
+    #[test]
+    fn test_terminal_viewport_has_visible_rows_immediately() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Verify that the viewport has non-zero visible_lines immediately
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+
+        assert!(
+            tab.viewport.visible_lines() > 0,
+            "Terminal viewport should have non-zero visible_lines immediately after creation (got {})",
+            tab.viewport.visible_lines()
+        );
+
+        // Visible lines should match expected value based on content height and line height
+        let content_height = 600.0; // 600.0 + TAB_BAR_HEIGHT - TAB_BAR_HEIGHT
+        let line_height = test_font_metrics().line_height;
+        let expected_visible = (content_height as f64 / line_height).floor() as usize;
+
+        assert_eq!(
+            tab.viewport.visible_lines(),
+            expected_visible,
+            "Terminal viewport should have {} visible lines based on content height",
+            expected_visible
         );
     }
 }

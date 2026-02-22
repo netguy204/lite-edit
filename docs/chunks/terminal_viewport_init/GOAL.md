@@ -1,11 +1,13 @@
 ---
-status: FUTURE
+status: ACTIVE
 ticket: null
 parent_chunk: terminal_tab_initial_render
 code_paths:
 - crates/editor/src/editor_state.rs
 - crates/editor/src/main.rs
-code_references: []
+code_references:
+  - ref: crates/editor/src/editor_state.rs#EditorState::new_terminal_tab
+    implements: "Initialize terminal viewport dimensions immediately after tab creation to fix scroll_to_bottom computing correct offsets"
 narrative: null
 investigation: terminal_initial_render_failure
 subsystems: []
@@ -17,7 +19,6 @@ created_after:
 - terminal_alt_backspace
 - terminal_tab_initial_render
 ---
-
 # Chunk Goal
 
 ## Minor Goal
