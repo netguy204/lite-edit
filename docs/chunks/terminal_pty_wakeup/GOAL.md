@@ -2,7 +2,16 @@
 status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/terminal/Cargo.toml
+  - crates/terminal/src/lib.rs
+  - crates/terminal/src/pty.rs
+  - crates/terminal/src/pty_wakeup.rs
+  - crates/terminal/src/terminal_buffer.rs
+  - crates/editor/src/main.rs
+  - crates/editor/src/editor_state.rs
+  - crates/editor/src/workspace.rs
+  - crates/terminal/tests/wakeup_integration.rs
 code_references: []
 narrative: null
 investigation: null
