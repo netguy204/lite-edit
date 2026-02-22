@@ -444,6 +444,7 @@ impl EditorState {
 
     /// Opens the file picker selector.
     /// Chunk: docs/chunks/file_picker - FileIndex initialization, initial query, SelectorWidget setup
+    // Chunk: docs/chunks/selector_scroll_bottom - Call update_visible_size after set_items
     fn open_file_picker(&mut self) {
         // file_index is initialized eagerly at EditorState construction time;
         // Chunk: docs/chunks/picker_eager_index
@@ -460,6 +461,19 @@ impl EditorState {
             .map(|r| r.path.display().to_string())
             .collect();
         selector.set_items(items);
+
+        // Calculate overlay geometry to set initial visible_rows (fixes Bug A:
+        // without this, visible_item_range() returns 0..1 on first render because
+        // RowScroller is initialized with visible_rows = 0).
+        // Chunk: docs/chunks/selector_scroll_bottom
+        let line_height = self.font_metrics.line_height as f32;
+        let geometry = calculate_overlay_geometry(
+            self.view_width,
+            self.view_height,
+            line_height,
+            selector.items().len(),
+        );
+        selector.update_visible_size(geometry.visible_items as f32 * geometry.item_height);
 
         // Store the selector and update focus
         self.active_selector = Some(selector);
@@ -787,6 +801,21 @@ impl EditorState {
                         // Need to reborrow selector mutably
                         if let Some(ref mut sel) = self.active_selector {
                             sel.set_items(items);
+                            // Fix Bug B: Recalculate visible_rows after set_items.
+                            // The update_visible_size at the start of the handler used
+                            // the old item count. With a new item list (potentially
+                            // different size), max_visible_items may change, so we need
+                            // to update visible_rows to match the new geometry.
+                            // Chunk: docs/chunks/selector_scroll_bottom
+                            let new_geometry = calculate_overlay_geometry(
+                                self.view_width,
+                                self.view_height,
+                                line_height,
+                                sel.items().len(),
+                            );
+                            sel.update_visible_size(
+                                new_geometry.visible_items as f32 * new_geometry.item_height,
+                            );
                         }
                         self.last_cache_version = file_index.cache_version();
                     }
