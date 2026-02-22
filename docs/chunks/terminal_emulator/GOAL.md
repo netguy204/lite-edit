@@ -1,18 +1,31 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/terminal/Cargo.toml
+  - crates/terminal/src/lib.rs
+  - crates/terminal/src/terminal_buffer.rs
+  - crates/terminal/src/style_convert.rs
+  - crates/terminal/src/pty.rs
+  - crates/terminal/src/event.rs
+  - crates/terminal/tests/integration.rs
+  - Cargo.toml
 code_references: []
 narrative: null
 investigation: hierarchical_terminal_tabs
 subsystems: []
 friction_entries: []
 bug_type: null
-depends_on: ["renderer_styled_content"]
-created_after: ["file_save", "viewport_fractional_scroll", "word_boundary_primitives", "word_forward_delete", "word_jump_navigation"]
+depends_on:
+- renderer_styled_content
+created_after:
+- file_save
+- viewport_fractional_scroll
+- word_boundary_primitives
+- word_forward_delete
+- word_jump_navigation
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
