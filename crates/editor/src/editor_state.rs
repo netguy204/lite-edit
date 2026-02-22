@@ -297,8 +297,11 @@ impl EditorState {
             None => return, // Non-file tab, skip viewport sync
         };
 
-        // Sync the viewport to the current window height
-        self.viewport_mut().update_size(view_height, line_count);
+        // Sync the viewport to the content height (window height minus tab bar).
+        // This matches update_viewport_size/update_viewport_dimensions which also
+        // subtract TAB_BAR_HEIGHT to compute visible_lines correctly.
+        let content_height = view_height - TAB_BAR_HEIGHT;
+        self.viewport_mut().update_size(content_height, line_count);
     }
 
     /// Handles a key event by forwarding to the active focus target.
@@ -4091,10 +4094,15 @@ mod tests {
     /// cursor repaints after mouse clicks.
     #[test]
     fn test_new_tab_viewport_is_sized() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
         let mut state = EditorState::empty(test_font_metrics());
         // Set viewport size (simulating initial window setup)
-        // 160 pixels / 16 line_height = 10 visible lines
-        state.update_viewport_size(160.0);
+        // update_viewport_size subtracts TAB_BAR_HEIGHT (32px) to get content_height.
+        // To get 10 visible lines: content_height = 10 * 16 = 160px
+        // window_height = content_height + TAB_BAR_HEIGHT = 160 + 32 = 192px
+        let window_height = (10.0 * 16.0) + TAB_BAR_HEIGHT;
+        state.update_viewport_size(window_height);
 
         // Verify first tab has correct viewport
         assert_eq!(
@@ -4140,8 +4148,13 @@ mod tests {
     /// would leave visible_lines = 0, preventing cursor repaints.
     #[test]
     fn test_switch_tab_viewport_is_sized() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
         let mut state = EditorState::empty(test_font_metrics());
-        state.update_viewport_size(160.0);
+        // update_viewport_size subtracts TAB_BAR_HEIGHT to get content_height.
+        // To get 10 visible lines: window_height = (10 * 16) + TAB_BAR_HEIGHT = 192
+        let window_height = (10.0 * 16.0) + TAB_BAR_HEIGHT;
+        state.update_viewport_size(window_height);
 
         // Create a second tab
         state.new_tab();
@@ -4185,10 +4198,14 @@ mod tests {
     /// the new tab with visible_lines = 0.
     #[test]
     fn test_associate_file_viewport_is_sized() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
         use std::io::Write;
 
         let mut state = EditorState::empty(test_font_metrics());
-        state.update_viewport_size(160.0);
+        // update_viewport_size subtracts TAB_BAR_HEIGHT to get content_height.
+        // To get 10 visible lines: window_height = (10 * 16) + TAB_BAR_HEIGHT = 192
+        let window_height = (10.0 * 16.0) + TAB_BAR_HEIGHT;
+        state.update_viewport_size(window_height);
 
         // Create a temporary file with known content
         let temp_dir = std::env::temp_dir();
