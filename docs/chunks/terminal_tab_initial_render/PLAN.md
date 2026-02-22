@@ -8,170 +8,163 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The bug is a classic race condition between initial rendering and asynchronous PTY output:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. `new_terminal_tab()` spawns the shell and marks `DirtyRegion::FullViewport`
+2. The renderer processes this dirty region and renders—but the PTY hasn't produced any output yet
+3. The shell's initial prompt arrives asynchronously (via the PTY reader thread sending to a channel)
+4. The prompt data sits in the channel until the next `poll_agents()` call (500ms cursor blink timer)
+5. Nothing triggers a re-render until a resize forces a full redraw
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+**Solution**: After creating a terminal tab, we need to ensure the rendering system continues to check for PTY output and re-render until the terminal has visible content. There are two viable approaches:
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/terminal_tab_initial_render/GOAL.md)
-with references to the files that you expect to touch.
--->
+### Option A: Deferred Re-render via Timer (Chosen)
+Schedule a one-shot "PTY readiness" check a short time after tab creation (e.g., 50-100ms). This gives the shell time to produce output and then triggers a poll + render cycle.
+
+**Pros**: Simple, non-invasive, matches macOS cocoa patterns (deferred layout)
+**Cons**: Fixed delay that may be too short/long for some systems
+
+### Option B: Poll Until Content Appears
+Mark the terminal as "awaiting initial content" and have the timer-based poll loop render more aggressively until content appears.
+
+**Pros**: Adapts to actual shell startup time
+**Cons**: More state tracking, risk of infinite polling if shell fails to start
+
+We will implement **Option A** with a slight enhancement: instead of a fixed delay, we'll poll immediately after `new_terminal_tab()` (in case the shell is fast), then the existing timer will catch any delayed output.
+
+The key change is that `new_terminal_tab()` should:
+1. Create and add the terminal tab (existing behavior)
+2. Immediately poll for PTY events (new)
+3. If events were processed, the dirty region is already set
+4. If no events yet, schedule a deferred poll via an existing mechanism
+
+Since the cursor blink timer already calls `poll_agents()` every 500ms, the deferred case will resolve naturally. However, 500ms is too slow for good UX. We'll add an immediate poll in `new_terminal_tab()` with a brief sleep to give the shell startup time, or leverage the main loop's structure.
+
+**Chosen implementation**: Add an immediate PTY poll call right after `new_terminal_tab()` returns, in the same call site where we already call `poll_agents()` after key events. The `handle_key` path in `EditorController` already does this, so the fix is minimal.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+- **docs/subsystems/viewport_scroll** (DOCUMENTED): This chunk USES the viewport subsystem for dirty region tracking. The viewport's `DirtyRegion` mechanism is central to understanding why the initial render fails—the dirty region is consumed before PTY output arrives.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add an integration test demonstrating the bug
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create a test that verifies terminal tabs render their initial content. This follows TDD methodology—the test should fail initially because the bug exists.
 
-Example:
+**Location**: `crates/terminal/tests/integration.rs`
 
-### Step 1: Define the SegmentHeader struct
+The test should:
+1. Create a `TerminalBuffer` with a shell
+2. Wait briefly for shell startup
+3. Poll for PTY events
+4. Verify that `line_count()` shows more than the viewport rows, OR
+5. Verify that `styled_line(N)` for some visible row contains non-whitespace
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+This test validates the PTY → TerminalBuffer flow, not the full rendering pipeline (which is platform-dependent and follows humble view principles).
 
-Location: src/segment/format.rs
+### Step 2: Add a unit test for the EditorState behavior
 
-### Step 2: Implement header serialization
+Create a test in `editor_state.rs` that:
+1. Creates an `EditorState` with `new_terminal_tab()`
+2. Simulates a brief delay (or uses test timing control)
+3. Verifies that `poll_agents()` produces dirty output when called after creation
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+**Location**: `crates/editor/src/editor_state.rs` (in the existing `#[cfg(test)]` module)
 
-### Step 3: ...
+This test captures the requirement that PTY output should be available and should produce a dirty region after polling.
 
----
+### Step 3: Schedule a deferred PTY poll after terminal creation
 
-**BACKREFERENCE COMMENTS**
+Modify `EditorState::new_terminal_tab()` to request a deferred render cycle. The simplest approach is to use a flag that the timer callback checks.
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+**Option A (simpler)**: Have `new_terminal_tab()` return a boolean indicating that a "needs-attention" terminal was created. The caller (`EditorController::handle_key`) already calls `poll_agents()` after key events, so the pattern exists.
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+However, since the shell hasn't started yet at the moment of `new_terminal_tab()` return, we need the timer to catch this case. The timer runs every 500ms which is too slow.
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+**Option B (chosen)**: Add a "pending initial render" flag to terminals, checked by `poll_agents()`. When set, `poll_agents()` returns `FullViewport` even if no PTY events arrived yet. This triggers re-renders until the shell prompt appears.
 
-Format (place immediately before the symbol):
+Actually, upon review, the problem is simpler: the *first* render happens *before* the shell has had time to output anything. The shell needs milliseconds to start, but the render happens synchronously.
+
+**Revised approach**: In `EditorController::handle_key`, after `new_terminal_tab()` is called (via `handle_key` → `new_terminal_tab()`), add a brief spin-poll loop that tries to get PTY output:
+
+```rust
+// After detecting Cmd+Shift+T and calling new_terminal_tab():
+for _ in 0..10 {
+    std::thread::sleep(Duration::from_millis(10));
+    let dirty = self.state.poll_agents();
+    if dirty.is_dirty() {
+        self.state.dirty_region.merge(dirty);
+        break;
+    }
+}
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+
+This gives up to 100ms for the shell to produce output, polling every 10ms.
+
+**Location**: `crates/editor/src/main.rs#EditorController::handle_key`
+
+This is simple, targeted, and doesn't require architectural changes.
+
+### Step 4: Alternative approach - Add `needs_initial_render` flag
+
+If the spin-poll in Step 3 causes UI jank (blocking the main thread), use a flag-based approach instead:
+
+1. Add `needs_initial_render: bool` to the `Tab` struct (or just check if it's a fresh terminal)
+2. In `poll_agents()`, after polling a terminal, check if it produced any visible output
+3. If a terminal tab is active, has PTY, but hasn't rendered content yet, return `FullViewport` to force re-polls
+
+**Location**:
+- `crates/editor/src/workspace.rs#Tab`
+- `crates/editor/src/workspace.rs#Workspace::poll_standalone_terminals`
+- `crates/editor/src/editor_state.rs#EditorState::poll_agents`
+
+### Step 5: Verify fix and clean up
+
+1. Run the tests from Steps 1 and 2 to verify they pass
+2. Manually test by pressing Cmd+Shift+T and confirming the shell prompt appears immediately
+3. Verify no flicker or double-render artifacts
+4. Verify switching tabs and back still works
+5. Run the full test suite to check for regressions
+
+### Step 6: Add backreference comments
+
+Add chunk backreference comments to the modified code:
+
+```rust
+// Chunk: docs/chunks/terminal_tab_initial_render - Deferred PTY poll for initial content
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
-
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+**Locations**:
+- The poll loop or flag check added in Step 3 or Step 4
+- Any new test methods
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **terminal_tab_spawn** (ACTIVE): Provides `new_terminal_tab()` and `poll_agents()` infrastructure
+- **terminal_input_render_bug** (ACTIVE): Established the PTY polling pattern in timer and input handlers
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Spin-poll blocking main thread**: The 10ms × 10 iterations = 100ms max block could cause noticeable UI pause. If this is unacceptable, fall back to the flag-based approach (Step 4).
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Shell startup time variance**: Some shells (zsh with plugins, fish) take longer to start than others. 100ms may not be enough for all configurations. The fallback is the existing 500ms timer which will eventually render the content.
+
+3. **Testing shell-dependent behavior**: Integration tests that spawn real shells can be flaky in CI environments. Consider mocking the PTY or using a predictable command like `echo` instead of a full shell.
+
+4. **Race between poll and render**: Even with the fix, there's a theoretical race where render happens just before PTY output arrives. The 500ms timer serves as the backstop, making this a UX issue rather than a correctness bug.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
+- Step 3: Instead of inlining the spin-poll loop directly in `EditorController::handle_key`,
+  we added a `pending_terminal_created: bool` flag to `EditorState` and a dedicated
+  `spin_poll_terminal_startup()` method. This approach:
+  - Encapsulates the spin-poll logic within EditorState where it belongs
+  - Makes the intent clearer (method name documents what's happening)
+  - Allows the flag to be set in `new_terminal_tab()` without changing its return type
+  - Keeps the EditorController simple (just calls the method after each key event)
 
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+- Step 4: The flag-based approach was combined with Step 3 rather than being a fallback.
+  The "pending_terminal_created" flag serves the same purpose as the "needs_initial_render"
+  flag mentioned in Step 4, but triggers a spin-poll rather than aggressive timer polling.
+  This is simpler and achieves the same goal without modifying the timer callback behavior.

@@ -727,3 +727,71 @@ fn test_combined_attributes_captured() {
         "Expected 'COMBINED' text with red, bold, and underline attributes"
     );
 }
+
+// =============================================================================
+// Initial render tests
+// Chunk: docs/chunks/terminal_tab_initial_render - Tests for initial terminal content
+// =============================================================================
+
+/// Test that a shell produces visible content after spawning.
+///
+/// This test verifies the core requirement: when a shell is spawned and polled,
+/// it should produce visible content (e.g., a prompt). This is the terminal-level
+/// behavior that underlies the editor's initial render fix.
+#[test]
+fn test_shell_produces_content_after_poll() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+    terminal.spawn_shell("/bin/sh", Path::new("/tmp")).unwrap();
+
+    // Poll multiple times with brief delays to give shell time to produce output
+    let mut has_content = false;
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(20));
+        terminal.poll_events();
+
+        // Check if any line has non-whitespace content
+        for line in 0..terminal.line_count() {
+            if let Some(styled) = terminal.styled_line(line) {
+                let text: String = styled.spans.iter().map(|s| &s.text[..]).collect();
+                if text.trim().len() > 0 {
+                    has_content = true;
+                    break;
+                }
+            }
+        }
+        if has_content {
+            break;
+        }
+    }
+
+    assert!(
+        has_content,
+        "Shell should produce visible content (e.g., prompt) after polling"
+    );
+}
+
+/// Test that poll_events returns true when there is PTY output.
+///
+/// This validates the dirty tracking mechanism that the editor uses to determine
+/// whether a re-render is needed after terminal creation.
+#[test]
+fn test_poll_events_returns_true_on_output() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+    terminal.spawn_shell("/bin/sh", Path::new("/tmp")).unwrap();
+
+    // The shell should produce output (prompt) shortly after spawning.
+    // Poll until we get true from poll_events.
+    let mut got_output = false;
+    for _ in 0..50 {
+        std::thread::sleep(Duration::from_millis(20));
+        if terminal.poll_events() {
+            got_output = true;
+            break;
+        }
+    }
+
+    assert!(
+        got_output,
+        "poll_events should return true when shell produces output"
+    );
+}
