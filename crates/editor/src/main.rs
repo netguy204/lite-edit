@@ -285,18 +285,39 @@ impl EditorController {
             let _dirty = self.state.take_dirty_region();
 
             // Chunk: docs/chunks/workspace_model - Render with left rail
-            // Use render_with_editor to include left rail rendering
-            let selector = if self.state.focus == EditorFocus::Selector {
-                self.state.active_selector.as_ref()
-            } else {
-                None
-            };
-            self.renderer.render_with_editor(
-                &self.metal_view,
-                &self.state.editor,
-                selector,
-                self.state.cursor_visible, // cursor blink affects selector cursor too
-            );
+            // Chunk: docs/chunks/find_in_file - Render with find strip when active
+            match self.state.focus {
+                EditorFocus::Selector => {
+                    // Render with selector overlay
+                    self.renderer.render_with_editor(
+                        &self.metal_view,
+                        &self.state.editor,
+                        self.state.active_selector.as_ref(),
+                        self.state.cursor_visible,
+                    );
+                }
+                EditorFocus::FindInFile => {
+                    // Render with find strip at bottom
+                    if let Some(ref mini_buffer) = self.state.find_mini_buffer {
+                        self.renderer.render_with_find_strip(
+                            &self.metal_view,
+                            &self.state.editor,
+                            &mini_buffer.content(),
+                            mini_buffer.cursor_col(),
+                            self.state.cursor_visible,
+                        );
+                    }
+                }
+                EditorFocus::Buffer => {
+                    // Normal rendering with left rail (no overlay)
+                    self.renderer.render_with_editor(
+                        &self.metal_view,
+                        &self.state.editor,
+                        None,
+                        self.state.cursor_visible,
+                    );
+                }
+            }
         }
     }
 
