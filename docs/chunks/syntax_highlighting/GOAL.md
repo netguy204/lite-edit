@@ -22,21 +22,19 @@ code_references:
   - ref: crates/syntax/src/theme.rs#SyntaxTheme::style_for_capture
     implements: "Capture name to style lookup with prefix fallback matching"
   - ref: crates/syntax/src/registry.rs#LanguageConfig
-    implements: "Language configuration holding tree-sitter Language, highlights/injections/locals queries"
-  - ref: crates/syntax/src/registry.rs#LanguageConfig::highlight_config
-    implements: "Creates tree-sitter HighlightConfiguration from language config and capture names"
+    implements: "Language configuration holding tree-sitter Language, highlights/injections/locals queries (refactored by syntax_highlight_perf to expose queries for direct QueryCursor usage)"
   - ref: crates/syntax/src/registry.rs#LanguageRegistry
     implements: "Extension-to-language mapping for 13 languages with 24 file extension patterns"
   - ref: crates/syntax/src/registry.rs#LanguageRegistry::config_for_extension
     implements: "Lookup language config by file extension (with or without leading dot)"
   - ref: crates/syntax/src/highlighter.rs#SyntaxHighlighter
-    implements: "Core highlighter owning tree-sitter Parser, Tree, and HighlightConfiguration"
+    implements: "Core highlighter owning tree-sitter Parser, Tree, and Query (refactored by syntax_highlight_perf from HighlightConfiguration to direct Query for viewport-batch performance)"
   - ref: crates/syntax/src/highlighter.rs#SyntaxHighlighter::new
     implements: "Creates highlighter from language config, performs initial parse"
   - ref: crates/syntax/src/highlighter.rs#SyntaxHighlighter::edit
     implements: "Incremental parse tree update (~120µs per single-char edit)"
   - ref: crates/syntax/src/highlighter.rs#SyntaxHighlighter::highlight_line
-    implements: "Viewport-scoped line highlighting converting HighlightEvents to StyledLine"
+    implements: "Line highlighting with cache lookup (refactored by syntax_highlight_perf to use viewport cache and QueryCursor instead of per-line HighlightEvents)"
   - ref: crates/syntax/src/highlighter.rs#merge_spans
     implements: "Optimizes span list by merging adjacent spans with same style"
   - ref: crates/syntax/src/edit.rs#EditEvent
