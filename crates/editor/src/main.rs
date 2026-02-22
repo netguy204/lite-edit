@@ -40,6 +40,7 @@ mod selector;
 mod selector_overlay;
 mod shader;
 mod viewport;
+mod wrap_layout;
 
 pub use file_index::FileIndex;
 
@@ -343,7 +344,7 @@ impl EditorController {
         let height = (frame.size.height * scale) as f32;
 
         self.state.update_viewport_dimensions(width, height);
-        self.renderer.update_viewport_size(height);
+        self.renderer.update_viewport_size(width, height);
 
         // Mark full viewport dirty and render
         self.state.mark_full_dirty();
@@ -495,7 +496,7 @@ impl AppDelegate {
         let width = (frame.size.width * scale) as f32;
         let height = (frame.size.height * scale) as f32;
         state.update_viewport_dimensions(width, height);
-        renderer.update_viewport_size(height);
+        renderer.update_viewport_size(width, height);
 
         // Set the initial buffer in the renderer
         let initial_buffer = TextBuffer::from_str(&demo_content);

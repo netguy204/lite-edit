@@ -1,6 +1,7 @@
 // Chunk: docs/chunks/glyph_rendering - Monospace glyph atlas + text rendering
 // Chunk: docs/chunks/viewport_rendering - Viewport + Buffer-to-Screen Rendering
 // Chunk: docs/chunks/text_selection_rendering - Selection highlight rendering
+// Chunk: docs/chunks/line_wrap_rendering - Soft line wrapping support
 //!
 //! Glyph vertex buffer construction
 //!
@@ -15,12 +16,17 @@
 //! The viewport-aware rendering methods allow rendering a subset of buffer lines
 //! (visible in the viewport) and include cursor and selection rendering support.
 //!
+//! With soft line wrapping enabled, long lines are split across multiple screen rows.
+//! The `WrapLayout` struct handles the coordinate mapping between buffer columns and
+//! screen positions.
+//!
 //! ## Quad Categories
 //!
-//! The buffer emits three types of quads in a specific order:
+//! The buffer emits quads in a specific order:
 //! 1. **Selection quads** - Semi-transparent background highlights for selected text
-//! 2. **Glyph quads** - The actual text characters
-//! 3. **Cursor quad** - The block cursor at the current position
+//! 2. **Border quads** - Left-edge indicators for continuation rows (wrapped lines)
+//! 3. **Glyph quads** - The actual text characters
+//! 4. **Cursor quad** - The block cursor at the current position
 //!
 //! Each category has its own index range tracked separately, allowing the renderer
 //! to draw each with different colors via separate draw calls.
@@ -35,6 +41,7 @@ use crate::font::FontMetrics;
 use crate::glyph_atlas::{GlyphAtlas, GlyphInfo};
 use crate::shader::VERTEX_SIZE;
 use crate::viewport::Viewport;
+use crate::wrap_layout::WrapLayout;
 use lite_edit_buffer::TextBuffer;
 
 // =============================================================================
@@ -188,6 +195,8 @@ pub struct GlyphBuffer {
     layout: GlyphLayout,
     /// Index range for selection highlight quads
     selection_range: QuadRange,
+    /// Index range for continuation row border quads
+    border_range: QuadRange,
     /// Index range for glyph (text character) quads
     glyph_range: QuadRange,
     /// Index range for cursor quad
@@ -203,6 +212,7 @@ impl GlyphBuffer {
             index_count: 0,
             layout: GlyphLayout::from_metrics(metrics),
             selection_range: QuadRange::default(),
+            border_range: QuadRange::default(),
             glyph_range: QuadRange::default(),
             cursor_range: QuadRange::default(),
         }
@@ -231,6 +241,11 @@ impl GlyphBuffer {
     /// Returns the index range for selection highlight quads
     pub fn selection_range(&self) -> QuadRange {
         self.selection_range
+    }
+
+    /// Returns the index range for continuation row border quads
+    pub fn border_range(&self) -> QuadRange {
+        self.border_range
     }
 
     /// Returns the index range for glyph (text character) quads
@@ -678,6 +693,354 @@ impl GlyphBuffer {
             GlyphVertex::new(x + cursor_width, y + cursor_height, u1, v1), // bottom-right
             GlyphVertex::new(x, y + cursor_height, u0, v1),             // bottom-left
         ]
+    }
+
+    // Chunk: docs/chunks/line_wrap_rendering - Continuation row border indicator
+    /// Creates a left-edge border quad for a continuation row.
+    ///
+    /// The border is 2 pixels wide and spans the full line height, positioned
+    /// at the leftmost edge of the screen row.
+    fn create_border_quad(
+        &self,
+        screen_row: usize,
+        solid_glyph: &GlyphInfo,
+        y_offset: f32,
+    ) -> [GlyphVertex; 4] {
+        let y = screen_row as f32 * self.layout.line_height - y_offset;
+
+        // Border is 2 pixels wide at the left edge
+        let border_width = 2.0;
+        let border_height = self.layout.line_height;
+
+        let (u0, v0) = solid_glyph.uv_min;
+        let (u1, v1) = solid_glyph.uv_max;
+
+        [
+            GlyphVertex::new(0.0, y, u0, v0),                           // top-left
+            GlyphVertex::new(border_width, y, u1, v0),                  // top-right
+            GlyphVertex::new(border_width, y + border_height, u1, v1),  // bottom-right
+            GlyphVertex::new(0.0, y + border_height, u0, v1),           // bottom-left
+        ]
+    }
+
+    // Chunk: docs/chunks/line_wrap_rendering - Wrap-aware rendering
+    /// Updates the buffers with content from a TextBuffer, with soft line wrapping.
+    ///
+    /// This is the main rendering entry point when line wrapping is enabled.
+    /// It iterates buffer lines, wrapping each according to the WrapLayout,
+    /// and emits quads for each screen row until the viewport is filled.
+    ///
+    /// Emits quads in this order:
+    /// 1. Selection highlight quads
+    /// 2. Border quads (for continuation rows)
+    /// 3. Glyph quads (text characters)
+    /// 4. Cursor quad
+    pub fn update_from_buffer_with_wrap(
+        &mut self,
+        device: &ProtocolObject<dyn MTLDevice>,
+        atlas: &GlyphAtlas,
+        buffer: &TextBuffer,
+        viewport: &Viewport,
+        wrap_layout: &WrapLayout,
+        cursor_visible: bool,
+        y_offset: f32,
+    ) {
+        let first_visible_line = viewport.first_visible_line();
+        let max_screen_rows = viewport.visible_lines() + 2; // +2 for partial visibility at top/bottom
+
+        // Estimate buffer sizes
+        // We don't know exact counts without iterating, but we can estimate
+        let mut estimated_quads = 0;
+        let mut screen_row = 0;
+        let line_count = buffer.line_count();
+
+        // Quick estimate: count chars in visible lines
+        for buffer_line in first_visible_line..line_count {
+            if screen_row >= max_screen_rows {
+                break;
+            }
+            let line_len = buffer.line_len(buffer_line);
+            let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
+            estimated_quads += line_len + rows_for_line; // chars + potential borders
+            screen_row += rows_for_line;
+        }
+        estimated_quads += 1; // cursor
+
+        // Reset quad ranges
+        self.selection_range = QuadRange::default();
+        self.border_range = QuadRange::default();
+        self.glyph_range = QuadRange::default();
+        self.cursor_range = QuadRange::default();
+
+        if estimated_quads == 0 && !cursor_visible {
+            self.vertex_buffer = None;
+            self.index_buffer = None;
+            self.index_count = 0;
+            return;
+        }
+
+        // Allocate vertex and index data
+        let mut vertices: Vec<GlyphVertex> = Vec::with_capacity(estimated_quads * 4);
+        let mut indices: Vec<u32> = Vec::with_capacity(estimated_quads * 6);
+        let mut vertex_offset: u32 = 0;
+
+        // Helper to push quad indices
+        let push_quad_indices = |indices: &mut Vec<u32>, vertex_offset: &mut u32| {
+            indices.push(*vertex_offset);
+            indices.push(*vertex_offset + 1);
+            indices.push(*vertex_offset + 2);
+            indices.push(*vertex_offset);
+            indices.push(*vertex_offset + 2);
+            indices.push(*vertex_offset + 3);
+            *vertex_offset += 4;
+        };
+
+        // ==================== Phase 1: Selection Quads ====================
+        let selection_start_index = indices.len();
+
+        if let Some((sel_start, sel_end)) = buffer.selection_range() {
+            let solid_glyph = atlas.solid_glyph();
+            let cols_per_row = wrap_layout.cols_per_row();
+
+            // Iterate buffer lines, tracking cumulative screen row
+            let mut cumulative_screen_row: usize = 0;
+            for buffer_line in first_visible_line..line_count {
+                if cumulative_screen_row >= max_screen_rows {
+                    break;
+                }
+
+                let line_len = buffer.line_len(buffer_line);
+                let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
+
+                // Check if this buffer line intersects the selection
+                if buffer_line >= sel_start.line && buffer_line <= sel_end.line {
+                    // Calculate selection bounds for this buffer line
+                    let line_sel_start = if buffer_line == sel_start.line {
+                        sel_start.col
+                    } else {
+                        0
+                    };
+                    let line_sel_end = if buffer_line == sel_end.line {
+                        sel_end.col
+                    } else {
+                        // Include newline character visualization
+                        line_len + 1
+                    };
+
+                    if line_sel_start < line_sel_end {
+                        // Emit selection quads for each screen row in this buffer line
+                        for row_offset in 0..rows_for_line {
+                            let screen_row = cumulative_screen_row + row_offset;
+                            if screen_row >= max_screen_rows {
+                                break;
+                            }
+
+                            // Calculate which buffer columns are on this screen row
+                            let row_start_col = row_offset * cols_per_row;
+                            let row_end_col = ((row_offset + 1) * cols_per_row).min(line_len + 1);
+
+                            // Calculate intersection with selection
+                            let sel_start_on_row = line_sel_start.max(row_start_col);
+                            let sel_end_on_row = line_sel_end.min(row_end_col);
+
+                            if sel_start_on_row < sel_end_on_row {
+                                // Convert to screen columns (relative to this screen row)
+                                let screen_start_col = sel_start_on_row - row_start_col;
+                                let screen_end_col = sel_end_on_row - row_start_col;
+
+                                let quad = self.create_selection_quad_with_offset(
+                                    screen_row,
+                                    screen_start_col,
+                                    screen_end_col,
+                                    solid_glyph,
+                                    y_offset,
+                                );
+                                vertices.extend_from_slice(&quad);
+                                push_quad_indices(&mut indices, &mut vertex_offset);
+                            }
+                        }
+                    }
+                }
+
+                cumulative_screen_row += rows_for_line;
+            }
+        }
+
+        let selection_index_count = indices.len() - selection_start_index;
+        self.selection_range = QuadRange::new(selection_start_index, selection_index_count);
+
+        // ==================== Phase 2: Border Quads ====================
+        let border_start_index = indices.len();
+
+        {
+            let solid_glyph = atlas.solid_glyph();
+            let mut cumulative_screen_row: usize = 0;
+
+            for buffer_line in first_visible_line..line_count {
+                if cumulative_screen_row >= max_screen_rows {
+                    break;
+                }
+
+                let line_len = buffer.line_len(buffer_line);
+                let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
+
+                // Emit border quads for continuation rows (row_offset > 0)
+                for row_offset in 1..rows_for_line {
+                    let screen_row = cumulative_screen_row + row_offset;
+                    if screen_row >= max_screen_rows {
+                        break;
+                    }
+
+                    let quad = self.create_border_quad(screen_row, solid_glyph, y_offset);
+                    vertices.extend_from_slice(&quad);
+                    push_quad_indices(&mut indices, &mut vertex_offset);
+                }
+
+                cumulative_screen_row += rows_for_line;
+            }
+        }
+
+        let border_index_count = indices.len() - border_start_index;
+        self.border_range = QuadRange::new(border_start_index, border_index_count);
+
+        // ==================== Phase 3: Glyph Quads ====================
+        let glyph_start_index = indices.len();
+
+        {
+            let mut cumulative_screen_row: usize = 0;
+
+            for buffer_line in first_visible_line..line_count {
+                if cumulative_screen_row >= max_screen_rows {
+                    break;
+                }
+
+                let line_content = buffer.line_content(buffer_line);
+                let line_len = line_content.chars().count();
+                let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
+
+                for (col, c) in line_content.chars().enumerate() {
+                    // Skip spaces (they don't need quads)
+                    if c == ' ' {
+                        continue;
+                    }
+
+                    // Get the glyph info from the atlas
+                    let glyph = match atlas.get_glyph(c) {
+                        Some(g) => g,
+                        None => continue,
+                    };
+
+                    // Calculate screen position using wrap layout
+                    let (row_offset, screen_col) = wrap_layout.buffer_col_to_screen_pos(col);
+                    let screen_row = cumulative_screen_row + row_offset;
+
+                    if screen_row >= max_screen_rows {
+                        break;
+                    }
+
+                    // Generate quad at the calculated screen position
+                    let quad = self.layout.quad_vertices_with_offset(
+                        screen_row,
+                        screen_col,
+                        glyph,
+                        y_offset,
+                    );
+                    vertices.extend_from_slice(&quad);
+                    push_quad_indices(&mut indices, &mut vertex_offset);
+                }
+
+                cumulative_screen_row += rows_for_line;
+            }
+        }
+
+        let glyph_index_count = indices.len() - glyph_start_index;
+        self.glyph_range = QuadRange::new(glyph_start_index, glyph_index_count);
+
+        // ==================== Phase 4: Cursor Quad ====================
+        let cursor_start_index = indices.len();
+
+        if cursor_visible {
+            let cursor_pos = buffer.cursor_position();
+            let solid_glyph = atlas.solid_glyph();
+
+            // Calculate the cumulative screen row for the cursor's buffer line
+            let mut cumulative_screen_row: usize = 0;
+            let mut found_cursor = false;
+
+            for buffer_line in first_visible_line..=cursor_pos.line.min(line_count.saturating_sub(1)) {
+                if buffer_line == cursor_pos.line {
+                    // Calculate cursor's screen position
+                    let (row_offset, screen_col) = wrap_layout.buffer_col_to_screen_pos(cursor_pos.col);
+                    let screen_row = cumulative_screen_row + row_offset;
+
+                    if screen_row < max_screen_rows {
+                        let cursor_quad = self.create_cursor_quad_with_offset(
+                            screen_row,
+                            screen_col,
+                            solid_glyph,
+                            y_offset,
+                        );
+                        vertices.extend_from_slice(&cursor_quad);
+                        push_quad_indices(&mut indices, &mut vertex_offset);
+                        found_cursor = true;
+                    }
+                    break;
+                }
+
+                let line_len = buffer.line_len(buffer_line);
+                cumulative_screen_row += wrap_layout.screen_rows_for_line(line_len);
+            }
+
+            // Handle case where cursor is before first_visible_line
+            if !found_cursor && cursor_pos.line < first_visible_line {
+                // Cursor is above viewport, don't render
+            }
+        }
+
+        let cursor_index_count = indices.len() - cursor_start_index;
+        self.cursor_range = QuadRange::new(cursor_start_index, cursor_index_count);
+
+        // ==================== Create GPU Buffers ====================
+        if vertices.is_empty() {
+            self.vertex_buffer = None;
+            self.index_buffer = None;
+            self.index_count = 0;
+            return;
+        }
+
+        // Create the vertex buffer
+        let vertex_data_size = vertices.len() * VERTEX_SIZE;
+        let vertex_ptr =
+            NonNull::new(vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
+
+        let vertex_buffer = unsafe {
+            device
+                .newBufferWithBytes_length_options(
+                    vertex_ptr,
+                    vertex_data_size,
+                    MTLResourceOptions::StorageModeShared,
+                )
+                .expect("Failed to create vertex buffer")
+        };
+
+        // Create the index buffer
+        let index_data_size = indices.len() * std::mem::size_of::<u32>();
+        let index_ptr =
+            NonNull::new(indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
+
+        let index_buffer = unsafe {
+            device
+                .newBufferWithBytes_length_options(
+                    index_ptr,
+                    index_data_size,
+                    MTLResourceOptions::StorageModeShared,
+                )
+                .expect("Failed to create index buffer")
+        };
+
+        self.vertex_buffer = Some(vertex_buffer);
+        self.index_buffer = Some(index_buffer);
+        self.index_count = indices.len();
     }
 
     /// Returns whether the last rendered content includes a cursor

@@ -171,6 +171,101 @@ impl Viewport {
         self.scroll_offset_px != old_offset_px
     }
 
+    // Chunk: docs/chunks/line_wrap_rendering - Wrap-aware cursor visibility
+    /// Ensures a cursor position is visible with soft line wrapping.
+    ///
+    /// This accounts for the fact that a buffer line may wrap to multiple screen rows.
+    /// We need to ensure the specific screen row containing the cursor column is visible.
+    ///
+    /// Returns `true` if scrolling occurred, `false` if the cursor was already visible.
+    ///
+    /// # Arguments
+    /// * `cursor_line` - The buffer line containing the cursor
+    /// * `cursor_col` - The buffer column of the cursor
+    /// * `first_visible_line` - The first visible buffer line
+    /// * `line_count` - Total number of buffer lines
+    /// * `wrap_layout` - The wrap layout for calculating screen rows
+    /// * `line_len_fn` - Closure to get the character count of a buffer line
+    pub fn ensure_visible_wrapped<F>(
+        &mut self,
+        cursor_line: usize,
+        cursor_col: usize,
+        first_visible_line: usize,
+        line_count: usize,
+        wrap_layout: &crate::wrap_layout::WrapLayout,
+        line_len_fn: F,
+    ) -> bool
+    where
+        F: Fn(usize) -> usize,
+    {
+        let old_offset_px = self.scroll_offset_px;
+
+        // Calculate the cumulative screen row of the cursor
+        // We need to know: "what screen row (from viewport top) is the cursor on?"
+        let mut cumulative_screen_row: usize = 0;
+
+        // First, calculate screen rows for lines before the cursor line
+        for buffer_line in first_visible_line..cursor_line.min(line_count) {
+            let line_len = line_len_fn(buffer_line);
+            cumulative_screen_row += wrap_layout.screen_rows_for_line(line_len);
+        }
+
+        // Now add the row offset within the cursor's line
+        let (cursor_row_offset, _) = wrap_layout.buffer_col_to_screen_pos(cursor_col);
+
+        // If cursor is before first_visible_line, we need to scroll up
+        if cursor_line < first_visible_line {
+            // Calculate how many screen rows from the absolute start
+            let mut abs_screen_row: usize = 0;
+            for buffer_line in 0..cursor_line.min(line_count) {
+                let line_len = line_len_fn(buffer_line);
+                abs_screen_row += wrap_layout.screen_rows_for_line(line_len);
+            }
+            abs_screen_row += cursor_row_offset;
+
+            // Scroll to put cursor's screen row at the top
+            let target_px = abs_screen_row as f32 * self.line_height;
+            // Use a reasonable max based on wrapping
+            // For simplicity, use a large value; proper clamping happens in set_scroll_offset_px
+            let max_screen_rows = self.compute_total_screen_rows(line_count, wrap_layout, &line_len_fn);
+            let max_offset_px = max_screen_rows.saturating_sub(self.visible_lines) as f32 * self.line_height;
+            self.scroll_offset_px = target_px.clamp(0.0, max_offset_px);
+        } else {
+            // Cursor is at or after first_visible_line
+            let cursor_screen_row = cumulative_screen_row + cursor_row_offset;
+
+            if cursor_screen_row >= self.visible_lines {
+                // Cursor is below viewport - scroll down
+                // Put the cursor's screen row at the bottom of the viewport
+                let new_top_row = cursor_screen_row.saturating_sub(self.visible_lines.saturating_sub(1));
+                let target_px = new_top_row as f32 * self.line_height;
+                let max_screen_rows = self.compute_total_screen_rows(line_count, wrap_layout, &line_len_fn);
+                let max_offset_px = max_screen_rows.saturating_sub(self.visible_lines) as f32 * self.line_height;
+                self.scroll_offset_px = target_px.clamp(0.0, max_offset_px);
+            }
+            // else: cursor is visible, no scroll needed
+        }
+
+        self.scroll_offset_px != old_offset_px
+    }
+
+    /// Helper: computes total screen rows for all buffer lines
+    fn compute_total_screen_rows<F>(
+        &self,
+        line_count: usize,
+        wrap_layout: &crate::wrap_layout::WrapLayout,
+        line_len_fn: F,
+    ) -> usize
+    where
+        F: Fn(usize) -> usize,
+    {
+        let mut total = 0;
+        for line in 0..line_count {
+            total += wrap_layout.screen_rows_for_line(line_len_fn(line));
+        }
+        total
+    }
+
     /// Converts a buffer line index to a screen line index
     ///
     /// Returns `Some(screen_line)` if the buffer line is visible in the viewport,

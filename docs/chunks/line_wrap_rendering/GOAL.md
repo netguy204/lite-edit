@@ -1,8 +1,15 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/editor/src/wrap_layout.rs
+- crates/editor/src/glyph_buffer.rs
+- crates/editor/src/buffer_target.rs
+- crates/editor/src/viewport.rs
+- crates/editor/src/renderer.rs
+- crates/editor/src/lib.rs
+- crates/editor/tests/wrap_test.rs
 code_references: []
 narrative: null
 investigation: null
@@ -10,9 +17,14 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["file_save", "viewport_fractional_scroll", "word_boundary_primitives", "word_double_click_select", "word_forward_delete", "word_jump_navigation"]
+created_after:
+- file_save
+- viewport_fractional_scroll
+- word_boundary_primitives
+- word_double_click_select
+- word_forward_delete
+- word_jump_navigation
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

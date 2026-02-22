@@ -1,6 +1,7 @@
 // Chunk: docs/chunks/editable_buffer - Main loop + input events + editable buffer
 // Chunk: docs/chunks/mouse_click_cursor - Mouse click cursor positioning
 // Chunk: docs/chunks/viewport_scrolling - Scroll event handling
+// Chunk: docs/chunks/line_wrap_rendering - Wrap-aware hit-testing
 //!
 //! Buffer focus target implementation.
 //!
@@ -11,11 +12,14 @@
 //!
 //! Also handles mouse click events for cursor positioning, converting pixel
 //! coordinates to buffer positions using font metrics and viewport scroll offset.
+//! With line wrapping, a single buffer line may span multiple screen rows, so
+//! the hit-testing walks buffer lines to find which one owns the clicked screen row.
 
 use crate::context::EditorContext;
 use crate::focus::{FocusTarget, Handled};
 use crate::font::FontMetrics;
 use crate::input::{Key, KeyEvent, MouseEvent, MouseEventKind, ScrollDelta};
+use crate::wrap_layout::WrapLayout;
 use lite_edit_buffer::Position;
 
 /// Commands that can be executed on the buffer.
@@ -457,14 +461,18 @@ impl FocusTarget for BufferFocusTarget {
 
     // Chunk: docs/chunks/mouse_drag_selection - Mouse drag selection
     // Chunk: docs/chunks/word_double_click_select - Double-click word selection
+    // Chunk: docs/chunks/line_wrap_rendering - Wrap-aware hit-testing
     fn handle_mouse(&mut self, event: MouseEvent, ctx: &mut EditorContext) {
+        // Create wrap layout for hit-testing
+        let wrap_layout = ctx.wrap_layout();
+
         match event.kind {
             MouseEventKind::Down => {
-                // Convert pixel position to buffer position and set cursor
-                let position = pixel_to_buffer_position(
+                // Convert pixel position to buffer position using wrap-aware mapping
+                let position = pixel_to_buffer_position_wrapped(
                     event.position,
                     ctx.view_height,
-                    &ctx.font_metrics,
+                    &wrap_layout,
                     ctx.viewport.first_visible_line(),
                     ctx.buffer.line_count(),
                     |line| ctx.buffer.line_len(line),
@@ -489,11 +497,11 @@ impl FocusTarget for BufferFocusTarget {
                 // Drag: extend selection from anchor to new position
                 let old_cursor = ctx.buffer.cursor_position();
 
-                // Convert pixel position to buffer position
-                let new_position = pixel_to_buffer_position(
+                // Convert pixel position to buffer position using wrap-aware mapping
+                let new_position = pixel_to_buffer_position_wrapped(
                     event.position,
                     ctx.view_height,
-                    &ctx.font_metrics,
+                    &wrap_layout,
                     ctx.viewport.first_visible_line(),
                     ctx.buffer.line_count(),
                     |line| ctx.buffer.line_len(line),
@@ -601,6 +609,103 @@ where
     Position::new(clamped_line, clamped_col)
 }
 
+// Chunk: docs/chunks/line_wrap_rendering - Wrap-aware pixel-to-buffer position conversion
+/// Converts pixel coordinates to buffer position with soft line wrapping.
+///
+/// This is the wrap-aware version of hit-testing. It walks buffer lines from
+/// the first visible line, summing their screen row counts, until it finds
+/// which buffer line owns the clicked screen row.
+///
+/// # Arguments
+/// * `position` - Pixel position (x, y) in view coordinates
+/// * `view_height` - Total view height in pixels
+/// * `wrap_layout` - WrapLayout for computing screen rows per line
+/// * `first_visible_line` - The first visible buffer line (scroll offset)
+/// * `line_count` - Total number of lines in the buffer
+/// * `line_len_fn` - Closure to get the character count of a specific buffer line
+///
+/// # Returns
+/// A buffer `Position` with line and column computed from wrapped coordinates.
+fn pixel_to_buffer_position_wrapped<F>(
+    position: (f64, f64),
+    view_height: f32,
+    wrap_layout: &WrapLayout,
+    first_visible_line: usize,
+    line_count: usize,
+    line_len_fn: F,
+) -> Position
+where
+    F: Fn(usize) -> usize,
+{
+    let (x, y) = position;
+    let line_height = wrap_layout.line_height();
+    let glyph_width = wrap_layout.glyph_width();
+
+    // Flip y-coordinate: macOS uses bottom-left origin, buffer uses top-left
+    let flipped_y = (view_height as f64) - y;
+
+    // Compute screen row (which row on screen, 0-indexed from top)
+    let target_screen_row = if flipped_y >= 0.0 && line_height > 0.0 {
+        (flipped_y / line_height as f64).floor() as usize
+    } else {
+        0
+    };
+
+    // Walk buffer lines from first_visible_line, summing screen rows
+    // until we find which buffer line owns the target screen row
+    let mut cumulative_screen_row: usize = 0;
+    let mut found_buffer_line: Option<usize> = None;
+    let mut row_offset_in_line: usize = 0;
+
+    if line_count == 0 {
+        return Position::new(0, 0);
+    }
+
+    for buffer_line in first_visible_line..line_count {
+        let line_len = line_len_fn(buffer_line);
+        let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
+
+        let next_cumulative = cumulative_screen_row + rows_for_line;
+
+        if target_screen_row < next_cumulative {
+            // This buffer line owns the target screen row
+            found_buffer_line = Some(buffer_line);
+            row_offset_in_line = target_screen_row - cumulative_screen_row;
+            break;
+        }
+
+        cumulative_screen_row = next_cumulative;
+    }
+
+    // If we didn't find the line (click was beyond last line), use last line
+    let buffer_line = found_buffer_line.unwrap_or(line_count - 1);
+    let line_len = line_len_fn(buffer_line);
+
+    // If we fell off the end, row_offset should be 0 (click on "virtual" first row past content)
+    // But actually we want to clamp to the last row of the last line
+    let row_offset = if found_buffer_line.is_none() {
+        // Click was below content - put cursor at end of last line
+        wrap_layout.screen_rows_for_line(line_len).saturating_sub(1)
+    } else {
+        row_offset_in_line
+    };
+
+    // Compute screen column from x position
+    let screen_col = if x >= 0.0 && glyph_width > 0.0 {
+        (x / glyph_width as f64).floor() as usize
+    } else {
+        0
+    };
+
+    // Convert (row_offset, screen_col) to buffer column
+    let buffer_col = wrap_layout.screen_pos_to_buffer_col(row_offset, screen_col);
+
+    // Clamp to line length
+    let clamped_col = buffer_col.min(line_len);
+
+    Position::new(buffer_line, clamped_col)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -642,6 +747,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             target.handle_key(KeyEvent::char('H'), &mut ctx);
             target.handle_key(KeyEvent::char('i'), &mut ctx);
@@ -664,6 +770,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             target.handle_key(KeyEvent::char('a'), &mut ctx);
             target.handle_key(KeyEvent::char('b'), &mut ctx);
@@ -691,6 +798,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             target.handle_key(KeyEvent::new(Key::Right, Modifiers::default()), &mut ctx);
         }
@@ -704,6 +812,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             target.handle_key(KeyEvent::new(Key::Down, Modifiers::default()), &mut ctx);
         }
@@ -717,6 +826,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             target.handle_key(KeyEvent::new(Key::Left, Modifiers::default()), &mut ctx);
         }
@@ -730,6 +840,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             target.handle_key(KeyEvent::new(Key::Up, Modifiers::default()), &mut ctx);
         }
@@ -748,6 +859,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             target.handle_key(KeyEvent::char('a'), &mut ctx);
             target.handle_key(KeyEvent::new(Key::Return, Modifiers::default()), &mut ctx);
@@ -775,6 +887,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             target.handle_key(KeyEvent::new(Key::Delete, Modifiers::default()), &mut ctx);
         }
@@ -798,6 +911,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Left,
@@ -828,6 +942,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Right,
@@ -858,6 +973,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Char('a'),
@@ -888,6 +1004,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Char('e'),
@@ -918,6 +1035,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(Key::Home, Modifiers::default());
             target.handle_key(event, &mut ctx);
@@ -942,6 +1060,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(Key::End, Modifiers::default());
             target.handle_key(event, &mut ctx);
@@ -971,6 +1090,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             for _ in 0..15 {
                 target.handle_key(KeyEvent::new(Key::Down, Modifiers::default()), &mut ctx);
@@ -995,6 +1115,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             // Cmd+Z is not handled
             target.handle_key(
@@ -1027,6 +1148,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
 
             // Type on line 0
@@ -1214,6 +1336,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
@@ -1246,6 +1369,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Char('k'),
@@ -1279,6 +1403,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Char('k'),
@@ -1311,6 +1436,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Char('k'),
@@ -1342,6 +1468,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Char('k'),
@@ -1376,6 +1503,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Right,
@@ -1414,6 +1542,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             // Press Shift+Right 3 times
             for _ in 0..3 {
@@ -1453,6 +1582,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             // Shift+Right 3 times
             for _ in 0..3 {
@@ -1501,6 +1631,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Down,
@@ -1534,6 +1665,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             // Shift+Right 3 times to select "hel"
             for _ in 0..3 {
@@ -1571,6 +1703,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Home,
@@ -1603,6 +1736,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::End,
@@ -1638,6 +1772,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             // Shift+Right twice
             for _ in 0..2 {
@@ -1679,6 +1814,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             // Shift+Right to extend selection
             let event = KeyEvent::new(
@@ -1713,6 +1849,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Char('a'),
@@ -1746,6 +1883,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Char('e'),
@@ -1779,6 +1917,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Up,
@@ -1812,6 +1951,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Down,
@@ -1845,6 +1985,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Left,
@@ -1878,6 +2019,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Up,
@@ -1911,6 +2053,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Left,
@@ -1944,6 +2087,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Right,
@@ -2038,6 +2182,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Char('a'),
@@ -2072,6 +2217,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Char('c'),
@@ -2105,6 +2251,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
 
             // Cmd+A to select all
@@ -2148,6 +2295,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             // Select all first
             let select_all = KeyEvent::new(
@@ -2170,6 +2318,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let copy = KeyEvent::new(
                 Key::Char('c'),
@@ -2212,6 +2361,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             // Scroll down by 3 lines (positive dy)
             // line_height = 16, so 3 lines = 48 pixels
@@ -2242,6 +2392,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             // Scroll up by 3 lines (negative dy)
             target.handle_scroll(ScrollDelta::new(0.0, -48.0), &mut ctx);
@@ -2270,6 +2421,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             // Try to scroll down by 30 lines (more than buffer length)
             target.handle_scroll(ScrollDelta::new(0.0, 30.0 * 16.0), &mut ctx);
@@ -2301,6 +2453,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             target.handle_scroll(ScrollDelta::new(0.0, 160.0), &mut ctx);
         }
@@ -2329,6 +2482,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             // Scroll by less than half a line - now accumulates in pixel space
             target.handle_scroll(ScrollDelta::new(0.0, 7.0), &mut ctx);
@@ -2363,6 +2517,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             target.handle_scroll(ScrollDelta::new(0.0, 7.0), &mut ctx);
         }
@@ -2395,6 +2550,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
@@ -2433,6 +2589,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
@@ -2456,6 +2613,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Moved,
@@ -2485,6 +2643,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Moved,
@@ -2519,6 +2678,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
@@ -2537,6 +2697,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Up,
@@ -2568,6 +2729,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
@@ -2586,6 +2748,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Moved,
@@ -2604,6 +2767,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Up,
@@ -2636,6 +2800,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
@@ -2654,6 +2819,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Moved,
@@ -2686,6 +2852,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
@@ -2705,6 +2872,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Moved,
@@ -2736,6 +2904,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
@@ -2756,6 +2925,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Moved,
@@ -2787,6 +2957,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             target.handle_mouse(
                 MouseEvent {
@@ -2810,6 +2981,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             target.handle_mouse(
                 MouseEvent {
@@ -2835,6 +3007,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             target.handle_mouse(
                 MouseEvent {
@@ -2858,6 +3031,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             target.handle_mouse(
                 MouseEvent {
@@ -2891,6 +3065,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             target.handle_mouse(
                 MouseEvent {
@@ -2913,6 +3088,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             target.handle_mouse(
                 MouseEvent {
@@ -2950,6 +3126,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             target.handle_mouse(
                 MouseEvent {
@@ -2974,6 +3151,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             target.handle_mouse(
                 MouseEvent {
@@ -3021,6 +3199,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Backspace,
@@ -3054,6 +3233,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Backspace,
@@ -3085,6 +3265,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = KeyEvent::new(
                 Key::Backspace,
@@ -3118,6 +3299,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             // Plain backspace - no modifiers
             let event = KeyEvent::new(Key::Backspace, Modifiers::default());
@@ -3150,6 +3332,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
@@ -3185,6 +3368,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
@@ -3220,6 +3404,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
@@ -3253,6 +3438,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
@@ -3284,6 +3470,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
@@ -3318,6 +3505,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
@@ -3352,6 +3540,7 @@ mod tests {
                 &mut dirty,
                 test_font_metrics(),
                 160.0,
+                800.0,
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
