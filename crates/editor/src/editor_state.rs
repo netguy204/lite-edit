@@ -977,6 +977,7 @@ impl EditorState {
     ///
     /// Mouse clicks in the left rail switch workspaces.
     /// Mouse clicks in the tab bar switch tabs.
+    // Chunk: docs/chunks/mouse_click_cursor - Mouse event routing from controller to focus target via EditorContext
     /// Chunk: docs/chunks/file_picker - Focus-based mouse routing (selector vs buffer)
     pub fn handle_mouse(&mut self, event: MouseEvent) {
         use crate::input::MouseEventKind;
