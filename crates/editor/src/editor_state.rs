@@ -248,6 +248,18 @@ impl EditorState {
             None => return,
         };
 
+        // Calculate overlay geometry to get visible_items for arrow key navigation
+        let line_height = self.font_metrics.line_height as f32;
+        let geometry = calculate_overlay_geometry(
+            self.view_width,
+            self.view_height,
+            line_height,
+            selector.items().len(),
+        );
+
+        // Update visible_items on the selector (for arrow key navigation scroll)
+        selector.set_visible_items(geometry.visible_items);
+
         // Capture the previous query for change detection
         let prev_query = selector.query().to_string();
 
@@ -425,6 +437,9 @@ impl EditorState {
             selector.items().len(),
         );
 
+        // Update visible_items on the selector (for consistency with scroll/key handling)
+        selector.set_visible_items(geometry.visible_items);
+
         // Convert mouse position to the format expected by selector
         // Mouse events arrive in view coordinates (y=0 at top)
         let position = event.position;
@@ -484,10 +499,12 @@ impl EditorState {
     /// Scroll events only affect the viewport, not the cursor position or buffer.
     /// The cursor may end up off-screen after scrolling, which is intentional.
     ///
-    /// When the selector is open, scroll events are ignored.
+    /// When the selector is open, scroll events are forwarded to the selector
+    /// to scroll the item list.
     pub fn handle_scroll(&mut self, delta: ScrollDelta) {
-        // Ignore scroll events when selector is open
+        // When selector is open, forward scroll to selector
         if self.focus == EditorFocus::Selector {
+            self.handle_scroll_selector(delta);
             return;
         }
 
@@ -500,6 +517,36 @@ impl EditorState {
             self.view_height,
         );
         self.focus_target.handle_scroll(delta, &mut ctx);
+    }
+
+    /// Handles a scroll event when the selector is focused.
+    fn handle_scroll_selector(&mut self, delta: ScrollDelta) {
+        let selector = match self.active_selector.as_mut() {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Calculate overlay geometry to get item_height and visible_items
+        let line_height = self.font_metrics.line_height as f32;
+        let geometry = calculate_overlay_geometry(
+            self.view_width,
+            self.view_height,
+            line_height,
+            selector.items().len(),
+        );
+
+        // Update visible_items on the selector (for arrow key navigation)
+        selector.set_visible_items(geometry.visible_items);
+
+        // Forward scroll to selector
+        selector.handle_scroll(
+            delta.dy as f64,
+            geometry.item_height as f64,
+            geometry.visible_items,
+        );
+
+        // Mark full viewport dirty for redraw
+        self.dirty_region.merge(DirtyRegion::FullViewport);
     }
 
     /// Returns true if any screen region needs re-rendering.
@@ -1185,7 +1232,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scroll_ignored_when_selector_open() {
+    fn test_scroll_when_selector_open_scrolls_selector_not_buffer() {
         // Create a buffer with many lines
         let content = (0..50)
             .map(|i| format!("line {}", i))
@@ -1211,11 +1258,79 @@ mod tests {
         state.handle_key(cmd_p);
         assert_eq!(state.focus, EditorFocus::Selector);
 
+        // Set up many items in the selector for scrolling
+        if let Some(ref mut selector) = state.active_selector {
+            selector.set_items((0..50).map(|i| format!("file{}.rs", i)).collect());
+        }
+
         // Try to scroll
         state.handle_scroll(ScrollDelta::new(0.0, 80.0));
 
-        // Viewport should NOT have scrolled (scroll ignored when selector open)
+        // Buffer viewport should NOT have scrolled
         assert_eq!(state.viewport.scroll_offset(), 0);
+
+        // But the selector should have scrolled
+        let view_offset = state.active_selector.as_ref().unwrap().view_offset();
+        assert!(view_offset > 0, "Selector should have scrolled");
+    }
+
+    #[test]
+    fn test_scroll_when_selector_open_updates_view_offset() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Open the selector
+        let cmd_p = KeyEvent::new(
+            Key::Char('p'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_p);
+        assert_eq!(state.focus, EditorFocus::Selector);
+
+        // Set up many items in the selector
+        if let Some(ref mut selector) = state.active_selector {
+            selector.set_items((0..100).map(|i| format!("file{}.rs", i)).collect());
+        }
+
+        // Initial view_offset should be 0
+        assert_eq!(state.active_selector.as_ref().unwrap().view_offset(), 0);
+
+        // Scroll down (positive delta = scroll down)
+        // line_height is 16.0, so 48 pixels = 3 rows
+        state.handle_scroll(ScrollDelta::new(0.0, 48.0));
+
+        // view_offset should have increased
+        let view_offset = state.active_selector.as_ref().unwrap().view_offset();
+        assert_eq!(view_offset, 3);
+    }
+
+    #[test]
+    fn test_scroll_when_buffer_focused_scrolls_buffer() {
+        // Create a buffer with many lines
+        let content = (0..50)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut state = EditorState::new(
+            lite_edit_buffer::TextBuffer::from_str(&content),
+            test_font_metrics(),
+        );
+        state.update_viewport_dimensions(800.0, 160.0); // 10 visible lines
+
+        // Initial scroll offset should be 0
+        assert_eq!(state.viewport.scroll_offset(), 0);
+
+        // Ensure we're in buffer focus (default)
+        assert_eq!(state.focus, EditorFocus::Buffer);
+
+        // Scroll down by 5 lines (80 pixels with line_height 16)
+        state.handle_scroll(ScrollDelta::new(0.0, 80.0));
+
+        // Buffer viewport should have scrolled
+        assert_eq!(state.viewport.first_visible_line(), 5);
     }
 
     #[test]

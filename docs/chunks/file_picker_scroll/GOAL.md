@@ -1,21 +1,26 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: file_picker
 code_paths:
-  - crates/editor/src/selector.rs
-  - crates/editor/src/selector_overlay.rs
-  - crates/editor/src/editor_state.rs
+- crates/editor/src/selector.rs
+- crates/editor/src/selector_overlay.rs
+- crates/editor/src/editor_state.rs
 code_references: []
 narrative: null
 investigation: null
 subsystems: []
 friction_entries: []
 bug_type: null
-depends_on: ["file_picker"]
-created_after: ["file_save", "viewport_fractional_scroll", "word_boundary_primitives", "word_forward_delete", "word_jump_navigation"]
+depends_on:
+- file_picker
+created_after:
+- file_save
+- viewport_fractional_scroll
+- word_boundary_primitives
+- word_forward_delete
+- word_jump_navigation
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

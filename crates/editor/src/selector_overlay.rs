@@ -368,8 +368,12 @@ impl SelectorGlyphBuffer {
         let sel_start = indices.len();
         if !widget.items().is_empty() && geometry.visible_items > 0 {
             let selected = widget.selected_index();
-            if selected < geometry.visible_items {
-                let sel_y = geometry.list_origin_y + selected as f32 * geometry.item_height;
+            let view_offset = widget.view_offset();
+            // Only render highlight if selected item is within visible window
+            if selected >= view_offset && selected < view_offset + geometry.visible_items {
+                // Compute the visible row (0 = first visible item)
+                let visible_row = selected - view_offset;
+                let sel_y = geometry.list_origin_y + visible_row as f32 * geometry.item_height;
                 let quad = self.create_rect_quad(
                     geometry.panel_x,
                     sel_y,
@@ -458,7 +462,13 @@ impl SelectorGlyphBuffer {
             let items = widget.items();
             let max_x = geometry.content_x + geometry.content_width;
 
-            for (i, item) in items.iter().take(geometry.visible_items).enumerate() {
+            // Skip items before view_offset, take only visible items
+            for (i, item) in items
+                .iter()
+                .skip(widget.view_offset())
+                .take(geometry.visible_items)
+                .enumerate()
+            {
                 let y = geometry.list_origin_y + i as f32 * geometry.item_height;
                 let mut x = geometry.content_x;
 

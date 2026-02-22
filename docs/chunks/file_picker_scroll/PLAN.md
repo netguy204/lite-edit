@@ -8,170 +8,190 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk adds scroll support to the file picker overlay, building on the
+existing `SelectorWidget` and `selector_overlay` infrastructure from the
+`file_picker` chunk. The strategy is to:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. Add scroll-related state (`view_offset`, `visible_items`) to `SelectorWidget`
+2. Add a `handle_scroll` method to translate pixel deltas into row shifts
+3. Update existing methods (`handle_key`, `handle_mouse`, `set_items`) to be
+   offset-aware
+4. Update the renderer to use `view_offset` when iterating items
+5. Wire scroll events through `EditorState` to the selector when focused
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+The implementation follows the Humble View Architecture: all scroll logic lives
+in pure Rust state manipulation (`SelectorWidget`), while the Metal renderer
+simply projects that state to pixels. This keeps the logic testable without GPU
+dependencies.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/file_picker_scroll/GOAL.md)
-with references to the files that you expect to touch.
--->
-
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Tests follow TDD as per `docs/trunk/TESTING_PHILOSOPHY.md`: write failing tests
+for each behavior first, then implement the minimum code to make them pass.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add `view_offset` and `visible_items` fields to `SelectorWidget`
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Location: `crates/editor/src/selector.rs`
 
-Example:
+Add two new fields to `SelectorWidget`:
+- `view_offset: usize` (default `0`) — index of the first visible item
+- `visible_items: usize` (default `0`) — number of visible rows (updated externally)
 
-### Step 1: Define the SegmentHeader struct
+Add accessors:
+- `pub fn view_offset(&self) -> usize`
+- `pub fn set_visible_items(&mut self, n: usize)`
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+**Tests (write first):**
+- `new_widget_has_view_offset_zero`
+- `new_widget_has_visible_items_zero`
+- `set_visible_items_stores_value`
 
-Location: src/segment/format.rs
+### Step 2: Implement `SelectorWidget::handle_scroll`
 
-### Step 2: Implement header serialization
+Location: `crates/editor/src/selector.rs`
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+Add method:
+```rust
+pub fn handle_scroll(&mut self, delta_y: f64, item_height: f64, visible_items: usize)
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Behavior:
+- Compute rows to shift: `(delta_y / item_height).round() as isize`
+- Update `view_offset` by adding the row delta
+- Clamp `view_offset` to `0..=items.len().saturating_sub(visible_items)`
+- No-op if items fit entirely within `visible_items`
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+**Tests (write first):**
+- `scroll_down_increments_view_offset`
+- `scroll_up_decrements_view_offset`
+- `scroll_clamps_at_max_offset`
+- `scroll_clamps_at_zero`
+- `scroll_on_short_list_is_noop` (items.len() <= visible_items)
+- `scroll_on_empty_list_is_noop`
+
+### Step 3: Update `handle_key` to keep selection visible
+
+Location: `crates/editor/src/selector.rs`
+
+Modify the Up/Down arrow handling in `handle_key`:
+- After moving `selected_index`, check if it's outside the visible window
+- If `selected_index < view_offset`, set `view_offset = selected_index`
+- If `selected_index >= view_offset + visible_items`, set
+  `view_offset = selected_index - visible_items + 1`
+
+Note: This requires `visible_items` to be stored on the widget (from Step 1).
+
+**Tests (write first):**
+- `down_past_visible_window_increments_view_offset`
+- `up_past_visible_window_decrements_view_offset`
+- `down_within_visible_window_does_not_change_view_offset`
+- `up_within_visible_window_does_not_change_view_offset`
+
+### Step 4: Update `set_items` to clamp `view_offset`
+
+Location: `crates/editor/src/selector.rs`
+
+Modify `set_items` to clamp `view_offset` after replacing items:
+```rust
+let max_offset = self.items.len().saturating_sub(self.visible_items);
+self.view_offset = self.view_offset.min(max_offset);
+```
+
+This ensures `view_offset` doesn't point past the end when the list shrinks
+(e.g., after query narrows results).
+
+**Tests (write first):**
+- `set_items_clamps_view_offset_when_list_shrinks`
+- `set_items_preserves_view_offset_when_list_grows`
+
+### Step 5: Update `handle_mouse` to be offset-aware
+
+Location: `crates/editor/src/selector.rs`
+
+Modify `handle_mouse` to account for `view_offset` when computing the item index:
+- The clicked row is computed as before: `(relative_y / item_height) as usize`
+- But the actual item index is `view_offset + row`
+- Clamp to ensure `view_offset + row < items.len()` before setting `selected_index`
+
+**Tests (write first):**
+- `mouse_click_with_view_offset_selects_correct_item`
+- `mouse_click_on_visible_row_0_with_offset_5_selects_item_5`
+
+### Step 6: Update renderer to use `view_offset`
+
+Location: `crates/editor/src/selector_overlay.rs`
+
+In `SelectorGlyphBuffer::update_from_widget`, modify Phase 6 (Item Text):
+```rust
+for (i, item) in items.iter()
+    .skip(widget.view_offset())
+    .take(geometry.visible_items)
+    .enumerate()
+```
+
+For Phase 2 (Selection Highlight):
+- Compute `visible_row = selected_index.wrapping_sub(view_offset)`
+- Only render highlight if `selected_index >= view_offset` AND
+  `selected_index < view_offset + visible_items`
+- Otherwise emit empty quad (zero-length range)
+
+**No unit tests needed**: This is humble view code (GPU buffer construction).
+Verify visually with manual smoke test.
+
+### Step 7: Wire scroll events through `EditorState` to selector
+
+Location: `crates/editor/src/editor_state.rs`
+
+Modify `EditorState::handle_scroll`:
+- Remove the early-return that ignores scroll when `focus == Selector`
+- When `focus == Selector`:
+  - Calculate `OverlayGeometry` using `calculate_overlay_geometry`
+  - Call `active_selector.handle_scroll(delta.dy, geometry.item_height, geometry.visible_items)`
+  - Update `active_selector.set_visible_items(geometry.visible_items)` for arrow key navigation
+  - Mark `DirtyRegion::FullViewport`
+
+Also update `handle_key_selector` and `handle_mouse_selector` to call
+`set_visible_items` with the computed geometry value, ensuring the widget always
+has the current `visible_items` for its scroll calculations.
+
+**Tests (write first):**
+- `scroll_when_selector_open_updates_view_offset`
+- `scroll_when_buffer_focused_scrolls_buffer` (existing test, verify still works)
+
+### Step 8: Final integration and smoke test
+
+Verify the full interaction:
+1. Open file picker (Cmd+P) in a directory with many files
+2. Scroll down with trackpad/mouse wheel — items scroll
+3. Scroll up — items scroll back
+4. Arrow key past visible boundary — list scrolls to keep selection visible
+5. Click an off-screen item after scrolling — correct item selected
+6. Type to narrow query — view_offset clamps if necessary
+7. Press Enter — correct file opens
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- `file_picker` chunk must be complete (provides base `SelectorWidget` and
+  `EditorState` integration)
+- `selector_widget` and `selector_rendering` chunks must be complete (provides
+  the widget model and overlay geometry)
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Scroll delta sign convention**: The existing `ScrollDelta` uses positive `dy`
+  for scroll down (content moves up). Verify this matches macOS trackpad behavior.
+  The GOAL.md specifies this convention explicitly.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Item height precision**: The selector uses `line_height` as `item_height`.
+  Ensure this value is passed consistently from `OverlayGeometry` through to
+  `handle_scroll`. Mismatch could cause drift.
+
+- **Large scroll deltas**: Very fast scrolling could produce large `delta_y`
+  values. The clamping in `handle_scroll` should handle this, but verify with
+  manual testing.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->
