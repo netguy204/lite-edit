@@ -1117,6 +1117,7 @@ impl GlyphBuffer {
     /// 4. Cursor quad
     // Chunk: docs/chunks/buffer_view_trait - Accept BufferView trait instead of TextBuffer
     // Chunk: docs/chunks/terminal_background_box_drawing - Mutable atlas for on-demand glyph addition
+    // Chunk: docs/chunks/terminal_styling_fidelity - Per-span foreground colors, background quads, and underline quads in wrapped rendering path
     pub fn update_from_buffer_with_wrap(
         &mut self,
         device: &ProtocolObject<dyn MTLDevice>,
