@@ -225,6 +225,14 @@ impl EditorController {
             return;
         }
 
+        // Chunk: docs/chunks/terminal_input_render_bug - Poll immediately after input
+        // For terminal tabs, poll PTY output immediately after sending input
+        // to ensure echoed characters appear without waiting for the next timer tick.
+        let terminal_dirty = self.state.poll_agents();
+        if terminal_dirty.is_dirty() {
+            self.state.dirty_region.merge(terminal_dirty);
+        }
+
         // Poll for file index updates so picker results stream in on every keystroke
         // Chunk: docs/chunks/picker_eager_index
         let picker_dirty = self.state.tick_picker();
@@ -238,6 +246,13 @@ impl EditorController {
     /// Handles a mouse event by forwarding to the editor state.
     fn handle_mouse(&mut self, event: MouseEvent) {
         self.state.handle_mouse(event);
+
+        // Chunk: docs/chunks/terminal_input_render_bug - Poll immediately after input
+        // For terminal tabs, poll PTY output immediately after mouse input.
+        let terminal_dirty = self.state.poll_agents();
+        if terminal_dirty.is_dirty() {
+            self.state.dirty_region.merge(terminal_dirty);
+        }
 
         // Poll for file index updates so picker results stream in on mouse interaction
         // Chunk: docs/chunks/picker_eager_index
@@ -254,6 +269,13 @@ impl EditorController {
     /// Scroll events only affect the viewport position, not the cursor.
     fn handle_scroll(&mut self, delta: ScrollDelta) {
         self.state.handle_scroll(delta);
+
+        // Chunk: docs/chunks/terminal_input_render_bug - Poll immediately after input
+        // For terminal tabs, poll PTY output immediately after scroll input.
+        let terminal_dirty = self.state.poll_agents();
+        if terminal_dirty.is_dirty() {
+            self.state.dirty_region.merge(terminal_dirty);
+        }
 
         // Poll for file index updates so picker results stream in on scroll
         // Chunk: docs/chunks/picker_eager_index
@@ -279,13 +301,21 @@ impl EditorController {
         app.terminate(None);
     }
 
-    /// Toggles cursor blink, checks for picker updates, and re-renders if needed.
+    /// Toggles cursor blink, polls PTY events, checks for picker updates, and re-renders if needed.
     /// Chunk: docs/chunks/file_picker - Integration of tick_picker into timer-driven refresh loop
     fn toggle_cursor_blink(&mut self) {
         // Toggle cursor blink
         let cursor_dirty = self.state.toggle_cursor_blink();
         if cursor_dirty.is_dirty() {
             self.state.dirty_region.merge(cursor_dirty);
+        }
+
+        // Chunk: docs/chunks/terminal_input_render_bug - Poll PTY events
+        // Poll all agent and standalone terminal PTY events.
+        // This processes shell output and updates TerminalBuffer content.
+        let terminal_dirty = self.state.poll_agents();
+        if terminal_dirty.is_dirty() {
+            self.state.dirty_region.merge(terminal_dirty);
         }
 
         // Check for picker streaming updates

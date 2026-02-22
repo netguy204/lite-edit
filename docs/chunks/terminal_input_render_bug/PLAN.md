@@ -8,170 +8,236 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This is a **semantic bug fix** that addresses a missing integration between existing pieces. The core issue is that the terminal event polling loop (`poll_agents()`/`poll_standalone_terminals()`) is **never called** in the main event loop, so PTY output never reaches the terminal buffer for rendering.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+### Root Cause Analysis
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+After code exploration, the following issues were identified:
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/terminal_input_render_bug/GOAL.md)
-with references to the files that you expect to touch.
--->
+1. **Missing PTY polling**: `EditorState::poll_agents()` exists and is documented, but `main.rs` never calls it. The cursor blink timer calls `toggle_cursor_blink()`, but that function doesn't poll terminals. Without polling, PTY output (shell prompts, command output) never gets processed.
+
+2. **Input routing works correctly**: The `handle_key_buffer()` function correctly detects terminal tabs via `tab.terminal_and_viewport_mut()` and routes input through `InputEncoder::encode_key()` → `terminal.write_input()`. This part is working.
+
+3. **Scroll routing works correctly**: The `handle_scroll()` function correctly handles terminal tabs, with primary screen viewport scrolling and alternate screen PTY passthrough.
+
+4. **Rendering works correctly**: The renderer uses `Editor::active_buffer_view()` which correctly returns `TerminalBuffer` (implementing `BufferView`) for terminal tabs. The `render_with_editor()` → `update_glyph_buffer()` pipeline handles terminal content through the same path as file tabs.
+
+### Fix Strategy
+
+The fix is surgical: **integrate PTY polling into the existing timer callback**. The cursor blink timer fires every 500ms, which is also a reasonable polling interval for terminal output. Alternatively, we could add a separate higher-frequency timer for PTY polling, but using the existing timer keeps the implementation simple.
+
+The `toggle_cursor_blink()` method in `EditorController` already handles cursor blink and picker updates. We'll extend it to also poll terminals.
+
+### Why TDD is limited here
+
+Per TESTING_PHILOSOPHY.md, terminal rendering involves platform code (Metal, NSWindow) that can't be unit tested. However, we can add integration tests that verify:
+- PTY output appears in `TerminalBuffer` content after polling
+- Key input reaches the PTY and produces echoed output
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems are directly relevant to this fix. The change integrates existing code paths that are already correctly designed—we're simply connecting the PTY polling loop to the main event loop.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add PTY polling to the timer callback
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+**Location**: `crates/editor/src/main.rs` - `EditorController::toggle_cursor_blink()`
 
-Example:
+Modify the timer callback to poll terminal PTY events in addition to cursor blink and picker updates:
 
-### Step 1: Define the SegmentHeader struct
+```rust
+fn toggle_cursor_blink(&mut self) {
+    // Toggle cursor blink (existing)
+    let cursor_dirty = self.state.toggle_cursor_blink();
+    if cursor_dirty.is_dirty() {
+        self.state.dirty_region.merge(cursor_dirty);
+    }
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+    // Chunk: docs/chunks/terminal_input_render_bug - Poll PTY events
+    // Poll all agent and standalone terminal PTY events.
+    // This processes shell output and updates TerminalBuffer content.
+    let terminal_dirty = self.state.poll_agents();
+    if terminal_dirty.is_dirty() {
+        self.state.dirty_region.merge(terminal_dirty);
+    }
 
-Location: src/segment/format.rs
+    // Check for picker streaming updates (existing)
+    let picker_dirty = self.state.tick_picker();
+    if picker_dirty.is_dirty() {
+        self.state.dirty_region.merge(picker_dirty);
+    }
 
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+    // Render if anything is dirty (existing)
+    self.render_if_dirty();
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+This ensures that every 500ms (the cursor blink interval), terminal output is processed and rendered.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 2: Add PTY polling on key/mouse/scroll events
+
+**Location**: `crates/editor/src/main.rs` - `EditorController::handle_key()`, `handle_mouse()`, `handle_scroll()`
+
+When the user interacts with a terminal tab, we want immediate feedback. Add PTY polling to each input handler so that after sending input to the PTY, we immediately check for output:
+
+```rust
+fn handle_key(&mut self, event: KeyEvent) {
+    self.state.handle_key(event);
+
+    if self.state.should_quit {
+        self.terminate_app();
+        return;
+    }
+
+    // Chunk: docs/chunks/terminal_input_render_bug - Poll immediately after input
+    // For terminal tabs, poll PTY output immediately after sending input
+    // to ensure echoed characters appear without waiting for the next timer tick.
+    let terminal_dirty = self.state.poll_agents();
+    if terminal_dirty.is_dirty() {
+        self.state.dirty_region.merge(terminal_dirty);
+    }
+
+    // ... rest of existing code (picker, render)
+}
+```
+
+Apply the same pattern to `handle_mouse()` and `handle_scroll()`.
+
+### Step 3: Add integration test for PTY input/output round-trip
+
+**Location**: `crates/terminal/tests/input_integration.rs`
+
+Add a test that verifies the end-to-end flow: write bytes to PTY stdin, poll for events, verify content appears in buffer.
+
+```rust
+#[test]
+fn test_pty_input_output_roundtrip() {
+    use std::path::PathBuf;
+    use std::time::Duration;
+    use std::thread;
+    use lite_edit_buffer::BufferView;
+
+    // Spawn a cat process that echoes input
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+    terminal.spawn_command("cat", &[], &PathBuf::from("/tmp")).unwrap();
+
+    // Write input
+    terminal.write_input(b"hello\n").unwrap();
+
+    // Poll until we see output (with timeout)
+    let mut attempts = 0;
+    while attempts < 50 {
+        if terminal.poll_events() {
+            // Check if "hello" appears in the buffer
+            for line in 0..terminal.line_count() {
+                if let Some(styled) = terminal.styled_line(line) {
+                    if styled.text.contains("hello") {
+                        return; // Success!
+                    }
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(10));
+        attempts += 1;
+    }
+
+    panic!("Did not see echoed input within timeout");
+}
+```
+
+### Step 4: Add integration test for shell prompt visibility
+
+**Location**: `crates/terminal/tests/integration.rs`
+
+Add a test that spawns a shell and verifies the prompt appears:
+
+```rust
+#[test]
+fn test_shell_prompt_appears() {
+    use std::path::PathBuf;
+    use std::time::Duration;
+    use std::thread;
+    use lite_edit_buffer::BufferView;
+
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Use /bin/sh as it's always available
+    terminal.spawn_shell("/bin/sh", &PathBuf::from("/tmp")).unwrap();
+
+    // Poll until we see a prompt ($ or #)
+    let mut attempts = 0;
+    while attempts < 100 {
+        if terminal.poll_events() {
+            for line in 0..terminal.line_count() {
+                if let Some(styled) = terminal.styled_line(line) {
+                    let text = &styled.text;
+                    // Look for common shell prompt characters
+                    if text.contains('$') || text.contains('#') || text.contains('%') {
+                        return; // Success!
+                    }
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(20));
+        attempts += 1;
+    }
+
+    panic!("No shell prompt appeared within timeout");
+}
+```
+
+### Step 5: Update code_paths in GOAL.md
+
+Update the chunk's GOAL.md frontmatter with the files modified:
+
+```yaml
+code_paths:
+  - crates/editor/src/main.rs
+  - crates/terminal/tests/input_integration.rs
+  - crates/terminal/tests/integration.rs
+```
+
+### Step 6: Manual verification
+
+Run the editor and verify all success criteria:
+1. Press `Cmd+Shift+T` to open a terminal tab
+2. Verify shell prompt appears (e.g., `$`, `%`, or `#`)
+3. Type `ls` and press Enter — verify command output appears
+4. Press `Ctrl+C` — verify it interrupts (no crash, prompt returns)
+5. Scroll with trackpad (if there's scrollback content)
+6. Switch to a file tab and back — verify terminal state is preserved
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+All dependencies are already complete (as indicated in GOAL.md frontmatter):
+- `terminal_input_encoding` — Input encoding is already working
+- `terminal_scrollback_viewport` — Scroll handling is already working
+- `renderer_polymorphic_buffer` — Rendering pipeline is already working
 
-If there are no dependencies, delete this section.
--->
+No new libraries or infrastructure needed.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+### Polling frequency trade-off
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+The current plan uses the 500ms cursor blink timer for PTY polling. This may feel sluggish for fast-typing users. If latency is noticeable:
+- **Option A**: Add a separate higher-frequency timer (e.g., 16ms / 60Hz) for PTY polling only
+- **Option B**: Use macOS's `kqueue` / `kevent` for event-driven PTY notification (more complex)
+
+The immediate polling on input events (Step 2) should mitigate most perceived latency for interactive use. If issues persist, consider Option A as a follow-up.
+
+### Test flakiness
+
+Integration tests that spawn real processes (`cat`, `/bin/sh`) may be flaky on CI due to:
+- Process startup time variability
+- Resource contention
+- Sandboxing restrictions
+
+The tests use generous timeouts (500ms-2s) to reduce flakiness. If they still fail intermittently, consider:
+- Using `BASH_ENV` or `ENV` to disable shell rc files
+- Mocking at a higher level (not feasible given the goal is testing the real PTY integration)
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- POPULATE DURING IMPLEMENTATION -->

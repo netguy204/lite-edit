@@ -1,8 +1,11 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/editor/src/main.rs
+  - crates/terminal/tests/input_integration.rs
+  - crates/terminal/tests/integration.rs
 code_references: []
 narrative: null
 investigation: null
@@ -13,9 +16,10 @@ depends_on:
 - terminal_input_encoding
 - terminal_scrollback_viewport
 - renderer_polymorphic_buffer
-created_after: ["terminal_scrollback_viewport", "renderer_polymorphic_buffer"]
+created_after:
+- terminal_scrollback_viewport
+- renderer_polymorphic_buffer
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
