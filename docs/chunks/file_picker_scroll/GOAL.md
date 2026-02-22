@@ -7,20 +7,20 @@ code_paths:
 - crates/editor/src/selector_overlay.rs
 - crates/editor/src/editor_state.rs
 code_references:
-  - ref: crates/editor/src/selector.rs#SelectorWidget::view_offset
-    implements: "Accessor for view_offset field (first visible item index)"
-  - ref: crates/editor/src/selector.rs#SelectorWidget::set_visible_items
-    implements: "Setter for visible_items field (visible row count)"
+  - ref: crates/editor/src/selector.rs#SelectorWidget::first_visible_item
+    implements: "Accessor for first visible item index (via RowScroller)"
+  - ref: crates/editor/src/selector.rs#SelectorWidget::update_visible_size
+    implements: "Setter for visible area height in pixels (computes visible row count)"
   - ref: crates/editor/src/selector.rs#SelectorWidget::set_items
-    implements: "Clamps view_offset when item list shrinks"
+    implements: "Clamps scroll offset when item list shrinks"
   - ref: crates/editor/src/selector.rs#SelectorWidget::handle_scroll
-    implements: "Translates pixel deltas into view_offset adjustments"
+    implements: "Translates pixel deltas into scroll offset adjustments via RowScroller"
   - ref: crates/editor/src/selector.rs#SelectorWidget::handle_key
     implements: "Keeps selection visible when navigating with arrow keys"
   - ref: crates/editor/src/selector.rs#SelectorWidget::handle_mouse
-    implements: "Maps visible row to actual item index via view_offset"
+    implements: "Maps visible row to actual item index via scroll offset"
   - ref: crates/editor/src/selector_overlay.rs#SelectorGlyphBuffer::update_from_widget
-    implements: "Renders visible window using view_offset skip/take"
+    implements: "Renders visible window using first_visible_item skip/take"
   - ref: crates/editor/src/editor_state.rs#EditorState::handle_scroll_selector
     implements: "Forwards scroll events to selector when focused"
 narrative: null

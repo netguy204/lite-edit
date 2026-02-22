@@ -300,6 +300,7 @@ impl SelectorGlyphBuffer {
         self.item_text_range
     }
 
+    // Chunk: docs/chunks/file_picker_scroll - Renders visible window using first_visible_item
     /// Updates the buffers from a SelectorWidget and geometry
     ///
     /// Builds vertex data in this order:

@@ -74,6 +74,7 @@ pub enum SelectorOutcome {
 /// - Navigation (up/down arrows)
 /// - Confirmation (Enter) and cancellation (Escape)
 /// - Mouse selection and confirmation
+// Chunk: docs/chunks/file_picker_mini_buffer - MiniBuffer-backed query editing
 pub struct SelectorWidget {
     /// Single-line MiniBuffer for query editing with full affordance set
     /// (word-jump, kill-line, shift-selection, clipboard, Emacs bindings).
@@ -95,6 +96,7 @@ impl Default for SelectorWidget {
 
 impl SelectorWidget {
     /// Creates a new selector widget with empty query, no items, and index 0.
+    // Chunk: docs/chunks/file_picker_mini_buffer - Zero-argument constructor with default FontMetrics
     pub fn new() -> Self {
         // Default metrics for MiniBuffer (values don't affect query behavior,
         // only internal viewport calculations which aren't used by selector)
@@ -115,6 +117,7 @@ impl SelectorWidget {
     }
 
     /// Returns the current query string.
+    // Chunk: docs/chunks/file_picker_mini_buffer - Query accessor delegating to mini_buffer.content()
     pub fn query(&self) -> String {
         self.mini_buffer.content()
     }
@@ -131,6 +134,7 @@ impl SelectorWidget {
         &self.items
     }
 
+    // Chunk: docs/chunks/file_picker_scroll - Setter for visible area height
     /// Updates the visible size from the pixel height of the list area.
     ///
     /// This forwards to `RowScroller::update_size(height_px)`, which computes
@@ -151,6 +155,7 @@ impl SelectorWidget {
         self.scroll.set_scroll_offset_px(offset, self.items.len());
     }
 
+    // Chunk: docs/chunks/file_picker_scroll - Clamps scroll offset when item list shrinks
     /// Replaces the item list and clamps the selected index and scroll offset to valid bounds.
     ///
     /// If the new list has fewer items than the current `selected_index`,
@@ -185,6 +190,8 @@ impl SelectorWidget {
     /// The MiniBuffer provides full editing affordances: character input, backspace,
     /// word navigation (Option+Left/Right), kill-line (Ctrl+K), selection (Shift+arrows),
     /// clipboard operations (Cmd+C/V/X), and Emacs-style bindings (Ctrl+A/E/K).
+    // Chunk: docs/chunks/file_picker_mini_buffer - Key handling with MiniBuffer delegation
+    // Chunk: docs/chunks/file_picker_scroll - Keeps selection visible when navigating
     pub fn handle_key(&mut self, event: &KeyEvent) -> SelectorOutcome {
         match &event.key {
             Key::Up => {
@@ -222,6 +229,7 @@ impl SelectorWidget {
         }
     }
 
+    // Chunk: docs/chunks/file_picker_scroll - Translates pixel deltas into scroll offset
     /// Handles a scroll event by adjusting the scroll offset.
     ///
     /// # Arguments
@@ -238,6 +246,7 @@ impl SelectorWidget {
         self.scroll.set_scroll_offset_px(new_px, self.items.len());
     }
 
+    // Chunk: docs/chunks/file_picker_scroll - Maps visible row to actual item index
     /// Handles a mouse event and returns the appropriate outcome.
     ///
     /// # Parameters
@@ -303,6 +312,7 @@ impl SelectorWidget {
     // New public accessors for RowScroller-based scroll state
     // =========================================================================
 
+    // Chunk: docs/chunks/file_picker_scroll - Accessor for first visible item index
     /// Returns the index of the first visible item.
     ///
     /// Delegates to `RowScroller::first_visible_row()`.

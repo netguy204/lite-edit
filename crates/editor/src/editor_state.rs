@@ -1067,6 +1067,7 @@ impl EditorState {
         self.focus_target.handle_scroll(delta, &mut ctx);
     }
 
+    // Chunk: docs/chunks/file_picker_scroll - Forwards scroll events to selector when focused
     /// Handles a scroll event when the selector is focused.
     fn handle_scroll_selector(&mut self, delta: ScrollDelta) {
         let selector = match self.active_selector.as_mut() {
