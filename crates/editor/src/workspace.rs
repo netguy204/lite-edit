@@ -282,6 +282,17 @@ impl Tab {
         self.buffer.as_text_buffer_mut()
     }
 
+    // Chunk: docs/chunks/terminal_active_tab_safety - Terminal buffer access
+    /// Returns a reference to the underlying `TerminalBuffer` if this is a terminal tab.
+    pub fn as_terminal_buffer(&self) -> Option<&TerminalBuffer> {
+        self.buffer.as_terminal_buffer()
+    }
+
+    /// Returns a mutable reference to the underlying `TerminalBuffer` if this is a terminal tab.
+    pub fn as_terminal_buffer_mut(&mut self) -> Option<&mut TerminalBuffer> {
+        self.buffer.as_terminal_buffer_mut()
+    }
+
     /// Returns mutable references to both the text buffer and viewport.
     ///
     /// This method is needed to satisfy the borrow checker when both need

@@ -32,6 +32,8 @@ use crate::selector_overlay::calculate_overlay_geometry;
 use crate::viewport::Viewport;
 use crate::workspace::Editor;
 use lite_edit_buffer::{Position, TextBuffer};
+// Chunk: docs/chunks/terminal_active_tab_safety - Terminal input encoding
+use lite_edit_terminal::{InputEncoder, TermMode};
 
 /// Duration in milliseconds for cursor blink interval
 const CURSOR_BLINK_INTERVAL_MS: u64 = 500;
@@ -138,6 +140,37 @@ impl EditorState {
             .expect("no active tab")
             .as_text_buffer_mut()
             .expect("active tab is not a file tab")
+    }
+
+    // Chunk: docs/chunks/terminal_active_tab_safety - Safe Option-returning accessors
+    /// Returns a reference to the active tab's TextBuffer, if it's a file tab.
+    ///
+    /// Returns `None` if the active tab is a terminal or other non-file tab type.
+    /// Use this method in code paths that need to gracefully handle terminal tabs.
+    pub fn try_buffer(&self) -> Option<&TextBuffer> {
+        self.editor
+            .active_workspace()
+            .and_then(|ws| ws.active_tab())
+            .and_then(|tab| tab.as_text_buffer())
+    }
+
+    /// Returns a mutable reference to the active tab's TextBuffer, if it's a file tab.
+    ///
+    /// Returns `None` if the active tab is a terminal or other non-file tab type.
+    /// Use this method in code paths that need to gracefully handle terminal tabs.
+    pub fn try_buffer_mut(&mut self) -> Option<&mut TextBuffer> {
+        self.editor
+            .active_workspace_mut()
+            .and_then(|ws| ws.active_tab_mut())
+            .and_then(|tab| tab.as_text_buffer_mut())
+    }
+
+    /// Returns true if the active tab is a file tab (has a TextBuffer).
+    ///
+    /// This is a cheap check for code paths that need to early-return when
+    /// the active tab is not a file tab (e.g., terminal, agent output).
+    pub fn active_tab_is_file(&self) -> bool {
+        self.try_buffer().is_some()
     }
 
     /// Returns a reference to the active tab's viewport.
@@ -260,8 +293,11 @@ impl EditorState {
     // Chunk: docs/chunks/resize_click_alignment - Pass line count for scroll clamping
     // Chunk: docs/chunks/scroll_max_last_line - Pass content_height to viewport
     // Chunk: docs/chunks/find_strip_scroll_clearance - Subtract TAB_BAR_HEIGHT for correct visible_lines
+    // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
     pub fn update_viewport_size(&mut self, window_height: f32) {
-        let line_count = self.buffer().line_count();
+        // Terminal tabs don't have a TextBuffer line count; use 0 which is harmless
+        // since terminals don't use the Viewport in the same way as file tabs.
+        let line_count = self.try_buffer().map(|b| b.line_count()).unwrap_or(0);
         // Pass content_height (window_height minus tab bar) to viewport so visible_lines
         // is computed correctly. The tab bar occupies the top TAB_BAR_HEIGHT pixels.
         let content_height = window_height - TAB_BAR_HEIGHT;
@@ -275,8 +311,11 @@ impl EditorState {
     // Chunk: docs/chunks/resize_click_alignment - Pass line count for scroll clamping
     // Chunk: docs/chunks/scroll_max_last_line - Pass content_height to viewport
     // Chunk: docs/chunks/find_strip_scroll_clearance - Subtract TAB_BAR_HEIGHT for correct visible_lines
+    // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
     pub fn update_viewport_dimensions(&mut self, window_width: f32, window_height: f32) {
-        let line_count = self.buffer().line_count();
+        // Terminal tabs don't have a TextBuffer line count; use 0 which is harmless
+        // since terminals don't use the Viewport in the same way as file tabs.
+        let line_count = self.try_buffer().map(|b| b.line_count()).unwrap_or(0);
         // Pass content_height (window_height minus tab bar) to viewport so visible_lines
         // is computed correctly. The tab bar occupies the top TAB_BAR_HEIGHT pixels.
         let content_height = window_height - TAB_BAR_HEIGHT;
@@ -550,7 +589,13 @@ impl EditorState {
     ///   position as `search_origin`, transitions to `FindInFile`, marks dirty.
     /// - If `focus == FindInFile`: no-op (does not close or reset).
     /// - If `focus == Selector`: no-op (don't open find while file picker is open).
+    // Chunk: docs/chunks/terminal_active_tab_safety - Skip for terminal tabs
     fn handle_cmd_f(&mut self) {
+        // Find-in-file only makes sense for file tabs. Terminal tabs use the shell's search.
+        if !self.active_tab_is_file() {
+            return;
+        }
+
         match self.focus {
             EditorFocus::Buffer => {
                 // Record cursor position as search origin
@@ -756,7 +801,14 @@ impl EditorState {
     /// Runs the live search and updates the buffer selection.
     ///
     /// Called after every key event that changes the minibuffer's content.
+    // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
     fn run_live_search(&mut self) {
+        // Early return if not a file tab (should not happen since find mode
+        // is guarded, but defensive)
+        if !self.active_tab_is_file() {
+            return;
+        }
+
         let query = match &self.find_mini_buffer {
             Some(mb) => mb.content(),
             None => return,
@@ -807,7 +859,13 @@ impl EditorState {
     /// Advances the search to the next match (Enter in find mode).
     ///
     /// Moves search_origin past the end of the current match and re-runs search.
+    // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
     fn advance_to_next_match(&mut self) {
+        // Early return if not a file tab
+        if !self.active_tab_is_file() {
+            return;
+        }
+
         let query = match &self.find_mini_buffer {
             Some(mb) => mb.content(),
             None => return,
@@ -975,60 +1033,74 @@ impl EditorState {
     }
 
     /// Handles a key event when the buffer is focused.
+    // Chunk: docs/chunks/terminal_active_tab_safety - Route terminal tabs to InputEncoder
     fn handle_key_buffer(&mut self, event: KeyEvent) {
         // Record keystroke time for cursor blink reset
         self.last_keystroke = Instant::now();
 
-        // Ensure cursor blink visibility is on when typing
-        if !self.cursor_visible {
-            self.cursor_visible = true;
-            // Mark cursor line dirty to show it
-            let cursor_line = self.buffer().cursor_position().line;
-            let dirty = self.viewport().dirty_lines_to_region(
-                &lite_edit_buffer::DirtyLines::Single(cursor_line),
-                self.buffer().line_count(),
-            );
-            self.dirty_region.merge(dirty);
-        }
-
-        // If the cursor is off-screen (scrolled away), snap the viewport back
-        // to make the cursor visible BEFORE processing the keystroke.
-        // This ensures typing after scrolling doesn't edit at a position
-        // the user can't see.
-        let cursor_line = self.buffer().cursor_position().line;
-        if self
-            .viewport()
-            .buffer_line_to_screen_line(cursor_line)
-            .is_none()
-        {
-            // Cursor is off-screen - scroll to make it visible
-            let line_count = self.buffer().line_count();
-            if self.viewport_mut().ensure_visible(cursor_line, line_count) {
-                // Viewport scrolled - mark full viewport dirty
-                self.dirty_region.merge(DirtyRegion::FullViewport);
-            }
-        }
-
-        // Create context and forward to focus target
-        // We need to borrow the active tab's buffer and viewport
-        let font_metrics = self.font_metrics;
-        // Chunk: docs/chunks/content_tab_bar - Use content area dimensions
-        // Adjust dimensions to account for left rail and tab bar
-        let content_height = self.view_height - TAB_BAR_HEIGHT;
-        let content_width = self.view_width - RAIL_WIDTH;
+        // Check if the active tab is a file tab or terminal tab
         let ws = self.editor.active_workspace_mut().expect("no active workspace");
         let tab = ws.active_tab_mut().expect("no active tab");
-        let (buffer, viewport) = tab.buffer_and_viewport_mut().expect("not a file tab");
 
-        let mut ctx = EditorContext::new(
-            buffer,
-            viewport,
-            &mut self.dirty_region,
-            font_metrics,
-            content_height,
-            content_width,
-        );
-        self.focus_target.handle_key(event, &mut ctx);
+        // Try to get the text buffer and viewport for file tabs
+        if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
+            // File tab: use the existing BufferFocusTarget path
+            // Ensure cursor blink visibility is on when typing
+            if !self.cursor_visible {
+                self.cursor_visible = true;
+                // Mark cursor line dirty to show it
+                let cursor_line = buffer.cursor_position().line;
+                let dirty = viewport.dirty_lines_to_region(
+                    &lite_edit_buffer::DirtyLines::Single(cursor_line),
+                    buffer.line_count(),
+                );
+                self.dirty_region.merge(dirty);
+            }
+
+            // If the cursor is off-screen (scrolled away), snap the viewport back
+            // to make the cursor visible BEFORE processing the keystroke.
+            // This ensures typing after scrolling doesn't edit at a position
+            // the user can't see.
+            let cursor_line = buffer.cursor_position().line;
+            if viewport.buffer_line_to_screen_line(cursor_line).is_none() {
+                // Cursor is off-screen - scroll to make it visible
+                let line_count = buffer.line_count();
+                if viewport.ensure_visible(cursor_line, line_count) {
+                    // Viewport scrolled - mark full viewport dirty
+                    self.dirty_region.merge(DirtyRegion::FullViewport);
+                }
+            }
+
+            // Create context and forward to focus target
+            let font_metrics = self.font_metrics;
+            // Chunk: docs/chunks/content_tab_bar - Use content area dimensions
+            // Adjust dimensions to account for left rail and tab bar
+            let content_height = self.view_height - TAB_BAR_HEIGHT;
+            let content_width = self.view_width - RAIL_WIDTH;
+
+            let mut ctx = EditorContext::new(
+                buffer,
+                viewport,
+                &mut self.dirty_region,
+                font_metrics,
+                content_height,
+                content_width,
+            );
+            self.focus_target.handle_key(event, &mut ctx);
+        } else if let Some(terminal) = tab.as_terminal_buffer_mut() {
+            // Terminal tab: encode key and send to PTY
+            let modes = terminal.term_mode();
+            let bytes = InputEncoder::encode_key(&event, modes);
+
+            if !bytes.is_empty() {
+                // Write to the terminal's PTY (ignore errors for now)
+                let _ = terminal.write_input(&bytes);
+            }
+
+            // Mark full viewport dirty since terminal output may change
+            self.dirty_region.merge(DirtyRegion::FullViewport);
+        }
+        // Other tab types (AgentOutput, Diff): no-op
     }
 
     /// Handles a mouse event by forwarding to the active focus target.
@@ -1144,65 +1216,100 @@ impl EditorState {
     }
 
     /// Handles a mouse event when the buffer is focused.
+    // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
     fn handle_mouse_buffer(&mut self, event: MouseEvent) {
         // Record event time for cursor blink reset (same as keystroke)
         self.last_keystroke = Instant::now();
 
-        // Ensure cursor is visible when clicking
-        if !self.cursor_visible {
-            self.cursor_visible = true;
-            // Mark cursor line dirty to show it
-            let cursor_line = self.buffer().cursor_position().line;
-            let dirty = self.viewport().dirty_lines_to_region(
-                &lite_edit_buffer::DirtyLines::Single(cursor_line),
-                self.buffer().line_count(),
-            );
-            self.dirty_region.merge(dirty);
-        }
-
-        // Chunk: docs/chunks/content_tab_bar - Coordinate transformation for content area
-        // Transform mouse coordinates from full window space to content area space:
-        // - X offset: subtract RAIL_WIDTH (content starts after left rail)
-        // - Y offset: adjust for TAB_BAR_HEIGHT (in NSView coords, subtract from view_height)
-        //
-        // NSView uses bottom-left origin, so:
-        // - y=0 is at BOTTOM of view
-        // - y=view_height is at TOP of view (where tab bar is)
-        //
-        // The content area in NSView coords spans y=[0, view_height - TAB_BAR_HEIGHT)
-        // We adjust view_height so the flip calculation maps correctly to content rows.
-        let (original_x, original_y) = event.position;
-        let adjusted_x = original_x - RAIL_WIDTH as f64;
-        // We pass adjusted_y unchanged but use a reduced view_height for the flip calc
-        // This effectively shifts the coordinate system down by TAB_BAR_HEIGHT
-        let adjusted_y = original_y;
-
-        let adjusted_event = MouseEvent {
-            kind: event.kind,
-            position: (adjusted_x, adjusted_y),
-            modifiers: event.modifiers,
-            click_count: event.click_count,
-        };
-
-        // Adjust view_height for content area (subtract tab bar height)
-        // This makes the y-flip calculation in pixel_to_buffer_position correct
-        let content_height = self.view_height - TAB_BAR_HEIGHT;
-
-        // Create context and forward to focus target
-        let font_metrics = self.font_metrics;
+        // Check if the active tab is a file tab or terminal tab
         let ws = self.editor.active_workspace_mut().expect("no active workspace");
         let tab = ws.active_tab_mut().expect("no active tab");
-        let (buffer, viewport) = tab.buffer_and_viewport_mut().expect("not a file tab");
 
-        let mut ctx = EditorContext::new(
-            buffer,
-            viewport,
-            &mut self.dirty_region,
-            font_metrics,
-            content_height,
-            self.view_width - RAIL_WIDTH, // Content width also adjusted
-        );
-        self.focus_target.handle_mouse(adjusted_event, &mut ctx);
+        // Try to get the text buffer and viewport for file tabs
+        if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
+            // File tab: use the existing BufferFocusTarget path
+
+            // Ensure cursor is visible when clicking
+            if !self.cursor_visible {
+                self.cursor_visible = true;
+                // Mark cursor line dirty to show it
+                let cursor_line = buffer.cursor_position().line;
+                let dirty = viewport.dirty_lines_to_region(
+                    &lite_edit_buffer::DirtyLines::Single(cursor_line),
+                    buffer.line_count(),
+                );
+                self.dirty_region.merge(dirty);
+            }
+
+            // Chunk: docs/chunks/content_tab_bar - Coordinate transformation for content area
+            // Transform mouse coordinates from full window space to content area space:
+            // - X offset: subtract RAIL_WIDTH (content starts after left rail)
+            // - Y offset: adjust for TAB_BAR_HEIGHT (in NSView coords, subtract from view_height)
+            //
+            // NSView uses bottom-left origin, so:
+            // - y=0 is at BOTTOM of view
+            // - y=view_height is at TOP of view (where tab bar is)
+            //
+            // The content area in NSView coords spans y=[0, view_height - TAB_BAR_HEIGHT)
+            // We adjust view_height so the flip calculation maps correctly to content rows.
+            let (original_x, original_y) = event.position;
+            let adjusted_x = original_x - RAIL_WIDTH as f64;
+            // We pass adjusted_y unchanged but use a reduced view_height for the flip calc
+            // This effectively shifts the coordinate system down by TAB_BAR_HEIGHT
+            let adjusted_y = original_y;
+
+            let adjusted_event = MouseEvent {
+                kind: event.kind,
+                position: (adjusted_x, adjusted_y),
+                modifiers: event.modifiers,
+                click_count: event.click_count,
+            };
+
+            // Adjust view_height for content area (subtract tab bar height)
+            // This makes the y-flip calculation in pixel_to_buffer_position correct
+            let content_height = self.view_height - TAB_BAR_HEIGHT;
+
+            // Create context and forward to focus target
+            let font_metrics = self.font_metrics;
+
+            let mut ctx = EditorContext::new(
+                buffer,
+                viewport,
+                &mut self.dirty_region,
+                font_metrics,
+                content_height,
+                self.view_width - RAIL_WIDTH, // Content width also adjusted
+            );
+            self.focus_target.handle_mouse(adjusted_event, &mut ctx);
+        } else if let Some(terminal) = tab.as_terminal_buffer_mut() {
+            // Terminal tab: encode mouse event and send to PTY if mouse mode is enabled
+            let modes = terminal.term_mode();
+
+            // Check if any mouse mode is active
+            if modes.intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG) {
+                // Calculate cell position from pixel coordinates
+                // For now, we use simplified cell calculation. A full implementation
+                // would use TerminalFocusTarget.
+                let cell_width = self.font_metrics.advance_width;
+                let cell_height = self.font_metrics.line_height as f32;
+
+                let (x, y) = event.position;
+                let adjusted_x = (x - RAIL_WIDTH as f64).max(0.0);
+                let adjusted_y = self.view_height as f64 - TAB_BAR_HEIGHT as f64 - y;
+
+                let col = (adjusted_x / cell_width as f64) as usize;
+                let row = (adjusted_y / cell_height as f64) as usize;
+
+                let bytes = InputEncoder::encode_mouse(&event, col, row, modes);
+                if !bytes.is_empty() {
+                    let _ = terminal.write_input(&bytes);
+                }
+            }
+
+            // Mark dirty since terminal may need redraw (e.g., selection)
+            self.dirty_region.merge(DirtyRegion::FullViewport);
+        }
+        // Other tab types (AgentOutput, Diff): no-op
     }
 
     /// Handles a scroll event by forwarding to the active focus target.
@@ -1216,6 +1323,7 @@ impl EditorState {
     /// When find-in-file is open, scroll events go to the main buffer (the user
     /// can scroll while searching).
     /// Chunk: docs/chunks/file_picker - Scroll event routing to selector widget when selector is open
+    // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
     pub fn handle_scroll(&mut self, delta: ScrollDelta) {
         // When selector is open, forward scroll to selector
         if self.focus == EditorFocus::Selector {
@@ -1227,25 +1335,36 @@ impl EditorState {
         // Note: horizontal scroll in tab bar region is handled via handle_scroll_tab_bar
         // which is called from handle_mouse when scroll events occur in tab bar area
 
-        // In Buffer or FindInFile mode, scroll the buffer
-        // Create context and forward to focus target
-        let font_metrics = self.font_metrics;
-        // Chunk: docs/chunks/content_tab_bar - Use content area dimensions
-        let content_height = self.view_height - TAB_BAR_HEIGHT;
-        let content_width = self.view_width - RAIL_WIDTH;
+        // Check if the active tab is a file tab or terminal tab
         let ws = self.editor.active_workspace_mut().expect("no active workspace");
         let tab = ws.active_tab_mut().expect("no active tab");
-        let (buffer, viewport) = tab.buffer_and_viewport_mut().expect("not a file tab");
 
-        let mut ctx = EditorContext::new(
-            buffer,
-            viewport,
-            &mut self.dirty_region,
-            font_metrics,
-            content_height,
-            content_width,
-        );
-        self.focus_target.handle_scroll(delta, &mut ctx);
+        // Try to get the text buffer and viewport for file tabs
+        if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
+            // In Buffer or FindInFile mode, scroll the buffer
+            // Create context and forward to focus target
+            let font_metrics = self.font_metrics;
+            // Chunk: docs/chunks/content_tab_bar - Use content area dimensions
+            let content_height = self.view_height - TAB_BAR_HEIGHT;
+            let content_width = self.view_width - RAIL_WIDTH;
+
+            let mut ctx = EditorContext::new(
+                buffer,
+                viewport,
+                &mut self.dirty_region,
+                font_metrics,
+                content_height,
+                content_width,
+            );
+            self.focus_target.handle_scroll(delta, &mut ctx);
+        } else if tab.as_terminal_buffer().is_some() {
+            // Terminal tab: scroll the terminal's scrollback viewport.
+            // For MVP, terminal scrolling is handled by marking dirty.
+            // A full implementation would integrate with the terminal's
+            // scrollback history.
+            self.dirty_region.merge(DirtyRegion::FullViewport);
+        }
+        // Other tab types (AgentOutput, Diff): no-op
     }
 
     /// Handles a scroll event when the selector is focused.
@@ -1383,7 +1502,29 @@ impl EditorState {
     /// If the user recently typed, this keeps the cursor solid instead of toggling.
     ///
     /// Chunk: docs/chunks/cursor_blink_focus - Focus-aware cursor blink toggle
+    // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
     pub fn toggle_cursor_blink(&mut self) -> DirtyRegion {
+        // Terminal tabs don't have a text buffer cursor to blink.
+        // The terminal has its own cursor managed by the PTY.
+        // Return FullViewport for terminal tabs to ensure the cursor is rendered.
+        if !self.active_tab_is_file() {
+            // For terminal tabs, just toggle the visibility state
+            // and return FullViewport since the cursor is part of the terminal grid.
+            let now = Instant::now();
+            let since_keystroke = now.duration_since(self.last_keystroke);
+
+            if since_keystroke.as_millis() < CURSOR_BLINK_INTERVAL_MS as u128 {
+                if !self.cursor_visible {
+                    self.cursor_visible = true;
+                    return DirtyRegion::FullViewport;
+                }
+                return DirtyRegion::None;
+            }
+
+            self.cursor_visible = !self.cursor_visible;
+            return DirtyRegion::FullViewport;
+        }
+
         let now = Instant::now();
 
         match self.focus {
@@ -1427,12 +1568,18 @@ impl EditorState {
     }
 
     /// Returns the dirty region for just the cursor line.
+    // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
     fn cursor_dirty_region(&self) -> DirtyRegion {
-        let cursor_line = self.buffer().cursor_position().line;
-        self.viewport().dirty_lines_to_region(
-            &lite_edit_buffer::DirtyLines::Single(cursor_line),
-            self.buffer().line_count(),
-        )
+        // For terminal tabs, return FullViewport since the cursor is part of the grid.
+        if let Some(buffer) = self.try_buffer() {
+            let cursor_line = buffer.cursor_position().line;
+            self.viewport().dirty_lines_to_region(
+                &lite_edit_buffer::DirtyLines::Single(cursor_line),
+                buffer.line_count(),
+            )
+        } else {
+            DirtyRegion::FullViewport
+        }
     }
 
     /// Marks the full viewport as dirty (e.g., after buffer replacement).
@@ -1459,7 +1606,14 @@ impl EditorState {
     /// - Stores `path` in `associated_file`
     /// - Marks `DirtyRegion::FullViewport`
     // Chunk: docs/chunks/tab_click_cursor_placement - Sync viewport on file association
+    // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
     pub fn associate_file(&mut self, path: PathBuf) {
+        // File association only makes sense for file tabs.
+        // Terminal tabs don't have a TextBuffer to load into.
+        if !self.active_tab_is_file() {
+            return;
+        }
+
         if path.exists() {
             // Read file contents with UTF-8 lossy conversion
             match std::fs::read(&path) {
@@ -1508,7 +1662,13 @@ impl EditorState {
     ///
     /// If no file is associated, this is a no-op.
     /// On write error, this silently fails (error reporting is out of scope).
+    // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
     fn save_file(&mut self) {
+        // Save only makes sense for file tabs with a TextBuffer
+        if !self.active_tab_is_file() {
+            return;
+        }
+
         let path = match self.associated_file() {
             Some(p) => p.clone(),
             None => return, // No file associated - no-op
@@ -4639,6 +4799,7 @@ mod tests {
     /// Bug: Before the fix, new tabs had visible_lines = 0, causing dirty region
     /// calculations to produce DirtyRegion::None for all mutations, preventing
     /// cursor repaints after mouse clicks.
+    // Chunk: docs/chunks/tab_click_cursor_placement - Regression test verifying new tabs have correct visible_lines
     #[test]
     fn test_new_tab_viewport_is_sized() {
         use crate::tab_bar::TAB_BAR_HEIGHT;
@@ -4693,6 +4854,7 @@ mod tests {
     ///
     /// Bug: Before the fix, switching to a tab that was created but never activated
     /// would leave visible_lines = 0, preventing cursor repaints.
+    // Chunk: docs/chunks/tab_click_cursor_placement - Regression test verifying tab switching maintains correct visible_lines
     #[test]
     fn test_switch_tab_viewport_is_sized() {
         use crate::tab_bar::TAB_BAR_HEIGHT;
@@ -4743,6 +4905,7 @@ mod tests {
     ///
     /// Bug: Before the fix, Cmd+T followed by file picker confirmation would leave
     /// the new tab with visible_lines = 0.
+    // Chunk: docs/chunks/tab_click_cursor_placement - Regression test verifying file picker flow maintains correct visible_lines
     #[test]
     fn test_associate_file_viewport_is_sized() {
         use crate::tab_bar::TAB_BAR_HEIGHT;
@@ -4798,6 +4961,7 @@ mod tests {
     ///
     /// This tests the early return in sync_active_tab_viewport for the initial
     /// state before the first window resize.
+    // Chunk: docs/chunks/tab_click_cursor_placement - Edge case test for initial state before window resize
     #[test]
     fn test_sync_viewport_skips_when_no_view_height() {
         let mut state = EditorState::empty(test_font_metrics());
@@ -4812,6 +4976,250 @@ mod tests {
             0,
             "Viewport should have 0 visible lines when view_height is not set"
         );
+    }
+
+    // =========================================================================
+    // Terminal Tab Safety Tests (Chunk: docs/chunks/terminal_active_tab_safety)
+    // =========================================================================
+
+    /// Tests that key events on a terminal tab don't panic.
+    ///
+    /// This is a regression test for the crash that occurred when Cmd+Shift+T
+    /// spawned a terminal tab and subsequent key events tried to access
+    /// the TextBuffer via `buffer()`.
+    #[test]
+    fn test_terminal_tab_key_events_no_panic() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Create a terminal tab
+        let cmd_shift_t = KeyEvent::new(
+            Key::Char('t'),
+            Modifiers {
+                command: true,
+                shift: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_shift_t);
+
+        // Verify we're on a terminal tab
+        let workspace = state.editor.active_workspace().unwrap();
+        let tab = workspace.active_tab().unwrap();
+        assert!(tab.as_text_buffer().is_none(), "Active tab should be a terminal");
+
+        // These should not panic
+        state.handle_key(KeyEvent::char('a'));
+        state.handle_key(KeyEvent::char('b'));
+        state.handle_key(KeyEvent::new(Key::Return, Modifiers::default()));
+        state.handle_key(KeyEvent::new(Key::Backspace, Modifiers::default()));
+        state.handle_key(KeyEvent::new(Key::Up, Modifiers::default()));
+    }
+
+    /// Tests that mouse events on a terminal tab don't panic.
+    #[test]
+    fn test_terminal_tab_mouse_events_no_panic() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Mouse clicks should not panic
+        let click_event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (100.0, 100.0),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        state.handle_mouse(click_event);
+
+        let drag_event = MouseEvent {
+            kind: MouseEventKind::Moved,
+            position: (150.0, 100.0),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        state.handle_mouse(drag_event);
+
+        let up_event = MouseEvent {
+            kind: MouseEventKind::Up,
+            position: (150.0, 100.0),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        state.handle_mouse(up_event);
+    }
+
+    /// Tests that scroll events on a terminal tab don't panic.
+    #[test]
+    fn test_terminal_tab_scroll_events_no_panic() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Scroll events should not panic
+        state.handle_scroll(ScrollDelta::new(0.0, 50.0));
+        state.handle_scroll(ScrollDelta::new(0.0, -50.0));
+    }
+
+    /// Tests that Cmd+F doesn't open find strip on terminal tabs.
+    #[test]
+    fn test_terminal_tab_cmd_f_no_find_strip() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+        assert_eq!(state.focus, EditorFocus::Buffer);
+
+        // Press Cmd+F
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        // Focus should still be Buffer, not FindInFile
+        assert_eq!(state.focus, EditorFocus::Buffer);
+        assert!(state.find_mini_buffer.is_none());
+    }
+
+    /// Tests that cursor blink toggle doesn't panic on terminal tabs.
+    #[test]
+    fn test_terminal_tab_cursor_blink_no_panic() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Set last_keystroke to the past so blink toggle works
+        state.last_keystroke = Instant::now() - Duration::from_secs(1);
+
+        // These should not panic
+        let dirty1 = state.toggle_cursor_blink();
+        let dirty2 = state.toggle_cursor_blink();
+
+        // Should return dirty regions (FullViewport for terminal tabs)
+        assert!(dirty1.is_dirty());
+        assert!(dirty2.is_dirty());
+    }
+
+    /// Tests that viewport size updates don't panic on terminal tabs.
+    #[test]
+    fn test_terminal_tab_viewport_update_no_panic() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // These should not panic
+        state.update_viewport_size(700.0);
+        state.update_viewport_dimensions(1000.0, 800.0);
+    }
+
+    /// Tests that switching between file and terminal tabs works correctly.
+    #[test]
+    fn test_switch_between_file_and_terminal_tabs() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Type in the file tab
+        state.handle_key(KeyEvent::char('h'));
+        state.handle_key(KeyEvent::char('i'));
+        assert_eq!(state.buffer().content(), "hi");
+
+        // Create a terminal tab (now active)
+        state.new_terminal_tab();
+
+        // Key events should not panic
+        state.handle_key(KeyEvent::char('x'));
+
+        // Switch back to file tab
+        state.switch_tab(0);
+
+        // Buffer should still have the same content
+        assert_eq!(state.buffer().content(), "hi");
+
+        // Typing should work again
+        state.handle_key(KeyEvent::char('!'));
+        assert_eq!(state.buffer().content(), "hi!");
+    }
+
+    /// Tests that active_tab_is_file correctly identifies tab types.
+    #[test]
+    fn test_active_tab_is_file() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Initially on a file tab
+        assert!(state.active_tab_is_file());
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Now on a terminal tab
+        assert!(!state.active_tab_is_file());
+
+        // Switch back to file tab
+        state.switch_tab(0);
+
+        // Back on file tab
+        assert!(state.active_tab_is_file());
+    }
+
+    /// Tests that try_buffer returns None for terminal tabs.
+    #[test]
+    fn test_try_buffer_on_terminal_tab() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // File tab should return Some
+        assert!(state.try_buffer().is_some());
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Terminal tab should return None
+        assert!(state.try_buffer().is_none());
+        assert!(state.try_buffer_mut().is_none());
+    }
+
+    /// Tests that save_file doesn't panic on terminal tabs.
+    #[test]
+    fn test_terminal_tab_save_no_panic() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Cmd+S should not panic
+        let cmd_s = KeyEvent::new(
+            Key::Char('s'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_s);
     }
 
     // =========================================================================

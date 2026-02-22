@@ -86,3 +86,6 @@ pub use terminal_target::TerminalFocusTarget;
 
 // Re-export BufferView and related types for convenience
 pub use lite_edit_buffer::{BufferView, CursorInfo, CursorShape, DirtyLines, Position, StyledLine};
+
+// Chunk: docs/chunks/terminal_active_tab_safety - Re-export TermMode for input encoding
+pub use alacritty_terminal::term::TermMode;
