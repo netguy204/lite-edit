@@ -92,10 +92,10 @@ impl Viewport {
     /// Use `buffer_line_for_screen_row()` to find which buffer line contains
     /// a given screen row.
     pub fn first_visible_screen_row(&self) -> usize {
-        if self.line_height <= 0.0 {
+        if self.line_height() <= 0.0 {
             return 0;
         }
-        (self.scroll_offset_px / self.line_height).floor() as usize
+        (self.scroll_offset_px() / self.line_height()).floor() as usize
     }
 
     // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Wrap-aware buffer line lookup
@@ -871,12 +871,12 @@ mod tests {
         // Initially at 0
         assert_eq!(vp.first_visible_screen_row(), 0);
 
-        // Set scroll to 3 screen rows
-        vp.scroll_offset_px = 48.0; // 3 * 16
+        // Set scroll to 3 screen rows (use large buffer line count for no clamping)
+        vp.set_scroll_offset_px(48.0, 100); // 3 * 16
         assert_eq!(vp.first_visible_screen_row(), 3);
 
         // Test with fractional position
-        vp.scroll_offset_px = 50.0; // 3 * 16 + 2
+        vp.set_scroll_offset_px(50.0, 100); // 3 * 16 + 2
         assert_eq!(vp.first_visible_screen_row(), 3);
     }
 
