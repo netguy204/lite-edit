@@ -329,3 +329,202 @@ fn test_continuation_row_detection() {
 fn is_continuation_row(row_offset: usize) -> bool {
     row_offset > 0
 }
+
+// =============================================================================
+// Scroll Alignment Tests (Chunk: cursor_wrap_scroll_alignment)
+// =============================================================================
+
+/// Tests for the coordinate alignment fix described in cursor_wrap_scroll_alignment.
+/// These verify that cursor screen row calculation is correct when:
+/// 1. Wrapped lines exist above the cursor
+/// 2. The cursor is on a continuation row
+/// 3. The viewport is scrolled
+
+/// Helper: Calculate screen row for a cursor given:
+/// - first_visible_buffer_line: Which buffer line is at the top of viewport
+/// - screen_row_offset_in_first_line: How many rows of the first line are scrolled off
+/// - cursor_line: Buffer line of cursor
+/// - cursor_col: Buffer column of cursor
+/// - line_lengths: Length of each buffer line
+/// - cols_per_row: Columns that fit in viewport
+fn cursor_screen_row(
+    first_visible_buffer_line: usize,
+    screen_row_offset_in_first_line: usize,
+    cursor_line: usize,
+    cursor_col: usize,
+    line_lengths: &[usize],
+    cols_per_row: usize,
+) -> Option<usize> {
+    if cursor_line < first_visible_buffer_line {
+        // Cursor is above viewport
+        return None;
+    }
+
+    let mut cumulative_screen_row: usize = 0;
+    let mut is_first = true;
+
+    for buffer_line in first_visible_buffer_line..=cursor_line {
+        let line_len = line_lengths[buffer_line];
+        let rows_for_line = screen_rows_for_line(line_len, cols_per_row);
+
+        let start_row_offset = if is_first {
+            screen_row_offset_in_first_line
+        } else {
+            0
+        };
+        is_first = false;
+
+        if buffer_line == cursor_line {
+            let (cursor_row_offset, _) = buffer_col_to_screen_pos(cursor_col, cols_per_row);
+            if cursor_row_offset < start_row_offset {
+                // Cursor's row is scrolled off
+                return None;
+            }
+            return Some(cumulative_screen_row + (cursor_row_offset - start_row_offset));
+        }
+
+        cumulative_screen_row += rows_for_line - start_row_offset;
+    }
+
+    None
+}
+
+#[test]
+fn test_cursor_on_unwrapped_line_with_wrapped_lines_above_scrolled_to_top() {
+    // Scenario from success criteria:
+    // Line 0: 200 chars (3 screen rows)  <- wrapped line above cursor
+    // Line 1: 50 chars (1 screen row)    <- cursor is here
+    let line_lengths = vec![200, 50];
+    let cols_per_row = 80;
+
+    // Viewport scrolled to show from screen row 0 (top of document)
+    let first_visible_line = 0;
+    let row_offset_in_first = 0;
+
+    // Cursor at line 1, col 25
+    let cursor_screen = cursor_screen_row(
+        first_visible_line,
+        row_offset_in_first,
+        1,  // cursor_line
+        25, // cursor_col
+        &line_lengths,
+        cols_per_row,
+    );
+
+    // Line 0 takes 3 screen rows (ceil(200/80) = 3)
+    // So cursor on line 1 should be at screen row 3
+    assert_eq!(cursor_screen, Some(3));
+}
+
+#[test]
+fn test_cursor_on_continuation_row_of_wrapped_line() {
+    // Scenario from success criteria:
+    // Line 0: 200 chars (3 screen rows)
+    // Cursor is at col 100, which is on the continuation row (row 1 of line 0)
+    let line_lengths = vec![200];
+    let cols_per_row = 80;
+
+    // Viewport scrolled to top
+    let cursor_screen = cursor_screen_row(
+        0,   // first_visible_buffer_line
+        0,   // screen_row_offset_in_first
+        0,   // cursor_line
+        100, // cursor_col (past first row of 80 chars)
+        &line_lengths,
+        cols_per_row,
+    );
+
+    // col 100 / 80 = row_offset 1
+    assert_eq!(cursor_screen, Some(1));
+}
+
+#[test]
+fn test_cursor_at_document_start_no_wrapped_lines_above() {
+    // Scenario from success criteria:
+    // Cursor at the document start with no wrapped lines above.
+    let line_lengths = vec![50, 50, 50];
+    let cols_per_row = 80;
+
+    let cursor_screen = cursor_screen_row(
+        0, // first_visible_buffer_line
+        0, // screen_row_offset_in_first
+        0, // cursor_line
+        0, // cursor_col
+        &line_lengths,
+        cols_per_row,
+    );
+
+    assert_eq!(cursor_screen, Some(0));
+}
+
+#[test]
+fn test_ensure_visible_wrapped_cursor_below_viewport() {
+    // Scenario from success criteria:
+    // ensure_visible_wrapped called when the cursor is below the viewport
+    // with wrapped lines above.
+    //
+    // This tests the calculation of target scroll position.
+    let line_lengths = vec![200, 50, 150, 100]; // Lines with various wrapping
+    let cols_per_row = 80;
+
+    // If viewport shows 10 screen rows and cursor is on line 3 col 0
+    // Total screen rows before line 3:
+    // Line 0: ceil(200/80) = 3 rows
+    // Line 1: ceil(50/80) = 1 row
+    // Line 2: ceil(150/80) = 2 rows
+    // Total = 6 rows
+
+    let screen_rows: Vec<usize> = line_lengths
+        .iter()
+        .map(|&len| screen_rows_for_line(len, cols_per_row))
+        .collect();
+    assert_eq!(screen_rows, vec![3, 1, 2, 2]);
+
+    let cumulative_before_line_3: usize = screen_rows[0..3].iter().sum();
+    assert_eq!(cumulative_before_line_3, 6);
+
+    // So cursor at line 3, col 0 is at screen row 6
+    let cursor_screen = cursor_screen_row(0, 0, 3, 0, &line_lengths, cols_per_row);
+    assert_eq!(cursor_screen, Some(6));
+}
+
+#[test]
+fn test_cursor_visible_after_partial_scroll() {
+    // When viewport is scrolled to show part of a wrapped line
+    // The cursor calculation must account for the skipped rows
+    let line_lengths = vec![200, 50]; // Line 0 wraps to 3 rows
+    let cols_per_row = 80;
+
+    // Viewport scrolled to row 1 of line 0 (second row of the wrapped line)
+    let cursor_screen = cursor_screen_row(
+        0, // first_visible_buffer_line
+        1, // screen_row_offset_in_first (skip first row)
+        1, // cursor_line
+        0, // cursor_col
+        &line_lengths,
+        cols_per_row,
+    );
+
+    // Line 0 has 3 rows total, we skip 1, so 2 remain from line 0
+    // Cursor on line 1 is at screen row 2
+    assert_eq!(cursor_screen, Some(2));
+}
+
+#[test]
+fn test_cursor_above_viewport_returns_none() {
+    // When cursor is on a line above the visible viewport
+    let line_lengths = vec![50, 50, 50];
+    let cols_per_row = 80;
+
+    // Viewport starts at line 2
+    let cursor_screen = cursor_screen_row(
+        2, // first_visible_buffer_line
+        0, // screen_row_offset_in_first
+        0, // cursor_line (above viewport)
+        0, // cursor_col
+        &line_lengths,
+        cols_per_row,
+    );
+
+    assert_eq!(cursor_screen, None);
+}

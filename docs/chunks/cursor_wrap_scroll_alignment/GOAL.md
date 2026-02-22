@@ -1,10 +1,10 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: line_wrap_rendering
 code_paths:
-  - crates/editor/src/viewport.rs
-  - crates/editor/src/glyph_buffer.rs
+- crates/editor/src/viewport.rs
+- crates/editor/src/glyph_buffer.rs
 code_references: []
 narrative: null
 investigation: null
@@ -12,9 +12,13 @@ subsystems: []
 friction_entries: []
 bug_type: semantic
 depends_on: []
-created_after: ["text_buffer", "buffer_view_trait", "file_picker_scroll", "line_wrap_rendering", "renderer_styled_content"]
+created_after:
+- text_buffer
+- buffer_view_trait
+- file_picker_scroll
+- line_wrap_rendering
+- renderer_styled_content
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

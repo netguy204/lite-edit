@@ -983,11 +983,16 @@ impl GlyphBuffer {
     }
 
     // Chunk: docs/chunks/line_wrap_rendering - Wrap-aware rendering
+    // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Fixed coordinate space alignment
     /// Updates the buffers with content from a BufferView, with soft line wrapping.
     ///
     /// This is the main rendering entry point when line wrapping is enabled.
     /// It iterates buffer lines, wrapping each according to the WrapLayout,
     /// and emits quads for each screen row until the viewport is filled.
+    ///
+    /// **Coordinate spaces**: When wrapping is enabled, `scroll_offset_px` is in
+    /// screen row space (set by `ensure_visible_wrapped`). This method converts
+    /// that to the correct buffer line starting point using `buffer_line_for_screen_row`.
     ///
     /// Emits quads in this order:
     /// 1. Selection highlight quads
@@ -1005,17 +1010,28 @@ impl GlyphBuffer {
         cursor_visible: bool,
         y_offset: f32,
     ) {
-        let first_visible_line = viewport.first_visible_line();
+        let line_count = view.line_count();
         let max_screen_rows = viewport.visible_lines() + 2; // +2 for partial visibility at top/bottom
+
+        // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Correct coordinate space conversion
+        // In wrapped mode, scroll_offset_px is in screen row space.
+        // Convert the first visible screen row to the corresponding buffer line.
+        let first_visible_screen_row = viewport.first_visible_screen_row();
+        let (first_visible_buffer_line, screen_row_offset_in_line, _) =
+            Viewport::buffer_line_for_screen_row(
+                first_visible_screen_row,
+                line_count,
+                wrap_layout,
+                |line| view.line_len(line),
+            );
 
         // Estimate buffer sizes
         // We don't know exact counts without iterating, but we can estimate
         let mut estimated_quads = 0;
         let mut screen_row = 0;
-        let line_count = view.line_count();
 
         // Quick estimate: count chars in visible lines
-        for buffer_line in first_visible_line..line_count {
+        for buffer_line in first_visible_buffer_line..line_count {
             if screen_row >= max_screen_rows {
                 break;
             }
@@ -1066,21 +1082,37 @@ impl GlyphBuffer {
         };
 
         // ==================== Phase 1: Selection Quads ====================
+        // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Fixed screen row tracking
         let selection_start_index = indices.len();
 
         if let Some((sel_start, sel_end)) = view.selection_range() {
             let solid_glyph = atlas.solid_glyph();
             let cols_per_row = wrap_layout.cols_per_row();
 
-            // Iterate buffer lines, tracking cumulative screen row
+            // Iterate buffer lines, tracking cumulative screen row.
+            // cumulative_screen_row tracks the screen row relative to the viewport's top,
+            // starting at 0 for the first visible screen row.
+            //
+            // For the first buffer line, we skip rows before screen_row_offset_in_line
+            // since they're scrolled above the viewport.
             let mut cumulative_screen_row: usize = 0;
-            for buffer_line in first_visible_line..line_count {
+            let mut is_first_buffer_line = true;
+
+            for buffer_line in first_visible_buffer_line..line_count {
                 if cumulative_screen_row >= max_screen_rows {
                     break;
                 }
 
                 let line_len = view.line_len(buffer_line);
                 let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
+
+                // Determine the starting row offset within this buffer line
+                let start_row_offset = if is_first_buffer_line {
+                    screen_row_offset_in_line
+                } else {
+                    0
+                };
+                is_first_buffer_line = false;
 
                 // Check if this buffer line intersects the selection
                 if buffer_line >= sel_start.line && buffer_line <= sel_end.line {
@@ -1099,8 +1131,8 @@ impl GlyphBuffer {
 
                     if line_sel_start < line_sel_end {
                         // Emit selection quads for each screen row in this buffer line
-                        for row_offset in 0..rows_for_line {
-                            let screen_row = cumulative_screen_row + row_offset;
+                        for row_offset in start_row_offset..rows_for_line {
+                            let screen_row = cumulative_screen_row + (row_offset - start_row_offset);
                             if screen_row >= max_screen_rows {
                                 break;
                             }
@@ -1133,7 +1165,8 @@ impl GlyphBuffer {
                     }
                 }
 
-                cumulative_screen_row += rows_for_line;
+                // Add only the visible rows from this line to cumulative count
+                cumulative_screen_row += rows_for_line - start_row_offset;
             }
         }
 
@@ -1141,13 +1174,15 @@ impl GlyphBuffer {
         self.selection_range = QuadRange::new(selection_start_index, selection_index_count);
 
         // ==================== Phase 2: Border Quads ====================
+        // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Fixed screen row tracking
         let border_start_index = indices.len();
 
         {
             let solid_glyph = atlas.solid_glyph();
             let mut cumulative_screen_row: usize = 0;
+            let mut is_first_buffer_line = true;
 
-            for buffer_line in first_visible_line..line_count {
+            for buffer_line in first_visible_buffer_line..line_count {
                 if cumulative_screen_row >= max_screen_rows {
                     break;
                 }
@@ -1155,9 +1190,20 @@ impl GlyphBuffer {
                 let line_len = view.line_len(buffer_line);
                 let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
 
+                // Determine the starting row offset within this buffer line
+                let start_row_offset = if is_first_buffer_line {
+                    screen_row_offset_in_line
+                } else {
+                    0
+                };
+                is_first_buffer_line = false;
+
                 // Emit border quads for continuation rows (row_offset > 0)
-                for row_offset in 1..rows_for_line {
-                    let screen_row = cumulative_screen_row + row_offset;
+                // Start from max(1, start_row_offset) since row 0 within a buffer line
+                // is never a continuation row
+                let border_start = start_row_offset.max(1);
+                for row_offset in border_start..rows_for_line {
+                    let screen_row = cumulative_screen_row + (row_offset - start_row_offset);
                     if screen_row >= max_screen_rows {
                         break;
                     }
@@ -1167,7 +1213,7 @@ impl GlyphBuffer {
                     push_quad_indices(&mut indices, &mut vertex_offset);
                 }
 
-                cumulative_screen_row += rows_for_line;
+                cumulative_screen_row += rows_for_line - start_row_offset;
             }
         }
 
@@ -1175,12 +1221,15 @@ impl GlyphBuffer {
         self.border_range = QuadRange::new(border_start_index, border_index_count);
 
         // ==================== Phase 3: Glyph Quads ====================
+        // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Fixed screen row tracking
         let glyph_start_index = indices.len();
 
         {
             let mut cumulative_screen_row: usize = 0;
+            let mut is_first_buffer_line = true;
+            let cols_per_row = wrap_layout.cols_per_row();
 
-            for buffer_line in first_visible_line..line_count {
+            for buffer_line in first_visible_buffer_line..line_count {
                 if cumulative_screen_row >= max_screen_rows {
                     break;
                 }
@@ -1189,12 +1238,29 @@ impl GlyphBuffer {
                 let line_content = if let Some(styled_line) = view.styled_line(buffer_line) {
                     styled_line.spans.iter().map(|s| s.text.as_str()).collect::<String>()
                 } else {
+                    is_first_buffer_line = false;
                     continue;
                 };
                 let line_len = line_content.chars().count();
                 let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
 
+                // Determine the starting row offset within this buffer line
+                let start_row_offset = if is_first_buffer_line {
+                    screen_row_offset_in_line
+                } else {
+                    0
+                };
+                is_first_buffer_line = false;
+
+                // Calculate which buffer columns to skip (those before start_row_offset)
+                let start_col = start_row_offset * cols_per_row;
+
                 for (col, c) in line_content.chars().enumerate() {
+                    // Skip characters on rows before our starting row
+                    if col < start_col {
+                        continue;
+                    }
+
                     // Skip spaces (they don't need quads)
                     if c == ' ' {
                         continue;
@@ -1208,7 +1274,8 @@ impl GlyphBuffer {
 
                     // Calculate screen position using wrap layout
                     let (row_offset, screen_col) = wrap_layout.buffer_col_to_screen_pos(col);
-                    let screen_row = cumulative_screen_row + row_offset;
+                    // Adjust row_offset to be relative to viewport top
+                    let screen_row = cumulative_screen_row + (row_offset - start_row_offset);
 
                     if screen_row >= max_screen_rows {
                         break;
@@ -1226,7 +1293,7 @@ impl GlyphBuffer {
                     push_quad_indices(&mut indices, &mut vertex_offset);
                 }
 
-                cumulative_screen_row += rows_for_line;
+                cumulative_screen_row += rows_for_line - start_row_offset;
             }
         }
 
@@ -1234,6 +1301,7 @@ impl GlyphBuffer {
         self.glyph_range = QuadRange::new(glyph_start_index, glyph_index_count);
 
         // ==================== Phase 4: Cursor Quad ====================
+        // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Fixed cursor positioning
         let cursor_start_index = indices.len();
 
         if cursor_visible {
@@ -1241,38 +1309,60 @@ impl GlyphBuffer {
                 let cursor_pos = cursor_info.position;
                 let solid_glyph = atlas.solid_glyph();
 
-                // Calculate the cumulative screen row for the cursor's buffer line
-                let mut cumulative_screen_row: usize = 0;
-                let mut found_cursor = false;
+                // Check if cursor is above the viewport
+                if cursor_pos.line < first_visible_buffer_line {
+                    // Cursor is above viewport, don't render
+                } else {
+                    // Calculate the cumulative screen row for the cursor's buffer line
+                    // Start from the first visible buffer line and track screen rows
+                    let mut cumulative_screen_row: usize = 0;
+                    let mut is_first_buffer_line = true;
+                    let mut found_cursor = false;
 
-                for buffer_line in first_visible_line..=cursor_pos.line.min(line_count.saturating_sub(1)) {
-                    if buffer_line == cursor_pos.line {
-                        // Calculate cursor's screen position
-                        let (row_offset, screen_col) = wrap_layout.buffer_col_to_screen_pos(cursor_pos.col);
-                        let screen_row = cumulative_screen_row + row_offset;
+                    for buffer_line in first_visible_buffer_line..=cursor_pos.line.min(line_count.saturating_sub(1)) {
+                        let line_len = view.line_len(buffer_line);
+                        let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
 
-                        if screen_row < max_screen_rows {
-                            let cursor_quad = self.create_cursor_quad_with_offset(
-                                screen_row,
-                                screen_col,
-                                solid_glyph,
-                                y_offset,
-                                cursor_color,
-                            );
-                            vertices.extend_from_slice(&cursor_quad);
-                            push_quad_indices(&mut indices, &mut vertex_offset);
-                            found_cursor = true;
+                        // Determine the starting row offset within this buffer line
+                        let start_row_offset = if is_first_buffer_line {
+                            screen_row_offset_in_line
+                        } else {
+                            0
+                        };
+                        is_first_buffer_line = false;
+
+                        if buffer_line == cursor_pos.line {
+                            // Calculate cursor's screen position within this buffer line
+                            let (row_offset, screen_col) = wrap_layout.buffer_col_to_screen_pos(cursor_pos.col);
+
+                            // Check if the cursor's row is scrolled above the viewport
+                            if row_offset < start_row_offset {
+                                // Cursor's row is above viewport, don't render
+                                break;
+                            }
+
+                            // Adjust row_offset to be relative to viewport top
+                            let screen_row = cumulative_screen_row + (row_offset - start_row_offset);
+
+                            if screen_row < max_screen_rows {
+                                let cursor_quad = self.create_cursor_quad_with_offset(
+                                    screen_row,
+                                    screen_col,
+                                    solid_glyph,
+                                    y_offset,
+                                    cursor_color,
+                                );
+                                vertices.extend_from_slice(&cursor_quad);
+                                push_quad_indices(&mut indices, &mut vertex_offset);
+                                found_cursor = true;
+                            }
+                            break;
                         }
-                        break;
+
+                        cumulative_screen_row += rows_for_line - start_row_offset;
                     }
 
-                    let line_len = view.line_len(buffer_line);
-                    cumulative_screen_row += wrap_layout.screen_rows_for_line(line_len);
-                }
-
-                // Handle case where cursor is before first_visible_line
-                if !found_cursor && cursor_pos.line < first_visible_line {
-                    // Cursor is above viewport, don't render
+                    let _ = found_cursor; // Suppress unused warning
                 }
             }
         }
