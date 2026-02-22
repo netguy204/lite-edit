@@ -394,6 +394,7 @@ dependencies = [
  "crossbeam-channel",
  "lite-edit-buffer",
  "portable-pty",
+ "tempfile",
 ]
 
 [[package]]
