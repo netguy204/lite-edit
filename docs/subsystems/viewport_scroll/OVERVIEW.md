@@ -22,6 +22,12 @@ code_references:
   - ref: crates/editor/src/viewport.rs#Viewport::buffer_line_for_screen_row
     implements: "Inverse mapping from screen row to buffer line in wrapped mode"
     compliance: COMPLIANT
+  - ref: crates/editor/src/viewport.rs#Viewport::is_at_bottom
+    implements: "Bottom-detection for auto-follow behavior (terminal scrollback)"
+    compliance: COMPLIANT
+  - ref: crates/editor/src/viewport.rs#Viewport::scroll_to_bottom
+    implements: "Snap-to-bottom for keypress and mode transition reset (terminal scrollback)"
+    compliance: COMPLIANT
 created_after: []
 ---
 
@@ -53,7 +59,7 @@ Without this subsystem, every rendering and input-handling component would need 
 - **Rendering**: The subsystem computes *where* to draw, not *how*. Glyph vertex buffers, Metal shaders, and atlas management belong to the GPU rendering subsystem.
 - **Input handling**: Translating scroll wheel deltas or mouse clicks into scroll offsets happens in `buffer_target.rs` and `editor_state.rs` — this subsystem only provides the `set_scroll_offset_px` API they call.
 - **Buffer content**: The subsystem has no knowledge of text content, gap buffers, or editing operations. It receives line counts and character counts as parameters.
-- **Terminal scrollback**: `TerminalBuffer` in `crates/terminal/` has its own scrollback management (hot/cold). It implements `BufferView` and uses its own scroll tracking, not `Viewport`.
+- **Terminal scrollback storage**: `TerminalBuffer` in `crates/terminal/` manages its own scrollback storage (hot/cold ring buffers, file-backed cold storage). The subsystem does not own or know about that storage. However, `Viewport` *is* used as the view layer over terminal scrollback — `Viewport::is_at_bottom`, `scroll_to_bottom`, and `set_scroll_offset_px` provide scroll position management while `TerminalBuffer::line_count()` supplies the content bounds. The subsystem owns the scroll arithmetic; the terminal owns the content.
 
 ## Invariants
 
@@ -96,6 +102,8 @@ A thin wrapper around `RowScroller` that adds buffer-editing concerns:
 - **`dirty_lines_to_region`**: Converts buffer `DirtyLines` to screen `DirtyRegion` by intersecting dirty ranges with the visible viewport. This is what allows incremental redraw — only touched screen lines are rebuilt.
 - **`ensure_visible_wrapped`**: The most complex method. It computes the cursor's absolute screen row by iterating over buffer lines, then adjusts scroll offset to keep that row visible. It uses `set_scroll_offset_unclamped` because it computes its own max from the wrapped total.
 - **`buffer_line_for_screen_row`**: The inverse mapping for wrapped mode — given a screen row, find which buffer line contains it and the row offset within that line. This is a static method (no `&self`) since it's used during rendering before a `Viewport` position is established.
+- **`is_at_bottom`**: Returns whether the viewport is scrolled to the bottom (within 1px tolerance). Used by terminal tabs for auto-follow behavior — when at bottom, new PTY output advances the viewport automatically.
+- **`scroll_to_bottom`**: Snaps the viewport to the maximum scroll offset. Used for keypress snap-to-bottom in terminal tabs and for mode transition resets (alternate → primary screen).
 
 ### WrapLayout (`crates/editor/src/wrap_layout.rs`)
 
