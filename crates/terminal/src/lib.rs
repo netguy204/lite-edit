@@ -73,6 +73,8 @@ mod event;
 // Chunk: docs/chunks/terminal_input_encoding - Terminal input encoding
 mod input_encoder;
 mod pty;
+// Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
+mod pty_wakeup;
 mod style_convert;
 mod terminal_buffer;
 // Chunk: docs/chunks/terminal_input_encoding - Terminal input encoding
@@ -81,6 +83,8 @@ mod terminal_target;
 pub use agent::{AgentConfig, AgentHandle, AgentState, AgentStateMachine};
 // Chunk: docs/chunks/terminal_input_encoding - Terminal input encoding
 pub use input_encoder::InputEncoder;
+// Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
+pub use pty_wakeup::{set_global_wakeup_callback, PtyWakeup};
 pub use terminal_buffer::TerminalBuffer;
 // Chunk: docs/chunks/terminal_scrollback_viewport - Terminal scroll action result
 pub use terminal_target::{ScrollAction, TerminalFocusTarget};

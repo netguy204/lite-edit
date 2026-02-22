@@ -2,3 +2,4 @@
 .ve/
 target/
 *.swp
+.lite-edit-recent

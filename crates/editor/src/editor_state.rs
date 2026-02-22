@@ -14,6 +14,7 @@
 //! focus target event handling.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::buffer_target::BufferFocusTarget;
@@ -34,7 +35,8 @@ use crate::workspace::Editor;
 use lite_edit_buffer::{Position, TextBuffer};
 // Chunk: docs/chunks/terminal_active_tab_safety - Terminal input encoding
 // Chunk: docs/chunks/terminal_scrollback_viewport - Terminal scroll action result
-use lite_edit_terminal::{BufferView, InputEncoder, TermMode};
+// Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
+use lite_edit_terminal::{BufferView, InputEncoder, PtyWakeup, TermMode};
 
 /// Duration in milliseconds for cursor blink interval
 const CURSOR_BLINK_INTERVAL_MS: u64 = 500;
@@ -110,6 +112,10 @@ pub struct EditorState {
     /// The buffer position from which the current search started
     /// (used as the search origin; only advances when Enter is pressed)
     pub search_origin: Position,
+    // Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
+    /// Factory for creating PTY wakeup callbacks.
+    /// Set by main.rs after controller creation.
+    pty_wakeup_factory: Option<Arc<dyn Fn() -> PtyWakeup + Send + Sync>>,
 }
 
 // =============================================================================
@@ -277,6 +283,8 @@ impl EditorState {
             resolved_path: None,
             find_mini_buffer: None,
             search_origin: Position::new(0, 0),
+            // Chunk: docs/chunks/terminal_pty_wakeup - Initialize wakeup factory as None
+            pty_wakeup_factory: None,
         }
     }
 
@@ -288,6 +296,25 @@ impl EditorState {
     /// Returns the font metrics.
     pub fn font_metrics(&self) -> &FontMetrics {
         &self.font_metrics
+    }
+
+    // Chunk: docs/chunks/terminal_pty_wakeup - PTY wakeup factory management
+    /// Sets the factory for creating PTY wakeup handles.
+    ///
+    /// The factory is called when spawning new terminals to create a wakeup
+    /// handle that signals the main thread when PTY data arrives.
+    pub fn set_pty_wakeup_factory(
+        &mut self,
+        factory: impl Fn() -> PtyWakeup + Send + Sync + 'static,
+    ) {
+        self.pty_wakeup_factory = Some(Arc::new(factory));
+    }
+
+    /// Creates a PTY wakeup handle using the registered factory.
+    ///
+    /// Returns `None` if no factory has been registered.
+    pub fn create_pty_wakeup(&self) -> Option<PtyWakeup> {
+        self.pty_wakeup_factory.as_ref().map(|f| f())
     }
 
     /// Updates the viewport size based on window dimensions in pixels.
@@ -1989,8 +2016,17 @@ impl EditorState {
             .map(|ws| ws.root_path.clone())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-        // Spawn shell (log error but don't fail)
-        if let Err(e) = terminal.spawn_shell(&shell, &cwd) {
+        // Chunk: docs/chunks/terminal_pty_wakeup - Spawn shell with wakeup if available
+        // Spawn shell with wakeup support if a factory is registered (enables low-latency
+        // PTY output rendering). Falls back to non-wakeup spawn if not available.
+        let spawn_result = if let Some(wakeup) = self.create_pty_wakeup() {
+            terminal.spawn_shell_with_wakeup(&shell, &cwd, wakeup)
+        } else {
+            terminal.spawn_shell(&shell, &cwd)
+        };
+
+        // Log error but don't fail
+        if let Err(e) = spawn_result {
             eprintln!("Failed to spawn shell '{}': {}", shell, e);
         }
 
