@@ -10,9 +10,11 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["terminal_cmd_backspace", "terminal_paste_render", "terminal_viewport_init"]
+created_after:
+- terminal_cmd_backspace
+- terminal_paste_render
+- terminal_viewport_init
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
