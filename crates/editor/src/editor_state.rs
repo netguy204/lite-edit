@@ -74,6 +74,12 @@ pub struct EditorState {
     pub cursor_visible: bool,
     /// Time of the last keystroke (for cursor blink reset)
     pub last_keystroke: Instant,
+    /// Whether the overlay cursor is currently visible (for blink animation)
+    /// Chunk: docs/chunks/cursor_blink_focus - Separate blink state for overlay mini-buffers
+    pub overlay_cursor_visible: bool,
+    /// Time of the last overlay keystroke (for overlay cursor blink reset)
+    /// Chunk: docs/chunks/cursor_blink_focus - Separate keystroke tracking for overlays
+    pub last_overlay_keystroke: Instant,
     /// Font metrics for pixel-to-position conversion
     font_metrics: FontMetrics,
     /// View height in pixels (for y-coordinate flipping in mouse events)
@@ -213,6 +219,9 @@ impl EditorState {
             focus_target: BufferFocusTarget::new(),
             cursor_visible: true,
             last_keystroke: Instant::now(),
+            // Chunk: docs/chunks/cursor_blink_focus - Initialize overlay cursor state
+            overlay_cursor_visible: true,
+            last_overlay_keystroke: Instant::now(),
             font_metrics,
             view_height: 0.0,
             // Default to a large width to prevent unintended wrapping in tests
@@ -483,6 +492,13 @@ impl EditorState {
         self.focus = EditorFocus::Selector;
         self.last_cache_version = self.file_index.as_ref().unwrap().cache_version();
 
+        // Chunk: docs/chunks/cursor_blink_focus - Reset cursor states on focus transition
+        // Main buffer cursor stays visible (static) while overlay is active
+        self.cursor_visible = true;
+        // Overlay cursor starts visible and ready to blink
+        self.overlay_cursor_visible = true;
+        self.last_overlay_keystroke = Instant::now();
+
         // Mark full viewport dirty for overlay rendering
         self.dirty_region.merge(DirtyRegion::FullViewport);
     }
@@ -492,6 +508,12 @@ impl EditorState {
     fn close_selector(&mut self) {
         self.active_selector = None;
         self.focus = EditorFocus::Buffer;
+
+        // Chunk: docs/chunks/cursor_blink_focus - Reset cursor states on focus transition
+        // Buffer cursor resumes blinking (start visible, record keystroke to prevent immediate blink-off)
+        self.cursor_visible = true;
+        self.last_keystroke = Instant::now();
+
         self.dirty_region.merge(DirtyRegion::FullViewport);
     }
 
@@ -517,6 +539,13 @@ impl EditorState {
                 // Transition focus
                 self.focus = EditorFocus::FindInFile;
 
+                // Chunk: docs/chunks/cursor_blink_focus - Reset cursor states on focus transition
+                // Main buffer cursor stays visible (static) while overlay is active
+                self.cursor_visible = true;
+                // Overlay cursor starts visible and ready to blink
+                self.overlay_cursor_visible = true;
+                self.last_overlay_keystroke = Instant::now();
+
                 // Mark full viewport dirty for overlay rendering
                 self.dirty_region.merge(DirtyRegion::FullViewport);
             }
@@ -537,6 +566,12 @@ impl EditorState {
     fn close_find_strip(&mut self) {
         self.find_mini_buffer = None;
         self.focus = EditorFocus::Buffer;
+
+        // Chunk: docs/chunks/cursor_blink_focus - Reset cursor states on focus transition
+        // Buffer cursor resumes blinking (start visible, record keystroke to prevent immediate blink-off)
+        self.cursor_visible = true;
+        self.last_keystroke = Instant::now();
+
         self.dirty_region.merge(DirtyRegion::FullViewport);
     }
 
@@ -658,6 +693,14 @@ impl EditorState {
     fn handle_key_find(&mut self, event: KeyEvent) {
         use crate::input::Key;
 
+        // Chunk: docs/chunks/cursor_blink_focus - Record overlay keystroke time for blink reset
+        self.last_overlay_keystroke = Instant::now();
+
+        // Ensure overlay cursor is visible when typing
+        if !self.overlay_cursor_visible {
+            self.overlay_cursor_visible = true;
+        }
+
         match &event.key {
             Key::Escape => {
                 self.close_find_strip();
@@ -766,6 +809,14 @@ impl EditorState {
     /// Handles a key event when the selector is focused.
     /// Chunk: docs/chunks/file_picker - Key forwarding to SelectorWidget and SelectorOutcome handling
     fn handle_key_selector(&mut self, event: KeyEvent) {
+        // Chunk: docs/chunks/cursor_blink_focus - Record overlay keystroke time for blink reset
+        self.last_overlay_keystroke = Instant::now();
+
+        // Ensure overlay cursor is visible when typing
+        if !self.overlay_cursor_visible {
+            self.overlay_cursor_visible = true;
+        }
+
         let selector = match self.active_selector.as_mut() {
             Some(s) => s,
             None => return,
@@ -1287,24 +1338,55 @@ impl EditorState {
 
     /// Toggles cursor visibility for blink animation.
     ///
+    /// Focus-aware: only the cursor in the currently focused area (buffer or overlay)
+    /// blinks. When an overlay (Selector or FindInFile) is focused, the main buffer
+    /// cursor remains static (visible), and the overlay cursor blinks.
+    ///
     /// Returns the dirty region for the cursor line if visibility changed.
     /// If the user recently typed, this keeps the cursor solid instead of toggling.
+    ///
+    /// Chunk: docs/chunks/cursor_blink_focus - Focus-aware cursor blink toggle
     pub fn toggle_cursor_blink(&mut self) -> DirtyRegion {
         let now = Instant::now();
-        let since_keystroke = now.duration_since(self.last_keystroke);
 
-        // If user typed recently, keep cursor solid
-        if since_keystroke.as_millis() < CURSOR_BLINK_INTERVAL_MS as u128 {
-            if !self.cursor_visible {
-                self.cursor_visible = true;
-                return self.cursor_dirty_region();
+        match self.focus {
+            EditorFocus::Buffer => {
+                // Buffer has focus - toggle the main buffer cursor
+                let since_keystroke = now.duration_since(self.last_keystroke);
+
+                // If user typed recently, keep cursor solid
+                if since_keystroke.as_millis() < CURSOR_BLINK_INTERVAL_MS as u128 {
+                    if !self.cursor_visible {
+                        self.cursor_visible = true;
+                        return self.cursor_dirty_region();
+                    }
+                    return DirtyRegion::None;
+                }
+
+                // Toggle buffer cursor visibility
+                self.cursor_visible = !self.cursor_visible;
+                self.cursor_dirty_region()
             }
-            return DirtyRegion::None;
-        }
+            EditorFocus::Selector | EditorFocus::FindInFile => {
+                // Overlay has focus - toggle the overlay cursor, not the buffer cursor
+                let since_keystroke = now.duration_since(self.last_overlay_keystroke);
 
-        // Toggle visibility
-        self.cursor_visible = !self.cursor_visible;
-        self.cursor_dirty_region()
+                // If user typed recently, keep cursor solid
+                if since_keystroke.as_millis() < CURSOR_BLINK_INTERVAL_MS as u128 {
+                    if !self.overlay_cursor_visible {
+                        self.overlay_cursor_visible = true;
+                        // Return FullViewport since overlay cursors aren't on a specific buffer line
+                        return DirtyRegion::FullViewport;
+                    }
+                    return DirtyRegion::None;
+                }
+
+                // Toggle overlay cursor visibility
+                self.overlay_cursor_visible = !self.overlay_cursor_visible;
+                // Return FullViewport since overlay cursors aren't on a specific buffer line
+                DirtyRegion::FullViewport
+            }
+        }
     }
 
     /// Returns the dirty region for just the cursor line.
@@ -4481,6 +4563,208 @@ mod tests {
             state.viewport().visible_lines(),
             0,
             "Viewport should have 0 visible lines when view_height is not set"
+        );
+    }
+
+    // =========================================================================
+    // Focus-aware cursor blink tests (Chunk: docs/chunks/cursor_blink_focus)
+    // =========================================================================
+
+    #[test]
+    fn test_buffer_focus_blink_toggles_cursor_visible() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Ensure buffer focus (default)
+        assert_eq!(state.focus, EditorFocus::Buffer);
+
+        // Set last_keystroke to the past so blink toggle works
+        state.last_keystroke = Instant::now() - Duration::from_secs(1);
+
+        assert!(state.cursor_visible);
+        state.toggle_cursor_blink();
+        assert!(!state.cursor_visible);
+        state.toggle_cursor_blink();
+        assert!(state.cursor_visible);
+    }
+
+    #[test]
+    fn test_overlay_focus_blink_toggles_overlay_cursor_visible() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Open find strip to switch to FindInFile focus
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+        assert_eq!(state.focus, EditorFocus::FindInFile);
+
+        // Set last_overlay_keystroke to the past so blink toggle works
+        state.last_overlay_keystroke = Instant::now() - Duration::from_secs(1);
+
+        assert!(state.overlay_cursor_visible);
+        state.toggle_cursor_blink();
+        assert!(!state.overlay_cursor_visible);
+        state.toggle_cursor_blink();
+        assert!(state.overlay_cursor_visible);
+    }
+
+    #[test]
+    fn test_overlay_focus_does_not_toggle_buffer_cursor() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Open find strip to switch to FindInFile focus
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+        assert_eq!(state.focus, EditorFocus::FindInFile);
+
+        // Buffer cursor should be visible (static)
+        assert!(state.cursor_visible);
+
+        // Set last_overlay_keystroke to the past so blink toggle works
+        state.last_overlay_keystroke = Instant::now() - Duration::from_secs(1);
+
+        // Toggle blink multiple times
+        state.toggle_cursor_blink();
+        state.toggle_cursor_blink();
+        state.toggle_cursor_blink();
+
+        // Buffer cursor should still be visible (not toggled)
+        assert!(
+            state.cursor_visible,
+            "Buffer cursor should remain static when overlay has focus"
+        );
+    }
+
+    #[test]
+    fn test_recent_overlay_keystroke_keeps_overlay_cursor_solid() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Open find strip
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        // Overlay keystroke just happened (set by handle_cmd_f)
+        // Toggle should keep overlay cursor visible
+        state.toggle_cursor_blink();
+        assert!(
+            state.overlay_cursor_visible,
+            "Recent keystroke should keep overlay cursor solid"
+        );
+    }
+
+    #[test]
+    fn test_focus_transition_to_overlay_resets_cursors() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Make buffer cursor invisible to verify it gets reset
+        state.cursor_visible = false;
+
+        // Open find strip
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        // Both cursors should be visible after transition
+        assert!(
+            state.cursor_visible,
+            "Buffer cursor should be visible (static) when overlay opens"
+        );
+        assert!(
+            state.overlay_cursor_visible,
+            "Overlay cursor should be visible when overlay opens"
+        );
+    }
+
+    #[test]
+    fn test_focus_transition_from_overlay_resets_buffer_cursor() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Open find strip
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        // Make buffer cursor invisible
+        state.cursor_visible = false;
+
+        // Close find strip with Escape
+        let escape = KeyEvent::new(Key::Escape, Modifiers::default());
+        state.handle_key(escape);
+
+        // Buffer should have focus again
+        assert_eq!(state.focus, EditorFocus::Buffer);
+
+        // Buffer cursor should be visible and last_keystroke should be recent
+        assert!(
+            state.cursor_visible,
+            "Buffer cursor should be visible after closing overlay"
+        );
+
+        // Toggle should not immediately blink off because keystroke is recent
+        state.toggle_cursor_blink();
+        assert!(
+            state.cursor_visible,
+            "Buffer cursor should stay solid briefly after closing overlay"
+        );
+    }
+
+    #[test]
+    fn test_overlay_keystroke_makes_cursor_visible() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Open find strip
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        // Make overlay cursor invisible
+        state.overlay_cursor_visible = false;
+
+        // Type in find strip
+        state.handle_key(KeyEvent::char('a'));
+
+        // Overlay cursor should become visible
+        assert!(
+            state.overlay_cursor_visible,
+            "Typing in overlay should make cursor visible"
         );
     }
 }
