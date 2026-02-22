@@ -306,10 +306,15 @@ impl EditorController {
         self.update_window_title_if_needed();
 
         if self.state.is_dirty() {
-            // Update renderer's buffer from editor state
-            // Note: We need to sync the buffer - the renderer has a copy
-            // For now, we'll create a fresh buffer each time (not ideal, but correct)
-            self.sync_renderer_buffer();
+            // Chunk: docs/chunks/renderer_polymorphic_buffer - Sync viewport scroll offset
+            // The renderer's viewport needs the scroll offset from the editor state.
+            // We sync this here rather than in render_with_editor because the EditorState
+            // owns the authoritative scroll position.
+            if let Some(buffer_view) = self.state.editor.active_buffer_view() {
+                let line_count = buffer_view.line_count();
+                let state_scroll_px = self.state.viewport().scroll_offset_px();
+                self.renderer.viewport_mut().set_scroll_offset_px(state_scroll_px, line_count);
+            }
 
             // Take the dirty region
             let _dirty = self.state.take_dirty_region();
@@ -381,34 +386,9 @@ impl EditorController {
         }
     }
 
-    // Chunk: docs/chunks/text_selection_rendering - Syncs selection anchor from edit buffer to renderer buffer
-    /// Syncs the renderer's buffer with the editor state's buffer.
-    fn sync_renderer_buffer(&mut self) {
-        // Update viewport on renderer - sync the pixel offset for smooth scrolling
-        let buffer_line_count = self.state.buffer().line_count();
-        let state_scroll_px = self.state.viewport().scroll_offset_px();
-        self.renderer.viewport_mut().set_scroll_offset_px(state_scroll_px, buffer_line_count);
-
-        // Sync buffer content
-        // The renderer needs the buffer to render from, so we need to give it
-        // an updated view. Since TextBuffer doesn't implement Clone, we'll
-        // update in place.
-        if let Some(render_buffer) = self.renderer.buffer_mut() {
-            // We need to sync the cursor position and content
-            // For now, reconstruct the buffer from content
-            let content = self.state.buffer().content();
-            let cursor_pos = self.state.buffer().cursor_position();
-
-            // Clear and rebuild (not ideal but works for now)
-            *render_buffer = TextBuffer::from_str(&content);
-            render_buffer.set_cursor(cursor_pos);
-
-            // Sync selection anchor (set_cursor clears selection, so do this after)
-            if let Some(anchor) = self.state.buffer().selection_anchor() {
-                render_buffer.set_selection_anchor(anchor);
-            }
-        }
-    }
+    // Chunk: docs/chunks/renderer_polymorphic_buffer - Removed sync_renderer_buffer
+    // The renderer no longer owns a buffer copy, so buffer content sync is eliminated.
+    // Viewport scroll sync is now done inline in render_if_dirty.
 
     // Chunk: docs/chunks/cursor_pointer_ui_hints - Calculate cursor regions for UI
     /// Calculates and sets the cursor regions for the current UI state.
@@ -714,9 +694,9 @@ impl AppDelegate {
         state.update_viewport_dimensions(width, height);
         renderer.update_viewport_size(width, height);
 
-        // Set the initial buffer in the renderer
-        let initial_buffer = TextBuffer::from_str(&demo_content);
-        renderer.set_buffer(initial_buffer);
+        // Chunk: docs/chunks/renderer_polymorphic_buffer - No longer setting buffer on renderer
+        // The renderer reads from Editor.active_buffer_view() at render time instead of
+        // owning a buffer copy. The demo content is already in EditorState.
 
         // Create the shared controller
         let controller = Rc::new(RefCell::new(EditorController::new(

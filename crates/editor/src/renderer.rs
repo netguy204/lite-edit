@@ -54,7 +54,8 @@ use crate::tab_bar::{
 use crate::viewport::Viewport;
 use crate::workspace::Editor;
 use crate::wrap_layout::WrapLayout;
-use lite_edit_buffer::{DirtyLines, TextBuffer};
+// Chunk: docs/chunks/renderer_polymorphic_buffer - Import BufferView for polymorphic rendering
+use lite_edit_buffer::{BufferView, DirtyLines};
 
 // =============================================================================
 // Background Color
@@ -189,8 +190,9 @@ pub struct Renderer {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     /// The viewport for buffer-to-screen coordinate mapping
     viewport: Viewport,
-    /// The text buffer being edited (if any)
-    buffer: Option<TextBuffer>,
+    // Chunk: docs/chunks/renderer_polymorphic_buffer - Removed buffer: Option<TextBuffer>
+    // The renderer no longer owns a buffer copy. Instead, it receives a &dyn BufferView
+    // reference at render time from the active tab.
     /// Whether the cursor should be visible
     cursor_visible: bool,
     /// The glyph buffer for selector overlay rendering (lazy-initialized)
@@ -258,7 +260,7 @@ impl Renderer {
             pipeline,
             device: device_retained,
             viewport,
-            buffer: None,
+            // Chunk: docs/chunks/renderer_polymorphic_buffer - No longer owns buffer
             cursor_visible: true,
             selector_buffer: None,
             left_rail_buffer: None,
@@ -268,22 +270,8 @@ impl Renderer {
         }
     }
 
-    /// Sets the text buffer to render
-    ///
-    /// This replaces any existing buffer and marks the full viewport dirty.
-    pub fn set_buffer(&mut self, buffer: TextBuffer) {
-        self.buffer = Some(buffer);
-    }
-
-    /// Returns a mutable reference to the text buffer, if any
-    pub fn buffer_mut(&mut self) -> Option<&mut TextBuffer> {
-        self.buffer.as_mut()
-    }
-
-    /// Returns a reference to the text buffer, if any
-    pub fn buffer(&self) -> Option<&TextBuffer> {
-        self.buffer.as_ref()
-    }
+    // Chunk: docs/chunks/renderer_polymorphic_buffer - Removed set_buffer, buffer_mut, buffer methods
+    // The renderer no longer owns a buffer copy. BufferView is passed at render time.
 
     /// Returns a mutable reference to the viewport
     pub fn viewport_mut(&mut self) -> &mut Viewport {
@@ -352,31 +340,37 @@ impl Renderer {
         self.glyph_buffer.set_y_offset(offset);
     }
 
+    // Chunk: docs/chunks/renderer_polymorphic_buffer - Accept line_count parameter
     /// Converts buffer-space DirtyLines to screen-space DirtyRegion
     ///
     /// This is used in the drain-all-then-render loop to determine what
     /// portion of the screen needs re-rendering.
-    pub fn apply_mutation(&self, dirty_lines: &DirtyLines) -> DirtyRegion {
-        if let Some(buffer) = &self.buffer {
-            self.viewport.dirty_lines_to_region(dirty_lines, buffer.line_count())
-        } else {
-            DirtyRegion::None
-        }
+    ///
+    /// # Arguments
+    /// * `dirty_lines` - The dirty lines from buffer mutations
+    /// * `line_count` - Total number of lines in the buffer
+    pub fn apply_mutation(&self, dirty_lines: &DirtyLines, line_count: usize) -> DirtyRegion {
+        self.viewport.dirty_lines_to_region(dirty_lines, line_count)
     }
 
-    /// Renders based on dirty region
+    // Chunk: docs/chunks/renderer_polymorphic_buffer - Legacy method, not used with workspace model
+    /// Renders based on dirty region (legacy method - use render_with_editor instead)
     ///
     /// For now, any dirty region triggers a full redraw. This is acceptable
     /// because full viewport redraws are <1ms (per H3 investigation).
     /// The dirty region tracking is in place for future optimization.
+    ///
+    /// Note: This method does NOT update the glyph buffer - the caller must
+    /// pass a BufferView to update_glyph_buffer before calling this method,
+    /// or use render_with_editor which handles this automatically.
+    #[allow(dead_code)]
     pub fn render_dirty(&mut self, view: &MetalView, dirty: &DirtyRegion) {
         match dirty {
             DirtyRegion::None => {
                 // No redraw needed
             }
             DirtyRegion::FullViewport | DirtyRegion::Lines { .. } => {
-                // Rebuild the glyph buffer and render
-                self.update_glyph_buffer();
+                // Render whatever is in the glyph buffer
                 self.render(view);
             }
         }
@@ -384,26 +378,25 @@ impl Renderer {
 
     // Chunk: docs/chunks/viewport_fractional_scroll - Pass y_offset for smooth scrolling
     // Chunk: docs/chunks/line_wrap_rendering - Use WrapLayout for soft wrapping
-    /// Updates the glyph buffer from the current buffer and viewport
-    fn update_glyph_buffer(&mut self) {
-        if let Some(buffer) = &self.buffer {
-            // Get the fractional scroll offset for smooth scrolling
-            let y_offset = self.viewport.scroll_fraction_px();
+    // Chunk: docs/chunks/renderer_polymorphic_buffer - Accept &dyn BufferView for polymorphic rendering
+    /// Updates the glyph buffer from the given buffer view and viewport
+    fn update_glyph_buffer(&mut self, view: &dyn BufferView) {
+        // Get the fractional scroll offset for smooth scrolling
+        let y_offset = self.viewport.scroll_fraction_px();
 
-            // Create wrap layout for current viewport width
-            let wrap_layout = WrapLayout::new(self.viewport_width_px, &self.font.metrics);
+        // Create wrap layout for current viewport width
+        let wrap_layout = WrapLayout::new(self.viewport_width_px, &self.font.metrics);
 
-            // Use wrap-aware rendering
-            self.glyph_buffer.update_from_buffer_with_wrap(
-                &self.device,
-                &self.atlas,
-                buffer,
-                &self.viewport,
-                &wrap_layout,
-                self.cursor_visible,
-                y_offset,
-            );
-        }
+        // Use wrap-aware rendering
+        self.glyph_buffer.update_from_buffer_with_wrap(
+            &self.device,
+            &self.atlas,
+            view,
+            &self.viewport,
+            &wrap_layout,
+            self.cursor_visible,
+            y_offset,
+        );
     }
 
     /// Sets the text content to display
@@ -414,16 +407,17 @@ impl Renderer {
         self.glyph_buffer.update(&self.device, &self.atlas, lines);
     }
 
-    /// Renders a frame to the given MetalView
+    // Chunk: docs/chunks/renderer_polymorphic_buffer - Legacy method, not used with workspace model
+    /// Renders a frame to the given MetalView (legacy method - use render_with_editor instead)
     ///
     /// This clears the surface to the background color and renders
-    /// any text content that has been set.
+    /// any text content that has been set in the glyph buffer.
     ///
-    /// If a TextBuffer is set, this method updates the glyph buffer
-    /// from the buffer content before rendering.
+    /// Note: This method does NOT update the glyph buffer - the caller must
+    /// pass a BufferView to update_glyph_buffer before calling this method,
+    /// or use render_with_editor which handles this automatically.
+    #[allow(dead_code)]
     pub fn render(&mut self, view: &MetalView) {
-        // Update glyph buffer from TextBuffer if available
-        self.update_glyph_buffer();
         let metal_layer = view.metal_layer();
 
         // Get the next drawable from the layer
@@ -656,11 +650,11 @@ impl Renderer {
         }
     }
 
-    /// Renders a frame with an optional selector overlay
+    // Chunk: docs/chunks/renderer_polymorphic_buffer - Legacy method, not used with workspace model
+    /// Renders a frame with an optional selector overlay (legacy method - use render_with_editor instead)
     ///
-    /// This is the primary entry point when a selector (file picker, command palette)
-    /// may be active. It renders the editor content first, then overlays the selector
-    /// panel if one is provided.
+    /// This is a legacy entry point that has been superseded by render_with_editor.
+    /// It renders the editor content first, then overlays the selector panel if one is provided.
     ///
     /// # Arguments
     /// * `view` - The Metal view to render to
@@ -671,14 +665,17 @@ impl Renderer {
     /// When the selector opens, closes, or its state changes (query, selected_index),
     /// the caller must mark `DirtyRegion::FullViewport` to ensure both the overlay
     /// and the editor content beneath are redrawn correctly.
+    ///
+    /// Note: This method does NOT update the glyph buffer - the caller must
+    /// pass a BufferView to update_glyph_buffer before calling this method,
+    /// or use render_with_editor which handles this automatically.
+    #[allow(dead_code)]
     pub fn render_with_selector(
         &mut self,
         view: &MetalView,
         selector: Option<&SelectorWidget>,
         selector_cursor_visible: bool,
     ) {
-        // Update glyph buffer from TextBuffer if available
-        self.update_glyph_buffer();
         let metal_layer = view.metal_layer();
 
         // Get the next drawable from the layer
@@ -967,8 +964,11 @@ impl Renderer {
         // Chunk: docs/chunks/content_tab_bar - Content area y offset for tab bar
         self.set_content_y_offset(TAB_BAR_HEIGHT);
 
-        // Update glyph buffer from TextBuffer if available
-        self.update_glyph_buffer();
+        // Chunk: docs/chunks/renderer_polymorphic_buffer - Get BufferView from Editor
+        // Update glyph buffer from active tab's BufferView if available
+        if let Some(buffer_view) = editor.active_buffer_view() {
+            self.update_glyph_buffer(buffer_view);
+        }
         let metal_layer = view.metal_layer();
 
         // Get the next drawable from the layer
@@ -1278,8 +1278,11 @@ impl Renderer {
         // Set content area offset to account for left rail
         self.set_content_x_offset(RAIL_WIDTH);
 
-        // Update glyph buffer from TextBuffer if available
-        self.update_glyph_buffer();
+        // Chunk: docs/chunks/renderer_polymorphic_buffer - Get BufferView from Editor
+        // Update glyph buffer from active tab's BufferView if available
+        if let Some(buffer_view) = editor.active_buffer_view() {
+            self.update_glyph_buffer(buffer_view);
+        }
         let metal_layer = view.metal_layer();
 
         // Get the next drawable from the layer

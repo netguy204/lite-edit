@@ -744,6 +744,23 @@ impl Editor {
     pub fn line_height(&self) -> f32 {
         self.line_height
     }
+
+    // Chunk: docs/chunks/renderer_polymorphic_buffer - Polymorphic buffer access
+    /// Returns a reference to the active tab's BufferView.
+    ///
+    /// Returns `None` if there is no active workspace or tab.
+    /// Handles AgentTerminal placeholder by delegating to workspace agent.
+    pub fn active_buffer_view(&self) -> Option<&dyn BufferView> {
+        let workspace = self.active_workspace()?;
+        let tab = workspace.active_tab()?;
+
+        if tab.buffer.is_agent_terminal() {
+            // AgentTerminal is a placeholder - get the actual buffer from workspace
+            workspace.agent_terminal().map(|t| t as &dyn BufferView)
+        } else {
+            Some(tab.buffer())
+        }
+    }
 }
 
 // =============================================================================
