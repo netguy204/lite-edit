@@ -672,8 +672,8 @@ impl EditorState {
             selector.items().len(),
         );
 
-        // Update visible_items on the selector (for arrow key navigation scroll)
-        selector.set_visible_items(geometry.visible_items);
+        // Update visible size on the selector (for arrow key navigation scroll)
+        selector.update_visible_size(geometry.visible_items as f32 * geometry.item_height);
 
         // Capture the previous query for change detection
         let prev_query = selector.query();
@@ -883,8 +883,8 @@ impl EditorState {
             selector.items().len(),
         );
 
-        // Update visible_items on the selector (for consistency with scroll/key handling)
-        selector.set_visible_items(geometry.visible_items);
+        // Update visible size on the selector (for consistency with scroll/key handling)
+        selector.update_visible_size(geometry.visible_items as f32 * geometry.item_height);
 
         // Chunk: docs/chunks/selector_coord_flip - Y-coordinate flip for macOS mouse events
         // Flip y-coordinate: macOS uses bottom-left origin (y=0 at bottom),
@@ -1002,15 +1002,11 @@ impl EditorState {
             selector.items().len(),
         );
 
-        // Update visible_items on the selector (for arrow key navigation)
-        selector.set_visible_items(geometry.visible_items);
+        // Update visible size on the selector (for arrow key navigation scroll)
+        selector.update_visible_size(geometry.visible_items as f32 * geometry.item_height);
 
-        // Forward scroll to selector
-        selector.handle_scroll(
-            delta.dy as f64,
-            geometry.item_height as f64,
-            geometry.visible_items,
-        );
+        // Forward scroll to selector (raw pixel delta, no rounding)
+        selector.handle_scroll(delta.dy as f64);
 
         // Mark full viewport dirty for redraw
         self.dirty_region.merge(DirtyRegion::FullViewport);
@@ -1777,12 +1773,12 @@ mod tests {
         assert_eq!(state.viewport().scroll_offset(), 0);
 
         // But the selector should have scrolled
-        let view_offset = state.active_selector.as_ref().unwrap().view_offset();
-        assert!(view_offset > 0, "Selector should have scrolled");
+        let first_visible = state.active_selector.as_ref().unwrap().first_visible_item();
+        assert!(first_visible > 0, "Selector should have scrolled");
     }
 
     #[test]
-    fn test_scroll_when_selector_open_updates_view_offset() {
+    fn test_scroll_when_selector_open_updates_first_visible_item() {
         let mut state = EditorState::empty(test_font_metrics());
         state.update_viewport_dimensions(800.0, 600.0);
 
@@ -1802,16 +1798,16 @@ mod tests {
             selector.set_items((0..100).map(|i| format!("file{}.rs", i)).collect());
         }
 
-        // Initial view_offset should be 0
-        assert_eq!(state.active_selector.as_ref().unwrap().view_offset(), 0);
+        // Initial first_visible_item should be 0
+        assert_eq!(state.active_selector.as_ref().unwrap().first_visible_item(), 0);
 
         // Scroll down (positive delta = scroll down)
         // line_height is 16.0, so 48 pixels = 3 rows
         state.handle_scroll(ScrollDelta::new(0.0, 48.0));
 
-        // view_offset should have increased
-        let view_offset = state.active_selector.as_ref().unwrap().view_offset();
-        assert_eq!(view_offset, 3);
+        // first_visible_item should have increased
+        let first_visible = state.active_selector.as_ref().unwrap().first_visible_item();
+        assert_eq!(first_visible, 3);
     }
 
     #[test]
