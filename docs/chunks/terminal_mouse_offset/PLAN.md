@@ -1,177 +1,233 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk fixes the ~3-row vertical offset bug when clicking inside a terminal tab running a program with mouse input (e.g., vim, htop). The bug is in `EditorState::handle_mouse_buffer`, where the terminal mouse coordinate calculation uses an inline Y-flip formula that doesn't correctly account for the coordinate system transformation.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Root Cause Analysis:**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+The current inline calculation:
+```rust
+let adjusted_y = self.view_height as f64 - TAB_BAR_HEIGHT as f64 - y;
+let row = (adjusted_y / cell_height as f64) as usize;
+```
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/terminal_mouse_offset/GOAL.md)
-with references to the files that you expect to touch.
--->
+This attempts to:
+1. Flip the NSView y-coordinate (y=0 at bottom) to content-relative (y=0 at top of content)
+2. Divide by cell_height to get the row
 
-## Subsystem Considerations
+However, the formula `view_height - TAB_BAR_HEIGHT - y` produces:
+- `adjusted_y = content_height` when clicking at NSView y=0 (bottom of window)
+- `adjusted_y = 0` when clicking at NSView y = content_height (top of content area)
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+This appears mathematically correct for mapping to terminal rows where row 0 is at the top. However, the GOAL.md notes that the offset is ~3 rows while `TAB_BAR_HEIGHT / cell_height = 32 / 16 = 2`. This extra ~1 row discrepancy suggests an additional offset in the rendering that isn't accounted for.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
+**Key Insight from File Buffer Path:**
 
-If no subsystems are relevant, delete this section.
+For file buffers, the code does NOT pre-flip the y coordinate. Instead:
+1. It adjusts x by subtracting RAIL_WIDTH
+2. It passes the raw y coordinate unchanged
+3. It uses `content_height = view_height - TAB_BAR_HEIGHT` when creating the EditorContext
+4. The flip happens inside `pixel_to_buffer_position`: `flipped_y = content_height - y`
 
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
+The terminal inline calculation does the flip differently, and may not be consistent with how the terminal content is actually rendered.
 
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
+**Fix Strategy:**
 
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
+Align the terminal mouse calculation with the rendering coordinate system. The `TerminalFocusTarget::pixel_to_cell` function already exists and expects:
+- `pixel_pos` - position in pixels from **top-left of view** (Metal-style coordinates)
+- `view_origin` - origin of the terminal view in the overall window (e.g., `(RAIL_WIDTH, TAB_BAR_HEIGHT)`)
 
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
+The fix will:
+1. Convert NSView coordinates to Metal-style coordinates (flip y)
+2. Use the correct view_origin that matches where terminal content is rendered
+3. Apply the same `pixel_to_cell` logic
 
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
+**Testing Philosophy Alignment:**
 
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Following the Humble View Architecture from TESTING_PHILOSOPHY.md:
+- Write a failing test that clicks at a known terminal row position
+- Verify the encoded mouse event contains the expected row
+- The coordinate transformation is pure math, fully testable without GPU
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write a failing test for terminal mouse row accuracy
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create a test that verifies terminal mouse click row calculation. The test should:
+- Set up an EditorState with a terminal tab
+- Configure known dimensions: view_height=320, TAB_BAR_HEIGHT=32, cell_height=16
+- Click at the position where row N should be
+- Capture the mouse event bytes sent to the PTY
+- Assert the encoded row matches the expected row
 
-Example:
+The test will initially fail, demonstrating the bug.
 
-### Step 1: Define the SegmentHeader struct
+Location: `crates/editor/src/editor_state.rs` (test module)
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+```rust
+#[test]
+fn test_terminal_mouse_click_row_accuracy() {
+    use crate::tab_bar::TAB_BAR_HEIGHT;
+    use crate::left_rail::RAIL_WIDTH;
 
-Location: src/segment/format.rs
+    // Create editor state with terminal tab
+    let mut state = create_terminal_test_state();
+    state.update_viewport_dimensions(800.0, 320.0);
 
-### Step 2: Implement header serialization
+    // Target row 5 (0-indexed)
+    // In NSView coords (y=0 at bottom), the content area is:
+    //   - Top of content: y = view_height - TAB_BAR_HEIGHT = 288
+    //   - Bottom of content: y = 0
+    // Row 5 center is at: y = 288 - (5 + 0.5) * 16 = 288 - 88 = 200
+    let target_row = 5;
+    let cell_height = 16.0;
+    let content_top_nsview = 320.0 - TAB_BAR_HEIGHT as f64;
+    let click_y = content_top_nsview - (target_row as f64 + 0.5) * cell_height;
+    let click_x = RAIL_WIDTH as f64 + 50.0; // Some column inside content
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+    let event = MouseEvent {
+        kind: MouseEventKind::Down,
+        position: (click_x, click_y),
+        modifiers: Modifiers::default(),
+        click_count: 1,
+    };
 
-### Step 3: ...
+    // Enable mouse reporting in terminal
+    // ...
 
----
+    // Handle mouse event (this sends encoded bytes to PTY)
+    state.handle_mouse(event);
 
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
+    // Capture and decode the mouse event bytes
+    // Assert row == target_row
+}
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+
+### Step 2: Investigate the exact rendering offset
+
+Before implementing the fix, verify where terminal content is actually rendered relative to the window. Check:
+
+1. The terminal glyph buffer's y_offset setting
+2. Any additional padding or margins in the rendering
+3. Whether the terminal uses the same content_y_offset as the text buffer
+
+This will identify if there's a rendering offset beyond TAB_BAR_HEIGHT that explains the ~3 row vs ~2 row discrepancy.
+
+Location: `crates/editor/src/renderer.rs`, `crates/editor/src/glyph_buffer.rs`
+
+### Step 3: Fix the terminal mouse coordinate calculation
+
+Apply the correct coordinate transformation. Two options:
+
+**Option A: Align with file buffer approach**
+
+Use the same pattern as file buffers - don't pre-flip, use content_height for the flip:
+
+```rust
+let (x, y) = event.position;
+let adjusted_x = (x - RAIL_WIDTH as f64).max(0.0);
+
+// Use content_height for the flip, matching how file buffers do it
+let content_height = self.view_height as f64 - TAB_BAR_HEIGHT as f64;
+let content_y = content_height - y;  // Flip: y=0 at bottom → y=0 at top of content
+
+// Clamp to prevent negative values (click above content area)
+let content_y = content_y.max(0.0);
+
+let col = (adjusted_x / cell_width as f64) as usize;
+let row = (content_y / cell_height as f64) as usize;
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+**Option B: Use TerminalFocusTarget::pixel_to_cell logic**
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Convert to Metal-style coordinates and apply view_origin:
 
-## Dependencies
+```rust
+let (x, y) = event.position;
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+// Convert NSView coords to Metal-style (y=0 at top)
+let metal_y = self.view_height as f64 - y;
 
-If there are no dependencies, delete this section.
--->
+// Subtract view_origin to get content-relative position
+let content_x = (x - RAIL_WIDTH as f64).max(0.0);
+let content_y = (metal_y - TAB_BAR_HEIGHT as f64).max(0.0);
+
+let col = (content_x / cell_width as f64) as usize;
+let row = (content_y / cell_height as f64) as usize;
+```
+
+Both options are mathematically equivalent. Choose Option A to match the file buffer pattern.
+
+Location: `crates/editor/src/editor_state.rs`, lines 1326-1353
+
+Add backreference:
+```rust
+// Chunk: docs/chunks/terminal_mouse_offset - Fixed terminal mouse Y coordinate calculation
+```
+
+### Step 4: Verify test passes
+
+Run the test from Step 1:
+```bash
+cargo test -p lite-edit-editor test_terminal_mouse_click_row_accuracy
+```
+
+If the test still fails after the code change, there may be additional offsets to account for. Investigate:
+- Font baseline offset
+- Any padding in terminal content rendering
+- Scale factor handling
+
+### Step 5: Run existing tests
+
+Ensure no regressions:
+```bash
+cargo test -p lite-edit-editor
+cargo test -p lite-edit-terminal
+cargo test -p lite-edit-input
+```
+
+Pay special attention to:
+- Existing terminal mouse encoding tests
+- Click-to-position tests for file buffers
+- Coordinate transformation tests
+
+### Step 6: Manual verification
+
+Test manually with programs that use mouse input:
+
+1. **vim test**: Open a terminal tab, run `vim`, click at various positions
+   - Click at line 1 → cursor should be at line 1
+   - Click at line 10 → cursor should be at line 10
+   - Click at last visible line → cursor should be at that line
+
+2. **htop test**: Run `htop`, click on process rows
+   - Selection should follow click position exactly
+
+3. **Edge cases**:
+   - Click at very top of content area (row 0)
+   - Click at bottom of content area (last visible row)
+   - Click while terminal is scrolled (if applicable)
+   - Test at different window sizes
+
+### Step 7: Update code_paths in GOAL.md
+
+Update the GOAL.md frontmatter to reflect the actual files modified:
+
+```yaml
+code_paths:
+  - crates/editor/src/editor_state.rs
+```
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Exact source of the ~3 row offset**: The GOAL.md indicates ~3 rows but TAB_BAR_HEIGHT/cell_height = 2. If the fix in Step 3 doesn't fully resolve the issue, there may be:
+   - Font baseline offset affecting visual position
+   - Additional content padding not accounted for
+   - Integer truncation vs floor differences
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Scroll offset interaction**: For terminals with scrollback, the row calculation may need to account for the current scroll position. Verify this works correctly or note as out of scope if scrollback mouse interaction isn't implemented.
 
-## Deviations
+3. **Scale factor handling**: The mouse coordinates are in scaled pixels. Verify the fix works correctly at both 1x and 2x (Retina) scale factors.
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+4. **Consistency check**: After fixing, verify that clicking the same visual position in a file tab vs terminal tab produces the same logical row (accounting for different content).
