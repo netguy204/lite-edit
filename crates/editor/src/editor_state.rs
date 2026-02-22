@@ -91,6 +91,7 @@ pub struct EditorState {
     /// View width in pixels (for selector overlay geometry)
     view_width: f32,
     /// Whether the app should quit (set by Cmd+Q)
+    // Chunk: docs/chunks/quit_command - Quit flag field set by Cmd+Q
     pub should_quit: bool,
     /// Which UI element currently owns focus
     pub focus: EditorFocus,
@@ -370,6 +371,7 @@ impl EditorState {
     ///
     /// If the cursor has been scrolled off-screen, we snap the viewport back
     /// to make the cursor visible BEFORE processing the keystroke.
+    // Chunk: docs/chunks/quit_command - Intercepts Cmd+Q before delegating to focus target
     // Chunk: docs/chunks/file_picker - Cmd+P interception and focus-based key routing
     pub fn handle_key(&mut self, event: KeyEvent) {
         use crate::input::Key;
@@ -1060,6 +1062,7 @@ impl EditorState {
                 self.dirty_region.merge(dirty);
             }
 
+            // Chunk: docs/chunks/viewport_scrolling - Snap-back viewport when cursor off-screen
             // If the cursor is off-screen (scrolled away), snap the viewport back
             // to make the cursor visible BEFORE processing the keystroke.
             // This ensures typing after scrolling doesn't edit at a position
@@ -1334,6 +1337,7 @@ impl EditorState {
     ///
     /// When find-in-file is open, scroll events go to the main buffer (the user
     /// can scroll while searching).
+    // Chunk: docs/chunks/viewport_scrolling - Editor-level scroll event routing
     /// Chunk: docs/chunks/file_picker - Scroll event routing to selector widget when selector is open
     // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
     pub fn handle_scroll(&mut self, delta: ScrollDelta) {
