@@ -388,9 +388,12 @@ impl EditorState {
 
             // Chunk: docs/chunks/content_tab_bar - Create new tab
             // Cmd+T creates a new empty tab in the current workspace
-            // Note: Creates an empty file tab; terminal tab support is in terminal_emulator chunk
+            // Chunk: docs/chunks/terminal_tab_spawn - Cmd+Shift+T creates a new terminal tab
             if let Key::Char('t') = event.key {
-                if !event.modifiers.shift {
+                if event.modifiers.shift {
+                    self.new_terminal_tab();
+                    return;
+                } else {
                     self.new_tab();
                     return;
                 }
@@ -1215,20 +1218,26 @@ impl EditorState {
     // Agent Polling (Chunk: docs/chunks/agent_lifecycle)
     // =========================================================================
 
-    /// Polls all agents in all workspaces for PTY events.
+    /// Polls all agents and standalone terminals in all workspaces for PTY events.
     ///
     /// Call this each frame to:
     /// 1. Process PTY output from agent processes
-    /// 2. Update agent state machines (Running → NeedsInput → Stale)
-    /// 3. Update workspace status indicators
+    /// 2. Process PTY output from standalone terminal tabs
+    /// 3. Update agent state machines (Running → NeedsInput → Stale)
+    /// 4. Update workspace status indicators
     ///
-    /// Returns `DirtyRegion::FullViewport` if any agent had activity,
+    /// Returns `DirtyRegion::FullViewport` if any agent or terminal had activity,
     /// otherwise `DirtyRegion::None`.
+    // Chunk: docs/chunks/terminal_tab_spawn - Poll standalone terminals
     pub fn poll_agents(&mut self) -> DirtyRegion {
         let mut any_activity = false;
 
         for workspace in &mut self.editor.workspaces {
             if workspace.poll_agent() {
+                any_activity = true;
+            }
+            // Chunk: docs/chunks/terminal_tab_spawn - Poll standalone terminals
+            if workspace.poll_standalone_terminals() {
                 any_activity = true;
             }
         }
@@ -1521,6 +1530,95 @@ impl EditorState {
         let tab_id = self.editor.gen_tab_id();
         let line_height = self.editor.line_height();
         let new_tab = crate::workspace::Tab::empty_file(tab_id, line_height);
+
+        if let Some(workspace) = self.editor.active_workspace_mut() {
+            workspace.add_tab(new_tab);
+        }
+
+        // Sync viewport to ensure dirty region calculations work correctly
+        self.sync_active_tab_viewport();
+
+        // Ensure the new tab is visible in the tab bar
+        self.ensure_active_tab_visible();
+        self.dirty_region.merge(DirtyRegion::FullViewport);
+    }
+
+    // Chunk: docs/chunks/terminal_tab_spawn - Cmd+Shift+T terminal spawning
+
+    /// Counts existing terminal tabs in the active workspace.
+    ///
+    /// Returns 0 if no workspace is active.
+    fn terminal_tab_count(&self) -> usize {
+        use crate::workspace::TabKind;
+        self.editor
+            .active_workspace()
+            .map(|ws| ws.tabs.iter().filter(|t| t.kind == TabKind::Terminal).count())
+            .unwrap_or(0)
+    }
+
+    // Chunk: docs/chunks/terminal_tab_spawn - Cmd+Shift+T terminal spawning
+    /// Creates a new standalone terminal tab in the active workspace.
+    ///
+    /// The terminal runs the user's default shell from `$SHELL`, falling back
+    /// to `/bin/sh`. Terminal dimensions are computed from the current viewport
+    /// size and font metrics.
+    ///
+    /// Terminal tabs are labeled "Terminal", "Terminal 2", etc. based on how
+    /// many terminal tabs already exist in the workspace.
+    pub fn new_terminal_tab(&mut self) {
+        use crate::left_rail::RAIL_WIDTH;
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        use crate::workspace::Tab;
+        use lite_edit_terminal::TerminalBuffer;
+
+        // Compute content area dimensions
+        let content_height = self.view_height - TAB_BAR_HEIGHT;
+        let content_width = self.view_width - RAIL_WIDTH;
+
+        // Guard against zero dimensions
+        if content_height <= 0.0 || content_width <= 0.0 {
+            return;
+        }
+
+        // Compute terminal dimensions (convert f32 content dimensions to f64 for font_metrics)
+        let rows = (content_height as f64 / self.font_metrics.line_height).floor() as usize;
+        let cols = (content_width as f64 / self.font_metrics.advance_width).floor() as usize;
+
+        // Guard against zero-dimension terminal
+        if rows == 0 || cols == 0 {
+            return;
+        }
+
+        // Create terminal buffer with 5000 scrollback lines
+        let mut terminal = TerminalBuffer::new(cols, rows, 5000);
+
+        // Get shell from $SHELL or default to /bin/sh
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+
+        // Get working directory from workspace's root_path or current directory
+        let cwd = self
+            .editor
+            .active_workspace()
+            .map(|ws| ws.root_path.clone())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+        // Spawn shell (log error but don't fail)
+        if let Err(e) = terminal.spawn_shell(&shell, &cwd) {
+            eprintln!("Failed to spawn shell '{}': {}", shell, e);
+        }
+
+        // Generate label based on existing terminal count
+        let existing_count = self.terminal_tab_count();
+        let label = if existing_count == 0 {
+            "Terminal".to_string()
+        } else {
+            format!("Terminal {}", existing_count + 1)
+        };
+
+        // Create and add the terminal tab
+        let tab_id = self.editor.gen_tab_id();
+        let line_height = self.editor.line_height();
+        let new_tab = Tab::new_terminal(tab_id, terminal, label, line_height);
 
         if let Some(workspace) = self.editor.active_workspace_mut() {
             workspace.add_tab(new_tab);
@@ -3786,15 +3884,25 @@ mod tests {
         assert!(state.buffer().is_empty());
     }
 
+    // =========================================================================
+    // Cmd+Shift+T Terminal Tab Tests (Chunk: docs/chunks/terminal_tab_spawn)
+    // =========================================================================
+
     #[test]
-    fn test_cmd_shift_t_does_not_create_tab() {
+    fn test_cmd_shift_t_creates_terminal_tab() {
+        use crate::workspace::TabKind;
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
         let mut state = EditorState::empty(test_font_metrics());
-        state.update_viewport_size(160.0);
+        // Set viewport size large enough to create a valid terminal
+        // Window height = TAB_BAR_HEIGHT + content area (enough for at least 1 row)
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
 
-        // Initially one tab
-        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+        // Initially one tab (the empty file tab)
+        let workspace = state.editor.active_workspace().unwrap();
+        assert_eq!(workspace.tabs.len(), 1);
 
-        // Cmd+Shift+T should NOT create a new tab (reserved for future use)
+        // Cmd+Shift+T should create a new terminal tab
         let cmd_shift_t = KeyEvent::new(
             Key::Char('t'),
             Modifiers {
@@ -3805,8 +3913,88 @@ mod tests {
         );
         state.handle_key(cmd_shift_t);
 
-        // Should still have 1 tab (Cmd+Shift+T is not handled)
+        // Should now have 2 tabs
+        let workspace = state.editor.active_workspace().unwrap();
+        assert_eq!(workspace.tabs.len(), 2);
+
+        // The active tab should be the new terminal tab (index 1)
+        assert_eq!(workspace.active_tab, 1);
+
+        // The new tab should be a Terminal type
+        let active_tab = workspace.active_tab().unwrap();
+        assert_eq!(active_tab.kind, TabKind::Terminal);
+
+        // The tab label should be "Terminal"
+        assert_eq!(active_tab.label, "Terminal");
+    }
+
+    #[test]
+    fn test_cmd_shift_t_multiple_terminals_numbered() {
+        use crate::workspace::TabKind;
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Initially one tab
         assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+
+        let cmd_shift_t = KeyEvent::new(
+            Key::Char('t'),
+            Modifiers {
+                command: true,
+                shift: true,
+                ..Default::default()
+            },
+        );
+
+        // Press Cmd+Shift+T twice
+        state.handle_key(cmd_shift_t.clone());
+        state.handle_key(cmd_shift_t);
+
+        // Should have 3 tabs (1 file + 2 terminals)
+        let workspace = state.editor.active_workspace().unwrap();
+        assert_eq!(workspace.tabs.len(), 3);
+
+        // Find the terminal tabs and check their labels
+        let terminal_tabs: Vec<_> = workspace
+            .tabs
+            .iter()
+            .filter(|t| t.kind == TabKind::Terminal)
+            .collect();
+
+        assert_eq!(terminal_tabs.len(), 2);
+
+        // First terminal should be "Terminal", second should be "Terminal 2"
+        let labels: Vec<&str> = terminal_tabs.iter().map(|t| t.label.as_str()).collect();
+        assert!(labels.contains(&"Terminal"), "Expected 'Terminal' label, got {:?}", labels);
+        assert!(labels.contains(&"Terminal 2"), "Expected 'Terminal 2' label, got {:?}", labels);
+    }
+
+    #[test]
+    fn test_cmd_shift_t_does_not_insert_t() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Cmd+Shift+T should NOT insert 'T' into the buffer
+        let cmd_shift_t = KeyEvent::new(
+            Key::Char('t'),
+            Modifiers {
+                command: true,
+                shift: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_shift_t);
+
+        // The original file tab's buffer should still be empty
+        // (Note: active tab is now the terminal, so we need to check the first tab)
+        let workspace = state.editor.active_workspace().unwrap();
+        let file_tab = &workspace.tabs[0];
+        let buffer = file_tab.as_text_buffer().unwrap();
+        assert!(buffer.is_empty());
     }
 
     #[test]

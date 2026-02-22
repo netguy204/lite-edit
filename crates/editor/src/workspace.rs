@@ -570,6 +570,22 @@ impl Workspace {
 
         had_events
     }
+
+    // Chunk: docs/chunks/terminal_tab_spawn - Poll standalone terminals
+    /// Polls PTY events for all standalone terminal tabs.
+    ///
+    /// Returns true if any terminal had output.
+    pub fn poll_standalone_terminals(&mut self) -> bool {
+        let mut had_events = false;
+        for tab in &mut self.tabs {
+            if let Some(terminal) = tab.buffer.as_terminal_buffer_mut() {
+                if terminal.poll_events() {
+                    had_events = true;
+                }
+            }
+        }
+        had_events
+    }
 }
 
 impl std::fmt::Debug for Workspace {

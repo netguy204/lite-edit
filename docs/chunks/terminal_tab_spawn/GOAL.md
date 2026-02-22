@@ -1,9 +1,10 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
 code_paths:
-  - crates/editor/src/editor_state.rs
+- crates/editor/src/editor_state.rs
+- crates/editor/src/workspace.rs
 code_references: []
 narrative: null
 investigation: null
@@ -11,11 +12,12 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on:
-  - terminal_emulator
-  - agent_lifecycle
-created_after: ["tab_bar_content_clip", "click_scroll_fraction_alignment"]
+- terminal_emulator
+- agent_lifecycle
+created_after:
+- tab_bar_content_clip
+- click_scroll_fraction_alignment
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
