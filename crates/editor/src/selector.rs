@@ -41,6 +41,7 @@
 use crate::font::FontMetrics;
 use crate::input::{Key, KeyEvent, MouseEventKind};
 use crate::mini_buffer::MiniBuffer;
+use crate::row_scroller::RowScroller;
 
 /// The outcome of handling an input event in the selector widget.
 ///
@@ -73,6 +74,7 @@ pub enum SelectorOutcome {
 /// - Navigation (up/down arrows)
 /// - Confirmation (Enter) and cancellation (Escape)
 /// - Mouse selection and confirmation
+// Chunk: docs/chunks/file_picker_mini_buffer - MiniBuffer-backed query editing
 pub struct SelectorWidget {
     /// Single-line MiniBuffer for query editing with full affordance set
     /// (word-jump, kill-line, shift-selection, clipboard, Emacs bindings).
@@ -82,10 +84,8 @@ pub struct SelectorWidget {
     /// Index into `items` of the currently highlighted entry.
     /// Always clamped to valid bounds (0..items.len(), or 0 if empty).
     selected_index: usize,
-    /// Index of the first item visible in the list (for scrolling).
-    view_offset: usize,
-    /// Number of items that can be displayed in the visible area.
-    visible_items: usize,
+    /// Scroll state for the item list, providing fractional-pixel scroll tracking.
+    scroll: RowScroller,
 }
 
 impl Default for SelectorWidget {
@@ -96,6 +96,7 @@ impl Default for SelectorWidget {
 
 impl SelectorWidget {
     /// Creates a new selector widget with empty query, no items, and index 0.
+    // Chunk: docs/chunks/file_picker_mini_buffer - Zero-argument constructor with default FontMetrics
     pub fn new() -> Self {
         // Default metrics for MiniBuffer (values don't affect query behavior,
         // only internal viewport calculations which aren't used by selector)
@@ -111,12 +112,12 @@ impl SelectorWidget {
             mini_buffer: MiniBuffer::new(metrics),
             items: Vec::new(),
             selected_index: 0,
-            view_offset: 0,
-            visible_items: 0,
+            scroll: RowScroller::new(metrics.line_height as f32),
         }
     }
 
     /// Returns the current query string.
+    // Chunk: docs/chunks/file_picker_mini_buffer - Query accessor delegating to mini_buffer.content()
     pub fn query(&self) -> String {
         self.mini_buffer.content()
     }
@@ -133,26 +134,35 @@ impl SelectorWidget {
         &self.items
     }
 
-    /// Returns the current view offset (index of first visible item).
-    pub fn view_offset(&self) -> usize {
-        self.view_offset
-    }
-
-    /// Sets the number of visible items in the display area.
+    // Chunk: docs/chunks/file_picker_scroll - Setter for visible area height
+    /// Updates the visible size from the pixel height of the list area.
     ///
-    /// This value is used by `handle_key` to keep the selection visible
-    /// when navigating with arrow keys.
-    pub fn set_visible_items(&mut self, n: usize) {
-        self.visible_items = n;
+    /// This forwards to `RowScroller::update_size(height_px)`, which computes
+    /// visible_rows from `height_px / row_height`.
+    pub fn update_visible_size(&mut self, height_px: f32) {
+        self.scroll.update_size(height_px);
     }
 
-    /// Replaces the item list and clamps the selected index and view_offset to valid bounds.
+    /// Sets the row height (item height) in pixels.
+    ///
+    /// Call this when font metrics change.
+    pub fn set_item_height(&mut self, height: f32) {
+        // Reconstruct the scroller with the new row height, preserving scroll state
+        let offset = self.scroll.scroll_offset_px();
+        let visible_rows = self.scroll.visible_rows();
+        self.scroll = RowScroller::new(height);
+        self.scroll.update_size(visible_rows as f32 * height);
+        self.scroll.set_scroll_offset_px(offset, self.items.len());
+    }
+
+    // Chunk: docs/chunks/file_picker_scroll - Clamps scroll offset when item list shrinks
+    /// Replaces the item list and clamps the selected index and scroll offset to valid bounds.
     ///
     /// If the new list has fewer items than the current `selected_index`,
     /// the index is clamped to `new_items.len() - 1` (or 0 if empty).
     ///
-    /// The `view_offset` is also clamped to ensure it doesn't point past the
-    /// new end of the list (e.g., after a query narrows results).
+    /// The scroll offset is re-clamped to the new item count without resetting
+    /// to zero (e.g., after a query narrows results).
     pub fn set_items(&mut self, items: Vec<String>) {
         self.items = items;
         // Clamp selected_index to valid range
@@ -161,9 +171,9 @@ impl SelectorWidget {
         } else {
             self.selected_index = self.selected_index.min(self.items.len() - 1);
         }
-        // Clamp view_offset to valid range
-        let max_offset = self.items.len().saturating_sub(self.visible_items);
-        self.view_offset = self.view_offset.min(max_offset);
+        // Re-clamp scroll offset to new item count without resetting to zero
+        let px = self.scroll.scroll_offset_px();
+        self.scroll.set_scroll_offset_px(px, self.items.len());
     }
 
     /// Handles a keyboard event and returns the appropriate outcome.
@@ -180,14 +190,13 @@ impl SelectorWidget {
     /// The MiniBuffer provides full editing affordances: character input, backspace,
     /// word navigation (Option+Left/Right), kill-line (Ctrl+K), selection (Shift+arrows),
     /// clipboard operations (Cmd+C/V/X), and Emacs-style bindings (Ctrl+A/E/K).
+    // Chunk: docs/chunks/file_picker_mini_buffer - Key handling with MiniBuffer delegation
+    // Chunk: docs/chunks/file_picker_scroll - Keeps selection visible when navigating
     pub fn handle_key(&mut self, event: &KeyEvent) -> SelectorOutcome {
         match &event.key {
             Key::Up => {
                 self.selected_index = self.selected_index.saturating_sub(1);
-                // Keep selection visible: if selected_index is above view_offset, scroll up
-                if self.selected_index < self.view_offset {
-                    self.view_offset = self.selected_index;
-                }
+                self.scroll.ensure_visible(self.selected_index, self.items.len());
                 SelectorOutcome::Pending
             }
             Key::Down => {
@@ -197,12 +206,7 @@ impl SelectorWidget {
                         self.selected_index += 1;
                     }
                 }
-                // Keep selection visible: if selected_index is past the visible window, scroll down
-                if self.visible_items > 0
-                    && self.selected_index >= self.view_offset + self.visible_items
-                {
-                    self.view_offset = self.selected_index - self.visible_items + 1;
-                }
+                self.scroll.ensure_visible(self.selected_index, self.items.len());
                 SelectorOutcome::Pending
             }
             Key::Return => {
@@ -225,42 +229,24 @@ impl SelectorWidget {
         }
     }
 
-    /// Handles a scroll event by adjusting the view offset.
+    // Chunk: docs/chunks/file_picker_scroll - Translates pixel deltas into scroll offset
+    /// Handles a scroll event by adjusting the scroll offset.
     ///
     /// # Arguments
     ///
     /// * `delta_y` - The raw pixel delta (positive = scroll down / content moves up).
-    /// * `item_height` - The height of each item row in pixels.
-    /// * `visible_items` - The number of items visible in the display area.
     ///
     /// # Behavior
     ///
-    /// - Computes rows to shift: `(delta_y / item_height).round() as isize`
-    /// - Updates `view_offset` by adding the row delta
-    /// - Clamps `view_offset` to `0..=items.len().saturating_sub(visible_items)`
-    /// - No-op if items fit entirely within `visible_items`
-    pub fn handle_scroll(&mut self, delta_y: f64, item_height: f64, visible_items: usize) {
-        // No-op if list fits within visible area
-        if self.items.len() <= visible_items {
-            return;
-        }
-
-        // No-op on empty list
-        if self.items.is_empty() {
-            return;
-        }
-
-        // Compute rows to shift
-        let rows = (delta_y / item_height).round() as isize;
-
-        // Update view_offset with clamping
-        let new_offset = (self.view_offset as isize + rows)
-            .max(0)
-            .min((self.items.len().saturating_sub(visible_items)) as isize) as usize;
-
-        self.view_offset = new_offset;
+    /// Accumulates the raw pixel delta via `RowScroller::set_scroll_offset_px`.
+    /// No rounding to row boundaries — fractional positions are preserved for
+    /// smooth scrolling.
+    pub fn handle_scroll(&mut self, delta_y: f64) {
+        let new_px = self.scroll.scroll_offset_px() + delta_y as f32;
+        self.scroll.set_scroll_offset_px(new_px, self.items.len());
     }
 
+    // Chunk: docs/chunks/file_picker_scroll - Maps visible row to actual item index
     /// Handles a mouse event and returns the appropriate outcome.
     ///
     /// # Parameters
@@ -273,14 +259,14 @@ impl SelectorWidget {
     /// # Behavior
     ///
     /// - **Down on a list row**: Sets `selected_index` to that row (accounting for
-    ///   `view_offset`), returns `Pending`.
+    ///   scroll offset), returns `Pending`.
     /// - **Up on same row as `selected_index`**: Returns `Confirmed(selected_index)`.
     /// - **Up on different row**: Sets `selected_index` to that row, returns `Pending`.
     /// - **Outside list bounds** (above or below the list): Returns `Pending` (no-op).
     /// - **Moved**: Returns `Pending` (no-op).
     ///
-    /// Note: The `row` computed from the click position is the visible row (0 = first
-    /// visible item). The actual item index is `view_offset + row`.
+    /// Note: The hit-testing accounts for fractional scroll offset to ensure the
+    /// clicked pixel maps to the same item the renderer draws at that position.
     pub fn handle_mouse(
         &mut self,
         position: (f64, f64),
@@ -293,12 +279,12 @@ impl SelectorWidget {
             return SelectorOutcome::Pending;
         }
 
-        // Compute which visible row was clicked
-        let relative_y = position.1 - list_origin_y;
-        let visible_row = (relative_y / item_height) as usize;
-
-        // Compute the actual item index (accounting for view_offset)
-        let item_index = self.view_offset + visible_row;
+        // Compute which item was clicked, accounting for fractional scroll offset
+        let first = self.scroll.first_visible_row();
+        let frac = self.scroll.scroll_fraction_px() as f64;
+        let relative_y = position.1 - list_origin_y + frac;
+        let row = (relative_y / item_height).floor() as usize;
+        let item_index = first + row;
 
         // Check if item_index is within valid range
         if item_index >= self.items.len() {
@@ -320,6 +306,34 @@ impl SelectorWidget {
             }
             MouseEventKind::Moved => SelectorOutcome::Pending,
         }
+    }
+
+    // =========================================================================
+    // New public accessors for RowScroller-based scroll state
+    // =========================================================================
+
+    // Chunk: docs/chunks/file_picker_scroll - Accessor for first visible item index
+    /// Returns the index of the first visible item.
+    ///
+    /// Delegates to `RowScroller::first_visible_row()`.
+    pub fn first_visible_item(&self) -> usize {
+        self.scroll.first_visible_row()
+    }
+
+    /// Returns the fractional pixel offset within the top row.
+    ///
+    /// Delegates to `RowScroller::scroll_fraction_px()`. Renderers use this
+    /// to offset item drawing for smooth sub-row scrolling.
+    pub fn scroll_fraction_px(&self) -> f32 {
+        self.scroll.scroll_fraction_px()
+    }
+
+    /// Returns the range of items visible in the viewport.
+    ///
+    /// Delegates to `RowScroller::visible_range(item_count)`. The range
+    /// includes partially visible items at the top and bottom.
+    pub fn visible_item_range(&self) -> std::ops::Range<usize> {
+        self.scroll.visible_range(self.items.len())
     }
 }
 
@@ -360,30 +374,31 @@ mod tests {
     }
 
     // =========================================================================
-    // Scroll support: view_offset and visible_items
+    // Scroll support: first_visible_item and update_visible_size
     // =========================================================================
 
     #[test]
-    fn new_widget_has_view_offset_zero() {
+    fn new_widget_has_first_visible_item_zero() {
         let widget = SelectorWidget::new();
-        assert_eq!(widget.view_offset(), 0);
+        assert_eq!(widget.first_visible_item(), 0);
     }
 
     #[test]
-    fn new_widget_has_visible_items_zero() {
+    fn new_widget_has_zero_scroll_fraction() {
         let widget = SelectorWidget::new();
-        // visible_items is internal but affects scroll behavior
-        // We verify it's 0 by checking that arrow navigation doesn't auto-scroll
-        // with default settings (visible_items = 0)
-        assert_eq!(widget.view_offset(), 0);
+        assert!((widget.scroll_fraction_px() - 0.0).abs() < 0.001);
     }
 
     #[test]
-    fn set_visible_items_stores_value() {
+    fn update_visible_size_sets_visible_rows() {
         let mut widget = SelectorWidget::new();
-        widget.set_visible_items(10);
-        // visible_items is used by handle_key for scroll calculations
-        // We verify by testing handle_key behavior in later tests
+        // row_height is 16.0 from default FontMetrics
+        widget.update_visible_size(80.0); // 80 / 16 = 5 visible rows
+        // We verify by checking that scrolling works correctly
+        widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
+        // Scroll 5 rows (80 pixels)
+        widget.handle_scroll(80.0);
+        assert_eq!(widget.first_visible_item(), 5);
     }
 
     // =========================================================================
@@ -391,32 +406,34 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn scroll_down_increments_view_offset() {
+    fn scroll_down_increments_first_visible_item() {
         let mut widget = SelectorWidget::new();
-        // 20 items, 5 visible
+        // 20 items, 5 visible (row_height = 16.0)
         widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
-        assert_eq!(widget.view_offset(), 0);
+        widget.update_visible_size(80.0); // 5 visible rows
+        assert_eq!(widget.first_visible_item(), 0);
 
-        // Scroll down by 2 rows (item_height = 20, delta = 40)
-        widget.handle_scroll(40.0, 20.0, 5);
+        // Scroll down by 2 rows (row_height = 16, delta = 32)
+        widget.handle_scroll(32.0);
 
-        assert_eq!(widget.view_offset(), 2);
+        assert_eq!(widget.first_visible_item(), 2);
     }
 
     #[test]
-    fn scroll_up_decrements_view_offset() {
+    fn scroll_up_decrements_first_visible_item() {
         let mut widget = SelectorWidget::new();
         // 20 items, 5 visible
         widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
+        widget.update_visible_size(80.0); // 5 visible rows
 
-        // Start at offset 5
-        widget.handle_scroll(100.0, 20.0, 5); // scroll down 5 rows
-        assert_eq!(widget.view_offset(), 5);
+        // Start at row 5 (scroll 80 pixels)
+        widget.handle_scroll(80.0);
+        assert_eq!(widget.first_visible_item(), 5);
 
         // Scroll up by 2 rows (negative delta)
-        widget.handle_scroll(-40.0, 20.0, 5);
+        widget.handle_scroll(-32.0);
 
-        assert_eq!(widget.view_offset(), 3);
+        assert_eq!(widget.first_visible_item(), 3);
     }
 
     #[test]
@@ -424,25 +441,27 @@ mod tests {
         let mut widget = SelectorWidget::new();
         // 10 items, 5 visible -> max offset is 5
         widget.set_items((0..10).map(|i| format!("item{}", i)).collect());
+        widget.update_visible_size(80.0); // 5 visible rows
 
         // Try to scroll way past the end
-        widget.handle_scroll(1000.0, 20.0, 5);
+        widget.handle_scroll(1000.0);
 
         // Should clamp at max offset (10 - 5 = 5)
-        assert_eq!(widget.view_offset(), 5);
+        assert_eq!(widget.first_visible_item(), 5);
     }
 
     #[test]
     fn scroll_clamps_at_zero() {
         let mut widget = SelectorWidget::new();
         widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
-        assert_eq!(widget.view_offset(), 0);
+        widget.update_visible_size(80.0);
+        assert_eq!(widget.first_visible_item(), 0);
 
         // Try to scroll up from 0 (negative delta)
-        widget.handle_scroll(-100.0, 20.0, 5);
+        widget.handle_scroll(-100.0);
 
         // Should stay at 0
-        assert_eq!(widget.view_offset(), 0);
+        assert_eq!(widget.first_visible_item(), 0);
     }
 
     #[test]
@@ -450,26 +469,28 @@ mod tests {
         let mut widget = SelectorWidget::new();
         // 3 items, 5 visible -> list fits entirely
         widget.set_items(vec!["a".into(), "b".into(), "c".into()]);
-        assert_eq!(widget.view_offset(), 0);
+        widget.update_visible_size(80.0);
+        assert_eq!(widget.first_visible_item(), 0);
 
         // Try to scroll
-        widget.handle_scroll(100.0, 20.0, 5);
+        widget.handle_scroll(100.0);
 
         // Should remain at 0 (no-op)
-        assert_eq!(widget.view_offset(), 0);
+        assert_eq!(widget.first_visible_item(), 0);
     }
 
     #[test]
     fn scroll_on_empty_list_is_noop() {
         let mut widget = SelectorWidget::new();
         // Empty list
-        assert_eq!(widget.view_offset(), 0);
+        widget.update_visible_size(80.0);
+        assert_eq!(widget.first_visible_item(), 0);
 
         // Try to scroll
-        widget.handle_scroll(100.0, 20.0, 5);
+        widget.handle_scroll(100.0);
 
         // Should remain at 0
-        assert_eq!(widget.view_offset(), 0);
+        assert_eq!(widget.first_visible_item(), 0);
     }
 
     // =========================================================================
@@ -477,152 +498,160 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn down_past_visible_window_increments_view_offset() {
+    fn down_past_visible_window_increments_first_visible_item() {
         let mut widget = SelectorWidget::new();
-        // 10 items, visible_items = 3
+        // 10 items, visible_rows = 3 (row_height = 16)
         widget.set_items((0..10).map(|i| format!("item{}", i)).collect());
-        widget.set_visible_items(3);
+        widget.update_visible_size(48.0); // 3 visible rows
 
-        // Start at index 0, view_offset 0 (items 0, 1, 2 visible)
+        // Start at index 0, first_visible_item 0 (items 0, 1, 2 visible)
         assert_eq!(widget.selected_index(), 0);
-        assert_eq!(widget.view_offset(), 0);
+        assert_eq!(widget.first_visible_item(), 0);
 
         // Navigate down to index 2 (still in visible window)
         widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
         widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
         assert_eq!(widget.selected_index(), 2);
-        assert_eq!(widget.view_offset(), 0); // Still visible
+        assert_eq!(widget.first_visible_item(), 0); // Still visible
 
         // Navigate down to index 3 (past visible window)
         widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
         assert_eq!(widget.selected_index(), 3);
-        // view_offset should adjust to keep selection visible
-        // selected_index 3 should be visible, so view_offset = 3 - 3 + 1 = 1
-        assert_eq!(widget.view_offset(), 1);
+        // first_visible_item should adjust to keep selection visible
+        // selected_index 3 should be visible, so first_visible_item = 3 - 3 + 1 = 1
+        assert_eq!(widget.first_visible_item(), 1);
     }
 
     #[test]
-    fn up_past_visible_window_decrements_view_offset() {
+    fn up_past_visible_window_decrements_first_visible_item() {
         let mut widget = SelectorWidget::new();
-        // 10 items, visible_items = 3
+        // 10 items, visible_rows = 3
         widget.set_items((0..10).map(|i| format!("item{}", i)).collect());
-        widget.set_visible_items(3);
+        widget.update_visible_size(48.0); // 3 visible rows
 
-        // Scroll down first so view_offset is 3 (items 3, 4, 5 visible)
-        widget.handle_scroll(60.0, 20.0, 3); // scroll 3 rows
-        assert_eq!(widget.view_offset(), 3);
-
-        // Set selected_index to 3 (top of visible window)
-        // Navigate down to 3 first
-        for _ in 0..3 {
+        // Navigate down to item 5 first (this will auto-scroll as we go)
+        for _ in 0..5 {
             widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
         }
-        assert_eq!(widget.selected_index(), 3);
+        assert_eq!(widget.selected_index(), 5);
+        // first_visible_item should have scrolled to keep index 5 visible
+        // With visible_rows=3, keeping index 5 visible means first_visible_item=3
+        assert_eq!(widget.first_visible_item(), 3);
 
-        // Navigate up - should scroll up
+        // Navigate up - selected_index goes from 5 to 4, still visible in window 3-5
+        widget.handle_key(&KeyEvent::new(Key::Up, Modifiers::default()));
+        assert_eq!(widget.selected_index(), 4);
+        assert_eq!(widget.first_visible_item(), 3); // No change needed
+
+        // Navigate up again - selected_index goes to 3, still visible
+        widget.handle_key(&KeyEvent::new(Key::Up, Modifiers::default()));
+        assert_eq!(widget.selected_index(), 3);
+        assert_eq!(widget.first_visible_item(), 3); // No change needed
+
+        // Navigate up again - selected_index goes to 2, which is above the window
         widget.handle_key(&KeyEvent::new(Key::Up, Modifiers::default()));
         assert_eq!(widget.selected_index(), 2);
-        // view_offset should adjust to show index 2
-        assert_eq!(widget.view_offset(), 2);
+        // first_visible_item should adjust to show index 2
+        assert_eq!(widget.first_visible_item(), 2);
     }
 
     #[test]
-    fn down_within_visible_window_does_not_change_view_offset() {
+    fn down_within_visible_window_does_not_change_first_visible_item() {
         let mut widget = SelectorWidget::new();
-        // 10 items, visible_items = 5
+        // 10 items, visible_rows = 5
         widget.set_items((0..10).map(|i| format!("item{}", i)).collect());
-        widget.set_visible_items(5);
+        widget.update_visible_size(80.0); // 5 visible rows
 
-        assert_eq!(widget.view_offset(), 0);
+        assert_eq!(widget.first_visible_item(), 0);
 
         // Navigate down to index 2 (within visible window 0-4)
         widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
         widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
 
         assert_eq!(widget.selected_index(), 2);
-        assert_eq!(widget.view_offset(), 0); // Should not change
+        assert_eq!(widget.first_visible_item(), 0); // Should not change
     }
 
     #[test]
-    fn up_within_visible_window_does_not_change_view_offset() {
+    fn up_within_visible_window_does_not_change_first_visible_item() {
         let mut widget = SelectorWidget::new();
-        // 10 items, visible_items = 5
+        // 10 items, visible_rows = 5
         widget.set_items((0..10).map(|i| format!("item{}", i)).collect());
-        widget.set_visible_items(5);
+        widget.update_visible_size(80.0); // 5 visible rows
 
         // Move to index 3
         for _ in 0..3 {
             widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
         }
         assert_eq!(widget.selected_index(), 3);
-        assert_eq!(widget.view_offset(), 0);
+        assert_eq!(widget.first_visible_item(), 0);
 
         // Navigate up to index 1 (still within visible window)
         widget.handle_key(&KeyEvent::new(Key::Up, Modifiers::default()));
         widget.handle_key(&KeyEvent::new(Key::Up, Modifiers::default()));
 
         assert_eq!(widget.selected_index(), 1);
-        assert_eq!(widget.view_offset(), 0); // Should not change
+        assert_eq!(widget.first_visible_item(), 0); // Should not change
     }
 
     // =========================================================================
-    // set_items view_offset clamping
+    // set_items scroll offset clamping
     // =========================================================================
 
     #[test]
-    fn set_items_clamps_view_offset_when_list_shrinks() {
+    fn set_items_clamps_scroll_offset_when_list_shrinks() {
         let mut widget = SelectorWidget::new();
-        // Start with 20 items, visible = 5
+        // Start with 20 items, visible = 5 (row_height = 16)
         widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
-        widget.set_visible_items(5);
+        widget.update_visible_size(80.0); // 5 visible rows
 
-        // Scroll to view_offset 10
-        widget.handle_scroll(200.0, 20.0, 5); // scroll 10 rows
-        assert_eq!(widget.view_offset(), 10);
+        // Scroll to row 10 (160 pixels)
+        widget.handle_scroll(160.0);
+        assert_eq!(widget.first_visible_item(), 10);
 
         // Now set fewer items (only 8 items)
         // max_offset should be 8 - 5 = 3
         widget.set_items((0..8).map(|i| format!("item{}", i)).collect());
 
-        assert_eq!(widget.view_offset(), 3); // Clamped to max valid offset
+        assert_eq!(widget.first_visible_item(), 3); // Clamped to max valid offset
     }
 
     #[test]
-    fn set_items_preserves_view_offset_when_list_grows() {
+    fn set_items_preserves_scroll_offset_when_list_grows() {
         let mut widget = SelectorWidget::new();
         // Start with 10 items, visible = 5
         widget.set_items((0..10).map(|i| format!("item{}", i)).collect());
-        widget.set_visible_items(5);
+        widget.update_visible_size(80.0); // 5 visible rows
 
-        // Scroll to view_offset 3
-        widget.handle_scroll(60.0, 20.0, 5); // scroll 3 rows
-        assert_eq!(widget.view_offset(), 3);
+        // Scroll to row 3 (48 pixels)
+        widget.handle_scroll(48.0);
+        assert_eq!(widget.first_visible_item(), 3);
 
         // Now add more items (20 items)
         widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
 
-        // view_offset should be preserved (3 is still valid)
-        assert_eq!(widget.view_offset(), 3);
+        // first_visible_item should be preserved (3 is still valid)
+        assert_eq!(widget.first_visible_item(), 3);
     }
 
     // =========================================================================
-    // handle_mouse with view_offset
+    // handle_mouse with scroll offset
     // =========================================================================
 
     #[test]
-    fn mouse_click_with_view_offset_selects_correct_item() {
+    fn mouse_click_with_scroll_offset_selects_correct_item() {
         let mut widget = SelectorWidget::new();
-        // 20 items, visible = 5
+        // 20 items, visible = 5 (row_height = 16)
         widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
-        widget.set_visible_items(5);
+        widget.update_visible_size(80.0); // 5 visible rows
 
-        // Scroll to view_offset 5 (items 5-9 visible)
-        widget.handle_scroll(100.0, 20.0, 5);
-        assert_eq!(widget.view_offset(), 5);
+        // Scroll to row 5 (80 pixels)
+        widget.handle_scroll(80.0);
+        assert_eq!(widget.first_visible_item(), 5);
 
-        // Click on visible row 0 (y=5 is in first visible row with height 20)
+        // Click on visible row 0 (y=5 is in first visible row with height 16)
         // This should select item 5, not item 0
-        let outcome = widget.handle_mouse((50.0, 5.0), MouseEventKind::Down, 20.0, 0.0);
+        let outcome = widget.handle_mouse((50.0, 5.0), MouseEventKind::Down, 16.0, 0.0);
         assert_eq!(outcome, SelectorOutcome::Pending);
         assert_eq!(widget.selected_index(), 5);
     }
@@ -632,15 +661,15 @@ mod tests {
         let mut widget = SelectorWidget::new();
         // 20 items, visible = 5
         widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
-        widget.set_visible_items(5);
+        widget.update_visible_size(80.0); // 5 visible rows
 
-        // Scroll to view_offset 5
-        widget.handle_scroll(100.0, 20.0, 5);
-        assert_eq!(widget.view_offset(), 5);
+        // Scroll to row 5
+        widget.handle_scroll(80.0);
+        assert_eq!(widget.first_visible_item(), 5);
 
-        // Click on visible row 2 (y=45 is in row 2 with height 20)
+        // Click on visible row 2 (y=35 is in row 2 with height 16)
         // This should select item 5 + 2 = 7
-        let outcome = widget.handle_mouse((50.0, 45.0), MouseEventKind::Down, 20.0, 0.0);
+        let outcome = widget.handle_mouse((50.0, 35.0), MouseEventKind::Down, 16.0, 0.0);
         assert_eq!(outcome, SelectorOutcome::Pending);
         assert_eq!(widget.selected_index(), 7);
     }
@@ -650,17 +679,18 @@ mod tests {
         let mut widget = SelectorWidget::new();
         // 20 items, visible = 5
         widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
-        widget.set_visible_items(5);
+        widget.update_visible_size(80.0); // 5 visible rows
 
-        // Scroll to view_offset 5
-        widget.handle_scroll(100.0, 20.0, 5);
-        assert_eq!(widget.view_offset(), 5);
+        // Scroll to row 5
+        widget.handle_scroll(80.0);
+        assert_eq!(widget.first_visible_item(), 5);
 
         // Click down then up on visible row 1 (item 6)
-        widget.handle_mouse((50.0, 25.0), MouseEventKind::Down, 20.0, 0.0);
+        // Row 1 is at y=16 to y=32 with height 16
+        widget.handle_mouse((50.0, 20.0), MouseEventKind::Down, 16.0, 0.0);
         assert_eq!(widget.selected_index(), 6);
 
-        let outcome = widget.handle_mouse((50.0, 25.0), MouseEventKind::Up, 20.0, 0.0);
+        let outcome = widget.handle_mouse((50.0, 20.0), MouseEventKind::Up, 16.0, 0.0);
         assert_eq!(outcome, SelectorOutcome::Confirmed(6));
     }
 
@@ -669,17 +699,17 @@ mod tests {
         let mut widget = SelectorWidget::new();
         // 10 items, visible = 5
         widget.set_items((0..10).map(|i| format!("item{}", i)).collect());
-        widget.set_visible_items(5);
+        widget.update_visible_size(80.0); // 5 visible rows
 
-        // Scroll to view_offset 7 (items 7, 8, 9 visible - only 3 items)
-        widget.handle_scroll(140.0, 20.0, 5);
-        assert_eq!(widget.view_offset(), 5); // max_offset is 10-5=5
+        // Scroll to max offset (items 5-9 visible)
+        widget.handle_scroll(1000.0); // Will clamp
+        assert_eq!(widget.first_visible_item(), 5); // max_offset is 10-5=5
 
-        // Retry with offset 5 (items 5-9 visible)
         // Click on visible row 6 would be item 5+6=11 which is out of bounds
-        widget.handle_mouse((50.0, 125.0), MouseEventKind::Down, 20.0, 0.0);
+        // Row 6 starts at y=96 with height 16
+        widget.handle_mouse((50.0, 100.0), MouseEventKind::Down, 16.0, 0.0);
         // Should be no-op because item 11 doesn't exist
-        // (row 6 = y position 120-140, item 5+6=11 is out of bounds)
+        // (row 6 = y position 96-112, item 5+6=11 is out of bounds)
     }
 
     // =========================================================================
@@ -990,11 +1020,12 @@ mod tests {
     fn mouse_down_on_row_selects_that_row() {
         let mut widget = SelectorWidget::new();
         widget.set_items(vec!["a".into(), "b".into(), "c".into(), "d".into(), "e".into()]);
+        widget.update_visible_size(80.0); // All items visible
         assert_eq!(widget.selected_index(), 0);
 
-        // Click on row 2 (item_height=20, list_origin_y=0)
-        // Row 2 starts at y=40 (rows 0-1 are 0-39)
-        let outcome = widget.handle_mouse((50.0, 45.0), MouseEventKind::Down, 20.0, 0.0);
+        // Click on row 2 (row_height=16, list_origin_y=0)
+        // Row 2 starts at y=32 (rows 0-1 are 0-31)
+        let outcome = widget.handle_mouse((50.0, 35.0), MouseEventKind::Down, 16.0, 0.0);
         assert_eq!(outcome, SelectorOutcome::Pending);
         assert_eq!(widget.selected_index(), 2);
     }
@@ -1003,11 +1034,12 @@ mod tests {
     fn mouse_down_outside_list_bounds_above_is_noop() {
         let mut widget = SelectorWidget::new();
         widget.set_items(vec!["a".into(), "b".into(), "c".into()]);
+        widget.update_visible_size(80.0); // All items visible
         widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
         assert_eq!(widget.selected_index(), 1);
 
         // Click above the list (list starts at y=100)
-        let outcome = widget.handle_mouse((50.0, 50.0), MouseEventKind::Down, 20.0, 100.0);
+        let outcome = widget.handle_mouse((50.0, 50.0), MouseEventKind::Down, 16.0, 100.0);
         assert_eq!(outcome, SelectorOutcome::Pending);
         assert_eq!(widget.selected_index(), 1); // Should not change
     }
@@ -1016,11 +1048,12 @@ mod tests {
     fn mouse_down_outside_list_bounds_below_is_noop() {
         let mut widget = SelectorWidget::new();
         widget.set_items(vec!["a".into(), "b".into(), "c".into()]);
+        widget.update_visible_size(80.0); // All items visible
         assert_eq!(widget.selected_index(), 0);
 
-        // Click below the list (3 items * 20px = 60px height, list starts at y=0)
+        // Click below the list (3 items * 16px = 48px height, list starts at y=0)
         // Row 3 and beyond is out of bounds
-        let outcome = widget.handle_mouse((50.0, 65.0), MouseEventKind::Down, 20.0, 0.0);
+        let outcome = widget.handle_mouse((50.0, 50.0), MouseEventKind::Down, 16.0, 0.0);
         assert_eq!(outcome, SelectorOutcome::Pending);
         assert_eq!(widget.selected_index(), 0); // Should not change
     }
@@ -1029,12 +1062,15 @@ mod tests {
     fn mouse_up_on_same_row_as_selected_confirms() {
         let mut widget = SelectorWidget::new();
         widget.set_items(vec!["a".into(), "b".into(), "c".into()]);
+        widget.update_visible_size(80.0); // 5 visible rows (all items visible)
         // Select row 1
         widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
         assert_eq!(widget.selected_index(), 1);
+        assert_eq!(widget.first_visible_item(), 0); // No scrolling needed
 
-        // Mouse up on row 1 (y=25 is in row 1 with height 20)
-        let outcome = widget.handle_mouse((50.0, 25.0), MouseEventKind::Up, 20.0, 0.0);
+        // Mouse up on row 1 (y=20 is in row 1 with height 16, the default row_height)
+        // Row 0: y=0..16, Row 1: y=16..32
+        let outcome = widget.handle_mouse((50.0, 20.0), MouseEventKind::Up, 16.0, 0.0);
         assert_eq!(outcome, SelectorOutcome::Confirmed(1));
     }
 
@@ -1042,10 +1078,12 @@ mod tests {
     fn mouse_up_on_different_row_selects_but_does_not_confirm() {
         let mut widget = SelectorWidget::new();
         widget.set_items(vec!["a".into(), "b".into(), "c".into()]);
+        widget.update_visible_size(80.0); // All items visible
         assert_eq!(widget.selected_index(), 0);
 
         // Mouse up on row 2 (different from selected row 0)
-        let outcome = widget.handle_mouse((50.0, 45.0), MouseEventKind::Up, 20.0, 0.0);
+        // Row 2 is at y=32..48 with row_height=16
+        let outcome = widget.handle_mouse((50.0, 35.0), MouseEventKind::Up, 16.0, 0.0);
         assert_eq!(outcome, SelectorOutcome::Pending);
         assert_eq!(widget.selected_index(), 2); // Should update selection
     }
@@ -1054,9 +1092,10 @@ mod tests {
     fn mouse_moved_is_noop() {
         let mut widget = SelectorWidget::new();
         widget.set_items(vec!["a".into(), "b".into(), "c".into()]);
+        widget.update_visible_size(80.0); // All items visible
         assert_eq!(widget.selected_index(), 0);
 
-        let outcome = widget.handle_mouse((50.0, 45.0), MouseEventKind::Moved, 20.0, 0.0);
+        let outcome = widget.handle_mouse((50.0, 35.0), MouseEventKind::Moved, 16.0, 0.0);
         assert_eq!(outcome, SelectorOutcome::Pending);
         assert_eq!(widget.selected_index(), 0); // Should not change
     }
@@ -1064,9 +1103,10 @@ mod tests {
     #[test]
     fn mouse_on_empty_items_is_noop() {
         let mut widget = SelectorWidget::new();
+        widget.update_visible_size(80.0);
         // No items
 
-        let outcome = widget.handle_mouse((50.0, 25.0), MouseEventKind::Down, 20.0, 0.0);
+        let outcome = widget.handle_mouse((50.0, 20.0), MouseEventKind::Down, 16.0, 0.0);
         assert_eq!(outcome, SelectorOutcome::Pending);
     }
 
@@ -1074,12 +1114,13 @@ mod tests {
     fn mouse_with_list_origin_offset() {
         let mut widget = SelectorWidget::new();
         widget.set_items(vec!["a".into(), "b".into(), "c".into()]);
+        widget.update_visible_size(80.0); // All items visible
         assert_eq!(widget.selected_index(), 0);
 
-        // List starts at y=50, item_height=30
-        // Row 1 is at y=50+30=80 to y=50+60=110
-        // Click at y=95 should be row 1
-        let outcome = widget.handle_mouse((50.0, 95.0), MouseEventKind::Down, 30.0, 50.0);
+        // List starts at y=50, row_height=16
+        // Row 1 is at y=50+16=66 to y=50+32=82
+        // Click at y=70 should be row 1
+        let outcome = widget.handle_mouse((50.0, 70.0), MouseEventKind::Down, 16.0, 50.0);
         assert_eq!(outcome, SelectorOutcome::Pending);
         assert_eq!(widget.selected_index(), 1);
     }
@@ -1088,12 +1129,123 @@ mod tests {
     fn click_and_release_on_same_row_confirms() {
         let mut widget = SelectorWidget::new();
         widget.set_items(vec!["a".into(), "b".into(), "c".into()]);
+        widget.update_visible_size(80.0); // All items visible
 
         // Simulate a full click: down then up on row 2
-        widget.handle_mouse((50.0, 45.0), MouseEventKind::Down, 20.0, 0.0);
+        // Row 2 is at y=32..48 with row_height=16
+        widget.handle_mouse((50.0, 35.0), MouseEventKind::Down, 16.0, 0.0);
         assert_eq!(widget.selected_index(), 2);
 
-        let outcome = widget.handle_mouse((50.0, 45.0), MouseEventKind::Up, 20.0, 0.0);
+        let outcome = widget.handle_mouse((50.0, 35.0), MouseEventKind::Up, 16.0, 0.0);
         assert_eq!(outcome, SelectorOutcome::Confirmed(2));
+    }
+
+    // =========================================================================
+    // Smooth scroll accumulation tests
+    // =========================================================================
+
+    #[test]
+    fn scroll_accumulates_sub_row_deltas() {
+        let mut widget = SelectorWidget::new();
+        // 20 items, row_height is 16.0 from default FontMetrics
+        widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
+        widget.update_visible_size(80.0); // 5 visible rows
+
+        // Scroll 5 pixels (less than one row)
+        widget.handle_scroll(5.0);
+        assert_eq!(widget.first_visible_item(), 0);
+        assert!((widget.scroll_fraction_px() - 5.0).abs() < 0.001);
+
+        // Scroll another 5 pixels (total 10, still less than row)
+        widget.handle_scroll(5.0);
+        assert_eq!(widget.first_visible_item(), 0);
+        assert!((widget.scroll_fraction_px() - 10.0).abs() < 0.001);
+
+        // Scroll 6 more pixels (total 16, exactly one row)
+        widget.handle_scroll(6.0);
+        assert_eq!(widget.first_visible_item(), 1);
+        assert!((widget.scroll_fraction_px() - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn scroll_preserves_fraction_across_row_boundary() {
+        let mut widget = SelectorWidget::new();
+        widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
+        widget.update_visible_size(80.0);
+
+        // Scroll 20 pixels (1 row + 4 pixels)
+        widget.handle_scroll(20.0);
+        assert_eq!(widget.first_visible_item(), 1);
+        assert!((widget.scroll_fraction_px() - 4.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn visible_item_range_accounts_for_partial_visibility() {
+        let mut widget = SelectorWidget::new();
+        widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
+        widget.update_visible_size(80.0); // 5 visible rows
+
+        // At row 0 with no fraction
+        let range = widget.visible_item_range();
+        // Should include +1 for partially visible bottom row
+        assert_eq!(range, 0..6);
+
+        // Scroll to row 5
+        widget.handle_scroll(80.0);
+        let range = widget.visible_item_range();
+        assert_eq!(range, 5..11);
+    }
+
+    // =========================================================================
+    // Fractional scroll hit-testing tests
+    // =========================================================================
+
+    #[test]
+    fn mouse_click_with_fractional_scroll_selects_correct_item() {
+        let mut widget = SelectorWidget::new();
+        widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
+        widget.update_visible_size(80.0); // 5 visible rows, row_height = 16
+
+        // Scroll 8 pixels (half a row)
+        widget.handle_scroll(8.0);
+        assert_eq!(widget.first_visible_item(), 0);
+        assert!((widget.scroll_fraction_px() - 8.0).abs() < 0.001);
+
+        // Click at y=4 (within the visible portion of item 0, which starts at -8)
+        // The visible portion of item 0 is y=0..8 on screen
+        // relative_y + frac = 4 + 8 = 12, row = floor(12/16) = 0
+        let outcome = widget.handle_mouse((50.0, 4.0), MouseEventKind::Down, 16.0, 0.0);
+        assert_eq!(outcome, SelectorOutcome::Pending);
+        assert_eq!(widget.selected_index(), 0);
+
+        // Click at y=10 (within item 1, which starts at y=8 on screen)
+        // relative_y + frac = 10 + 8 = 18, row = floor(18/16) = 1
+        let outcome = widget.handle_mouse((50.0, 10.0), MouseEventKind::Down, 16.0, 0.0);
+        assert_eq!(outcome, SelectorOutcome::Pending);
+        assert_eq!(widget.selected_index(), 1);
+    }
+
+    #[test]
+    fn mouse_click_near_row_boundary_with_fraction() {
+        let mut widget = SelectorWidget::new();
+        widget.set_items((0..20).map(|i| format!("item{}", i)).collect());
+        widget.update_visible_size(80.0);
+
+        // Scroll 12 pixels (3/4 of a row)
+        widget.handle_scroll(12.0);
+        assert_eq!(widget.first_visible_item(), 0);
+
+        // The visible portion of item 0 is now only y=0..4 on screen
+        // Click at y=3 should still hit item 0
+        // relative_y + frac = 3 + 12 = 15, row = floor(15/16) = 0
+        let outcome = widget.handle_mouse((50.0, 3.0), MouseEventKind::Down, 16.0, 0.0);
+        assert_eq!(outcome, SelectorOutcome::Pending);
+        assert_eq!(widget.selected_index(), 0);
+
+        // Click at y=5 should hit item 1
+        // relative_y + frac = 5 + 12 = 17, row = floor(17/16) = 1
+        let outcome = widget.handle_mouse((50.0, 5.0), MouseEventKind::Down, 16.0, 0.0);
+        assert_eq!(outcome, SelectorOutcome::Pending);
+        assert_eq!(widget.selected_index(), 1);
     }
 }
