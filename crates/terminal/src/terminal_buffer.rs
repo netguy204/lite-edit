@@ -322,6 +322,13 @@ impl TerminalBuffer {
         }
     }
 
+    /// Returns the process ID of the PTY child process, if available.
+    ///
+    /// This is used for sending signals (e.g., SIGTERM for graceful shutdown).
+    pub fn process_id(&self) -> Option<u32> {
+        self.pty.as_ref().and_then(|pty| pty.process_id())
+    }
+
     // =========================================================================
     // Cold Scrollback Support
     // =========================================================================

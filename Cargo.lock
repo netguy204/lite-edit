@@ -398,6 +398,7 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "crossbeam-channel",
+ "libc",
  "lite-edit-buffer",
  "lite-edit-input",
  "portable-pty",

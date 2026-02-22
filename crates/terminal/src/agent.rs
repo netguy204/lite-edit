@@ -439,9 +439,16 @@ impl AgentHandle {
         Ok(())
     }
 
-    /// Stops the running agent.
+    /// Gracefully stops the running agent.
     ///
-    /// Kills the process (SIGKILL) and transitions state to Exited.
+    /// Uses the SIGTERM→wait→SIGKILL pattern:
+    /// 1. Send SIGTERM for graceful shutdown
+    /// 2. Wait briefly (~100ms) polling for exit
+    /// 3. If still alive, send SIGKILL
+    ///
+    /// Exit codes:
+    /// - -15 if process exited from SIGTERM
+    /// - -9 if SIGKILL was required
     ///
     /// # Returns
     ///
@@ -454,11 +461,44 @@ impl AgentHandle {
             ));
         }
 
-        // Kill the process
-        self.terminal.kill()?;
+        // Get the process ID for SIGTERM
+        let pid = self.terminal.process_id();
 
-        // Mark as exited with SIGKILL exit code (-9)
-        self.state_machine.on_exit(-9, Instant::now());
+        if let Some(pid) = pid {
+            // Send SIGTERM for graceful shutdown
+            // SAFETY: libc::kill is a standard POSIX function. We're sending
+            // SIGTERM to a process we spawned and own.
+            let result = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+
+            if result == 0 {
+                // SIGTERM sent successfully, wait briefly for graceful exit
+                const WAIT_ITERATIONS: u32 = 10;
+                const WAIT_INTERVAL_MS: u64 = 10;
+
+                for _ in 0..WAIT_ITERATIONS {
+                    std::thread::sleep(std::time::Duration::from_millis(WAIT_INTERVAL_MS));
+
+                    // Check if process exited
+                    if let Some(code) = self.terminal.try_wait() {
+                        // Process exited gracefully from SIGTERM
+                        self.state_machine.on_exit(code, Instant::now());
+                        return Ok(());
+                    }
+                }
+
+                // Process didn't exit in time, send SIGKILL
+                self.terminal.kill()?;
+                self.state_machine.on_exit(-9, Instant::now());
+            } else {
+                // SIGTERM failed (process may already be dead), try SIGKILL
+                self.terminal.kill()?;
+                self.state_machine.on_exit(-9, Instant::now());
+            }
+        } else {
+            // No PID available, fall back to SIGKILL
+            self.terminal.kill()?;
+            self.state_machine.on_exit(-9, Instant::now());
+        }
 
         Ok(())
     }
