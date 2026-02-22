@@ -206,6 +206,13 @@ pub struct Renderer {
     find_strip_buffer: Option<FindStripGlyphBuffer>,
     /// Current viewport width in pixels (for wrap layout calculation)
     viewport_width_px: f32,
+    // Chunk: docs/chunks/wrap_click_offset - Content width for consistent wrap calculation
+    /// Content area width in pixels (viewport_width - RAIL_WIDTH).
+    ///
+    /// This is the width available for text rendering, excluding the left rail.
+    /// Both the renderer and click handler must use this same value when creating
+    /// WrapLayout instances to ensure consistent `cols_per_row` calculations.
+    content_width_px: f32,
 }
 
 impl Renderer {
@@ -251,6 +258,8 @@ impl Renderer {
         let frame = view.frame();
         let scale = view.scale_factor();
         let viewport_width_px = (frame.size.width * scale) as f32;
+        // Chunk: docs/chunks/wrap_click_offset - Initialize content width
+        let content_width_px = (viewport_width_px - RAIL_WIDTH).max(0.0);
 
         Self {
             command_queue,
@@ -267,6 +276,7 @@ impl Renderer {
             tab_bar_buffer: None,
             find_strip_buffer: None,
             viewport_width_px,
+            content_width_px,
         }
     }
 
@@ -294,11 +304,15 @@ impl Renderer {
     }
 
     // Chunk: docs/chunks/line_wrap_rendering - Create WrapLayout for hit-testing
-    /// Creates a WrapLayout for the current viewport width and font metrics.
+    // Chunk: docs/chunks/wrap_click_offset - Use content_width_px for consistent cols_per_row
+    /// Creates a WrapLayout for the current content width and font metrics.
     ///
     /// This is used by hit-testing code to convert screen positions to buffer positions.
+    /// The content width (viewport - RAIL_WIDTH) is used to ensure the same `cols_per_row`
+    /// value is computed here as in the rendering code, preventing click offset errors
+    /// on continuation rows.
     pub fn wrap_layout(&self) -> WrapLayout {
-        WrapLayout::new(self.viewport_width_px, &self.font.metrics)
+        WrapLayout::new(self.content_width_px, &self.font.metrics)
     }
 
     /// Updates the viewport size based on window dimensions
@@ -311,10 +325,13 @@ impl Renderer {
     /// clamp here. We pass usize::MAX as the buffer line count to prevent
     /// any spurious clamping until the sync occurs.
     // Chunk: docs/chunks/resize_click_alignment - Viewport update_size now takes line count
+    // Chunk: docs/chunks/wrap_click_offset - Update content_width_px on resize
     pub fn update_viewport_size(&mut self, window_width: f32, window_height: f32) {
         // Use usize::MAX since scroll is synced externally from EditorState
         self.viewport.update_size(window_height, usize::MAX);
         self.viewport_width_px = window_width;
+        // Content width is viewport minus the left rail
+        self.content_width_px = (window_width - RAIL_WIDTH).max(0.0);
     }
 
     /// Sets cursor visibility
@@ -379,13 +396,16 @@ impl Renderer {
     // Chunk: docs/chunks/viewport_fractional_scroll - Pass y_offset for smooth scrolling
     // Chunk: docs/chunks/line_wrap_rendering - Use WrapLayout for soft wrapping
     // Chunk: docs/chunks/renderer_polymorphic_buffer - Accept &dyn BufferView for polymorphic rendering
+    // Chunk: docs/chunks/wrap_click_offset - Use content_width_px for consistent cols_per_row
     /// Updates the glyph buffer from the given buffer view and viewport
     fn update_glyph_buffer(&mut self, view: &dyn BufferView) {
         // Get the fractional scroll offset for smooth scrolling
         let y_offset = self.viewport.scroll_fraction_px();
 
-        // Create wrap layout for current viewport width
-        let wrap_layout = WrapLayout::new(self.viewport_width_px, &self.font.metrics);
+        // Create wrap layout for current content width (viewport - RAIL_WIDTH).
+        // Using content_width_px ensures the same cols_per_row value is computed
+        // here as in wrap_layout(), which is used for click hit-testing.
+        let wrap_layout = WrapLayout::new(self.content_width_px, &self.font.metrics);
 
         // Use wrap-aware rendering
         self.glyph_buffer.update_from_buffer_with_wrap(
