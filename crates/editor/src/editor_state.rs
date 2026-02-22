@@ -4783,6 +4783,7 @@ mod tests {
     /// Bug: Before the fix, new tabs had visible_lines = 0, causing dirty region
     /// calculations to produce DirtyRegion::None for all mutations, preventing
     /// cursor repaints after mouse clicks.
+    // Chunk: docs/chunks/tab_click_cursor_placement - Regression test verifying new tabs have correct visible_lines
     #[test]
     fn test_new_tab_viewport_is_sized() {
         use crate::tab_bar::TAB_BAR_HEIGHT;
@@ -4837,6 +4838,7 @@ mod tests {
     ///
     /// Bug: Before the fix, switching to a tab that was created but never activated
     /// would leave visible_lines = 0, preventing cursor repaints.
+    // Chunk: docs/chunks/tab_click_cursor_placement - Regression test verifying tab switching maintains correct visible_lines
     #[test]
     fn test_switch_tab_viewport_is_sized() {
         use crate::tab_bar::TAB_BAR_HEIGHT;
@@ -4887,6 +4889,7 @@ mod tests {
     ///
     /// Bug: Before the fix, Cmd+T followed by file picker confirmation would leave
     /// the new tab with visible_lines = 0.
+    // Chunk: docs/chunks/tab_click_cursor_placement - Regression test verifying file picker flow maintains correct visible_lines
     #[test]
     fn test_associate_file_viewport_is_sized() {
         use crate::tab_bar::TAB_BAR_HEIGHT;
@@ -4942,6 +4945,7 @@ mod tests {
     ///
     /// This tests the early return in sync_active_tab_viewport for the initial
     /// state before the first window resize.
+    // Chunk: docs/chunks/tab_click_cursor_placement - Edge case test for initial state before window resize
     #[test]
     fn test_sync_viewport_skips_when_no_view_height() {
         let mut state = EditorState::empty(test_font_metrics());
