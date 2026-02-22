@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use crate::viewport::Viewport;
 use lite_edit_buffer::{BufferView, TextBuffer};
+use lite_edit_syntax::{LanguageRegistry, SyntaxHighlighter, SyntaxTheme};
 use lite_edit_terminal::{AgentConfig, AgentHandle, AgentState, TerminalBuffer};
 
 // =============================================================================
@@ -184,10 +185,10 @@ impl TabBuffer {
 // =============================================================================
 
 // Chunk: docs/chunks/content_tab_bar - Per-tab model: kind, buffer ref, dirty flag, unread badge
+// Chunk: docs/chunks/syntax_highlighting - Added syntax highlighter field
 /// A tab within a workspace.
 ///
 /// Each tab owns its own buffer and viewport (for independent scroll positions).
-#[derive(Debug)]
 pub struct Tab {
     /// Unique identifier for this tab
     pub id: TabId,
@@ -205,6 +206,8 @@ pub struct Tab {
     pub unread: bool,
     /// The file associated with this tab (for file tabs)
     pub associated_file: Option<PathBuf>,
+    /// The syntax highlighter for file tabs (if language detected)
+    highlighter: Option<SyntaxHighlighter>,
 }
 
 impl Tab {

@@ -1,8 +1,17 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/syntax/src/lib.rs
+  - crates/syntax/src/theme.rs
+  - crates/syntax/src/registry.rs
+  - crates/syntax/src/highlighter.rs
+  - crates/syntax/src/edit.rs
+  - crates/syntax/Cargo.toml
+  - crates/editor/src/editor_state.rs
+  - crates/editor/src/highlighted_buffer.rs
+  - crates/editor/Cargo.toml
 code_references: []
 narrative: null
 investigation: syntax_highlighting_scalable
