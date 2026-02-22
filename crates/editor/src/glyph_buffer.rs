@@ -2,6 +2,7 @@
 // Chunk: docs/chunks/viewport_rendering - Viewport + Buffer-to-Screen Rendering
 // Chunk: docs/chunks/text_selection_rendering - Selection highlight rendering
 // Chunk: docs/chunks/line_wrap_rendering - Soft line wrapping support
+// Chunk: docs/chunks/workspace_model - Content area x offset for left rail
 //!
 //! Glyph vertex buffer construction
 //!
@@ -113,6 +114,18 @@ impl GlyphLayout {
         (x, y)
     }
 
+    // Chunk: docs/chunks/workspace_model - Position with X and Y offset for left rail
+    /// Calculates the screen position for a character at (row, col) with both X and Y offset
+    ///
+    /// Returns (x, y) where:
+    /// - X coordinate is shifted by `x_offset` pixels (for left rail offset)
+    /// - Y coordinate is shifted by `-y_offset` pixels (for smooth scrolling)
+    pub fn position_for_with_xy_offset(&self, row: usize, col: usize, x_offset: f32, y_offset: f32) -> (f32, f32) {
+        let x = col as f32 * self.glyph_width + x_offset;
+        let y = row as f32 * self.line_height - y_offset;
+        (x, y)
+    }
+
     /// Generates the four vertices for a glyph quad at (row, col)
     ///
     /// The quad covers the glyph cell with the given UV coordinates.
@@ -140,6 +153,38 @@ impl GlyphLayout {
         y_offset: f32,
     ) -> [GlyphVertex; 4] {
         let (x, y) = self.position_for_with_offset(row, col, y_offset);
+
+        // Quad dimensions match the glyph cell size
+        let w = glyph.width;
+        let h = glyph.height;
+
+        // UV coordinates from the glyph info
+        let (u0, v0) = glyph.uv_min;
+        let (u1, v1) = glyph.uv_max;
+
+        // Four corners: top-left, top-right, bottom-right, bottom-left
+        [
+            GlyphVertex::new(x, y, u0, v0),         // top-left
+            GlyphVertex::new(x + w, y, u1, v0),     // top-right
+            GlyphVertex::new(x + w, y + h, u1, v1), // bottom-right
+            GlyphVertex::new(x, y + h, u0, v1),     // bottom-left
+        ]
+    }
+
+    // Chunk: docs/chunks/workspace_model - Quad vertices with X and Y offset for left rail
+    /// Generates the four vertices for a glyph quad at (row, col) with X and Y offset
+    ///
+    /// The X coordinate is shifted by `x_offset` pixels (e.g., for left rail offset).
+    /// The Y coordinate is shifted by `-y_offset` pixels for smooth scrolling.
+    pub fn quad_vertices_with_xy_offset(
+        &self,
+        row: usize,
+        col: usize,
+        glyph: &GlyphInfo,
+        x_offset: f32,
+        y_offset: f32,
+    ) -> [GlyphVertex; 4] {
+        let (x, y) = self.position_for_with_xy_offset(row, col, x_offset, y_offset);
 
         // Quad dimensions match the glyph cell size
         let w = glyph.width;
@@ -202,6 +247,9 @@ pub struct GlyphBuffer {
     glyph_range: QuadRange,
     /// Index range for cursor quad
     cursor_range: QuadRange,
+    // Chunk: docs/chunks/workspace_model - Content area x offset for left rail
+    /// Horizontal offset for content area (e.g., for left rail)
+    x_offset: f32,
 }
 
 impl GlyphBuffer {
@@ -216,7 +264,22 @@ impl GlyphBuffer {
             border_range: QuadRange::default(),
             glyph_range: QuadRange::default(),
             cursor_range: QuadRange::default(),
+            x_offset: 0.0,
         }
+    }
+
+    // Chunk: docs/chunks/workspace_model - Content area x offset for left rail
+    /// Sets the horizontal offset for content area rendering.
+    ///
+    /// When set to a positive value (e.g., RAIL_WIDTH), all glyphs are shifted
+    /// right by that amount to make room for the left rail.
+    pub fn set_x_offset(&mut self, offset: f32) {
+        self.x_offset = offset;
+    }
+
+    /// Returns the current horizontal offset
+    pub fn x_offset(&self) -> f32 {
+        self.x_offset
     }
 
     /// Returns the vertex buffer, if any
@@ -638,6 +701,7 @@ impl GlyphBuffer {
     }
 
     // Chunk: docs/chunks/viewport_fractional_scroll - Selection quad with Y offset for smooth scrolling
+    // Chunk: docs/chunks/workspace_model - Uses self.x_offset for left rail offset
     /// Creates a selection highlight quad with Y offset for smooth scrolling
     fn create_selection_quad_with_offset(
         &self,
@@ -647,8 +711,8 @@ impl GlyphBuffer {
         solid_glyph: &GlyphInfo,
         y_offset: f32,
     ) -> [GlyphVertex; 4] {
-        let (start_x, y) = self.layout.position_for_with_offset(screen_row, start_col, y_offset);
-        let (end_x, _) = self.layout.position_for_with_offset(screen_row, end_col, y_offset);
+        let (start_x, y) = self.layout.position_for_with_xy_offset(screen_row, start_col, self.x_offset, y_offset);
+        let (end_x, _) = self.layout.position_for_with_xy_offset(screen_row, end_col, self.x_offset, y_offset);
 
         // Selection height matches the line height
         let selection_height = self.layout.line_height;
@@ -680,6 +744,7 @@ impl GlyphBuffer {
     }
 
     // Chunk: docs/chunks/viewport_fractional_scroll - Cursor quad with Y offset for smooth scrolling
+    // Chunk: docs/chunks/workspace_model - Uses self.x_offset for left rail offset
     /// Creates a cursor quad at the specified screen position with Y offset
     fn create_cursor_quad_with_offset(
         &self,
@@ -688,7 +753,7 @@ impl GlyphBuffer {
         reference_glyph: &GlyphInfo,
         y_offset: f32,
     ) -> [GlyphVertex; 4] {
-        let (x, y) = self.layout.position_for_with_offset(screen_row, col, y_offset);
+        let (x, y) = self.layout.position_for_with_xy_offset(screen_row, col, self.x_offset, y_offset);
 
         // Cursor width is a thin bar (2 pixels) for line cursor
         // For now we use a block cursor that's the full glyph width
@@ -712,10 +777,12 @@ impl GlyphBuffer {
     }
 
     // Chunk: docs/chunks/line_wrap_rendering - Continuation row border indicator
+    // Chunk: docs/chunks/workspace_model - Uses self.x_offset for left rail offset
     /// Creates a left-edge border quad for a continuation row.
     ///
     /// The border is 2 pixels wide and spans the full line height, positioned
-    /// at the leftmost edge of the screen row.
+    /// at the leftmost edge of the content area (offset by x_offset to account
+    /// for the left rail).
     fn create_border_quad(
         &self,
         screen_row: usize,
@@ -723,6 +790,7 @@ impl GlyphBuffer {
         y_offset: f32,
     ) -> [GlyphVertex; 4] {
         let y = screen_row as f32 * self.layout.line_height - y_offset;
+        let x = self.x_offset; // Start at the left edge of the content area
 
         // Border is 2 pixels wide at the left edge
         let border_width = 2.0;
@@ -732,10 +800,10 @@ impl GlyphBuffer {
         let (u1, v1) = solid_glyph.uv_max;
 
         [
-            GlyphVertex::new(0.0, y, u0, v0),                           // top-left
-            GlyphVertex::new(border_width, y, u1, v0),                  // top-right
-            GlyphVertex::new(border_width, y + border_height, u1, v1),  // bottom-right
-            GlyphVertex::new(0.0, y + border_height, u0, v1),           // bottom-left
+            GlyphVertex::new(x, y, u0, v0),                               // top-left
+            GlyphVertex::new(x + border_width, y, u1, v0),                // top-right
+            GlyphVertex::new(x + border_width, y + border_height, u1, v1), // bottom-right
+            GlyphVertex::new(x, y + border_height, u0, v1),               // bottom-left
         ]
     }
 
@@ -961,10 +1029,12 @@ impl GlyphBuffer {
                     }
 
                     // Generate quad at the calculated screen position
-                    let quad = self.layout.quad_vertices_with_offset(
+                    // Chunk: docs/chunks/workspace_model - Apply x_offset for left rail
+                    let quad = self.layout.quad_vertices_with_xy_offset(
                         screen_row,
                         screen_col,
                         glyph,
+                        self.x_offset,
                         y_offset,
                     );
                     vertices.extend_from_slice(&quad);
