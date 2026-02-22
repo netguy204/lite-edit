@@ -1,9 +1,21 @@
 // Chunk: docs/chunks/terminal_emulator - Terminal emulator backed by alacritty_terminal
+// Chunk: docs/chunks/terminal_file_backed_scrollback - File-backed cold scrollback
 //! Terminal emulator crate for lite-edit.
 //!
 //! This crate provides `TerminalBuffer`, a full-featured terminal emulator
 //! that implements the `BufferView` trait. It wraps `alacritty_terminal` for
 //! escape sequence interpretation and manages PTY I/O for process communication.
+//!
+//! ## Scrollback
+//!
+//! `TerminalBuffer` supports unlimited scrollback history with bounded memory:
+//! - Recent lines stay in memory (hot scrollback)
+//! - Older lines are persisted to a temp file (cold scrollback)
+//! - The `BufferView::styled_line()` API is transparent — callers don't
+//!   need to know where the data comes from
+//!
+//! This enables 10+ concurrent terminals with 100K+ line histories while
+//! keeping memory usage under ~7MB per terminal.
 //!
 //! # Example
 //!
@@ -23,6 +35,7 @@
 //! }
 //! ```
 
+mod cold_scrollback;
 mod event;
 mod pty;
 mod style_convert;
