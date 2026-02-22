@@ -12,6 +12,8 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 use crate::event::TerminalEvent;
+// Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
+use crate::pty_wakeup::PtyWakeup;
 
 /// Handle to a PTY process and its I/O thread.
 pub struct PtyHandle {
@@ -112,6 +114,113 @@ impl PtyHandle {
                             // Channel closed, main thread dropped
                             break;
                         }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(TerminalEvent::PtyError(e));
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(PtyHandle {
+            master: pair.master,
+            writer,
+            child,
+            event_rx,
+            reader_thread: Some(reader_thread),
+            event_tx,
+        })
+    }
+
+    // Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
+    /// Spawns a command in a new PTY with run-loop wakeup support.
+    ///
+    /// Same as `spawn()`, but signals `wakeup` whenever PTY output arrives,
+    /// allowing the main thread to poll and render promptly.
+    ///
+    /// # Arguments
+    ///
+    /// * `cmd` - The command to run (e.g., "/bin/zsh")
+    /// * `args` - Arguments to pass to the command
+    /// * `cwd` - Working directory for the command
+    /// * `rows` - Number of terminal rows
+    /// * `cols` - Number of terminal columns
+    /// * `wakeup` - Handle to signal the main thread when PTY data arrives
+    ///
+    /// # Returns
+    ///
+    /// A `PtyHandle` that can be used to interact with the PTY.
+    pub fn spawn_with_wakeup(
+        cmd: &str,
+        args: &[&str],
+        cwd: &Path,
+        rows: u16,
+        cols: u16,
+        wakeup: PtyWakeup,
+    ) -> std::io::Result<Self> {
+        let pty_system = native_pty_system();
+
+        // Create PTY with specified size
+        let size = PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+
+        let pair = pty_system
+            .openpty(size)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+        // Build the command
+        let mut cmd_builder = CommandBuilder::new(cmd);
+        cmd_builder.args(args);
+        cmd_builder.cwd(cwd);
+
+        // Set up environment
+        cmd_builder.env("TERM", "xterm-256color");
+        cmd_builder.env("COLORTERM", "truecolor");
+
+        // Spawn the child process
+        let child = pair
+            .slave
+            .spawn_command(cmd_builder)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+        // Create channel for events
+        let (event_tx, event_rx) = unbounded();
+
+        // Get a reader for the PTY output
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+        // Take the writer once at creation time
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+        // Spawn reader thread with wakeup support
+        let tx = event_tx.clone();
+        let reader_thread = thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => {
+                        // EOF - PTY closed
+                        break;
+                    }
+                    Ok(n) => {
+                        // Send output to main thread
+                        if tx.send(TerminalEvent::PtyOutput(buf[..n].to_vec())).is_err() {
+                            // Channel closed, main thread dropped
+                            break;
+                        }
+                        // Signal main thread to wake and poll
+                        wakeup.signal();
                     }
                     Err(e) => {
                         let _ = tx.send(TerminalEvent::PtyError(e));

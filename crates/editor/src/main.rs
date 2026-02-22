@@ -57,7 +57,7 @@ pub use row_scroller::RowScroller;
 
 use std::cell::RefCell;
 use std::ptr::NonNull;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use block2::RcBlock;
 use objc2::rc::Retained;
@@ -73,6 +73,8 @@ use objc2_foundation::{
 };
 
 use lite_edit_buffer::TextBuffer;
+// Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
+use lite_edit_terminal::{set_global_wakeup_callback, PtyWakeup};
 
 use crate::editor_state::{EditorFocus, EditorState};
 use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
@@ -85,6 +87,23 @@ use crate::tab_bar::TAB_BAR_HEIGHT;
 
 /// Cursor blink interval in seconds
 const CURSOR_BLINK_INTERVAL: f64 = 0.5;
+
+// Chunk: docs/chunks/terminal_pty_wakeup - Thread-local weak reference to controller for PTY wakeup
+// This allows the global wakeup callback to access the controller without
+// capturing Rc<RefCell<EditorController>> (which isn't Send+Sync).
+thread_local! {
+    static PTY_WAKEUP_CONTROLLER: RefCell<Weak<RefCell<EditorController>>> = RefCell::new(Weak::new());
+}
+
+/// Global callback for PTY wakeup. Called on main thread via dispatch_async.
+// Chunk: docs/chunks/terminal_pty_wakeup - Global wakeup callback function
+fn handle_pty_wakeup_global() {
+    PTY_WAKEUP_CONTROLLER.with(|cell| {
+        if let Some(controller) = cell.borrow().upgrade() {
+            controller.borrow_mut().handle_pty_wakeup();
+        }
+    });
+}
 
 // =============================================================================
 // Demo Text Generation
@@ -234,6 +253,15 @@ impl EditorController {
             self.state.dirty_region.merge(terminal_dirty);
         }
 
+        // Chunk: docs/chunks/terminal_tab_initial_render - Deferred PTY poll for initial content
+        // When a terminal tab was just created, spin-poll to capture the shell's
+        // initial prompt output before rendering. This gives the shell up to 100ms
+        // to start and produce its prompt.
+        let startup_dirty = self.state.spin_poll_terminal_startup();
+        if startup_dirty.is_dirty() {
+            self.state.dirty_region.merge(startup_dirty);
+        }
+
         // Poll for file index updates so picker results stream in on every keystroke
         // Chunk: docs/chunks/picker_eager_index
         let picker_dirty = self.state.tick_picker();
@@ -328,6 +356,21 @@ impl EditorController {
         }
 
         // Render if anything is dirty
+        self.render_if_dirty();
+    }
+
+    // Chunk: docs/chunks/terminal_pty_wakeup - PTY data arrival handler
+    /// Called when PTY data arrives (via dispatch_async from reader thread).
+    ///
+    /// This is triggered by the PtyWakeup callback registered during terminal
+    /// spawn. It polls all agents/terminals for output and renders if dirty,
+    /// ensuring terminal output appears within ~1ms of data arrival instead of
+    /// waiting for the 500ms cursor blink timer.
+    fn handle_pty_wakeup(&mut self) {
+        let terminal_dirty = self.state.poll_agents();
+        if terminal_dirty.is_dirty() {
+            self.state.dirty_region.merge(terminal_dirty);
+        }
         self.render_if_dirty();
     }
 
@@ -743,6 +786,17 @@ impl AppDelegate {
             renderer,
             metal_view.clone(),
         )));
+
+        // Chunk: docs/chunks/terminal_pty_wakeup - Set up PTY wakeup for terminal tabs
+        // Register the global wakeup callback and store a weak reference to the controller.
+        // When PTY data arrives, dispatch_async calls handle_pty_wakeup_global which
+        // upgrades the weak reference and polls agents.
+        set_global_wakeup_callback(handle_pty_wakeup_global);
+        PTY_WAKEUP_CONTROLLER.with(|cell| {
+            *cell.borrow_mut() = Rc::downgrade(&controller);
+        });
+        // Set up the factory that creates PtyWakeup handles for new terminals
+        controller.borrow_mut().state.set_pty_wakeup_factory(PtyWakeup::new);
 
         // Set up key handler
         let key_controller = controller.clone();

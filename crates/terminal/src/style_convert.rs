@@ -75,6 +75,7 @@ fn flags_to_underline_style(flags: Flags) -> UnderlineStyle {
     }
 }
 
+// Chunk: docs/chunks/terminal_styling_fidelity - Terminal cell to Style conversion with proper DIM flag detection
 /// Convert a cell to our Style type.
 pub fn cell_to_style(cell: &Cell) -> Style {
     let flags = cell.flags;
@@ -110,6 +111,7 @@ pub fn cell_to_style(cell: &Cell) -> Style {
     }
 }
 
+// Chunk: docs/chunks/terminal_styling_fidelity - Row-to-StyledLine conversion preserving per-span styles
 /// Convert a row of cells to a StyledLine.
 ///
 /// This function iterates through cells, coalescing adjacent cells with identical

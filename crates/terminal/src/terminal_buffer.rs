@@ -40,6 +40,8 @@ use lite_edit_buffer::{
 use crate::cold_scrollback::{ColdScrollback, PageCache};
 use crate::event::TerminalEvent;
 use crate::pty::PtyHandle;
+// Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
+use crate::pty_wakeup::PtyWakeup;
 use crate::style_convert::row_to_styled_line;
 
 /// Event listener that captures terminal events.
@@ -183,6 +185,38 @@ impl TerminalBuffer {
     ) -> std::io::Result<()> {
         let (cols, rows) = self.size;
         let handle = PtyHandle::spawn(cmd, args, cwd, rows as u16, cols as u16)?;
+        self.pty = Some(handle);
+        Ok(())
+    }
+
+    // Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
+    /// Spawns a shell with run-loop wakeup support.
+    ///
+    /// Same as `spawn_shell()`, but signals `wakeup` whenever PTY output arrives,
+    /// allowing the main thread to poll and render promptly.
+    pub fn spawn_shell_with_wakeup(
+        &mut self,
+        shell: &str,
+        cwd: &Path,
+        wakeup: PtyWakeup,
+    ) -> std::io::Result<()> {
+        self.spawn_command_with_wakeup(shell, &[], cwd, wakeup)
+    }
+
+    // Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
+    /// Spawns a command with run-loop wakeup support.
+    ///
+    /// Same as `spawn_command()`, but signals `wakeup` whenever PTY output arrives,
+    /// allowing the main thread to poll and render promptly.
+    pub fn spawn_command_with_wakeup(
+        &mut self,
+        cmd: &str,
+        args: &[&str],
+        cwd: &Path,
+        wakeup: PtyWakeup,
+    ) -> std::io::Result<()> {
+        let (cols, rows) = self.size;
+        let handle = PtyHandle::spawn_with_wakeup(cmd, args, cwd, rows as u16, cols as u16, wakeup)?;
         self.pty = Some(handle);
         Ok(())
     }

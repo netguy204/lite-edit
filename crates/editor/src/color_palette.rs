@@ -187,6 +187,7 @@ impl ColorPalette {
         }
     }
 
+    // Chunk: docs/chunks/terminal_styling_fidelity - Style to RGBA resolution including inverse and dim transformations
     /// Resolves foreground and background colors from a style, applying
     /// inverse and dim transformations.
     ///

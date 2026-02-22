@@ -14,6 +14,7 @@
 //! focus target event handling.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::buffer_target::BufferFocusTarget;
@@ -34,7 +35,8 @@ use crate::workspace::Editor;
 use lite_edit_buffer::{Position, TextBuffer};
 // Chunk: docs/chunks/terminal_active_tab_safety - Terminal input encoding
 // Chunk: docs/chunks/terminal_scrollback_viewport - Terminal scroll action result
-use lite_edit_terminal::{BufferView, InputEncoder, TermMode};
+// Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
+use lite_edit_terminal::{BufferView, InputEncoder, PtyWakeup, TermMode};
 
 /// Duration in milliseconds for cursor blink interval
 const CURSOR_BLINK_INTERVAL_MS: u64 = 500;
@@ -110,6 +112,14 @@ pub struct EditorState {
     /// The buffer position from which the current search started
     /// (used as the search origin; only advances when Enter is pressed)
     pub search_origin: Position,
+    // Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
+    /// Factory for creating PTY wakeup callbacks.
+    /// Set by main.rs after controller creation.
+    pty_wakeup_factory: Option<Arc<dyn Fn() -> PtyWakeup + Send + Sync>>,
+    // Chunk: docs/chunks/terminal_tab_initial_render - Deferred PTY poll for initial content
+    /// Flag indicating that a terminal tab was just created and needs
+    /// a deferred poll loop to capture the shell's initial output.
+    pending_terminal_created: bool,
 }
 
 // =============================================================================
@@ -277,6 +287,10 @@ impl EditorState {
             resolved_path: None,
             find_mini_buffer: None,
             search_origin: Position::new(0, 0),
+            // Chunk: docs/chunks/terminal_pty_wakeup - Initialize wakeup factory as None
+            pty_wakeup_factory: None,
+            // Chunk: docs/chunks/terminal_tab_initial_render - Deferred PTY poll for initial content
+            pending_terminal_created: false,
         }
     }
 
@@ -288,6 +302,25 @@ impl EditorState {
     /// Returns the font metrics.
     pub fn font_metrics(&self) -> &FontMetrics {
         &self.font_metrics
+    }
+
+    // Chunk: docs/chunks/terminal_pty_wakeup - PTY wakeup factory management
+    /// Sets the factory for creating PTY wakeup handles.
+    ///
+    /// The factory is called when spawning new terminals to create a wakeup
+    /// handle that signals the main thread when PTY data arrives.
+    pub fn set_pty_wakeup_factory(
+        &mut self,
+        factory: impl Fn() -> PtyWakeup + Send + Sync + 'static,
+    ) {
+        self.pty_wakeup_factory = Some(Arc::new(factory));
+    }
+
+    /// Creates a PTY wakeup handle using the registered factory.
+    ///
+    /// Returns `None` if no factory has been registered.
+    pub fn create_pty_wakeup(&self) -> Option<PtyWakeup> {
+        self.pty_wakeup_factory.as_ref().map(|f| f())
     }
 
     /// Updates the viewport size based on window dimensions in pixels.
@@ -1626,6 +1659,41 @@ impl EditorState {
         }
     }
 
+    // Chunk: docs/chunks/terminal_tab_initial_render - Deferred PTY poll for initial content
+    /// Performs a spin-poll loop to capture a newly created terminal's initial output.
+    ///
+    /// When a terminal tab is created via `new_terminal_tab()`, the shell needs a few
+    /// milliseconds to start and produce its initial prompt. This method polls repeatedly
+    /// (up to 100ms total) until PTY output is detected, giving the shell time to start.
+    ///
+    /// This is called from the EditorController after key events to ensure the terminal
+    /// prompt appears immediately rather than waiting for the next timer tick (500ms).
+    ///
+    /// Returns `DirtyRegion::FullViewport` if any terminal activity was detected,
+    /// otherwise `DirtyRegion::None`.
+    pub fn spin_poll_terminal_startup(&mut self) -> DirtyRegion {
+        use std::time::Duration;
+
+        // Only do the spin-poll if a terminal was just created
+        if !self.pending_terminal_created {
+            return DirtyRegion::None;
+        }
+
+        // Clear the flag immediately
+        self.pending_terminal_created = false;
+
+        // Spin-poll for up to 100ms (10 iterations × 10ms) to give the shell time to start
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(10));
+            let dirty = self.poll_agents();
+            if dirty.is_dirty() {
+                return dirty;
+            }
+        }
+
+        DirtyRegion::None
+    }
+
     /// Takes the dirty region, leaving `DirtyRegion::None` in its place.
     ///
     /// Call this after rendering to reset the dirty state.
@@ -2082,8 +2150,17 @@ impl EditorState {
             .map(|ws| ws.root_path.clone())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-        // Spawn shell (log error but don't fail)
-        if let Err(e) = terminal.spawn_shell(&shell, &cwd) {
+        // Chunk: docs/chunks/terminal_pty_wakeup - Spawn shell with wakeup if available
+        // Spawn shell with wakeup support if a factory is registered (enables low-latency
+        // PTY output rendering). Falls back to non-wakeup spawn if not available.
+        let spawn_result = if let Some(wakeup) = self.create_pty_wakeup() {
+            terminal.spawn_shell_with_wakeup(&shell, &cwd, wakeup)
+        } else {
+            terminal.spawn_shell(&shell, &cwd)
+        };
+
+        // Log error but don't fail
+        if let Err(e) = spawn_result {
             eprintln!("Failed to spawn shell '{}': {}", shell, e);
         }
 
@@ -2110,6 +2187,11 @@ impl EditorState {
         // Ensure the new tab is visible in the tab bar
         self.ensure_active_tab_visible();
         self.dirty_region.merge(DirtyRegion::FullViewport);
+
+        // Chunk: docs/chunks/terminal_tab_initial_render - Signal that a terminal needs startup polling
+        // Mark that a terminal was created so the controller can do a spin-poll
+        // to capture the shell's initial output (prompt) before rendering.
+        self.pending_terminal_created = true;
     }
 
     /// Scrolls the tab bar horizontally.
@@ -5682,5 +5764,68 @@ mod tests {
         let ws = state.editor.active_workspace().expect("workspace");
         let tab = ws.active_tab().expect("tab");
         assert!(tab.viewport.scroll_offset_px() >= 0.0);
+    }
+
+    // =========================================================================
+    // Terminal Initial Render Tests
+    // Chunk: docs/chunks/terminal_tab_initial_render - Tests for initial terminal rendering
+    // =========================================================================
+
+    /// Tests that poll_agents returns dirty after a new terminal tab is created
+    /// and the shell has had time to produce output.
+    ///
+    /// This validates the core requirement: when a terminal tab is created and
+    /// we poll for PTY events, we should eventually get a dirty region indicating
+    /// that the terminal has content to render.
+    #[test]
+    fn test_poll_agents_dirty_after_terminal_creation() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // The terminal shell needs time to start and produce output.
+        // Poll repeatedly until we get dirty activity.
+        let mut found_dirty = false;
+        for _ in 0..50 {
+            std::thread::sleep(Duration::from_millis(20));
+            let dirty = state.poll_agents();
+            if dirty.is_dirty() {
+                found_dirty = true;
+                break;
+            }
+        }
+
+        assert!(
+            found_dirty,
+            "poll_agents should return dirty when terminal produces output"
+        );
+    }
+
+    /// Tests that new_terminal_tab marks the viewport dirty.
+    ///
+    /// This is separate from the PTY output - the act of creating a terminal
+    /// tab should mark the viewport dirty so that at minimum an initial render
+    /// is triggered (even if it shows an empty terminal).
+    #[test]
+    fn test_new_terminal_tab_marks_dirty() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Clear any existing dirty state
+        let _ = state.take_dirty_region();
+        assert!(!state.is_dirty());
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Should be dirty after creating a tab
+        assert!(
+            state.is_dirty(),
+            "EditorState should be dirty after creating a terminal tab"
+        );
     }
 }
