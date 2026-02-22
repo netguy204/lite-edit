@@ -252,8 +252,15 @@ impl Renderer {
     ///
     /// Call this when the window resizes. Both width and height are needed
     /// for line wrapping calculations.
+    ///
+    /// Note: The renderer's viewport scroll offset is synced from EditorState
+    /// before each render via `set_scroll_offset_px`, so we don't need to
+    /// clamp here. We pass usize::MAX as the buffer line count to prevent
+    /// any spurious clamping until the sync occurs.
+    // Chunk: docs/chunks/resize_click_alignment - Viewport update_size now takes line count
     pub fn update_viewport_size(&mut self, window_width: f32, window_height: f32) {
-        self.viewport.update_size(window_height);
+        // Use usize::MAX since scroll is synced externally from EditorState
+        self.viewport.update_size(window_height, usize::MAX);
         self.viewport_width_px = window_width;
     }
 

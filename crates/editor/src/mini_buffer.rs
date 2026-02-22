@@ -83,7 +83,8 @@ impl MiniBuffer {
     pub fn new(font_metrics: FontMetrics) -> Self {
         let mut viewport = Viewport::new(font_metrics.line_height as f32);
         // Single-line viewport: one line visible
-        viewport.update_size(font_metrics.line_height as f32);
+        // MiniBuffer is always single-line, so line_count = 1
+        viewport.update_size(font_metrics.line_height as f32, 1);
 
         Self {
             buffer: TextBuffer::new(),

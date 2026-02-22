@@ -141,7 +141,7 @@ mod tests {
     fn test_mark_dirty_single_line() {
         let mut buffer = TextBuffer::from_str("hello\nworld");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0); // 10 visible lines
+        viewport.update_size(160.0, 100); // 10 visible lines
         let mut dirty = DirtyRegion::None;
 
         {
@@ -163,7 +163,7 @@ mod tests {
     fn test_mark_dirty_merges() {
         let mut buffer = TextBuffer::from_str("hello\nworld\nfoo\nbar");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
 
         {
@@ -186,7 +186,7 @@ mod tests {
     fn test_ensure_cursor_visible_no_scroll() {
         let mut buffer = TextBuffer::from_str("hello\nworld");
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
 
         {
@@ -213,7 +213,7 @@ mod tests {
         buffer.set_cursor(Position::new(45, 0)); // Move cursor near end
 
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0); // 10 visible lines
+        viewport.update_size(160.0, 100); // 10 visible lines
         let mut dirty = DirtyRegion::None;
 
         {
@@ -238,7 +238,7 @@ mod tests {
         let mut buffer = TextBuffer::from_str("hello\nworld");
         buffer.set_cursor(Position::new(1, 0));
         let mut viewport = Viewport::new(16.0);
-        viewport.update_size(160.0);
+        viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
 
         {

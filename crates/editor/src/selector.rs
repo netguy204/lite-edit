@@ -137,10 +137,10 @@ impl SelectorWidget {
     // Chunk: docs/chunks/file_picker_scroll - Setter for visible area height
     /// Updates the visible size from the pixel height of the list area.
     ///
-    /// This forwards to `RowScroller::update_size(height_px)`, which computes
-    /// visible_rows from `height_px / row_height`.
+    /// This forwards to `RowScroller::update_size(height_px, row_count)`, which computes
+    /// visible_rows from `height_px / row_height` and clamps scroll offset.
     pub fn update_visible_size(&mut self, height_px: f32) {
-        self.scroll.update_size(height_px);
+        self.scroll.update_size(height_px, self.items.len());
     }
 
     /// Sets the row height (item height) in pixels.
@@ -151,7 +151,7 @@ impl SelectorWidget {
         let offset = self.scroll.scroll_offset_px();
         let visible_rows = self.scroll.visible_rows();
         self.scroll = RowScroller::new(height);
-        self.scroll.update_size(visible_rows as f32 * height);
+        self.scroll.update_size(visible_rows as f32 * height, self.items.len());
         self.scroll.set_scroll_offset_px(offset, self.items.len());
     }
 

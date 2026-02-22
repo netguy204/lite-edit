@@ -240,16 +240,20 @@ impl EditorState {
     ///
     /// This also updates the stored view_height and view_width for
     /// mouse event coordinate flipping and selector overlay geometry.
+    // Chunk: docs/chunks/resize_click_alignment - Pass line count for scroll clamping
     pub fn update_viewport_size(&mut self, window_height: f32) {
-        self.viewport_mut().update_size(window_height);
+        let line_count = self.buffer().line_count();
+        self.viewport_mut().update_size(window_height, line_count);
         self.view_height = window_height;
     }
 
     /// Updates the viewport size with both width and height.
     ///
     /// This is the preferred method when both dimensions are available.
+    // Chunk: docs/chunks/resize_click_alignment - Pass line count for scroll clamping
     pub fn update_viewport_dimensions(&mut self, window_width: f32, window_height: f32) {
-        self.viewport_mut().update_size(window_height);
+        let line_count = self.buffer().line_count();
+        self.viewport_mut().update_size(window_height, line_count);
         self.view_height = window_height;
         self.view_width = window_width;
     }

@@ -8,170 +8,188 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The root cause is well-understood from the GOAL.md:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. When the viewport resizes (e.g., entering fullscreen), `update_viewport_dimensions`
+   calls `Viewport::update_size`, which updates `visible_rows` inside the `RowScroller`.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. However, the existing `scroll_offset_px` is **not re-clamped** to the new valid
+   bounds. After a resize that increases the viewport height, `visible_rows` grows,
+   which decreases `max_offset_px = (row_count - visible_rows) * row_height`.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/resize_click_alignment/GOAL.md)
-with references to the files that you expect to touch.
--->
+3. If the previous `scroll_offset_px` exceeds the new `max_offset_px`, the
+   `first_visible_line()` derivation (`floor(scroll_offset_px / line_height)`)
+   returns a value larger than what the renderer actually draws, causing click
+   misalignment.
+
+**The fix** is minimal:
+
+- Add a `row_count` parameter to `RowScroller::update_size` (and propagate through
+  `Viewport::update_size` and `EditorState::update_viewport_dimensions`).
+- After computing the new `visible_rows`, call `set_scroll_offset_px` with the
+  current offset to re-clamp it to the new valid bounds.
+
+This follows the **Humble View Architecture** pattern (Decision 002): the fix is
+pure state manipulation inside `RowScroller`, fully testable without platform
+mocks. We add a unit test that simulates the problematic scenario and verifies
+the scroll offset is clamped correctly.
+
+Per **TESTING_PHILOSOPHY.md**, we write the failing test first (red), then
+implement the fix (green), then verify existing tests still pass.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems directory exists in this project. This chunk does not touch any
+existing cross-cutting patterns.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add failing regression test to `RowScroller`
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add a test to `row_scroller.rs` that:
 
-Example:
+1. Creates a `RowScroller` with `row_height = 16.0`.
+2. Calls `update_size(160.0)` → 10 visible rows.
+3. Sets scroll to near max for a 100-row buffer: `scroll_to(90, 100)`.
+   (This puts `scroll_offset_px = 1440.0`, `first_visible_row = 90`.)
+4. Simulates a resize that **increases** viewport height: `update_size(320.0, 100)`.
+   Now there are 20 visible rows, so `max_offset_px = (100 - 20) * 16 = 1280`.
+5. Asserts that `scroll_offset_px` was clamped to `1280.0` (not still `1440.0`).
+6. Asserts that `first_visible_row()` returns `80`, not `90`.
 
-### Step 1: Define the SegmentHeader struct
+The test should fail initially because `update_size` currently does not clamp.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Location: `crates/editor/src/row_scroller.rs` (test module)
 
-Location: src/segment/format.rs
+### Step 2: Update `RowScroller::update_size` to accept `row_count` and re-clamp
 
-### Step 2: Implement header serialization
+Modify `RowScroller::update_size`:
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+/// Updates the viewport size based on height in pixels.
+///
+/// This recomputes `visible_rows` = floor(height_px / row_height) and re-clamps
+/// `scroll_offset_px` to the new valid bounds.
+// Chunk: docs/chunks/resize_click_alignment - Re-clamp scroll offset on resize
+pub fn update_size(&mut self, height_px: f32, row_count: usize) {
+    self.visible_rows = if self.row_height > 0.0 {
+        (height_px / self.row_height).floor() as usize
+    } else {
+        0
+    };
+    // Re-clamp scroll offset to new valid bounds
+    self.set_scroll_offset_px(self.scroll_offset_px, row_count);
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+The key addition is calling `set_scroll_offset_px` with the current offset after
+updating `visible_rows`, which forces a re-clamp.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Location: `crates/editor/src/row_scroller.rs`
+
+### Step 3: Update `Viewport::update_size` to accept `buffer_line_count`
+
+Propagate the `row_count` parameter:
+
+```rust
+/// Updates the viewport size based on window height in pixels.
+///
+/// This recomputes `visible_lines` = floor(window_height / line_height) and
+/// re-clamps the scroll offset to the new valid bounds.
+// Chunk: docs/chunks/resize_click_alignment - Re-clamp scroll offset on resize
+pub fn update_size(&mut self, window_height: f32, buffer_line_count: usize) {
+    self.scroller.update_size(window_height, buffer_line_count);
+}
+```
+
+Location: `crates/editor/src/viewport.rs`
+
+### Step 4: Update `EditorState::update_viewport_dimensions` to pass line count
+
+Modify `update_viewport_dimensions` to pass the buffer line count:
+
+```rust
+/// Updates the viewport size with both width and height.
+// Chunk: docs/chunks/resize_click_alignment - Pass line count for scroll clamping
+pub fn update_viewport_dimensions(&mut self, window_width: f32, window_height: f32) {
+    let line_count = self.buffer().line_count();
+    self.viewport_mut().update_size(window_height, line_count);
+    self.view_height = window_height;
+    self.view_width = window_width;
+}
+```
+
+This ensures that on every resize, the scroll offset is re-clamped to valid bounds.
+
+Location: `crates/editor/src/editor_state.rs`
+
+### Step 5: Fix all call sites of `update_size`
+
+Search for other call sites of `Viewport::update_size` and `RowScroller::update_size`
+and update them to pass the appropriate row count:
+
+1. **`Viewport` tests** in `viewport.rs`: Update test calls to pass a buffer line
+   count (e.g., `100` for most tests, or a smaller value for small-buffer tests).
+
+2. **`RowScroller` tests** in `row_scroller.rs`: Update test calls similarly.
+
+3. **Any other `update_size` calls**: Check `editor_state.rs` and `main.rs` for
+   additional sites.
+
+Location: Multiple files
+
+### Step 6: Verify the regression test passes
+
+Run `cargo test -p lite-edit test_resize_clamps_scroll_offset` (or the chosen
+test name) and verify it now passes.
+
+### Step 7: Run all tests
+
+Run `cargo test -p lite-edit` to verify:
+
+- The new regression test passes.
+- All existing `Viewport` and `RowScroller` tests still pass (after updating
+  their `update_size` calls).
+- All `EditorState` tests still pass.
+
+### Step 8: Add backreference comment
+
+Ensure the modified methods have a backreference comment pointing to this chunk:
+
+```rust
+// Chunk: docs/chunks/resize_click_alignment - Re-clamp scroll offset on resize
+```
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+This chunk depends on `row_scroller_extract` being complete (which introduced
+the `RowScroller` struct). Per the GOAL.md frontmatter, `row_scroller_extract`
+is listed in `created_after`, confirming it is already ACTIVE.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Wrapped line handling**: The `Viewport` also has `ensure_visible_wrapped`,
+   which does its own scroll clamping based on screen rows rather than buffer
+   lines. The simple `row_count` parameter we're adding represents buffer lines,
+   not wrapped screen rows. This is acceptable because:
+   - `update_viewport_dimensions` is called on window resize, which affects
+     `visible_rows` (screen rows), not wrapped layout.
+   - The re-clamp uses the buffer line count, which is the same semantics as
+     `set_scroll_offset_px` already uses.
+   - For wrapped content, scroll positions near the end may be sub-optimal
+     after resize, but clicking will be correct because `first_visible_line`
+     will match what the renderer draws.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Editor vs Workspace**: The `EditorState` currently accesses `self.buffer()`
+   to get line count. If the editor manages multiple workspaces with different
+   buffers, we need to ensure we're getting the active workspace's buffer. The
+   current code already calls `self.buffer()`, which returns the active buffer,
+   so this should be correct.
+
+3. **Performance**: Calling `set_scroll_offset_px` on every resize adds a small
+   amount of work (computing `max_offset_px` and clamping). This is negligible
+   compared to the overall resize handling cost.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- Populated during implementation -->

@@ -167,11 +167,13 @@ impl Viewport {
         self.scroller.set_scroll_offset_px(px, buffer_line_count);
     }
 
-    /// Updates the viewport size based on window height in pixels
+    /// Updates the viewport size based on window height in pixels.
     ///
-    /// This recomputes `visible_lines` = floor(window_height / line_height).
-    pub fn update_size(&mut self, window_height: f32) {
-        self.scroller.update_size(window_height);
+    /// This recomputes `visible_lines` = floor(window_height / line_height) and
+    /// re-clamps the scroll offset to the new valid bounds.
+    // Chunk: docs/chunks/resize_click_alignment - Re-clamp scroll offset on resize
+    pub fn update_size(&mut self, window_height: f32, buffer_line_count: usize) {
+        self.scroller.update_size(window_height, buffer_line_count);
     }
 
     /// Returns the range of buffer lines visible in the viewport
@@ -436,21 +438,21 @@ mod tests {
     #[test]
     fn test_update_size() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
         assert_eq!(vp.visible_lines(), 10); // 160 / 16 = 10
     }
 
     #[test]
     fn test_update_size_fractional() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(170.0); // 170 / 16 = 10.625
+        vp.update_size(170.0, 100); // 170 / 16 = 10.625
         assert_eq!(vp.visible_lines(), 10); // floor
     }
 
     #[test]
     fn test_update_size_zero_height() {
         let mut vp = Viewport::new(0.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
         assert_eq!(vp.visible_lines(), 0);
     }
 
@@ -459,7 +461,7 @@ mod tests {
     #[test]
     fn test_sub_line_delta_accumulates_without_line_change() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0); // 10 visible lines
+        vp.update_size(160.0, 100); // 10 visible lines
 
         // Scroll 5 pixels (less than line_height of 16)
         vp.set_scroll_offset_px(5.0, 100);
@@ -475,7 +477,7 @@ mod tests {
     #[test]
     fn test_crossing_line_boundary_advances_first_visible_line() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
 
         // Scroll exactly one line worth of pixels
         vp.set_scroll_offset_px(16.0, 100);
@@ -496,7 +498,7 @@ mod tests {
     #[test]
     fn test_fractional_remainder_correct_after_accumulated_deltas() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
 
         // Simulate accumulated deltas
         vp.set_scroll_offset_px(50.0, 100); // 50 = 3 * 16 + 2
@@ -511,7 +513,7 @@ mod tests {
     #[test]
     fn test_clamping_at_start() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
 
         // Try to scroll to negative pixels
         vp.set_scroll_offset_px(-10.0, 100);
@@ -522,7 +524,7 @@ mod tests {
     #[test]
     fn test_clamping_at_end() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0); // 10 visible lines
+        vp.update_size(160.0, 100); // 10 visible lines
 
         // max offset = (100 - 10) * 16 = 1440 pixels
         vp.set_scroll_offset_px(2000.0, 100);
@@ -533,7 +535,7 @@ mod tests {
     #[test]
     fn test_scroll_offset_px_getter() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
 
         vp.set_scroll_offset_px(123.5, 100);
         assert!((vp.scroll_offset_px() - 123.5).abs() < 0.001);
@@ -544,7 +546,7 @@ mod tests {
     #[test]
     fn test_visible_range_at_start() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0); // 10 visible lines
+        vp.update_size(160.0, 100); // 10 visible lines
 
         let range = vp.visible_range(100);
         // With 10 visible lines, range should include an extra line for partial visibility
@@ -554,7 +556,7 @@ mod tests {
     #[test]
     fn test_visible_range_scrolled() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
         vp.scroll_to(20, 100); // Sets scroll_offset_px to 320.0
 
         let range = vp.visible_range(100);
@@ -564,7 +566,7 @@ mod tests {
     #[test]
     fn test_visible_range_at_end() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
         // Scroll to line 95 - but clamped to max of 90
         vp.scroll_to(95, 100);
 
@@ -576,7 +578,7 @@ mod tests {
     #[test]
     fn test_visible_range_buffer_smaller_than_viewport() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0); // 10 visible lines
+        vp.update_size(160.0, 100); // 10 visible lines
 
         let range = vp.visible_range(5);
         assert_eq!(range, 0..5);
@@ -587,7 +589,7 @@ mod tests {
     #[test]
     fn test_scroll_to_valid() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0); // 10 visible lines
+        vp.update_size(160.0, 100); // 10 visible lines
 
         vp.scroll_to(20, 100);
         assert_eq!(vp.first_visible_line(), 20);
@@ -597,7 +599,7 @@ mod tests {
     #[test]
     fn test_scroll_to_clamped_to_max() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0); // 10 visible lines
+        vp.update_size(160.0, 100); // 10 visible lines
 
         vp.scroll_to(95, 100);
         assert_eq!(vp.first_visible_line(), 90); // max is 100 - 10 = 90
@@ -606,7 +608,7 @@ mod tests {
     #[test]
     fn test_scroll_to_beyond_buffer() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0); // 10 visible lines
+        vp.update_size(160.0, 100); // 10 visible lines
 
         vp.scroll_to(200, 100);
         assert_eq!(vp.first_visible_line(), 90);
@@ -615,7 +617,7 @@ mod tests {
     #[test]
     fn test_scroll_to_small_buffer() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0); // 10 visible lines
+        vp.update_size(160.0, 100); // 10 visible lines
 
         vp.scroll_to(5, 5); // buffer smaller than viewport
         assert_eq!(vp.first_visible_line(), 0); // can't scroll at all
@@ -626,7 +628,7 @@ mod tests {
     #[test]
     fn test_ensure_visible_already_visible() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0); // 10 visible lines
+        vp.update_size(160.0, 100); // 10 visible lines
 
         let scrolled = vp.ensure_visible(5, 100);
         assert!(!scrolled);
@@ -636,7 +638,7 @@ mod tests {
     #[test]
     fn test_ensure_visible_scroll_up() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
         vp.scroll_to(20, 100);
 
         let scrolled = vp.ensure_visible(10, 100);
@@ -647,7 +649,7 @@ mod tests {
     #[test]
     fn test_ensure_visible_scroll_down() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0); // 10 visible lines
+        vp.update_size(160.0, 100); // 10 visible lines
 
         let scrolled = vp.ensure_visible(25, 100);
         assert!(scrolled);
@@ -658,7 +660,7 @@ mod tests {
     #[test]
     fn test_ensure_visible_at_boundary() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0); // 10 visible lines, showing 0..10
+        vp.update_size(160.0, 100); // 10 visible lines, showing 0..10
 
         // Line 9 is the last visible line (0-indexed)
         let scrolled = vp.ensure_visible(9, 100);
@@ -672,7 +674,7 @@ mod tests {
     #[test]
     fn test_ensure_visible_snaps_to_whole_line() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
 
         // Start with fractional scroll position
         vp.set_scroll_offset_px(25.0, 100); // Line 1, fraction 9px
@@ -690,7 +692,7 @@ mod tests {
     #[test]
     fn test_buffer_to_screen_visible() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
         vp.scroll_to(10, 100);
 
         assert_eq!(vp.buffer_line_to_screen_line(10), Some(0));
@@ -701,7 +703,7 @@ mod tests {
     #[test]
     fn test_buffer_to_screen_above() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
         vp.scroll_to(10, 100);
 
         assert_eq!(vp.buffer_line_to_screen_line(5), None);
@@ -711,7 +713,7 @@ mod tests {
     #[test]
     fn test_buffer_to_screen_below() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
         vp.scroll_to(10, 100);
 
         // Line 21 is beyond visible_lines + 1 (for partial visibility)
@@ -724,7 +726,7 @@ mod tests {
     #[test]
     fn test_screen_to_buffer() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
         vp.scroll_to(10, 100);
 
         assert_eq!(vp.screen_line_to_buffer_line(0), 10);
@@ -737,7 +739,7 @@ mod tests {
     #[test]
     fn test_dirty_none() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
 
         let region = vp.dirty_lines_to_region(&DirtyLines::None, 100);
         assert_eq!(region, DirtyRegion::None);
@@ -746,7 +748,7 @@ mod tests {
     #[test]
     fn test_dirty_single_visible() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0); // 10 visible lines
+        vp.update_size(160.0, 100); // 10 visible lines
 
         let region = vp.dirty_lines_to_region(&DirtyLines::Single(5), 100);
         assert_eq!(region, DirtyRegion::Lines { from: 5, to: 6 });
@@ -755,7 +757,7 @@ mod tests {
     #[test]
     fn test_dirty_single_above_viewport() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
         vp.scroll_to(20, 100);
 
         let region = vp.dirty_lines_to_region(&DirtyLines::Single(5), 100);
@@ -765,7 +767,7 @@ mod tests {
     #[test]
     fn test_dirty_single_below_viewport() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0); // 10 visible lines
+        vp.update_size(160.0, 100); // 10 visible lines
 
         let region = vp.dirty_lines_to_region(&DirtyLines::Single(50), 100);
         assert_eq!(region, DirtyRegion::None);
@@ -774,7 +776,7 @@ mod tests {
     #[test]
     fn test_dirty_range_fully_visible() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
 
         let region = vp.dirty_lines_to_region(&DirtyLines::Range { from: 3, to: 7 }, 100);
         assert_eq!(region, DirtyRegion::Lines { from: 3, to: 7 });
@@ -783,7 +785,7 @@ mod tests {
     #[test]
     fn test_dirty_range_partial_above() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
         vp.scroll_to(5, 100);
 
         let region = vp.dirty_lines_to_region(&DirtyLines::Range { from: 3, to: 8 }, 100);
@@ -793,7 +795,7 @@ mod tests {
     #[test]
     fn test_dirty_range_partial_below() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0); // visible 0..10
+        vp.update_size(160.0, 100); // visible 0..10
 
         let region = vp.dirty_lines_to_region(&DirtyLines::Range { from: 5, to: 15 }, 100);
         assert_eq!(region, DirtyRegion::Lines { from: 5, to: 10 });
@@ -802,7 +804,7 @@ mod tests {
     #[test]
     fn test_dirty_range_outside_viewport() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
         vp.scroll_to(20, 100);
 
         let region = vp.dirty_lines_to_region(&DirtyLines::Range { from: 5, to: 10 }, 100);
@@ -812,7 +814,7 @@ mod tests {
     #[test]
     fn test_dirty_from_line_to_end_inside_viewport() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0); // visible 0..10
+        vp.update_size(160.0, 100); // visible 0..10
 
         let region = vp.dirty_lines_to_region(&DirtyLines::FromLineToEnd(5), 100);
         assert_eq!(region, DirtyRegion::Lines { from: 5, to: 10 });
@@ -821,7 +823,7 @@ mod tests {
     #[test]
     fn test_dirty_from_line_to_end_at_viewport_start() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
 
         let region = vp.dirty_lines_to_region(&DirtyLines::FromLineToEnd(0), 100);
         assert_eq!(region, DirtyRegion::FullViewport);
@@ -830,7 +832,7 @@ mod tests {
     #[test]
     fn test_dirty_from_line_to_end_above_viewport() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
         vp.scroll_to(20, 100);
 
         // If dirty starts at line 5 and we're scrolled to 20, entire viewport is dirty
@@ -841,7 +843,7 @@ mod tests {
     #[test]
     fn test_dirty_from_line_to_end_below_viewport() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0); // visible 0..10
+        vp.update_size(160.0, 100); // visible 0..10
 
         let region = vp.dirty_lines_to_region(&DirtyLines::FromLineToEnd(50), 100);
         assert_eq!(region, DirtyRegion::None);
@@ -852,7 +854,7 @@ mod tests {
     #[test]
     fn test_scroll_offset_compat() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
         vp.scroll_to(20, 100);
 
         // scroll_offset() should return first_visible_line()
@@ -866,7 +868,7 @@ mod tests {
     #[test]
     fn test_first_visible_screen_row() {
         let mut vp = Viewport::new(16.0);
-        vp.update_size(160.0);
+        vp.update_size(160.0, 100);
 
         // Initially at 0
         assert_eq!(vp.first_visible_screen_row(), 0);
