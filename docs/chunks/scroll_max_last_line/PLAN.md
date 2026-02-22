@@ -1,177 +1,146 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The bug is that `EditorState::update_viewport_size` and `update_viewport_dimensions`
+pass the **full** window height to `viewport.update_size()`, but the actual text
+content area is smaller by `TAB_BAR_HEIGHT` pixels (the tab bar occupies space at
+the top of the window).
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+This causes `visible_lines` to be overcounted by approximately one line, which in
+turn makes `max_offset_px` too small. The user cannot scroll far enough to fully
+reveal the last line of the buffer.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+The fix is straightforward:
+1. Compute `content_height = window_height - TAB_BAR_HEIGHT` before calling
+   `viewport.update_size()`.
+2. Pass `content_height` instead of `window_height` to the viewport.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/scroll_max_last_line/GOAL.md)
-with references to the files that you expect to touch.
--->
+This ensures the viewport calculates `visible_lines` based on the actual pixel
+area available for text, not the full window.
 
-## Subsystem Considerations
+**Critical constraint from GOAL.md**: The `view_height` field stored on
+`EditorState` must remain the **full** window height. It is used for:
+- Mouse-coordinate flipping (NSView uses bottom-left origin)
+- Tab bar hit-testing
+- Selector overlay geometry
+- Rail hit-testing
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+Only the value forwarded to `viewport.update_size()` changes.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Following docs/trunk/TESTING_PHILOSOPHY.md, we write the regression test first
+(red phase), then implement the fix.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing regression test
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create a test in `editor_state.rs` that verifies `visible_lines` is computed from
+the content area height, not the full window height.
 
-Example:
+**Test logic:**
+- Create an `EditorState` with a known line height (e.g., 16.0px)
+- Set window height to 192px (TAB_BAR_HEIGHT=32, so content_height=160)
+- Call `update_viewport_dimensions(800.0, 192.0)`
+- Assert `visible_lines == 10` (160 / 16), **not** 12 (192 / 16)
 
-### Step 1: Define the SegmentHeader struct
+The test will fail initially because the current code passes 192 to the viewport.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Location: `crates/editor/src/editor_state.rs` (in `#[cfg(test)]` module)
 
-Location: src/segment/format.rs
+### Step 2: Implement the fix in update_viewport_size
 
-### Step 2: Implement header serialization
+Modify `EditorState::update_viewport_size` to compute the content height before
+passing to the viewport:
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+pub fn update_viewport_size(&mut self, window_height: f32) {
+    let line_count = self.buffer().line_count();
+    let content_height = window_height - TAB_BAR_HEIGHT;
+    self.viewport_mut().update_size(content_height, line_count);
+    self.view_height = window_height;  // Keep full height for coordinate flipping
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `crates/editor/src/editor_state.rs`
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 3: Implement the fix in update_viewport_dimensions
+
+Apply the same fix to `update_viewport_dimensions`:
+
+```rust
+pub fn update_viewport_dimensions(&mut self, window_width: f32, window_height: f32) {
+    let line_count = self.buffer().line_count();
+    let content_height = window_height - TAB_BAR_HEIGHT;
+    self.viewport_mut().update_size(content_height, line_count);
+    self.view_height = window_height;  // Keep full height for coordinate flipping
+    self.view_width = window_width;
+}
+```
+
+Location: `crates/editor/src/editor_state.rs`
+
+### Step 4: Add backreference comment
+
+Add a chunk backreference to both methods indicating this fix:
+
+```rust
+// Chunk: docs/chunks/scroll_max_last_line - Pass content_height to viewport
+```
+
+### Step 5: Verify the regression test now passes
+
+Run the new test to confirm it passes with the fix in place.
+
+### Step 6: Run existing tests
+
+Run the full test suite to verify no regressions in:
+- Click-to-cursor alignment (from `resize_click_alignment` chunk)
+- Viewport scroll clamping
+- Selector overlay geometry
+- Tab bar/rail hit-testing
+
+The existing tests may need adjustment if they relied on the incorrect behavior.
+Any test that calls `update_viewport_size(160.0)` expecting 10 visible lines will
+still work correctly because 160 - 32 = 128, and 128 / 16 = 8 visible lines. We
+may need to adjust expected values or use larger window heights to maintain the
+same effective visible line counts.
+
+### Step 7: Verify no changes to coordinate flipping behavior
+
+Manually verify (or add a test assertion) that `view_height` is still the full
+window height after the fix. The mouse coordinate flipping logic uses
+`view_height` to transform NSView coordinates:
+
+```rust
+let content_y = (self.view_height as f64 - mouse_y) - TAB_BAR_HEIGHT as f64;
+```
+
+This must continue to work correctly. The fix changes what goes to the viewport,
+not what is stored in `view_height`.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+This chunk depends on the completed work from `resize_click_alignment`, which
+established the pattern of passing `line_count` to `viewport.update_size()` for
+scroll clamping. That pattern is already in place.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Test adjustments**: Existing tests that call `update_viewport_size(160.0)`
+   expecting 10 visible lines will now get 8 visible lines (because content_height
+   = 160 - 32 = 128). These tests may need to:
+   - Use window heights that account for TAB_BAR_HEIGHT (e.g., 192.0 for 10 lines)
+   - Have their expected values adjusted
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+   This is acceptable because the tests were implicitly testing incorrect behavior.
+
+2. **Wrapped line scroll handling**: `ensure_visible_wrapped` computes its own
+   max_offset_px. Verify this code path is unaffected (it uses visible_lines
+   which will now be correct, so it should benefit from the fix).
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

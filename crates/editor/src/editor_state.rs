@@ -242,20 +242,24 @@ impl EditorState {
     /// This also updates the stored view_height and view_width for
     /// mouse event coordinate flipping and selector overlay geometry.
     // Chunk: docs/chunks/resize_click_alignment - Pass line count for scroll clamping
+    // Chunk: docs/chunks/scroll_max_last_line - Pass content_height to viewport
     pub fn update_viewport_size(&mut self, window_height: f32) {
         let line_count = self.buffer().line_count();
-        self.viewport_mut().update_size(window_height, line_count);
-        self.view_height = window_height;
+        let content_height = window_height - TAB_BAR_HEIGHT;
+        self.viewport_mut().update_size(content_height, line_count);
+        self.view_height = window_height; // Keep full height for coordinate flipping
     }
 
     /// Updates the viewport size with both width and height.
     ///
     /// This is the preferred method when both dimensions are available.
     // Chunk: docs/chunks/resize_click_alignment - Pass line count for scroll clamping
+    // Chunk: docs/chunks/scroll_max_last_line - Pass content_height to viewport
     pub fn update_viewport_dimensions(&mut self, window_width: f32, window_height: f32) {
         let line_count = self.buffer().line_count();
-        self.viewport_mut().update_size(window_height, line_count);
-        self.view_height = window_height;
+        let content_height = window_height - TAB_BAR_HEIGHT;
+        self.viewport_mut().update_size(content_height, line_count);
+        self.view_height = window_height; // Keep full height for coordinate flipping
         self.view_width = window_width;
     }
 
@@ -1651,8 +1655,37 @@ mod tests {
         let mut state = EditorState::empty(test_font_metrics());
         state.update_viewport_size(320.0);
 
-        assert_eq!(state.viewport().visible_lines(), 20); // 320 / 16 = 20
+        // With TAB_BAR_HEIGHT=32, content_height = 320 - 32 = 288
+        // visible_lines = 288 / 16 = 18
+        assert_eq!(state.viewport().visible_lines(), 18);
+        // view_height remains the full window height for coordinate flipping
         assert_eq!(state.view_height, 320.0);
+    }
+
+    /// Regression test: visible_lines must be computed from content area height,
+    /// not full window height. The tab bar occupies TAB_BAR_HEIGHT pixels at the
+    /// top, so the usable text area is (window_height - TAB_BAR_HEIGHT).
+    ///
+    /// Bug: When this calculation was wrong, the user couldn't scroll far enough
+    /// to fully reveal the last line of the buffer.
+    // Chunk: docs/chunks/scroll_max_last_line - Regression test for content_height fix
+    #[test]
+    fn test_visible_lines_accounts_for_tab_bar() {
+        let mut state = EditorState::empty(test_font_metrics());
+        // line_height = 16.0, TAB_BAR_HEIGHT = 32.0
+        // window_height = 192 => content_height = 192 - 32 = 160
+        // visible_lines = 160 / 16 = 10
+        state.update_viewport_dimensions(800.0, 192.0);
+
+        assert_eq!(
+            state.viewport().visible_lines(),
+            10,
+            "visible_lines should be computed from content_height (192 - 32 = 160), \
+             not window_height (192). With line_height=16, that's 10 lines, not 12."
+        );
+        // view_height must remain the full window height for mouse coordinate flipping
+        assert_eq!(state.view_height, 192.0);
+        assert_eq!(state.view_width, 800.0);
     }
 
     // =========================================================================
