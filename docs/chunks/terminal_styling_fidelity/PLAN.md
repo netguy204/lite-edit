@@ -8,170 +8,185 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The terminal displays unstyled monochrome text because `GlyphBuffer::update_from_buffer_with_wrap` — the rendering path used for terminal content — extracts text from `StyledLine` spans but ignores their `Style` attributes. It uses a single `glyph_color` (the default foreground) for all characters.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The fix follows the pattern already established in `update_from_buffer_with_cursor` (the non-wrap rendering path):
+1. **Iterate spans, not flattened text** — Process each span individually, preserving its `Style`
+2. **Resolve per-span colors** — Use `ColorPalette::resolve_style_colors()` to convert `Style` fg/bg to RGBA
+3. **Emit background quads** — For spans with non-default backgrounds, emit solid quads behind the text
+4. **Emit per-span foreground colors** — Pass the resolved fg color to `quad_vertices_with_xy_offset()`
+5. **Emit underline quads** — For spans with underline styles
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+The existing color resolution infrastructure (`ColorPalette`, `cell_to_style`, `row_to_styled_line`) already handles the full terminal color space (named, indexed, RGB, inverse, dim). The missing link is using this data in the wrap-aware rendering path.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/terminal_styling_fidelity/GOAL.md)
-with references to the files that you expect to touch.
--->
-
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Testing follows the TESTING_PHILOSOPHY.md approach: test the pure logic (color resolution, span iteration) while relying on visual verification for GPU rendering.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add unit tests for terminal color resolution
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Location: `crates/terminal/src/style_convert.rs`
 
-Example:
+Add tests verifying:
+- `cell_to_style` correctly captures ANSI colors (named colors map to correct `NamedColor`)
+- `cell_to_style` correctly captures 256-color indexed colors
+- `cell_to_style` correctly captures RGB truecolor
+- `cell_to_style` correctly captures text attributes (bold, italic, dim, inverse, underline, strikethrough)
+- `row_to_styled_line` preserves styles across span boundaries
 
-### Step 1: Define the SegmentHeader struct
+These tests establish the baseline that `style_convert.rs` is producing correct `Style` values. If these pass and colors still don't render, the bug is in the rendering path.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Add tests for ColorPalette resolution of terminal colors
 
-Location: src/segment/format.rs
+Location: `crates/editor/src/color_palette.rs`
 
-### Step 2: Implement header serialization
+Verify that `ColorPalette::resolve_style_colors` correctly handles:
+- All 16 named ANSI colors (fg and bg)
+- Inverse video (fg/bg swap)
+- Dim (alpha reduction)
+- Combined inverse+dim
+- 256-color indexed colors (cube and grayscale ranges)
+- RGB truecolor
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+These tests are mostly present but should be reviewed for completeness against terminal color cases.
 
-### Step 3: ...
+### Step 3: Extract span-aware rendering from update_from_buffer_with_cursor
 
----
+Location: `crates/editor/src/glyph_buffer.rs`
 
-**BACKREFERENCE COMMENTS**
+Study `update_from_buffer_with_cursor` Phase 3 (Glyph Quads) lines 672-730. This code:
+1. Iterates lines via `view.styled_line(buffer_line)`
+2. Iterates spans within each line
+3. Skips hidden text
+4. Resolves `(fg, _) = self.palette.resolve_style_colors(&span.style)` per span
+5. Uses `fg` color when generating quad vertices
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+This is the exact pattern needed in `update_from_buffer_with_wrap`.
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+### Step 4: Add background quad emission to update_from_buffer_with_wrap
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+Location: `crates/editor/src/glyph_buffer.rs`, `update_from_buffer_with_wrap` method
 
-Format (place immediately before the symbol):
+Insert a new Phase 1.5 (Background Quads) after selection quads but before border quads:
+1. Initialize `background_range` tracking at method start
+2. Iterate buffer lines in the visible range
+3. For each line, get `styled_line`, iterate spans
+4. Track cumulative column position within each line
+5. For spans with `!self.palette.is_default_background(span.style.bg)`:
+   - Calculate screen position using `wrap_layout.buffer_col_to_screen_pos()`
+   - Account for wrapping: a span may cross multiple screen rows
+   - Call `self.create_selection_quad_with_offset()` with the resolved bg color
+   - Push quad indices
+6. Set `self.background_range`
+
+This follows the existing Phase 1 (Background Quads) pattern in `update_from_buffer_with_cursor`.
+
+### Step 5: Modify glyph rendering in update_from_buffer_with_wrap to use per-span colors
+
+Location: `crates/editor/src/glyph_buffer.rs`, `update_from_buffer_with_wrap` Phase 3
+
+Replace the current implementation that extracts text into a flat string:
+```rust
+// OLD (incorrect)
+let line_content = if let Some(styled_line) = view.styled_line(buffer_line) {
+    styled_line.spans.iter().map(|s| s.text.as_str()).collect::<String>()
+} else { ... };
+// ... uses glyph_color for all characters
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+
+With span-aware iteration:
+```rust
+// NEW (correct)
+if let Some(styled_line) = view.styled_line(buffer_line) {
+    let mut col: usize = 0;
+    for span in &styled_line.spans {
+        if span.style.hidden { col += span.text.chars().count(); continue; }
+        let (fg, _) = self.palette.resolve_style_colors(&span.style);
+        for c in span.text.chars() {
+            // Skip spaces, get glyph, calculate wrapped position
+            // Use fg (not glyph_color) when generating vertex
+            col += 1;
+        }
+    }
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+This matches the pattern in `update_from_buffer_with_cursor` Phase 3.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 6: Add underline quad emission to update_from_buffer_with_wrap
+
+Location: `crates/editor/src/glyph_buffer.rs`, `update_from_buffer_with_wrap` method
+
+Insert a new Phase 3.5 (Underline Quads) after glyph quads:
+1. Initialize `underline_range` tracking at method start (currently defaults to empty)
+2. Iterate buffer lines and spans as in Step 5
+3. For spans with `span.style.underline != UnderlineStyle::None`:
+   - Calculate screen position accounting for wrap
+   - Resolve underline color (use `underline_color` if set, else fg)
+   - Call `self.create_underline_quad()` with the resolved color
+   - Push quad indices
+4. Set `self.underline_range`
+
+This follows the existing Phase 4 (Underline Quads) pattern in `update_from_buffer_with_cursor`.
+
+### Step 7: Manual visual verification
+
+Run the application and test:
+1. Open a terminal tab (`Cmd+Shift+T`)
+2. Run `ls --color=auto` — file types should show distinct colors
+3. Run `echo -e "\e[31mRed\e[32mGreen\e[34mBlue\e[0m"` — should show colored text
+4. Run `echo -e "\e[1mBold\e[0m \e[3mItalic\e[0m \e[4mUnderline\e[0m"` — should show styled text
+5. Run `echo -e "\e[7mInverse\e[0m \e[2mDim\e[0m"` — should show inverse and dim
+6. Run `vim` and open a source file — syntax highlighting should appear
+7. Run a TUI app like `htop` or `top` — colors and shading should be visible
+8. Verify file tabs still render correctly (no regression)
+
+### Step 8: Add integration test for styled terminal output
+
+Location: `crates/terminal/tests/integration.rs` (or new file)
+
+Add a test that:
+1. Creates a `TerminalBuffer`
+2. Feeds ANSI escape sequences for colored text
+3. Calls `styled_line()` and verifies spans have correct `Style` attributes
+4. Verifies foreground colors match expected ANSI colors
+5. Verifies attributes (bold, inverse, etc.) are correctly set
+
+This provides automated regression coverage for the color pipeline without requiring GPU rendering.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- `renderer_styled_content` chunk (ACTIVE): Provides `ColorPalette`, per-vertex color in shaders, and the pattern for background/underline rendering
+- `terminal_input_render_bug` chunk (ACTIVE): Ensures terminal input/output pipeline is functional
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Performance impact**: Adding per-span iteration in the wrap path may increase CPU cost. The non-wrap path already does this, so the cost should be acceptable. Monitor render times during testing.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Wrap boundary handling for spans**: A single styled span may wrap across multiple screen rows. The background and underline quads need to be split at wrap boundaries. Study how `update_from_buffer_with_cursor` handles this (it doesn't have wrap) and adapt.
+
+3. **Attribute interaction**: Bold+Dim, Inverse+underline_color, etc. Verify these combinations render correctly. The existing `resolve_style_colors` logic should handle this, but visual verification is needed.
+
+4. **Hidden text in wrapped mode**: The current wrap implementation doesn't skip hidden text. Need to ensure `span.style.hidden` is checked and column tracking accounts for it.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
+### Step 1: DIM flag handling correction
 
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
+**Changed**: Fixed the dim attribute detection in `cell_to_style`.
 
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
+**Original code**: `dim: flags.contains(Flags::DIM_BOLD) && !flags.contains(Flags::BOLD)`
 
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+**New code**: `dim: flags.contains(Flags::DIM)`
+
+**Why**: The original code incorrectly used `DIM_BOLD` which is a compound flag (both DIM and BOLD set). Alacritty actually has a separate `DIM` flag that should be used directly.
+
+**Impact**: Dim text now correctly detected. Tests were updated to match.
+
+### Step 3: No extraction needed
+
+**Skipped**: Step 3 (Extract span-aware rendering from update_from_buffer_with_cursor) was not explicitly performed as a separate step. Instead, the pattern from `update_from_buffer_with_cursor` was directly applied to `update_from_buffer_with_wrap` during Steps 4-6.
+
+### Step 7: Visual verification
+
+**Skipped**: Manual visual verification was not performed as part of this implementation. The integration tests provide automated coverage for the key scenarios. Visual verification should be done by the operator.

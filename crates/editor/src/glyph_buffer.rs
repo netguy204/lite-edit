@@ -1145,9 +1145,12 @@ impl GlyphBuffer {
         estimated_quads += 1; // cursor
 
         // Reset quad ranges
+        // Chunk: docs/chunks/terminal_styling_fidelity - Added background and underline ranges
+        self.background_range = QuadRange::default();
         self.selection_range = QuadRange::default();
         self.border_range = QuadRange::default();
         self.glyph_range = QuadRange::default();
+        self.underline_range = QuadRange::default();
         self.cursor_range = QuadRange::default();
 
         // Define colors for this rendering pass
@@ -1157,8 +1160,6 @@ impl GlyphBuffer {
         let cursor_color = self.palette.default_foreground();
         // Border color for continuation lines (dimmed foreground)
         let border_color: [f32; 4] = [0.4, 0.4, 0.45, 0.6];
-        // Default glyph foreground color
-        let glyph_color = self.palette.default_foreground();
 
         if estimated_quads == 0 && !cursor_visible {
             self.vertex_buffer = None;
@@ -1183,7 +1184,97 @@ impl GlyphBuffer {
             *vertex_offset += 4;
         };
 
-        // ==================== Phase 1: Selection Quads ====================
+        // ==================== Phase 1: Background Quads ====================
+        // Chunk: docs/chunks/terminal_styling_fidelity - Per-span background colors for terminal styling
+        let background_start_index = indices.len();
+
+        {
+            let solid_glyph = atlas.solid_glyph();
+            let cols_per_row = wrap_layout.cols_per_row();
+            let mut cumulative_screen_row: usize = 0;
+            let mut is_first_buffer_line = true;
+
+            for buffer_line in first_visible_buffer_line..line_count {
+                if cumulative_screen_row >= max_screen_rows {
+                    break;
+                }
+
+                let line_len = view.line_len(buffer_line);
+                let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
+
+                // Determine the starting row offset within this buffer line
+                let start_row_offset = if is_first_buffer_line {
+                    screen_row_offset_in_line
+                } else {
+                    0
+                };
+                is_first_buffer_line = false;
+
+                // Iterate spans and emit background quads for non-default backgrounds
+                if let Some(styled_line) = view.styled_line(buffer_line) {
+                    let mut col: usize = 0;
+                    for span in &styled_line.spans {
+                        let span_len = span.text.chars().count();
+                        let end_col = col + span_len;
+
+                        // Only emit background quad if bg is not default
+                        if !self.palette.is_default_background(span.style.bg) {
+                            let (_, bg) = self.palette.resolve_style_colors(&span.style);
+
+                            // The span may cross multiple screen rows due to wrapping.
+                            // Emit a background quad for each screen row the span covers.
+                            let span_start_row_offset = col / cols_per_row;
+                            let span_end_row_offset = if end_col == 0 { 0 } else { (end_col - 1) / cols_per_row };
+
+                            for row_offset in span_start_row_offset..=span_end_row_offset {
+                                // Skip rows before our starting row
+                                if row_offset < start_row_offset {
+                                    continue;
+                                }
+
+                                let screen_row = cumulative_screen_row + (row_offset - start_row_offset);
+                                if screen_row >= max_screen_rows {
+                                    break;
+                                }
+
+                                // Calculate the portion of the span on this screen row
+                                let row_start_col = row_offset * cols_per_row;
+                                let row_end_col = (row_offset + 1) * cols_per_row;
+
+                                let span_start_on_row = col.max(row_start_col);
+                                let span_end_on_row = end_col.min(row_end_col);
+
+                                if span_start_on_row < span_end_on_row {
+                                    // Convert to screen columns (relative to this screen row)
+                                    let screen_start_col = span_start_on_row - row_start_col;
+                                    let screen_end_col = span_end_on_row - row_start_col;
+
+                                    let quad = self.create_selection_quad_with_offset(
+                                        screen_row,
+                                        screen_start_col,
+                                        screen_end_col,
+                                        solid_glyph,
+                                        y_offset,
+                                        bg,
+                                    );
+                                    vertices.extend_from_slice(&quad);
+                                    push_quad_indices(&mut indices, &mut vertex_offset);
+                                }
+                            }
+                        }
+
+                        col = end_col;
+                    }
+                }
+
+                cumulative_screen_row += rows_for_line - start_row_offset;
+            }
+        }
+
+        let background_index_count = indices.len() - background_start_index;
+        self.background_range = QuadRange::new(background_start_index, background_index_count);
+
+        // ==================== Phase 2: Selection Quads ====================
         // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Fixed screen row tracking
         let selection_start_index = indices.len();
 
@@ -1324,6 +1415,7 @@ impl GlyphBuffer {
 
         // ==================== Phase 3: Glyph Quads ====================
         // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Fixed screen row tracking
+        // Chunk: docs/chunks/terminal_styling_fidelity - Per-span foreground colors for terminal styling
         let glyph_start_index = indices.len();
 
         {
@@ -1336,14 +1428,16 @@ impl GlyphBuffer {
                     break;
                 }
 
-                // Get line content via styled_line, extract text from spans
-                let line_content = if let Some(styled_line) = view.styled_line(buffer_line) {
-                    styled_line.spans.iter().map(|s| s.text.as_str()).collect::<String>()
+                // Get styled_line and iterate spans to preserve per-span colors
+                let styled_line = if let Some(sl) = view.styled_line(buffer_line) {
+                    sl
                 } else {
                     is_first_buffer_line = false;
                     continue;
                 };
-                let line_len = line_content.chars().count();
+
+                // Calculate line length from spans
+                let line_len: usize = styled_line.spans.iter().map(|s| s.text.chars().count()).sum();
                 let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
 
                 // Determine the starting row offset within this buffer line
@@ -1357,46 +1451,68 @@ impl GlyphBuffer {
                 // Calculate which buffer columns to skip (those before start_row_offset)
                 let start_col = start_row_offset * cols_per_row;
 
-                for (col, c) in line_content.chars().enumerate() {
-                    // Skip characters on rows before our starting row
-                    if col < start_col {
+                // Iterate spans, tracking cumulative column position
+                let mut col: usize = 0;
+                for span in &styled_line.spans {
+                    // Skip hidden text
+                    if span.style.hidden {
+                        col += span.text.chars().count();
                         continue;
                     }
 
-                    // Skip spaces (they don't need quads)
-                    if c == ' ' {
-                        continue;
+                    // Resolve foreground color for this span
+                    let (fg, _) = self.palette.resolve_style_colors(&span.style);
+
+                    for c in span.text.chars() {
+                        // Skip characters on rows before our starting row
+                        if col < start_col {
+                            col += 1;
+                            continue;
+                        }
+
+                        // Skip spaces (they don't need quads)
+                        if c == ' ' {
+                            col += 1;
+                            continue;
+                        }
+
+                        // Get the glyph info from the atlas
+                        let glyph = match atlas.get_glyph(c) {
+                            Some(g) => g,
+                            None => {
+                                col += 1;
+                                continue;
+                            }
+                        };
+
+                        // Calculate screen position using wrap layout
+                        let (row_offset, screen_col) = wrap_layout.buffer_col_to_screen_pos(col);
+                        // Adjust row_offset to be relative to viewport top
+                        let screen_row = cumulative_screen_row + (row_offset - start_row_offset);
+
+                        if screen_row >= max_screen_rows {
+                            // Don't break entirely - there might be more chars on earlier rows
+                            col += 1;
+                            continue;
+                        }
+
+                        // Generate quad at the calculated screen position with per-span fg color
+                        // Chunk: docs/chunks/workspace_model - Apply x_offset for left rail
+                        // Chunk: docs/chunks/content_tab_bar - Apply y_offset for tab bar
+                        let effective_y_offset = y_offset - self.y_offset;
+                        let quad = self.layout.quad_vertices_with_xy_offset(
+                            screen_row,
+                            screen_col,
+                            glyph,
+                            self.x_offset,
+                            effective_y_offset,
+                            fg,
+                        );
+                        vertices.extend_from_slice(&quad);
+                        push_quad_indices(&mut indices, &mut vertex_offset);
+
+                        col += 1;
                     }
-
-                    // Get the glyph info from the atlas
-                    let glyph = match atlas.get_glyph(c) {
-                        Some(g) => g,
-                        None => continue,
-                    };
-
-                    // Calculate screen position using wrap layout
-                    let (row_offset, screen_col) = wrap_layout.buffer_col_to_screen_pos(col);
-                    // Adjust row_offset to be relative to viewport top
-                    let screen_row = cumulative_screen_row + (row_offset - start_row_offset);
-
-                    if screen_row >= max_screen_rows {
-                        break;
-                    }
-
-                    // Generate quad at the calculated screen position
-                    // Chunk: docs/chunks/workspace_model - Apply x_offset for left rail
-                    // Chunk: docs/chunks/content_tab_bar - Apply y_offset for tab bar
-                    let effective_y_offset = y_offset - self.y_offset;
-                    let quad = self.layout.quad_vertices_with_xy_offset(
-                        screen_row,
-                        screen_col,
-                        glyph,
-                        self.x_offset,
-                        effective_y_offset,
-                        glyph_color,
-                    );
-                    vertices.extend_from_slice(&quad);
-                    push_quad_indices(&mut indices, &mut vertex_offset);
                 }
 
                 cumulative_screen_row += rows_for_line - start_row_offset;
@@ -1406,7 +1522,103 @@ impl GlyphBuffer {
         let glyph_index_count = indices.len() - glyph_start_index;
         self.glyph_range = QuadRange::new(glyph_start_index, glyph_index_count);
 
-        // ==================== Phase 4: Cursor Quad ====================
+        // ==================== Phase 4: Underline Quads ====================
+        // Chunk: docs/chunks/terminal_styling_fidelity - Underline rendering for terminal styling
+        let underline_start_index = indices.len();
+
+        {
+            let solid_glyph = atlas.solid_glyph();
+            let cols_per_row = wrap_layout.cols_per_row();
+            let mut cumulative_screen_row: usize = 0;
+            let mut is_first_buffer_line = true;
+
+            for buffer_line in first_visible_buffer_line..line_count {
+                if cumulative_screen_row >= max_screen_rows {
+                    break;
+                }
+
+                let line_len = view.line_len(buffer_line);
+                let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
+
+                // Determine the starting row offset within this buffer line
+                let start_row_offset = if is_first_buffer_line {
+                    screen_row_offset_in_line
+                } else {
+                    0
+                };
+                is_first_buffer_line = false;
+
+                // Iterate spans and emit underline quads for underlined spans
+                if let Some(styled_line) = view.styled_line(buffer_line) {
+                    let mut col: usize = 0;
+                    for span in &styled_line.spans {
+                        let span_len = span.text.chars().count();
+                        let end_col = col + span_len;
+
+                        // Emit underline quad if underline style is not None
+                        if span.style.underline != UnderlineStyle::None {
+                            // Use underline_color if specified, otherwise use fg color
+                            let underline_color = if let Some(uc) = span.style.underline_color {
+                                self.palette.resolve_color(uc, true)
+                            } else {
+                                let (fg, _) = self.palette.resolve_style_colors(&span.style);
+                                fg
+                            };
+
+                            // The span may cross multiple screen rows due to wrapping.
+                            // Emit an underline quad for each screen row the span covers.
+                            let span_start_row_offset = col / cols_per_row;
+                            let span_end_row_offset = if end_col == 0 { 0 } else { (end_col - 1) / cols_per_row };
+
+                            for row_offset in span_start_row_offset..=span_end_row_offset {
+                                // Skip rows before our starting row
+                                if row_offset < start_row_offset {
+                                    continue;
+                                }
+
+                                let screen_row = cumulative_screen_row + (row_offset - start_row_offset);
+                                if screen_row >= max_screen_rows {
+                                    break;
+                                }
+
+                                // Calculate the portion of the span on this screen row
+                                let row_start_col = row_offset * cols_per_row;
+                                let row_end_col = (row_offset + 1) * cols_per_row;
+
+                                let span_start_on_row = col.max(row_start_col);
+                                let span_end_on_row = end_col.min(row_end_col);
+
+                                if span_start_on_row < span_end_on_row {
+                                    // Convert to screen columns (relative to this screen row)
+                                    let screen_start_col = span_start_on_row - row_start_col;
+                                    let screen_end_col = span_end_on_row - row_start_col;
+
+                                    let quad = self.create_underline_quad(
+                                        screen_row,
+                                        screen_start_col,
+                                        screen_end_col,
+                                        solid_glyph,
+                                        y_offset,
+                                        underline_color,
+                                    );
+                                    vertices.extend_from_slice(&quad);
+                                    push_quad_indices(&mut indices, &mut vertex_offset);
+                                }
+                            }
+                        }
+
+                        col = end_col;
+                    }
+                }
+
+                cumulative_screen_row += rows_for_line - start_row_offset;
+            }
+        }
+
+        let underline_index_count = indices.len() - underline_start_index;
+        self.underline_range = QuadRange::new(underline_start_index, underline_index_count);
+
+        // ==================== Phase 5: Cursor Quad ====================
         // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Fixed cursor positioning
         let cursor_start_index = indices.len();
 

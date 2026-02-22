@@ -101,7 +101,7 @@ pub fn cell_to_style(cell: &Cell) -> Style {
         bg,
         bold: flags.contains(Flags::BOLD),
         italic: flags.contains(Flags::ITALIC),
-        dim: flags.contains(Flags::DIM_BOLD) && !flags.contains(Flags::BOLD),
+        dim: flags.contains(Flags::DIM),
         underline: flags_to_underline_style(flags),
         underline_color,
         strikethrough: flags.contains(Flags::STRIKEOUT),
@@ -328,5 +328,308 @@ mod tests {
         let line = row_to_styled_line(cells.iter(), 80);
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].text, "Hello");
+    }
+
+    // ==================== Step 1: Terminal Color Resolution Tests ====================
+    // Chunk: docs/chunks/terminal_styling_fidelity - Tests for style_convert.rs color handling
+
+    #[test]
+    fn test_cell_to_style_named_foreground_colors() {
+        // Test that cell_to_style correctly captures all 16 ANSI named colors
+        let test_cases = [
+            (VteNamedColor::Black, NamedColor::Black),
+            (VteNamedColor::Red, NamedColor::Red),
+            (VteNamedColor::Green, NamedColor::Green),
+            (VteNamedColor::Yellow, NamedColor::Yellow),
+            (VteNamedColor::Blue, NamedColor::Blue),
+            (VteNamedColor::Magenta, NamedColor::Magenta),
+            (VteNamedColor::Cyan, NamedColor::Cyan),
+            (VteNamedColor::White, NamedColor::White),
+            (VteNamedColor::BrightBlack, NamedColor::BrightBlack),
+            (VteNamedColor::BrightRed, NamedColor::BrightRed),
+            (VteNamedColor::BrightGreen, NamedColor::BrightGreen),
+            (VteNamedColor::BrightYellow, NamedColor::BrightYellow),
+            (VteNamedColor::BrightBlue, NamedColor::BrightBlue),
+            (VteNamedColor::BrightMagenta, NamedColor::BrightMagenta),
+            (VteNamedColor::BrightCyan, NamedColor::BrightCyan),
+            (VteNamedColor::BrightWhite, NamedColor::BrightWhite),
+        ];
+
+        for (vte_color, expected_named) in test_cases {
+            let mut cell = Cell::default();
+            cell.fg = VteColor::Named(vte_color);
+            let style = cell_to_style(&cell);
+            assert_eq!(style.fg, Color::Named(expected_named), "Failed for {:?}", vte_color);
+        }
+    }
+
+    #[test]
+    fn test_cell_to_style_indexed_colors() {
+        // Test 256-color indexed colors
+        let test_indices = [0u8, 15, 16, 127, 231, 232, 255];
+
+        for idx in test_indices {
+            let mut cell = Cell::default();
+            cell.fg = VteColor::Indexed(idx);
+            let style = cell_to_style(&cell);
+            assert_eq!(style.fg, Color::Indexed(idx), "Failed for index {}", idx);
+        }
+    }
+
+    #[test]
+    fn test_cell_to_style_rgb_truecolor() {
+        // Test RGB truecolor
+        let test_cases = [
+            (0, 0, 0),       // Black
+            (255, 255, 255), // White
+            (255, 0, 0),     // Red
+            (0, 255, 0),     // Green
+            (0, 0, 255),     // Blue
+            (128, 64, 192),  // Arbitrary
+        ];
+
+        for (r, g, b) in test_cases {
+            let mut cell = Cell::default();
+            cell.fg = VteColor::Spec(Rgb { r, g, b });
+            let style = cell_to_style(&cell);
+            assert_eq!(style.fg, Color::Rgb { r, g, b }, "Failed for RGB({}, {}, {})", r, g, b);
+        }
+    }
+
+    #[test]
+    fn test_cell_to_style_background_colors() {
+        // Test that background colors are also correctly captured
+        let mut cell = Cell::default();
+        cell.bg = VteColor::Named(VteNamedColor::Blue);
+        let style = cell_to_style(&cell);
+        assert_eq!(style.bg, Color::Named(NamedColor::Blue));
+
+        let mut cell = Cell::default();
+        cell.bg = VteColor::Indexed(200);
+        let style = cell_to_style(&cell);
+        assert_eq!(style.bg, Color::Indexed(200));
+
+        let mut cell = Cell::default();
+        cell.bg = VteColor::Spec(Rgb { r: 50, g: 100, b: 150 });
+        let style = cell_to_style(&cell);
+        assert_eq!(style.bg, Color::Rgb { r: 50, g: 100, b: 150 });
+    }
+
+    #[test]
+    fn test_cell_to_style_default_colors() {
+        // Default foreground/background colors should map to Color::Default
+        let mut cell = Cell::default();
+        cell.fg = VteColor::Named(VteNamedColor::Foreground);
+        cell.bg = VteColor::Named(VteNamedColor::Background);
+        let style = cell_to_style(&cell);
+        assert_eq!(style.fg, Color::Default);
+        assert_eq!(style.bg, Color::Default);
+    }
+
+    #[test]
+    fn test_cell_to_style_bold_attribute() {
+        let mut cell = Cell::default();
+        cell.flags = Flags::BOLD;
+        let style = cell_to_style(&cell);
+        assert!(style.bold);
+        assert!(!style.italic);
+        assert!(!style.dim);
+    }
+
+    #[test]
+    fn test_cell_to_style_italic_attribute() {
+        let mut cell = Cell::default();
+        cell.flags = Flags::ITALIC;
+        let style = cell_to_style(&cell);
+        assert!(style.italic);
+        assert!(!style.bold);
+    }
+
+    #[test]
+    fn test_cell_to_style_dim_attribute() {
+        // Dim should be set when DIM flag is set
+        let mut cell = Cell::default();
+        cell.flags = Flags::DIM;
+        let style = cell_to_style(&cell);
+        assert!(style.dim);
+        assert!(!style.bold);
+
+        // Dim and bold can coexist
+        let mut cell = Cell::default();
+        cell.flags = Flags::DIM | Flags::BOLD;
+        let style = cell_to_style(&cell);
+        assert!(style.bold);
+        assert!(style.dim);
+    }
+
+    #[test]
+    fn test_cell_to_style_inverse_attribute() {
+        let mut cell = Cell::default();
+        cell.flags = Flags::INVERSE;
+        let style = cell_to_style(&cell);
+        assert!(style.inverse);
+    }
+
+    #[test]
+    fn test_cell_to_style_underline_attribute() {
+        let mut cell = Cell::default();
+        cell.flags = Flags::UNDERLINE;
+        let style = cell_to_style(&cell);
+        assert_eq!(style.underline, UnderlineStyle::Single);
+    }
+
+    #[test]
+    fn test_cell_to_style_strikethrough_attribute() {
+        let mut cell = Cell::default();
+        cell.flags = Flags::STRIKEOUT;
+        let style = cell_to_style(&cell);
+        assert!(style.strikethrough);
+    }
+
+    #[test]
+    fn test_cell_to_style_hidden_attribute() {
+        let mut cell = Cell::default();
+        cell.flags = Flags::HIDDEN;
+        let style = cell_to_style(&cell);
+        assert!(style.hidden);
+    }
+
+    #[test]
+    fn test_cell_to_style_combined_attributes() {
+        // Test multiple attributes combined
+        let mut cell = Cell::default();
+        cell.fg = VteColor::Named(VteNamedColor::Red);
+        cell.bg = VteColor::Named(VteNamedColor::Blue);
+        cell.flags = Flags::BOLD | Flags::ITALIC | Flags::UNDERLINE;
+        let style = cell_to_style(&cell);
+
+        assert_eq!(style.fg, Color::Named(NamedColor::Red));
+        assert_eq!(style.bg, Color::Named(NamedColor::Blue));
+        assert!(style.bold);
+        assert!(style.italic);
+        assert_eq!(style.underline, UnderlineStyle::Single);
+        assert!(!style.dim);
+        assert!(!style.strikethrough);
+    }
+
+    #[test]
+    fn test_row_to_styled_line_preserves_styles_across_spans() {
+        // Create a row with multiple styled segments
+        // "Red" in red, "Green" in green
+        let mut cells: Vec<Cell> = Vec::new();
+
+        // "Red" in red
+        for c in "Red".chars() {
+            let mut cell = Cell::default();
+            cell.c = c;
+            cell.fg = VteColor::Named(VteNamedColor::Red);
+            cells.push(cell);
+        }
+
+        // "Green" in green
+        for c in "Green".chars() {
+            let mut cell = Cell::default();
+            cell.c = c;
+            cell.fg = VteColor::Named(VteNamedColor::Green);
+            cells.push(cell);
+        }
+
+        let line = row_to_styled_line(cells.iter(), 80);
+
+        // Should have two spans with different styles
+        assert_eq!(line.spans.len(), 2);
+        assert_eq!(line.spans[0].text, "Red");
+        assert_eq!(line.spans[0].style.fg, Color::Named(NamedColor::Red));
+        assert_eq!(line.spans[1].text, "Green");
+        assert_eq!(line.spans[1].style.fg, Color::Named(NamedColor::Green));
+    }
+
+    #[test]
+    fn test_row_to_styled_line_coalesces_same_style() {
+        // Create a row where all cells have the same style
+        let mut cells: Vec<Cell> = Vec::new();
+        for c in "Hello World".chars() {
+            let mut cell = Cell::default();
+            cell.c = c;
+            cell.fg = VteColor::Named(VteNamedColor::Cyan);
+            cells.push(cell);
+        }
+
+        let line = row_to_styled_line(cells.iter(), 80);
+
+        // Should have a single span
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].text, "Hello World");
+        assert_eq!(line.spans[0].style.fg, Color::Named(NamedColor::Cyan));
+    }
+
+    #[test]
+    fn test_row_to_styled_line_multiple_style_changes() {
+        // Create: "A" red, "B" green, "C" blue, "D" red again
+        let colors = [
+            ('A', VteNamedColor::Red),
+            ('B', VteNamedColor::Green),
+            ('C', VteNamedColor::Blue),
+            ('D', VteNamedColor::Red),
+        ];
+
+        let cells: Vec<Cell> = colors
+            .iter()
+            .map(|(c, color)| {
+                let mut cell = Cell::default();
+                cell.c = *c;
+                cell.fg = VteColor::Named(*color);
+                cell
+            })
+            .collect();
+
+        let line = row_to_styled_line(cells.iter(), 80);
+
+        // Should have 4 spans (each character is different from the previous)
+        assert_eq!(line.spans.len(), 4);
+        assert_eq!(line.spans[0].text, "A");
+        assert_eq!(line.spans[0].style.fg, Color::Named(NamedColor::Red));
+        assert_eq!(line.spans[1].text, "B");
+        assert_eq!(line.spans[1].style.fg, Color::Named(NamedColor::Green));
+        assert_eq!(line.spans[2].text, "C");
+        assert_eq!(line.spans[2].style.fg, Color::Named(NamedColor::Blue));
+        assert_eq!(line.spans[3].text, "D");
+        assert_eq!(line.spans[3].style.fg, Color::Named(NamedColor::Red));
+    }
+
+    #[test]
+    fn test_row_to_styled_line_preserves_attributes_in_spans() {
+        // Create: "Bold" bold, "Italic" italic, "Normal" default
+        let mut cells: Vec<Cell> = Vec::new();
+
+        for c in "Bold".chars() {
+            let mut cell = Cell::default();
+            cell.c = c;
+            cell.flags = Flags::BOLD;
+            cells.push(cell);
+        }
+
+        for c in "Italic".chars() {
+            let mut cell = Cell::default();
+            cell.c = c;
+            cell.flags = Flags::ITALIC;
+            cells.push(cell);
+        }
+
+        for c in "Normal".chars() {
+            let mut cell = Cell::default();
+            cell.c = c;
+            cells.push(cell);
+        }
+
+        let line = row_to_styled_line(cells.iter(), 80);
+
+        assert_eq!(line.spans.len(), 3);
+        assert!(line.spans[0].style.bold);
+        assert!(!line.spans[0].style.italic);
+        assert!(!line.spans[1].style.bold);
+        assert!(line.spans[1].style.italic);
+        assert!(!line.spans[2].style.bold);
+        assert!(!line.spans[2].style.italic);
     }
 }

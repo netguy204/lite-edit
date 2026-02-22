@@ -369,3 +369,361 @@ fn test_pty_input_output_roundtrip() {
 
     panic!("Did not see echoed input within timeout");
 }
+
+// =============================================================================
+// Terminal styling integration tests
+// Chunk: docs/chunks/terminal_styling_fidelity - Tests for styled terminal output
+// =============================================================================
+
+use lite_edit_buffer::{Color, NamedColor, UnderlineStyle};
+
+/// Test that colored text output preserves ANSI color escape sequences in styled spans.
+///
+/// This verifies: ANSI escape sequences → alacritty_terminal parsing → style_convert → StyledLine
+#[test]
+fn test_colored_text_produces_styled_spans() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Use printf to output red text: \e[31m sets red foreground, \e[0m resets
+    // The text "RED" should appear in a span with Color::Named(NamedColor::Red)
+    terminal
+        .spawn_command("printf", &["\\033[31mRED\\033[0m"], Path::new("/tmp"))
+        .unwrap();
+
+    // Wait for output
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Find "RED" in output and verify it has red foreground
+    let mut found_red = false;
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            for span in &styled.spans {
+                if span.text.contains("RED") {
+                    // Check that the span has red foreground color
+                    if span.style.fg == Color::Named(NamedColor::Red) {
+                        found_red = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if found_red {
+            break;
+        }
+    }
+    assert!(found_red, "Expected 'RED' text with red foreground color");
+}
+
+/// Test that multiple colors in one line produce separate styled spans.
+#[test]
+fn test_multiple_colors_create_separate_spans() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Output "RED" in red, then "GREEN" in green
+    terminal
+        .spawn_command(
+            "printf",
+            &["\\033[31mRED\\033[32mGREEN\\033[0m"],
+            Path::new("/tmp"),
+        )
+        .unwrap();
+
+    // Wait for output
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Find the line containing the colored text
+    let mut found_red = false;
+    let mut found_green = false;
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            for span in &styled.spans {
+                if span.text.contains("RED") && span.style.fg == Color::Named(NamedColor::Red) {
+                    found_red = true;
+                }
+                if span.text.contains("GREEN") && span.style.fg == Color::Named(NamedColor::Green)
+                {
+                    found_green = true;
+                }
+            }
+        }
+    }
+    assert!(
+        found_red && found_green,
+        "Expected both red and green spans, found_red={}, found_green={}",
+        found_red,
+        found_green
+    );
+}
+
+/// Test that bold attribute is captured in styled spans.
+#[test]
+fn test_bold_attribute_captured() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Output bold text: \e[1m sets bold, \e[0m resets
+    terminal
+        .spawn_command("printf", &["\\033[1mBOLD\\033[0m"], Path::new("/tmp"))
+        .unwrap();
+
+    // Wait for output
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Find "BOLD" and verify it has bold attribute
+    let mut found_bold = false;
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            for span in &styled.spans {
+                if span.text.contains("BOLD") && span.style.bold {
+                    found_bold = true;
+                    break;
+                }
+            }
+        }
+        if found_bold {
+            break;
+        }
+    }
+    assert!(found_bold, "Expected 'BOLD' text with bold attribute");
+}
+
+/// Test that inverse video attribute is captured in styled spans.
+#[test]
+fn test_inverse_attribute_captured() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Output inverse text: \e[7m sets inverse video, \e[0m resets
+    terminal
+        .spawn_command("printf", &["\\033[7mINVERSE\\033[0m"], Path::new("/tmp"))
+        .unwrap();
+
+    // Wait for output
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Find "INVERSE" and verify it has inverse attribute
+    let mut found_inverse = false;
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            for span in &styled.spans {
+                if span.text.contains("INVERSE") && span.style.inverse {
+                    found_inverse = true;
+                    break;
+                }
+            }
+        }
+        if found_inverse {
+            break;
+        }
+    }
+    assert!(
+        found_inverse,
+        "Expected 'INVERSE' text with inverse attribute"
+    );
+}
+
+/// Test that underline attribute is captured in styled spans.
+#[test]
+fn test_underline_attribute_captured() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Output underlined text: \e[4m sets underline, \e[0m resets
+    terminal
+        .spawn_command("printf", &["\\033[4mUNDERLINE\\033[0m"], Path::new("/tmp"))
+        .unwrap();
+
+    // Wait for output
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Find "UNDERLINE" and verify it has underline attribute
+    let mut found_underline = false;
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            for span in &styled.spans {
+                if span.text.contains("UNDERLINE")
+                    && span.style.underline != UnderlineStyle::None
+                {
+                    found_underline = true;
+                    break;
+                }
+            }
+        }
+        if found_underline {
+            break;
+        }
+    }
+    assert!(
+        found_underline,
+        "Expected 'UNDERLINE' text with underline attribute"
+    );
+}
+
+/// Test that 256-color indexed colors are captured.
+#[test]
+fn test_indexed_colors_captured() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Output text with 256-color: \e[38;5;208m sets fg to color 208 (orange)
+    terminal
+        .spawn_command(
+            "printf",
+            &["\\033[38;5;208mORANGE\\033[0m"],
+            Path::new("/tmp"),
+        )
+        .unwrap();
+
+    // Wait for output
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Find "ORANGE" and verify it has indexed color 208
+    let mut found_indexed = false;
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            for span in &styled.spans {
+                if span.text.contains("ORANGE") {
+                    if let Color::Indexed(idx) = span.style.fg {
+                        if idx == 208 {
+                            found_indexed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if found_indexed {
+            break;
+        }
+    }
+    assert!(
+        found_indexed,
+        "Expected 'ORANGE' text with indexed color 208"
+    );
+}
+
+/// Test that RGB truecolor is captured.
+#[test]
+fn test_rgb_truecolor_captured() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Output text with RGB truecolor: \e[38;2;255;128;64m sets fg to RGB(255, 128, 64)
+    terminal
+        .spawn_command(
+            "printf",
+            &["\\033[38;2;255;128;64mRGB\\033[0m"],
+            Path::new("/tmp"),
+        )
+        .unwrap();
+
+    // Wait for output
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Find "RGB" and verify it has the correct RGB color
+    let mut found_rgb = false;
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            for span in &styled.spans {
+                if span.text.contains("RGB") {
+                    if let Color::Rgb { r, g, b } = span.style.fg {
+                        if r == 255 && g == 128 && b == 64 {
+                            found_rgb = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if found_rgb {
+            break;
+        }
+    }
+    assert!(
+        found_rgb,
+        "Expected 'RGB' text with RGB color (255, 128, 64)"
+    );
+}
+
+/// Test that background colors are captured.
+#[test]
+fn test_background_color_captured() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Output text with blue background: \e[44m sets bg to blue, \e[0m resets
+    terminal
+        .spawn_command("printf", &["\\033[44mBLUEBG\\033[0m"], Path::new("/tmp"))
+        .unwrap();
+
+    // Wait for output
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Find "BLUEBG" and verify it has blue background color
+    let mut found_blue_bg = false;
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            for span in &styled.spans {
+                if span.text.contains("BLUEBG")
+                    && span.style.bg == Color::Named(NamedColor::Blue)
+                {
+                    found_blue_bg = true;
+                    break;
+                }
+            }
+        }
+        if found_blue_bg {
+            break;
+        }
+    }
+    assert!(
+        found_blue_bg,
+        "Expected 'BLUEBG' text with blue background color"
+    );
+}
+
+/// Test that combined attributes (color + bold + underline) are captured.
+#[test]
+fn test_combined_attributes_captured() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Output text with red + bold + underline: \e[31;1;4m
+    terminal
+        .spawn_command(
+            "printf",
+            &["\\033[31;1;4mCOMBINED\\033[0m"],
+            Path::new("/tmp"),
+        )
+        .unwrap();
+
+    // Wait for output
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Find "COMBINED" and verify it has all attributes
+    let mut found_combined = false;
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            for span in &styled.spans {
+                if span.text.contains("COMBINED") {
+                    if span.style.fg == Color::Named(NamedColor::Red)
+                        && span.style.bold
+                        && span.style.underline != UnderlineStyle::None
+                    {
+                        found_combined = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if found_combined {
+            break;
+        }
+    }
+    assert!(
+        found_combined,
+        "Expected 'COMBINED' text with red, bold, and underline attributes"
+    );
+}

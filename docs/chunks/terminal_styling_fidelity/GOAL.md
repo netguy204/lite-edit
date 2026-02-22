@@ -1,8 +1,12 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/editor/src/glyph_buffer.rs
+  - crates/terminal/src/style_convert.rs
+  - crates/editor/src/color_palette.rs
+  - crates/terminal/tests/integration.rs
 code_references: []
 narrative: null
 investigation: null
@@ -10,9 +14,9 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["terminal_input_render_bug"]
+created_after:
+- terminal_input_render_bug
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
