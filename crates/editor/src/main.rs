@@ -216,6 +216,7 @@ impl EditorController {
     ///
     /// After processing the event, checks if the app should quit (Cmd+Q)
     /// and terminates the application if so.
+    // Chunk: docs/chunks/quit_command - Checks quit flag and triggers app termination
     fn handle_key(&mut self, event: KeyEvent) {
         self.state.handle_key(event);
 
@@ -264,6 +265,7 @@ impl EditorController {
         self.render_if_dirty();
     }
 
+    // Chunk: docs/chunks/viewport_scrolling - Controller scroll event forwarding
     /// Handles a scroll event by forwarding to the editor state.
     ///
     /// Scroll events only affect the viewport position, not the cursor.
@@ -292,6 +294,7 @@ impl EditorController {
     /// This is called when the user presses Cmd+Q. It obtains a MainThreadMarker
     /// (which is safe since EditorController only runs on the main thread) and
     /// calls NSApplication::terminate to perform a clean shutdown.
+    // Chunk: docs/chunks/quit_command - Calls NSApplication::terminate for clean macOS shutdown
     fn terminate_app(&self) {
         // SAFETY: EditorController is only accessed from the main thread
         // (via callbacks from the NSRunLoop), so MainThreadMarker::new() will succeed.

@@ -442,6 +442,7 @@ impl FocusTarget for BufferFocusTarget {
         }
     }
 
+    // Chunk: docs/chunks/viewport_scrolling - Buffer viewport scroll handling
     // Chunk: docs/chunks/viewport_fractional_scroll - Smooth scrolling with pixel-level precision
     // Chunk: docs/chunks/scroll_bottom_deadzone - Wrap-aware scroll clamping
     fn handle_scroll(&mut self, delta: ScrollDelta, ctx: &mut EditorContext) {
