@@ -389,6 +389,7 @@ dependencies = [
  "block2",
  "lite-edit-buffer",
  "lite-edit-input",
+ "lite-edit-syntax",
  "lite-edit-terminal",
  "notify",
  "objc2",

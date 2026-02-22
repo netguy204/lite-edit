@@ -222,6 +222,7 @@ impl Tab {
             dirty: false,
             unread: false,
             associated_file: path,
+            highlighter: None,
         }
     }
 
@@ -244,6 +245,7 @@ impl Tab {
             dirty: false,
             unread: false,
             associated_file: None,
+            highlighter: None,
         }
     }
 
@@ -258,6 +260,7 @@ impl Tab {
             dirty: false,
             unread: false,
             associated_file: None,
+            highlighter: None,
         }
     }
 
@@ -338,6 +341,20 @@ impl Tab {
     /// Called when the tab becomes active to indicate the user has seen the content.
     pub fn clear_unread(&mut self) {
         self.unread = false;
+    }
+}
+
+impl std::fmt::Debug for Tab {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tab")
+            .field("id", &self.id)
+            .field("label", &self.label)
+            .field("kind", &self.kind)
+            .field("dirty", &self.dirty)
+            .field("unread", &self.unread)
+            .field("associated_file", &self.associated_file)
+            .field("highlighter", &self.highlighter.as_ref().map(|_| "<SyntaxHighlighter>"))
+            .finish()
     }
 }
 
