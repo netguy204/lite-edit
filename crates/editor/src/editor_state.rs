@@ -608,8 +608,10 @@ impl EditorState {
                 #[cfg(test)]
                 eprintln!("run_live_search: Setting selection from {:?} to {:?}", start, end);
                 // Set the buffer selection to cover the match range
-                self.buffer_mut().set_selection_anchor(start);
+                // Note: set_cursor clears the selection anchor, so we must call
+                // set_selection_anchor AFTER set_cursor
                 self.buffer_mut().set_cursor(end);
+                self.buffer_mut().set_selection_anchor(start);
                 #[cfg(test)]
                 eprintln!("run_live_search: After setting selection, selection_range={:?}", self.buffer().selection_range());
 
