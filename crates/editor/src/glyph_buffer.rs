@@ -1086,6 +1086,7 @@ impl GlyphBuffer {
 
     // Chunk: docs/chunks/line_wrap_rendering - Wrap-aware rendering
     // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Fixed coordinate space alignment
+    // Chunk: docs/chunks/terminal_styling_fidelity - Per-span foreground colors, background quads, and underline quads
     /// Updates the buffers with content from a BufferView, with soft line wrapping.
     ///
     /// This is the main rendering entry point when line wrapping is enabled.
