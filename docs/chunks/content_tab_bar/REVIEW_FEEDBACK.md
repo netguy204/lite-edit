@@ -1,25 +1,19 @@
 # Review Feedback
 
-**Iteration:** 2
+**Iteration:** 3
 **Decision:** FEEDBACK
 
 ## Summary
 
-Core tab bar functionality is solid but Cmd+T shortcut (new tab) and unread badge clearing on tab switch are still not implemented from iteration 1 feedback.
+9 of 10 success criteria satisfied. Iteration 2 issue fixed (unread badge clearing), but Cmd+T shortcut for new tab creation remains missing after 3 review iterations. This is a documented success criterion from GOAL.md that has not been addressed.
 
 ## Issues to Address
 
 ### Issue 1: crates/editor/src/editor_state.rs:260-330
 
-**Concern:** Cmd+T shortcut for creating new tabs is not implemented. This was flagged in iteration 1 and remains unaddressed. PLAN.md Step 6 explicitly requires this shortcut.
+**Concern:** The Cmd+T shortcut for creating a new empty tab remains unimplemented. This was flagged in iterations 1 and 2 and persists in iteration 3. PLAN.md Step 6 explicitly requires 'Cmd+T: Create new empty tab in current workspace'. This is a documented success criterion that has not been addressed.
 
-**Suggestion:** Add a Key::Char('t') handler in the command modifier section (around line 286) that calls a new new_empty_tab() method. The method should generate a tab ID, create an empty file tab, add it to the workspace, and mark dirty.
-
-### Issue 2: crates/editor/src/editor_state.rs:1027-1036
-
-**Concern:** When switching to a tab, the unread flag is not cleared. This was flagged in iteration 1 and remains unaddressed. PLAN.md Step 8 explicitly states 'When switching tabs, call clear_unread() on the newly active tab.'
-
-**Suggestion:** In switch_tab(), after calling workspace.switch_tab(index), add: if let Some(tab) = workspace.tabs.get_mut(index) { tab.unread = false; }
+**Suggestion:** Add a Key::Char('t') handler in the Cmd+modifiers block (around line 286) that calls a new new_tab() method. Implementation should: (1) generate a tab ID via self.editor.gen_tab_id(), (2) create an empty file tab via Tab::empty_file(id, line_height), (3) add to workspace via workspace.add_tab(tab), (4) mark dirty region for re-render, (5) auto-scroll to ensure new tab is visible.
 
 
 ---

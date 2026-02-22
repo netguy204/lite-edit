@@ -315,6 +315,16 @@ impl EditorState {
                 }
             }
 
+            // Chunk: docs/chunks/content_tab_bar - Create new tab
+            // Cmd+T creates a new empty tab in the current workspace
+            // Note: Creates an empty file tab; terminal tab support is in terminal_emulator chunk
+            if let Key::Char('t') = event.key {
+                if !event.modifiers.shift {
+                    self.new_tab();
+                    return;
+                }
+            }
+
             // Cmd+1..9 switches workspaces
             if let Key::Char(c) = event.key {
                 if !event.modifiers.shift {
@@ -546,7 +556,10 @@ impl EditorState {
         // Create context and forward to focus target
         // We need to borrow the active tab's buffer and viewport
         let font_metrics = self.font_metrics;
-        let view_height = self.view_height;
+        // Chunk: docs/chunks/content_tab_bar - Use content area dimensions
+        // Adjust dimensions to account for left rail and tab bar
+        let content_height = self.view_height - TAB_BAR_HEIGHT;
+        let content_width = self.view_width - RAIL_WIDTH;
         let ws = self.editor.active_workspace_mut().expect("no active workspace");
         let tab = ws.active_tab_mut().expect("no active tab");
         let (buffer, viewport) = tab.buffer_and_viewport_mut().expect("not a file tab");
@@ -556,8 +569,8 @@ impl EditorState {
             viewport,
             &mut self.dirty_region,
             font_metrics,
-            view_height,
-            self.view_width,
+            content_height,
+            content_width,
         );
         self.focus_target.handle_key(event, &mut ctx);
     }
@@ -709,9 +722,36 @@ impl EditorState {
             self.dirty_region.merge(dirty);
         }
 
+        // Chunk: docs/chunks/content_tab_bar - Coordinate transformation for content area
+        // Transform mouse coordinates from full window space to content area space:
+        // - X offset: subtract RAIL_WIDTH (content starts after left rail)
+        // - Y offset: adjust for TAB_BAR_HEIGHT (in NSView coords, subtract from view_height)
+        //
+        // NSView uses bottom-left origin, so:
+        // - y=0 is at BOTTOM of view
+        // - y=view_height is at TOP of view (where tab bar is)
+        //
+        // The content area in NSView coords spans y=[0, view_height - TAB_BAR_HEIGHT)
+        // We adjust view_height so the flip calculation maps correctly to content rows.
+        let (original_x, original_y) = event.position;
+        let adjusted_x = original_x - RAIL_WIDTH as f64;
+        // We pass adjusted_y unchanged but use a reduced view_height for the flip calc
+        // This effectively shifts the coordinate system down by TAB_BAR_HEIGHT
+        let adjusted_y = original_y;
+
+        let adjusted_event = MouseEvent {
+            kind: event.kind,
+            position: (adjusted_x, adjusted_y),
+            modifiers: event.modifiers,
+            click_count: event.click_count,
+        };
+
+        // Adjust view_height for content area (subtract tab bar height)
+        // This makes the y-flip calculation in pixel_to_buffer_position correct
+        let content_height = self.view_height - TAB_BAR_HEIGHT;
+
         // Create context and forward to focus target
         let font_metrics = self.font_metrics;
-        let view_height = self.view_height;
         let ws = self.editor.active_workspace_mut().expect("no active workspace");
         let tab = ws.active_tab_mut().expect("no active tab");
         let (buffer, viewport) = tab.buffer_and_viewport_mut().expect("not a file tab");
@@ -721,10 +761,10 @@ impl EditorState {
             viewport,
             &mut self.dirty_region,
             font_metrics,
-            view_height,
-            self.view_width,
+            content_height,
+            self.view_width - RAIL_WIDTH, // Content width also adjusted
         );
-        self.focus_target.handle_mouse(event, &mut ctx);
+        self.focus_target.handle_mouse(adjusted_event, &mut ctx);
     }
 
     /// Handles a scroll event by forwarding to the active focus target.
@@ -747,7 +787,9 @@ impl EditorState {
 
         // Create context and forward to focus target
         let font_metrics = self.font_metrics;
-        let view_height = self.view_height;
+        // Chunk: docs/chunks/content_tab_bar - Use content area dimensions
+        let content_height = self.view_height - TAB_BAR_HEIGHT;
+        let content_width = self.view_width - RAIL_WIDTH;
         let ws = self.editor.active_workspace_mut().expect("no active workspace");
         let tab = ws.active_tab_mut().expect("no active tab");
         let (buffer, viewport) = tab.buffer_and_viewport_mut().expect("not a file tab");
@@ -757,8 +799,8 @@ impl EditorState {
             viewport,
             &mut self.dirty_region,
             font_metrics,
-            view_height,
-            self.view_width,
+            content_height,
+            content_width,
         );
         self.focus_target.handle_scroll(delta, &mut ctx);
     }
@@ -1100,6 +1142,24 @@ impl EditorState {
             let active_idx = workspace.active_tab;
             self.close_tab(active_idx);
         }
+    }
+
+    /// Creates a new empty tab in the active workspace and switches to it.
+    ///
+    /// This is triggered by Cmd+T. For now, this creates an empty file tab.
+    /// Terminal tab creation will be added in the terminal_emulator chunk.
+    pub fn new_tab(&mut self) {
+        let tab_id = self.editor.gen_tab_id();
+        let line_height = self.editor.line_height();
+        let new_tab = crate::workspace::Tab::empty_file(tab_id, line_height);
+
+        if let Some(workspace) = self.editor.active_workspace_mut() {
+            workspace.add_tab(new_tab);
+        }
+
+        // Ensure the new tab is visible in the tab bar
+        self.ensure_active_tab_visible();
+        self.dirty_region.merge(DirtyRegion::FullViewport);
     }
 
     /// Scrolls the tab bar horizontally.
@@ -2669,5 +2729,101 @@ mod tests {
 
         assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
         assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+    }
+
+    // =========================================================================
+    // Cmd+T New Tab Tests (Chunk: docs/chunks/content_tab_bar)
+    // =========================================================================
+
+    #[test]
+    fn test_cmd_t_creates_new_tab() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Initially one tab
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+
+        // Cmd+T creates a new tab
+        let cmd_t = KeyEvent::new(
+            Key::Char('t'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_t);
+
+        // Should have 2 tabs, active tab is 1 (switched to new tab)
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 2);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 1);
+    }
+
+    #[test]
+    fn test_cmd_t_does_not_insert_t() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Cmd+T should NOT insert 't' into buffer
+        let cmd_t = KeyEvent::new(
+            Key::Char('t'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_t);
+
+        // Buffer should be empty
+        assert!(state.buffer().is_empty());
+    }
+
+    #[test]
+    fn test_cmd_shift_t_does_not_create_tab() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Initially one tab
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+
+        // Cmd+Shift+T should NOT create a new tab (reserved for future use)
+        let cmd_shift_t = KeyEvent::new(
+            Key::Char('t'),
+            Modifiers {
+                command: true,
+                shift: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_shift_t);
+
+        // Should still have 1 tab (Cmd+Shift+T is not handled)
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+    }
+
+    #[test]
+    fn test_new_tab_method() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+
+        state.new_tab();
+
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 2);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 1);
+    }
+
+    #[test]
+    fn test_new_tab_marks_dirty() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Clear any existing dirty state
+        let _ = state.take_dirty_region();
+
+        state.new_tab();
+
+        assert!(state.is_dirty());
     }
 }
