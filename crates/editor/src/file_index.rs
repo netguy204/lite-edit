@@ -212,14 +212,43 @@ impl FileIndex {
     }
 
     /// Handle non-empty query: fuzzy matching with scoring.
+    ///
+    /// Scores each path against both the filename and the full path:
+    /// - If the query matches the filename: use `filename_score * 2 + path_score`
+    /// - If the query only matches the path: use `path_score` as the sole score
+    /// - If no match: filter out the path
+    ///
+    /// This ensures filename matches dominate (2× weight) while path-only matches
+    /// still appear (users can type directory names).
     fn query_fuzzy(&self, cache: &[PathBuf], query: &str) -> Vec<MatchResult> {
         let mut results: Vec<MatchResult> = cache
             .iter()
             .filter(|p| !is_excluded(p))
             .filter_map(|path| {
-                let filename = path.file_name()?.to_str()?;
-                let score = score_match(query, filename)?;
-                Some(MatchResult {
+                // Compute filename score
+                let filename_score = path
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .and_then(|filename| score_match(query, filename));
+
+                // Compute path score
+                let path_score = score_path_match(query, path);
+
+                // Compute final score based on which matches succeeded
+                let final_score = match (filename_score, path_score) {
+                    // Both match: filename score dominates (2×) + path score bonus
+                    (Some(fs), Some(ps)) => {
+                        Some(fs.saturating_mul(2).saturating_add(ps))
+                    }
+                    // Only filename matches
+                    (Some(fs), None) => Some(fs.saturating_mul(2)),
+                    // Only path matches (path-only result)
+                    (None, Some(ps)) => Some(ps),
+                    // Neither matches: filter out
+                    (None, None) => None,
+                };
+
+                final_score.map(|score| MatchResult {
                     path: path.clone(),
                     score,
                 })
@@ -565,6 +594,51 @@ fn score_match(query: &str, filename: &str) -> Option<u32> {
     // Use inverse of length (capped to prevent overflow)
     let length_penalty = filename.len().min(255) as u32;
     score += 255 - length_penalty;
+
+    Some(score)
+}
+
+/// Scores a query against a full relative path string.
+///
+/// Returns None if the query doesn't match (not all characters found as subsequence).
+/// Returns Some(score) if the query matches, with higher scores being better.
+///
+/// Unlike `score_match`, this function does NOT apply filename-specific bonuses
+/// (prefix bonus, shorter-length bonus). It only applies:
+/// - Base score
+/// - Consecutive-run bonus
+fn score_path_match(query: &str, path: &Path) -> Option<u32> {
+    let path_str = path.to_string_lossy().to_lowercase();
+    let query_chars: Vec<char> = query.chars().collect();
+    let path_chars: Vec<char> = path_str.chars().collect();
+
+    if query_chars.is_empty() {
+        return Some(1);
+    }
+
+    // Find match positions using subsequence matching
+    let positions = find_match_positions(&query_chars, &path_chars)?;
+
+    // Base score
+    let mut score: u32 = 100;
+
+    // Consecutive run bonus: runs of ≥2 consecutively matched characters
+    let mut consecutive_bonus: u32 = 0;
+    let mut run_length = 1;
+    for window in positions.windows(2) {
+        if window[1] == window[0] + 1 {
+            run_length += 1;
+        } else {
+            if run_length >= 2 {
+                consecutive_bonus = consecutive_bonus.saturating_add(run_length as u32 * 10);
+            }
+            run_length = 1;
+        }
+    }
+    if run_length >= 2 {
+        consecutive_bonus = consecutive_bonus.saturating_add(run_length as u32 * 10);
+    }
+    score = score.saturating_add(consecutive_bonus);
 
     Some(score)
 }
@@ -1236,5 +1310,257 @@ mod tests {
         let target: Vec<char> = "main.rs".chars().collect();
         let positions = find_match_positions(&query, &target);
         assert!(positions.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // Path-Segment Matching Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_query_directory_name_matches_files_within() {
+        // Typing a directory name (e.g. `file_search`) should match files under that directory
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::create_dir_all(root.join("docs/chunks/file_search_path_matching")).unwrap();
+        File::create(root.join("docs/chunks/file_search_path_matching/GOAL.md")).unwrap();
+        File::create(root.join("docs/chunks/file_search_path_matching/PLAN.md")).unwrap();
+        File::create(root.join("unrelated.txt")).unwrap();
+
+        let index = FileIndex::start(root.to_path_buf());
+
+        while index.is_indexing() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let results = index.query("file_search");
+
+        // Should match files within the file_search_path_matching directory
+        assert!(results.len() >= 2, "Expected at least 2 results for 'file_search'");
+        assert!(
+            results.iter().any(|r| r.path == PathBuf::from("docs/chunks/file_search_path_matching/GOAL.md")),
+            "GOAL.md should appear in results"
+        );
+        assert!(
+            results.iter().any(|r| r.path == PathBuf::from("docs/chunks/file_search_path_matching/PLAN.md")),
+            "PLAN.md should appear in results"
+        );
+    }
+
+    #[test]
+    fn test_query_partial_path_matches() {
+        // Typing a partial path like `chunks/terminal` should match files under docs/chunks/terminal_tab_spawn/
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::create_dir_all(root.join("docs/chunks/terminal_tab_spawn")).unwrap();
+        File::create(root.join("docs/chunks/terminal_tab_spawn/GOAL.md")).unwrap();
+        fs::create_dir_all(root.join("docs/chunks/other_feature")).unwrap();
+        File::create(root.join("docs/chunks/other_feature/GOAL.md")).unwrap();
+
+        let index = FileIndex::start(root.to_path_buf());
+
+        while index.is_indexing() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let results = index.query("chunks/term");
+
+        // Should match files under docs/chunks/terminal_tab_spawn/
+        assert!(!results.is_empty(), "Expected at least 1 result for 'chunks/term'");
+        assert!(
+            results.iter().any(|r| r.path == PathBuf::from("docs/chunks/terminal_tab_spawn/GOAL.md")),
+            "terminal_tab_spawn/GOAL.md should appear in results"
+        );
+    }
+
+    #[test]
+    fn test_filename_matches_still_rank_highest() {
+        // When a query matches both a filename prefix AND a path segment, filename match should score higher
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::create_dir_all(root.join("docs/chunks/config_feature")).unwrap();
+        // config.rs has "config" in the filename
+        File::create(root.join("config.rs")).unwrap();
+        // This file has "config" in the path but not in the filename
+        File::create(root.join("docs/chunks/config_feature/GOAL.md")).unwrap();
+
+        let index = FileIndex::start(root.to_path_buf());
+
+        while index.is_indexing() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let results = index.query("config");
+
+        // config.rs should rank higher than docs/chunks/config_feature/GOAL.md
+        assert!(results.len() >= 2, "Expected at least 2 results");
+        let config_rs_idx = results.iter().position(|r| r.path == PathBuf::from("config.rs"));
+        let goal_md_idx = results.iter().position(|r| r.path == PathBuf::from("docs/chunks/config_feature/GOAL.md"));
+
+        assert!(config_rs_idx.is_some(), "config.rs should be in results");
+        assert!(goal_md_idx.is_some(), "GOAL.md should be in results");
+        assert!(
+            config_rs_idx.unwrap() < goal_md_idx.unwrap(),
+            "config.rs (filename match) should rank above GOAL.md (path-only match)"
+        );
+    }
+
+    #[test]
+    fn test_path_only_match_returns_results() {
+        // A query that matches only directory segments (not the filename) should still return results
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::create_dir_all(root.join("special_project/src")).unwrap();
+        File::create(root.join("special_project/src/main.rs")).unwrap();
+
+        let index = FileIndex::start(root.to_path_buf());
+
+        while index.is_indexing() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Query "special" - doesn't appear in the filename "main.rs" but does in the path
+        let results = index.query("special");
+
+        assert!(!results.is_empty(), "Expected results for path-only match 'special'");
+        assert!(
+            results.iter().any(|r| r.path == PathBuf::from("special_project/src/main.rs")),
+            "main.rs in special_project should appear in results"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Path-Segment Matching Edge Cases
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_query_with_slash_characters() {
+        // Query with `/` characters (e.g., `src/main`) should match paths containing that sequence
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("lib")).unwrap();
+        File::create(root.join("src/main.rs")).unwrap();
+        File::create(root.join("lib/main.rs")).unwrap();
+
+        let index = FileIndex::start(root.to_path_buf());
+
+        while index.is_indexing() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let results = index.query("src/main");
+
+        // Should match src/main.rs
+        assert!(!results.is_empty(), "Expected results for 'src/main'");
+        assert!(
+            results.iter().any(|r| r.path == PathBuf::from("src/main.rs")),
+            "src/main.rs should appear in results"
+        );
+
+        // src/main.rs should rank higher than lib/main.rs (more specific path match)
+        if results.len() >= 2 {
+            let src_idx = results.iter().position(|r| r.path == PathBuf::from("src/main.rs"));
+            let lib_idx = results.iter().position(|r| r.path == PathBuf::from("lib/main.rs"));
+            if let (Some(src), Some(lib)) = (src_idx, lib_idx) {
+                assert!(src < lib, "src/main.rs should rank above lib/main.rs for query 'src/main'");
+            }
+        }
+    }
+
+    #[test]
+    fn test_score_path_match_basic() {
+        // Basic test for score_path_match function
+        let path = Path::new("docs/chunks/feature/GOAL.md");
+
+        // Query that matches the path
+        let score = score_path_match("docs", path);
+        assert!(score.is_some(), "Expected score for 'docs' in path");
+        assert!(score.unwrap() >= 100, "Score should include base score");
+
+        // Query that doesn't match the path
+        let no_score = score_path_match("xyz", path);
+        assert!(no_score.is_none(), "Expected no match for 'xyz'");
+    }
+
+    #[test]
+    fn test_score_path_match_consecutive_bonus() {
+        // Test that consecutive characters in path get bonus
+        let path = Path::new("testing/feature/main.rs");
+
+        // "test" appears consecutively
+        let consecutive_score = score_path_match("test", path);
+        assert!(consecutive_score.is_some());
+
+        // "tig" requires skipping characters (t-i-g from "testing")
+        let sparse_score = score_path_match("tig", path);
+        assert!(sparse_score.is_some());
+
+        // Consecutive should score higher
+        assert!(
+            consecutive_score.unwrap() > sparse_score.unwrap(),
+            "Consecutive match should score higher than sparse match"
+        );
+    }
+
+    #[test]
+    fn test_empty_query_path_match() {
+        // Empty query should return a score (handled in score_path_match)
+        let path = Path::new("src/main.rs");
+        let score = score_path_match("", path);
+        assert!(score.is_some(), "Empty query should match any path");
+        assert_eq!(score.unwrap(), 1, "Empty query should return score 1");
+    }
+
+    #[test]
+    fn test_combined_score_uses_saturating_arithmetic() {
+        // Verify that combined scoring doesn't overflow by using saturating arithmetic
+        // This is a structural test - actual scores are bounded, but we verify no panic
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        // Create a file with a name that would get high scores
+        fs::create_dir_all(root.join("aaaa/bbbb/cccc")).unwrap();
+        File::create(root.join("aaaa/bbbb/cccc/aaaaaaaabbbbbbbbcccccccc.rs")).unwrap();
+
+        let index = FileIndex::start(root.to_path_buf());
+
+        while index.is_indexing() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Query that matches both filename and path - should not panic
+        let results = index.query("abc");
+        assert!(!results.is_empty(), "Should find match without panic");
+    }
+
+    #[test]
+    fn test_very_long_path_does_not_regress() {
+        // Test that very long paths don't cause performance issues
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        // Create a deeply nested path
+        let deep_path = root.join("a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t");
+        fs::create_dir_all(&deep_path).unwrap();
+        File::create(deep_path.join("deep_file.rs")).unwrap();
+
+        let index = FileIndex::start(root.to_path_buf());
+
+        while index.is_indexing() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Query should still work for deep paths
+        let results = index.query("deep");
+        assert!(!results.is_empty(), "Should find deeply nested file");
+        assert!(
+            results.iter().any(|r| r.path.to_string_lossy().contains("deep_file.rs")),
+            "deep_file.rs should be in results"
+        );
     }
 }
