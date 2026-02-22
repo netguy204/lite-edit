@@ -355,6 +355,7 @@ impl GlyphBuffer {
         self.selection_range
     }
 
+    // Chunk: docs/chunks/line_wrap_rendering - Continuation row border quad range
     /// Returns the index range for continuation row border quads
     pub fn border_range(&self) -> QuadRange {
         self.border_range

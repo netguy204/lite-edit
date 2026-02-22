@@ -82,6 +82,7 @@ impl WrapLayout {
         self.line_height
     }
 
+    // Chunk: docs/chunks/line_wrap_rendering - O(1) screen row count for a buffer line
     /// Returns the number of visual screen rows needed to display a line with `char_count` characters.
     ///
     /// This is O(1) arithmetic: `ceil(char_count / cols_per_row)`.
@@ -101,6 +102,7 @@ impl WrapLayout {
         }
     }
 
+    // Chunk: docs/chunks/line_wrap_rendering - O(1) buffer column to screen position
     /// Converts a buffer column to screen position within a wrapped line.
     ///
     /// This is O(1) arithmetic: `divmod(buf_col, cols_per_row)`.
@@ -119,6 +121,7 @@ impl WrapLayout {
         (row_offset, screen_col)
     }
 
+    // Chunk: docs/chunks/line_wrap_rendering - O(1) screen position to buffer column
     /// Converts a screen position within a wrapped line back to a buffer column.
     ///
     /// This is O(1) arithmetic: `row_offset * cols_per_row + screen_col`.
@@ -134,6 +137,7 @@ impl WrapLayout {
         row_offset * self.cols_per_row + screen_col
     }
 
+    // Chunk: docs/chunks/line_wrap_rendering - Continuation row detection
     /// Returns true if this is a continuation row (not the first row of a buffer line).
     ///
     /// Continuation rows are rendered with a visual indicator (left-edge border).
@@ -145,6 +149,7 @@ impl WrapLayout {
         row_offset > 0
     }
 
+    // Chunk: docs/chunks/line_wrap_rendering - Pixel position for wrapped character
     /// Calculates the screen position (x, y) in pixels for a character at the given
     /// buffer column within a wrapped line.
     ///
