@@ -20,6 +20,9 @@ libc = "0.2"
 # Low-latency channel for PTY reader thread
 crossbeam-channel = "0.5"
 
+# Chunk: docs/chunks/terminal_pty_wakeup - GCD dispatch for run-loop wakeup
+dispatch2 = "0.3"
+
 # Temp file creation for cold scrollback storage
 tempfile = "3"
 
