@@ -365,6 +365,21 @@ impl Viewport {
         self.scroller.set_scroll_offset_unclamped(px);
     }
 
+    // Chunk: docs/chunks/scroll_bottom_deadzone_v3 - Unclamped scroll offset setter for viewport sync
+    /// Sets the scroll offset in pixels without clamping.
+    ///
+    /// This is used when syncing a scroll offset that has already been clamped
+    /// by another viewport (e.g., copying from EditorState's viewport to the
+    /// renderer's viewport). Re-clamping would incorrectly reduce the max scroll
+    /// position when wrap-aware clamping was used.
+    ///
+    /// **Important**: Only use this when the source offset is known to be valid.
+    /// For user input (scroll events), use `set_scroll_offset_px` or
+    /// `set_scroll_offset_px_wrapped` which perform proper clamping.
+    pub fn set_scroll_offset_px_unclamped(&mut self, px: f32) {
+        self.scroller.set_scroll_offset_unclamped(px);
+    }
+
     // Chunk: docs/chunks/scroll_bottom_deadzone - Wrap-aware scroll clamping
     /// Sets the scroll offset in pixels, with clamping based on total screen rows.
     ///
@@ -1494,5 +1509,274 @@ mod tests {
                 screen_row, expected_line, expected_offset, actual_line, actual_offset
             );
         }
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/scroll_bottom_deadzone_v3 - Scroll boundary tests
+    // =========================================================================
+
+    #[test]
+    fn test_scroll_to_max_no_wrapping_last_line_visible() {
+        // Test: When scrolled to max with no wrapped lines, the last buffer line
+        // must be visible and no phantom scroll region should exist.
+        //
+        // Scenario: 20 buffer lines, 10 visible rows (no wrapping)
+        // Max scroll should position the last line at the bottom of viewport.
+        // At max scroll: first_visible_line = 10, visible_range = 10..20
+        // The last line (line 19) should be at screen row 9.
+
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(160.0, 100); // 10 visible rows
+        assert_eq!(vp.visible_lines(), 10);
+
+        // 20 buffer lines, no wrapping needed
+        let line_count = 20;
+
+        // Scroll to max
+        vp.set_scroll_offset_px(10000.0, line_count);
+
+        // Verify we're at the correct max
+        // max_offset = (20 - 10) * 16 = 160
+        let expected_max = (line_count - vp.visible_lines()) as f32 * vp.line_height();
+        assert!(
+            (vp.scroll_offset_px() - expected_max).abs() < 0.001,
+            "Expected max offset {}, got {}",
+            expected_max, vp.scroll_offset_px()
+        );
+
+        // Verify visible range includes the last line
+        let range = vp.visible_range(line_count);
+        assert!(
+            range.contains(&(line_count - 1)),
+            "Visible range {:?} should contain last line {}",
+            range, line_count - 1
+        );
+
+        // Verify no phantom scroll: scrolling further should not change offset
+        let offset_before = vp.scroll_offset_px();
+        vp.set_scroll_offset_px(offset_before + 100.0, line_count);
+        assert!(
+            (vp.scroll_offset_px() - offset_before).abs() < 0.001,
+            "Scrolling past max should be clamped. Before: {}, After: {}",
+            offset_before, vp.scroll_offset_px()
+        );
+
+        // Verify scrolling back up responds immediately
+        vp.set_scroll_offset_px(offset_before - 16.0, line_count);
+        assert!(
+            (vp.scroll_offset_px() - (offset_before - 16.0)).abs() < 0.001,
+            "Scrolling up from max should respond immediately. Expected {}, got {}",
+            offset_before - 16.0, vp.scroll_offset_px()
+        );
+    }
+
+    #[test]
+    fn test_scroll_to_max_with_wrapping_last_line_visible() {
+        // Test: When scrolled to max with wrapped lines, the last screen row
+        // of the last buffer line must be visible.
+        //
+        // Scenario: 5 buffer lines, each 160 chars (2 screen rows at 80 cols)
+        // Total screen rows: 10
+        // Viewport: 5 visible rows
+        // At max scroll, screen rows 5-9 should be visible (last 5 of 10)
+
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(640.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(80.0, 100); // 5 visible rows
+        assert_eq!(vp.visible_lines(), 5);
+
+        // 5 buffer lines, each 160 chars = 2 screen rows
+        let line_lens = vec![160; 5];
+        let line_count = line_lens.len();
+        let total_screen_rows: usize = line_lens.iter()
+            .map(|&len| wrap_layout.screen_rows_for_line(len))
+            .sum();
+        assert_eq!(total_screen_rows, 10);
+
+        // Scroll to max using wrap-aware clamping
+        vp.set_scroll_offset_px_wrapped(10000.0, line_count, &wrap_layout, |line| line_lens[line]);
+
+        // Verify max offset: (10 - 5) * 16 = 80
+        let expected_max = (total_screen_rows - vp.visible_lines()) as f32 * vp.line_height();
+        assert!(
+            (vp.scroll_offset_px() - expected_max).abs() < 0.001,
+            "Expected max offset {}, got {}",
+            expected_max, vp.scroll_offset_px()
+        );
+
+        // Verify the last buffer line is reachable:
+        // At max scroll, first_visible_screen_row = 5
+        // Screen rows 5-9 are visible
+        // Screen row 9 is the second row of buffer line 4 (the last line)
+        let first_visible_screen_row = vp.first_visible_screen_row();
+        assert_eq!(first_visible_screen_row, 5);
+
+        // Map screen row 9 (last visible) to buffer line
+        let (last_visible_buffer_line, _, _) = Viewport::buffer_line_for_screen_row(
+            first_visible_screen_row + vp.visible_lines() - 1, // screen row 9
+            line_count,
+            &wrap_layout,
+            |line| line_lens[line],
+        );
+        assert_eq!(
+            last_visible_buffer_line, line_count - 1,
+            "Last visible buffer line should be the last line in the document"
+        );
+
+        // Verify no phantom scroll: scrolling further should not change offset
+        let offset_before = vp.scroll_offset_px();
+        vp.set_scroll_offset_px_wrapped(offset_before + 100.0, line_count, &wrap_layout, |line| line_lens[line]);
+        assert!(
+            (vp.scroll_offset_px() - offset_before).abs() < 0.001,
+            "Scrolling past max should be clamped. Before: {}, After: {}",
+            offset_before, vp.scroll_offset_px()
+        );
+
+        // Verify scrolling back up responds immediately
+        vp.set_scroll_offset_px_wrapped(offset_before - 16.0, line_count, &wrap_layout, |line| line_lens[line]);
+        assert!(
+            (vp.scroll_offset_px() - (offset_before - 16.0)).abs() < 0.001,
+            "Scrolling up from max should respond immediately. Expected {}, got {}",
+            offset_before - 16.0, vp.scroll_offset_px()
+        );
+    }
+
+    #[test]
+    fn test_scroll_max_offset_no_fractional_row_deadzone() {
+        // This test captures the core deadzone bug: when viewport height is NOT
+        // an exact multiple of line height, the max scroll offset should still
+        // be computed such that the last content line is at the bottom of the
+        // visible area, not beyond it.
+        //
+        // The renderer draws rows 0..visible_rows+1 to handle the partial row,
+        // but scroll clamping uses just visible_rows. This can create a gap.
+
+        let mut vp = Viewport::new(16.0);
+        // Viewport height 170px / 16px = 10.625 -> visible_rows = 10
+        // But the renderer will actually show up to 11 rows (10 full + 1 partial)
+        vp.update_size(170.0, 100);
+        assert_eq!(vp.visible_lines(), 10);
+
+        let line_count = 20;
+
+        // Scroll to max
+        vp.set_scroll_offset_px(10000.0, line_count);
+
+        // Current formula: max = (20 - 10) * 16 = 160
+        // This positions first_visible_line at 10, showing lines 10..20
+        // With 170px viewport, we can actually see partial row at bottom
+
+        // The key assertion: at max scroll, the user should NOT be able to
+        // scroll further down (no phantom region)
+        let max_offset = vp.scroll_offset_px();
+
+        // Attempt to scroll down by 1px
+        vp.set_scroll_offset_px(max_offset + 1.0, line_count);
+
+        // The offset should be clamped back to max
+        assert!(
+            (vp.scroll_offset_px() - max_offset).abs() < 0.001,
+            "After scrolling to max and then +1px, offset should remain at max. \
+             Max: {}, Current: {}",
+            max_offset, vp.scroll_offset_px()
+        );
+
+        // And scrolling up should work immediately
+        vp.set_scroll_offset_px(max_offset - 1.0, line_count);
+        assert!(
+            (vp.scroll_offset_px() - (max_offset - 1.0)).abs() < 0.001,
+            "Scrolling up from max should work immediately without unwinding phantom region"
+        );
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/scroll_bottom_deadzone_v3 - Verification that last line is visible at max scroll
+    // =========================================================================
+
+    #[test]
+    fn test_last_line_visible_at_max_scroll_no_wrapping() {
+        // Verify that at max scroll, the last line of the document is visible.
+        // This ensures no content is "unreachable" due to scroll clamping.
+
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(160.0, 100); // 10 visible rows
+        assert_eq!(vp.visible_lines(), 10);
+
+        let line_count = 50;
+
+        // Scroll to max
+        vp.set_scroll_offset_px(10000.0, line_count);
+
+        // Verify the last line is in the visible range
+        let range = vp.visible_range(line_count);
+        assert!(
+            range.contains(&(line_count - 1)),
+            "At max scroll, visible range {:?} should contain last line {}",
+            range, line_count - 1
+        );
+
+        // Verify first_visible_line is what we expect
+        // max_offset = (50 - 10) * 16 = 640
+        // first_visible_line = 640 / 16 = 40
+        assert_eq!(vp.first_visible_line(), 40);
+        // visible_range should be 40..50 (or 40..51 with partial row inclusion)
+        assert!(range.start == 40, "Range should start at line 40");
+        assert!(range.end >= 50, "Range should include line 49 (the last line)");
+    }
+
+    #[test]
+    fn test_last_line_visible_at_max_scroll_with_wrapping() {
+        // Same test but with wrapped lines. The last buffer line should be reachable.
+
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(640.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(80.0, 100); // 5 visible rows
+        assert_eq!(vp.visible_lines(), 5);
+
+        // 10 buffer lines, each 160 chars = 2 screen rows = 20 total screen rows
+        let line_lens = vec![160; 10];
+        let line_count = line_lens.len();
+
+        // Scroll to max
+        vp.set_scroll_offset_px_wrapped(10000.0, line_count, &wrap_layout, |line| line_lens[line]);
+
+        // At max scroll, the last buffer line should be visible
+        let first_visible_screen_row = vp.first_visible_screen_row();
+
+        // With 20 screen rows and 5 visible, max scroll shows rows 15-19
+        // first_visible_screen_row should be 15
+        assert_eq!(first_visible_screen_row, 15);
+
+        // Screen row 19 corresponds to buffer line 9 (the last line)
+        // Each buffer line takes 2 screen rows, so:
+        // - Lines 0-4 take rows 0-9
+        // - Lines 5-9 take rows 10-19
+        // Screen row 15 is in line 7 (rows 14-15), row 19 is in line 9 (rows 18-19)
+        let (last_visible_buffer_line, _, _) = Viewport::buffer_line_for_screen_row(
+            first_visible_screen_row + vp.visible_lines() - 1,
+            line_count,
+            &wrap_layout,
+            |line| line_lens[line],
+        );
+        assert_eq!(
+            last_visible_buffer_line, line_count - 1,
+            "At max scroll, the last buffer line should be visible"
+        );
     }
 }

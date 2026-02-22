@@ -1,8 +1,11 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: scroll_wrap_deadzone_v2
-code_paths: []
+code_paths:
+- crates/editor/src/row_scroller.rs
+- crates/editor/src/viewport.rs
+- crates/editor/src/buffer_target.rs
 code_references: []
 narrative: null
 investigation: null
@@ -10,9 +13,10 @@ subsystems: []
 friction_entries: []
 bug_type: semantic
 depends_on: []
-created_after: ["terminal_scrollback_viewport", "renderer_polymorphic_buffer"]
+created_after:
+- terminal_scrollback_viewport
+- renderer_polymorphic_buffer
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

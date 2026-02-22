@@ -2833,6 +2833,71 @@ mod tests {
         assert_eq!(viewport.first_visible_line(), 10);
     }
 
+    // Chunk: docs/chunks/scroll_bottom_deadzone_v3 - Click at max scroll verification
+    #[test]
+    fn test_click_at_max_scroll_no_wrapping_cursor_alignment() {
+        // Test that clicking at max scroll with no wrapping places the cursor correctly.
+        // This verifies the fix for the click-to-cursor off-by-one bug.
+
+        let content = (0..20)
+            .map(|i| format!("line {:02}", i)) // "line 00" through "line 19"
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut buffer = TextBuffer::from_str(&content);
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0, 100); // 10 visible lines
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Scroll to max
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+                800.0, // Wide viewport, no wrapping
+            );
+            target.handle_scroll(ScrollDelta::new(0.0, 1000.0), &mut ctx);
+        }
+
+        // Verify we're at max scroll
+        assert_eq!(viewport.first_visible_line(), 10);
+        // Visible lines: 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
+
+        // Click on the last visible line (line 19, which is screen row 9)
+        // view_height = 160, line_height = 16
+        // Screen row 9 is at flipped_y in [144, 160)
+        // For flipped_y = 150, y = 160 - 150 = 10
+        {
+            let mut dirty2 = DirtyRegion::None;
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty2,
+                test_font_metrics(),
+                160.0,
+                800.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Down,
+                position: (0.0, 10.0), // y = 10, flipped_y = 150, screen row 9
+                modifiers: Modifiers::default(),
+                click_count: 1,
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        // Cursor should be on buffer line 19 (the last line)
+        assert_eq!(
+            buffer.cursor_position().line,
+            19,
+            "Click on last visible line at max scroll should place cursor on line 19, got {}",
+            buffer.cursor_position().line
+        );
+    }
+
     // ==================== Mouse Drag Selection Tests ====================
     // Chunk: docs/chunks/mouse_drag_selection - Mouse drag selection
 

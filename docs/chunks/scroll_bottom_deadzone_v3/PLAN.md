@@ -1,177 +1,169 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk fixes two interrelated bugs at the scroll-bottom boundary:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Phantom scroll region (deadzone)**: The max scroll offset computation allows offsets past the actual renderable content, creating a gap where scroll input is consumed with no visual effect.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **Click-to-cursor misalignment**: When in the phantom region, click hit-testing and rendering disagree on which buffer line corresponds to a given screen position.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/scroll_bottom_deadzone_v3/GOAL.md)
-with references to the files that you expect to touch.
--->
+### Root Cause Analysis
+
+**The 1-line phantom region without wrapping:**
+In `RowScroller::set_scroll_offset_px`, the max is computed as:
+```
+max_offset_px = (row_count - visible_rows) * row_height
+```
+This formula is correct, but the issue is that `visible_rows` is computed as `floor(viewport_height / row_height)`, which may truncate fractional rows. If the viewport height isn't an exact multiple of row height, the actual renderable area can display a partial row at the bottom. The max offset formula doesn't account for this, allowing the viewport to scroll ~1 line past what's actually rendered.
+
+**The larger phantom region with wrapping:**
+`set_scroll_offset_px_wrapped` computes total screen rows by summing `screen_rows_for_line` for all buffer lines. This sum appears correct. However, the issue is that `visible_lines()` (which equals `visible_rows` from the scroller) doesn't account for the fact that with wrapping enabled, we're in screen-row space. The `max_rows = total_screen_rows - visible_lines` subtraction should work, but if total_screen_rows is overcounted, the deadzone grows proportionally.
+
+**The click-to-cursor misalignment:**
+Looking at `pixel_to_buffer_position_wrapped`, the function receives `first_visible_screen_row` and uses `Viewport::buffer_line_for_screen_row` to map screen rows to buffer lines. The bug is that when the scroll offset is clamped to a value higher than the renderer can actually display, the `first_visible_screen_row` value is beyond what the renderer is showing. The renderer clamps its own draw loop to available content, but hit-testing doesn't know about this clamping.
+
+### Fix Strategy
+
+The fix addresses both the scroll clamping and hit-testing from a unified perspective:
+
+1. **Audit `visible_rows` / `visible_lines`**: Ensure the count of visible rows accounts for the actual viewport height in a way that aligns with what the renderer draws.
+
+2. **Make max scroll offset match renderer bounds**: The max scroll offset should be the minimum value that allows the last content to be visible, not the value computed from `total - visible`. This means ensuring the formulas agree on boundaries.
+
+3. **Add tests that detect disagreement**: Create tests that verify scroll position, hit-testing, and rendering all agree at the maximum scroll position.
+
+Following the testing philosophy in TESTING_PHILOSOPHY.md: we'll write failing tests first for the boundary conditions (scrolling to max shows last line, clicking at max positions cursor correctly), then fix the implementation.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+- **docs/subsystems/viewport_scroll** (DOCUMENTED): This chunk IMPLEMENTS fixes to the scroll clamping logic within this subsystem. The subsystem's invariants (especially "Scroll offset is always clamped to `[0.0, max_offset_px]`") remain valid, but the computation of `max_offset_px` needs correction.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+The subsystem is DOCUMENTED (not REFACTORING), so we focus on fixing the specific bugs rather than broader refactoring. However, since we are directly fixing scroll clamping within the subsystem, any improvements we make should align with the documented invariants.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing tests for scroll boundary behavior
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create tests that capture the exact symptoms described in the GOAL.md:
 
-Example:
+1. **test_scroll_to_max_no_wrapping_shows_last_line**: With no wrapped lines, scroll to max and verify:
+   - The last buffer line is visible
+   - No additional scroll input is accepted (offset doesn't change when trying to scroll further)
+   - Scrolling back up responds immediately (offset decreases by the delta)
 
-### Step 1: Define the SegmentHeader struct
+2. **test_scroll_to_max_with_wrapping_shows_last_line**: With wrapped lines, scroll to max and verify:
+   - The last screen row of the last buffer line is visible
+   - No additional scroll input is accepted
+   - Scrolling back up responds immediately
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+3. **test_click_at_max_scroll_no_wrapping_hits_correct_line**: At max scroll without wrapping:
+   - Click at each visible line position
+   - Verify cursor lands on the expected buffer line (not offset by 1)
 
-Location: src/segment/format.rs
+4. **test_click_at_max_scroll_with_wrapping_hits_correct_line**: At max scroll with wrapping:
+   - Click at each visible screen row
+   - Verify cursor lands on the expected buffer line
 
-### Step 2: Implement header serialization
+Location: `crates/editor/src/viewport.rs` (unit tests) and `crates/editor/src/buffer_target.rs` (integration tests)
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+### Step 2: Investigate the off-by-one in non-wrapped mode
 
-### Step 3: ...
+Debug why there's a 1-line phantom region even without wrapping. This requires:
 
----
+1. Print/trace `visible_rows`, `row_count`, computed `max_offset_px`
+2. Compare with the actual content height the renderer would draw
+3. Identify if the issue is in `visible_rows` computation or the max formula
 
-**BACKREFERENCE COMMENTS**
+The hypothesis is that `visible_rows = floor(viewport_height / row_height)` may be underestimating when the viewport can show a partial row. If the renderer draws rows `0..visible_rows+1` (for partial visibility), but clamping uses just `visible_rows`, there's a mismatch.
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+Location: `crates/editor/src/row_scroller.rs`
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+### Step 3: Fix the non-wrapped scroll clamping
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+Based on Step 2's findings, correct the max offset formula. The fix likely involves one of:
 
-Format (place immediately before the symbol):
+a) Using `visible_rows + 1` in the max computation when there's a fractional row
+b) Adjusting how `visible_rows` is computed to include the partial row
+c) Computing max as `(total_height - viewport_height)` in pixels, not rows
+
+The fix must preserve the invariant that at max scroll, the last line is at the bottom of the viewport.
+
+Location: `crates/editor/src/row_scroller.rs#set_scroll_offset_px`
+
+### Step 4: Verify non-wrapped tests pass
+
+Run the non-wrapped tests from Step 1. If they pass, proceed. If not, debug and iterate.
+
+### Step 5: Investigate the wrapped-mode clamping
+
+With the non-wrapped case fixed, examine the wrapped case:
+
+1. Verify `compute_total_screen_rows` agrees with what the renderer draws
+2. Check that the max offset formula `(total_screen_rows - visible_lines) * line_height` is correct
+3. Look for discrepancies between visible_lines (which is in buffer lines for some uses) and visible_rows (which should be screen rows)
+
+Location: `crates/editor/src/viewport.rs#set_scroll_offset_px_wrapped`
+
+### Step 6: Fix the wrapped-mode scroll clamping
+
+Apply the same fix pattern as Step 3, but for `set_scroll_offset_px_wrapped`. The key insight is that in wrapped mode, all units should be in screen rows:
+
+- `total_screen_rows`: sum of screen rows for all buffer lines
+- `visible_rows`: number of screen rows that fit in viewport (this is what we already have)
+- `max_offset = (total_screen_rows - visible_rows) * line_height`
+
+If the non-wrapped fix changed how `visible_rows` is interpreted, apply the same change here.
+
+Location: `crates/editor/src/viewport.rs#set_scroll_offset_px_wrapped`
+
+### Step 7: Verify wrapped tests pass
+
+Run the wrapped tests from Step 1. If they pass, proceed. If not, debug and iterate.
+
+### Step 8: Address click-to-cursor mapping
+
+With scroll clamping fixed, verify click-to-cursor:
+
+1. Run the click tests from Step 1
+2. If they fail, the issue is in `pixel_to_buffer_position_wrapped`
+3. The likely fix: ensure `first_visible_screen_row` aligns with what the renderer actually draws at max scroll
+
+The semantic issue: `first_visible_screen_row` should be what the renderer uses for its first visible row, not an abstract computation. At max scroll, if the clamped offset means "last content row at viewport bottom", then `first_visible_screen_row` should reflect that.
+
+Location: `crates/editor/src/buffer_target.rs#pixel_to_buffer_position_wrapped` and `crates/editor/src/buffer_target.rs#handle_mouse`
+
+### Step 9: Run all existing tests
+
+Ensure no regressions:
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+cargo test -p lite-edit-editor
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+All viewport, scroll, and buffer_target tests should pass.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 10: Manual verification
+
+Create a test document that exercises the bug scenarios:
+1. A file with ~50 lines that fits in the viewport with room to scroll
+2. Resize to force line wrapping
+3. Scroll to bottom — verify last line visible, no deadzone
+4. Click at various positions — verify cursor placement is correct
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+No external dependencies. This chunk builds on the existing viewport_scroll subsystem infrastructure.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Partial row rendering**: The renderer may include an extra partial row at the bottom of the viewport. Does the scroll clamping need to account for this, or should it assume whole rows only? The current tests suggest the `+1` row in `visible_range` handles this, but scroll clamping may not.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Interaction with `ensure_visible_wrapped`**: This method does its own scroll clamping via `set_scroll_offset_unclamped`. If we change the max offset formula, we need to verify `ensure_visible_wrapped` still behaves correctly.
+
+3. **Terminal scrollback**: The terminal uses `Viewport::is_at_bottom` and `scroll_to_bottom`. Changes to scroll bounds may affect terminal auto-follow behavior. Need to verify terminal scrolling still works after the fix.
+
+4. **Performance**: The current `compute_total_screen_rows` iterates over all buffer lines. This is O(n) per scroll event. For large files, this could be noticeable. If profiling shows issues, we may need to cache the total or use incremental updates.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+(To be populated during implementation)
