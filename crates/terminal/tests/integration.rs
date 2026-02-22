@@ -877,10 +877,12 @@ fn test_box_drawing_characters_captured() {
     // ┌──┐
     // │  │
     // └──┘
+    // We use printf with the raw UTF-8 characters since macOS printf doesn't
+    // support \u escape sequences.
     terminal
         .spawn_command(
             "printf",
-            &["\\u250C\\u2500\\u2500\\u2510\\n\\u2502  \\u2502\\n\\u2514\\u2500\\u2500\\u2518\\n"],
+            &["%s\n%s\n%s\n", "┌──┐", "│  │", "└──┘"],
             Path::new("/tmp"),
         )
         .unwrap();
@@ -924,10 +926,12 @@ fn test_block_element_characters_captured() {
     let mut terminal = TerminalBuffer::new(80, 24, 1000);
 
     // Output block elements: █ (full block U+2588), ▀ (upper half U+2580)
+    // We use printf with the raw UTF-8 characters since macOS printf doesn't
+    // support \u escape sequences.
     terminal
         .spawn_command(
             "printf",
-            &["\\u2588\\u2580"],
+            &["%s\n", "█▀"],
             Path::new("/tmp"),
         )
         .unwrap();

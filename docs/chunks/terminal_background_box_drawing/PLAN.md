@@ -153,6 +153,33 @@ If any are missing from Menlo, we may need a fallback font strategy (future work
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
--->
+### Test command changes for macOS compatibility
+
+The terminal integration tests for box-drawing and block element characters originally used `\u` escape sequences (e.g., `\u250C` for `┌`) in printf arguments. However, macOS's `/usr/bin/printf` does not support `\u` Unicode escapes - only the shell built-in printf does.
+
+**Solution**: Changed tests to use `printf` with the raw UTF-8 characters embedded in the format string arguments:
+- `spawn_command("printf", &["%s\n%s\n%s\n", "┌──┐", "│  │", "└──┘"], ...)`
+
+This approach works reliably across all shells and system versions.
+
+### Implementation already completed
+
+Steps 1-5 and Step 7 from the plan were already implemented when this chunk was picked up:
+
+- **Step 1 (background color tests)**: Tests `test_indexed_background_color_captured`, `test_rgb_background_color_captured`, `test_combined_fg_bg_colors_captured` already existed in `integration.rs`
+- **Step 2 (glyph atlas tests)**: Tests `test_ensure_glyph_adds_on_demand`, `test_box_drawing_characters_rasterize`, `test_block_element_characters_rasterize`, `test_non_bmp_character_falls_back_to_space` already existed in `glyph_atlas.rs`
+- **Step 3 (mutable atlas signature)**: `GlyphBuffer` methods already took `&mut GlyphAtlas` and `&Font` parameters, using `ensure_glyph()` for on-demand glyph addition
+- **Step 4 (renderer updates)**: `Renderer::update_glyph_buffer()` already passed `&mut self.atlas` and `&self.font`
+- **Step 5 (terminal box-drawing tests)**: Tests existed but were failing due to the `\u` escape issue (now fixed)
+- **Step 7 (font glyph tests)**: Tests `test_menlo_has_box_drawing_glyphs`, `test_menlo_has_block_element_glyphs`, `test_non_bmp_characters_return_none` already existed in `font.rs`
+
+The implementation work for this session was limited to fixing the failing terminal tests.
+
+### Step 6 (Visual verification) deferred
+
+Visual verification with htop, vim, etc. was not performed as part of this implementation session. The automated tests verify:
+1. Background colors are captured in styled spans (data pipeline)
+2. Box-drawing characters are captured in styled spans (data pipeline)
+3. Glyph atlas can rasterize box-drawing and block element characters (rendering infrastructure)
+
+Visual verification should be performed before marking this chunk complete to confirm the full rendering pipeline produces visible output.
