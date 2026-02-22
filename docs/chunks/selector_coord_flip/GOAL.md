@@ -1,9 +1,9 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
 code_paths:
-  - crates/editor/src/editor_state.rs
+- crates/editor/src/editor_state.rs
 code_references: []
 narrative: file_picker_viewport
 investigation: null
@@ -11,9 +11,14 @@ subsystems: []
 friction_entries: []
 bug_type: implementation
 depends_on: []
-created_after: ["renderer_styled_content", "terminal_emulator", "terminal_file_backed_scrollback", "workspace_model", "file_picker_mini_buffer", "mini_buffer_model"]
+created_after:
+- renderer_styled_content
+- terminal_emulator
+- terminal_file_backed_scrollback
+- workspace_model
+- file_picker_mini_buffer
+- mini_buffer_model
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
