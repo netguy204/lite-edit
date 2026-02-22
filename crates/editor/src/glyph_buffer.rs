@@ -173,6 +173,7 @@ impl GlyphLayout {
 // Glyph Buffer
 // =============================================================================
 
+// Chunk: docs/chunks/text_selection_rendering - Index range tracking for selection/glyph/cursor quad categories
 /// Index range for a category of quads (start index, count)
 #[derive(Debug, Clone, Copy, Default)]
 pub struct QuadRange {
@@ -443,6 +444,7 @@ impl GlyphBuffer {
     ///   to shift all content up, causing the top line to be partially clipped.
     // Chunk: docs/chunks/viewport_fractional_scroll - Y offset parameter for smooth scrolling
     // Chunk: docs/chunks/buffer_view_trait - Accept BufferView trait instead of TextBuffer
+    // Chunk: docs/chunks/text_selection_rendering - Three-phase quad emission: selection -> glyphs -> cursor with per-category index ranges
     // Chunk: docs/chunks/renderer_styled_content - Per-span colors, backgrounds, underlines, cursor shapes
     pub fn update_from_buffer_with_cursor(
         &mut self,
@@ -853,6 +855,7 @@ impl GlyphBuffer {
         }
     }
 
+    // Chunk: docs/chunks/text_selection_rendering - Selection highlight quad geometry covering selected columns on a row
     /// Creates a selection highlight quad covering columns [start_col, end_col) on the given row
     ///
     /// The quad uses the solid glyph from the atlas so the fragment shader produces

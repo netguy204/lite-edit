@@ -64,6 +64,7 @@ const TEXT_COLOR: [f32; 4] = [
     1.0,
 ];
 
+// Chunk: docs/chunks/text_selection_rendering - Selection highlight color constant
 /// The selection highlight color: #585b70 (Catppuccin Mocha surface2) at 40% alpha
 /// This provides a visible background for selected text without overwhelming it.
 const SELECTION_COLOR: [f32; 4] = [
@@ -377,6 +378,7 @@ impl Renderer {
         // and the drawable will be presented at the next vsync.
     }
 
+    // Chunk: docs/chunks/text_selection_rendering - Three-pass draw with separate fragment color uniforms per quad category
     /// Renders the text content using the glyph pipeline
     ///
     /// Draws quads in three passes with different colors:
