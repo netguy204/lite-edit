@@ -600,6 +600,374 @@ impl SelectorGlyphBuffer {
 }
 
 // =============================================================================
+// Find Strip (Chunk: docs/chunks/find_in_file)
+// =============================================================================
+
+/// Horizontal padding for the find strip
+pub const FIND_STRIP_PADDING_X: f32 = 8.0;
+
+/// Vertical padding inside the find strip
+pub const FIND_STRIP_PADDING_Y: f32 = 4.0;
+
+/// Width of the "find:" label in characters
+const FIND_LABEL_TEXT: &str = "find:";
+
+/// Dim text color for the "find:" label
+pub const FIND_LABEL_COLOR: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
+
+/// Computed geometry for the find strip (bottom-anchored, 1 line tall)
+///
+/// All values are in screen coordinates (pixels).
+#[derive(Debug, Clone, Copy)]
+pub struct FindStripGeometry {
+    /// Left edge of the strip in screen coordinates
+    pub strip_x: f32,
+    /// Top edge of the strip (bottom of viewport - strip_height)
+    pub strip_y: f32,
+    /// Width of the strip (full viewport width)
+    pub strip_width: f32,
+    /// Height of the strip (line_height + 2*padding)
+    pub strip_height: f32,
+    /// X where "find:" label starts
+    pub label_x: f32,
+    /// X where query text starts (after label + space)
+    pub query_x: f32,
+    /// Y coordinate for text baseline area
+    pub text_y: f32,
+    /// X coordinate of cursor position in query
+    pub cursor_x: f32,
+    /// Width of a single glyph
+    pub glyph_width: f32,
+    /// Line height
+    pub line_height: f32,
+}
+
+/// Calculates the geometry for the find strip
+///
+/// The find strip is anchored to the bottom of the viewport, is 1 line tall
+/// (plus padding), and spans the full width.
+///
+/// # Arguments
+/// * `view_width` - The window/viewport width in pixels
+/// * `view_height` - The window/viewport height in pixels
+/// * `line_height` - The height of a text line in pixels
+/// * `glyph_width` - The width of a single glyph
+/// * `cursor_col` - The cursor column position in the query
+pub fn calculate_find_strip_geometry(
+    view_width: f32,
+    view_height: f32,
+    line_height: f32,
+    glyph_width: f32,
+    cursor_col: usize,
+) -> FindStripGeometry {
+    let strip_height = line_height + 2.0 * FIND_STRIP_PADDING_Y;
+    let strip_y = view_height - strip_height;
+
+    let label_x = FIND_STRIP_PADDING_X;
+    let label_width = FIND_LABEL_TEXT.len() as f32 * glyph_width;
+    let query_x = label_x + label_width + glyph_width; // One space after label
+
+    let cursor_x = query_x + cursor_col as f32 * glyph_width;
+
+    FindStripGeometry {
+        strip_x: 0.0,
+        strip_y,
+        strip_width: view_width,
+        strip_height,
+        label_x,
+        query_x,
+        text_y: strip_y + FIND_STRIP_PADDING_Y,
+        cursor_x,
+        glyph_width,
+        line_height,
+    }
+}
+
+/// Manages vertex and index buffers for rendering the find strip
+///
+/// Similar to `SelectorGlyphBuffer` but specialized for the find strip UI.
+pub struct FindStripGlyphBuffer {
+    /// The vertex buffer containing quad vertices
+    vertex_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
+    /// The index buffer for drawing triangles
+    index_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
+    /// Total number of indices
+    index_count: usize,
+    /// Layout calculator for glyph positioning
+    layout: GlyphLayout,
+
+    // Quad ranges for different draw phases
+    /// Background rect quad
+    background_range: QuadRange,
+    /// "find:" label text glyphs
+    label_range: QuadRange,
+    /// Query text glyphs
+    query_text_range: QuadRange,
+    /// Query cursor quad (if visible)
+    cursor_range: QuadRange,
+}
+
+impl FindStripGlyphBuffer {
+    /// Creates a new empty find strip glyph buffer
+    pub fn new(layout: GlyphLayout) -> Self {
+        Self {
+            vertex_buffer: None,
+            index_buffer: None,
+            index_count: 0,
+            layout,
+            background_range: QuadRange::default(),
+            label_range: QuadRange::default(),
+            query_text_range: QuadRange::default(),
+            cursor_range: QuadRange::default(),
+        }
+    }
+
+    /// Returns the vertex buffer, if any
+    pub fn vertex_buffer(&self) -> Option<&ProtocolObject<dyn MTLBuffer>> {
+        self.vertex_buffer.as_deref()
+    }
+
+    /// Returns the index buffer, if any
+    pub fn index_buffer(&self) -> Option<&ProtocolObject<dyn MTLBuffer>> {
+        self.index_buffer.as_deref()
+    }
+
+    /// Returns the total number of indices
+    pub fn index_count(&self) -> usize {
+        self.index_count
+    }
+
+    /// Returns the index range for the background quad
+    pub fn background_range(&self) -> QuadRange {
+        self.background_range
+    }
+
+    /// Returns the index range for the label text glyphs
+    pub fn label_range(&self) -> QuadRange {
+        self.label_range
+    }
+
+    /// Returns the index range for query text glyphs
+    pub fn query_text_range(&self) -> QuadRange {
+        self.query_text_range
+    }
+
+    /// Returns the index range for the cursor quad
+    pub fn cursor_range(&self) -> QuadRange {
+        self.cursor_range
+    }
+
+    /// Updates the buffers with find strip content
+    ///
+    /// # Arguments
+    /// * `device` - The Metal device for buffer creation
+    /// * `atlas` - The glyph atlas for text rendering
+    /// * `query` - The current find query text
+    /// * `geometry` - The computed find strip geometry
+    /// * `cursor_visible` - Whether to render the cursor
+    pub fn update(
+        &mut self,
+        device: &ProtocolObject<dyn MTLDevice>,
+        atlas: &GlyphAtlas,
+        query: &str,
+        geometry: &FindStripGeometry,
+        cursor_visible: bool,
+    ) {
+        // Estimate capacity
+        let label_len = FIND_LABEL_TEXT.len();
+        let query_len = query.chars().count();
+        let estimated_quads = 1 + label_len + query_len + 1; // bg + label + query + cursor
+
+        let mut vertices: Vec<GlyphVertex> = Vec::with_capacity(estimated_quads * 4);
+        let mut indices: Vec<u32> = Vec::with_capacity(estimated_quads * 6);
+        let mut vertex_offset: u32 = 0;
+
+        // Reset ranges
+        self.background_range = QuadRange::default();
+        self.label_range = QuadRange::default();
+        self.query_text_range = QuadRange::default();
+        self.cursor_range = QuadRange::default();
+
+        let solid_glyph = atlas.solid_glyph();
+
+        // Text color for query text (Catppuccin Mocha text)
+        let text_color: [f32; 4] = [0.804, 0.839, 0.957, 1.0];
+
+        // ==================== Phase 1: Background Rect ====================
+        let bg_start = indices.len();
+        {
+            let quad = self.create_rect_quad(
+                geometry.strip_x,
+                geometry.strip_y,
+                geometry.strip_width,
+                geometry.strip_height,
+                solid_glyph,
+                OVERLAY_BACKGROUND_COLOR,
+            );
+            vertices.extend_from_slice(&quad);
+            Self::push_quad_indices(&mut indices, vertex_offset);
+            vertex_offset += 4;
+        }
+        self.background_range = QuadRange::new(bg_start, indices.len() - bg_start);
+
+        // ==================== Phase 2: "find:" Label ====================
+        let label_start = indices.len();
+        {
+            let mut x = geometry.label_x;
+            let y = geometry.text_y;
+
+            for c in FIND_LABEL_TEXT.chars() {
+                if c == ' ' {
+                    x += geometry.glyph_width;
+                    continue;
+                }
+
+                if let Some(glyph) = atlas.get_glyph(c) {
+                    let quad = self.create_glyph_quad_at(x, y, glyph, FIND_LABEL_COLOR);
+                    vertices.extend_from_slice(&quad);
+                    Self::push_quad_indices(&mut indices, vertex_offset);
+                    vertex_offset += 4;
+                }
+                x += geometry.glyph_width;
+            }
+        }
+        self.label_range = QuadRange::new(label_start, indices.len() - label_start);
+
+        // ==================== Phase 3: Query Text ====================
+        let query_start = indices.len();
+        {
+            let mut x = geometry.query_x;
+            let y = geometry.text_y;
+
+            for c in query.chars() {
+                if c == ' ' {
+                    x += geometry.glyph_width;
+                    continue;
+                }
+
+                if let Some(glyph) = atlas.get_glyph(c) {
+                    let quad = self.create_glyph_quad_at(x, y, glyph, text_color);
+                    vertices.extend_from_slice(&quad);
+                    Self::push_quad_indices(&mut indices, vertex_offset);
+                    vertex_offset += 4;
+                }
+                x += geometry.glyph_width;
+            }
+        }
+        self.query_text_range = QuadRange::new(query_start, indices.len() - query_start);
+
+        // ==================== Phase 4: Cursor ====================
+        let cursor_start = indices.len();
+        if cursor_visible {
+            let quad = self.create_rect_quad(
+                geometry.cursor_x,
+                geometry.text_y,
+                geometry.glyph_width,
+                geometry.line_height,
+                solid_glyph,
+                text_color, // Cursor uses text color
+            );
+            vertices.extend_from_slice(&quad);
+            Self::push_quad_indices(&mut indices, vertex_offset);
+            #[allow(unused_assignments)]
+            { vertex_offset += 4; }
+        }
+        self.cursor_range = QuadRange::new(cursor_start, indices.len() - cursor_start);
+
+        // ==================== Create GPU Buffers ====================
+        if vertices.is_empty() {
+            self.vertex_buffer = None;
+            self.index_buffer = None;
+            self.index_count = 0;
+            return;
+        }
+
+        // Create the vertex buffer
+        let vertex_data_size = vertices.len() * VERTEX_SIZE;
+        let vertex_ptr =
+            NonNull::new(vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
+
+        let vertex_buffer = unsafe {
+            device
+                .newBufferWithBytes_length_options(
+                    vertex_ptr,
+                    vertex_data_size,
+                    MTLResourceOptions::StorageModeShared,
+                )
+                .expect("Failed to create vertex buffer")
+        };
+
+        // Create the index buffer
+        let index_data_size = indices.len() * std::mem::size_of::<u32>();
+        let index_ptr =
+            NonNull::new(indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
+
+        let index_buffer = unsafe {
+            device
+                .newBufferWithBytes_length_options(
+                    index_ptr,
+                    index_data_size,
+                    MTLResourceOptions::StorageModeShared,
+                )
+                .expect("Failed to create index buffer")
+        };
+
+        self.vertex_buffer = Some(vertex_buffer);
+        self.index_buffer = Some(index_buffer);
+        self.index_count = indices.len();
+    }
+
+    /// Creates a solid rectangle quad at the given position with the specified color
+    fn create_rect_quad(
+        &self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        solid_glyph: &GlyphInfo,
+        color: [f32; 4],
+    ) -> [GlyphVertex; 4] {
+        let (u0, v0) = solid_glyph.uv_min;
+        let (u1, v1) = solid_glyph.uv_max;
+
+        [
+            GlyphVertex::new(x, y, u0, v0, color),                 // top-left
+            GlyphVertex::new(x + width, y, u1, v0, color),         // top-right
+            GlyphVertex::new(x + width, y + height, u1, v1, color), // bottom-right
+            GlyphVertex::new(x, y + height, u0, v1, color),        // bottom-left
+        ]
+    }
+
+    /// Creates a glyph quad at an absolute position with the specified color
+    fn create_glyph_quad_at(&self, x: f32, y: f32, glyph: &GlyphInfo, color: [f32; 4]) -> [GlyphVertex; 4] {
+        let (u0, v0) = glyph.uv_min;
+        let (u1, v1) = glyph.uv_max;
+
+        let w = glyph.width;
+        let h = glyph.height;
+
+        [
+            GlyphVertex::new(x, y, u0, v0, color),         // top-left
+            GlyphVertex::new(x + w, y, u1, v0, color),     // top-right
+            GlyphVertex::new(x + w, y + h, u1, v1, color), // bottom-right
+            GlyphVertex::new(x, y + h, u0, v1, color),     // bottom-left
+        ]
+    }
+
+    /// Pushes indices for a quad (two triangles)
+    fn push_quad_indices(indices: &mut Vec<u32>, vertex_offset: u32) {
+        // Triangle 1: top-left, top-right, bottom-right
+        indices.push(vertex_offset);
+        indices.push(vertex_offset + 1);
+        indices.push(vertex_offset + 2);
+        // Triangle 2: top-left, bottom-right, bottom-left
+        indices.push(vertex_offset);
+        indices.push(vertex_offset + 2);
+        indices.push(vertex_offset + 3);
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 

@@ -1,21 +1,26 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
 code_paths:
-  - crates/editor/src/editor_state.rs
-  - crates/editor/src/renderer.rs
-  - crates/editor/src/selector_overlay.rs
+- crates/editor/src/editor_state.rs
+- crates/editor/src/renderer.rs
+- crates/editor/src/selector_overlay.rs
+- crates/editor/src/main.rs
 code_references: []
 narrative: minibuffer
 investigation: null
 subsystems: []
 friction_entries: []
 bug_type: null
-depends_on: ["mini_buffer_model"]
-created_after: ["text_buffer", "buffer_view_trait", "file_picker_scroll", "line_wrap_rendering"]
+depends_on:
+- mini_buffer_model
+created_after:
+- text_buffer
+- buffer_view_trait
+- file_picker_scroll
+- line_wrap_rendering
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

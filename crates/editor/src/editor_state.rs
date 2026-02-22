@@ -23,11 +23,12 @@ use crate::focus::FocusTarget;
 use crate::font::FontMetrics;
 use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
 use crate::left_rail::{calculate_left_rail_geometry, RAIL_WIDTH};
+use crate::mini_buffer::MiniBuffer;
 use crate::selector::{SelectorOutcome, SelectorWidget};
 use crate::selector_overlay::calculate_overlay_geometry;
 use crate::viewport::Viewport;
 use crate::workspace::Editor;
-use lite_edit_buffer::TextBuffer;
+use lite_edit_buffer::{Position, TextBuffer};
 
 /// Duration in milliseconds for cursor blink interval
 const CURSOR_BLINK_INTERVAL_MS: u64 = 500;
@@ -40,6 +41,8 @@ pub enum EditorFocus {
     Buffer,
     /// Selector overlay is active (file picker, command palette, etc.)
     Selector,
+    /// Find-in-file strip is active
+    FindInFile,
 }
 
 /// Consolidated editor state.
@@ -85,6 +88,11 @@ pub struct EditorState {
     /// The resolved path from the last selector confirmation
     /// (consumed by file_save chunk for buffer association)
     pub resolved_path: Option<PathBuf>,
+    /// The MiniBuffer for the find query (when focus == FindInFile)
+    pub find_mini_buffer: Option<MiniBuffer>,
+    /// The buffer position from which the current search started
+    /// (used as the search origin; only advances when Enter is pressed)
+    pub search_origin: Position,
 }
 
 // =============================================================================
@@ -211,6 +219,8 @@ impl EditorState {
             file_index: None,
             last_cache_version: 0,
             resolved_path: None,
+            find_mini_buffer: None,
+            search_origin: Position::new(0, 0),
         }
     }
 
@@ -275,6 +285,12 @@ impl EditorState {
                 return;
             }
 
+            // Cmd+F (without Ctrl) opens find-in-file
+            if let Key::Char('f') = event.key {
+                self.handle_cmd_f();
+                return;
+            }
+
             // Cmd+N (without Shift) creates a new workspace
             if let Key::Char('n') = event.key {
                 if !event.modifiers.shift {
@@ -313,6 +329,9 @@ impl EditorState {
             EditorFocus::Buffer => {
                 self.handle_key_buffer(event);
             }
+            EditorFocus::FindInFile => {
+                self.handle_key_find(event);
+            }
         }
     }
 
@@ -326,6 +345,9 @@ impl EditorState {
             EditorFocus::Selector => {
                 // Close the file picker (toggle behavior)
                 self.close_selector();
+            }
+            EditorFocus::FindInFile => {
+                // Don't open file picker while find is active
             }
         }
     }
@@ -367,6 +389,269 @@ impl EditorState {
         self.active_selector = None;
         self.focus = EditorFocus::Buffer;
         self.dirty_region.merge(DirtyRegion::FullViewport);
+    }
+
+    // =========================================================================
+    // Find-in-File (Chunk: docs/chunks/find_in_file)
+    // =========================================================================
+
+    /// Handles Cmd+F to open the find strip.
+    ///
+    /// - If `focus == Buffer`: creates a new `MiniBuffer`, records the cursor
+    ///   position as `search_origin`, transitions to `FindInFile`, marks dirty.
+    /// - If `focus == FindInFile`: no-op (does not close or reset).
+    /// - If `focus == Selector`: no-op (don't open find while file picker is open).
+    fn handle_cmd_f(&mut self) {
+        match self.focus {
+            EditorFocus::Buffer => {
+                // Record cursor position as search origin
+                self.search_origin = self.buffer().cursor_position();
+
+                // Create a new MiniBuffer for the find query
+                self.find_mini_buffer = Some(MiniBuffer::new(self.font_metrics));
+
+                // Transition focus
+                self.focus = EditorFocus::FindInFile;
+
+                // Mark full viewport dirty for overlay rendering
+                self.dirty_region.merge(DirtyRegion::FullViewport);
+            }
+            EditorFocus::FindInFile => {
+                // No-op: Cmd+F while open does nothing
+            }
+            EditorFocus::Selector => {
+                // No-op: don't open find while file picker is open
+            }
+        }
+    }
+
+    /// Closes the find-in-file strip.
+    ///
+    /// Clears the `find_mini_buffer`, resets focus to `Buffer`, and marks dirty.
+    /// Leaves the main buffer's cursor and selection at their current positions
+    /// (the last match position).
+    fn close_find_strip(&mut self) {
+        self.find_mini_buffer = None;
+        self.focus = EditorFocus::Buffer;
+        self.dirty_region.merge(DirtyRegion::FullViewport);
+    }
+
+    /// Finds the next match for the query starting from start_pos.
+    ///
+    /// Performs a case-insensitive substring search. If no match is found
+    /// forward from start_pos, wraps around to the beginning of the buffer.
+    ///
+    /// # Arguments
+    /// * `buffer` - The text buffer to search in
+    /// * `query` - The search query string
+    /// * `start_pos` - The position to start searching from
+    ///
+    /// # Returns
+    /// * `Some((start, end))` - The match range as (start position, end position)
+    /// * `None` - If query is empty or no match was found
+    fn find_next_match(
+        buffer: &TextBuffer,
+        query: &str,
+        start_pos: Position,
+    ) -> Option<(Position, Position)> {
+        if query.is_empty() {
+            return None;
+        }
+
+        let content = buffer.content();
+        let query_lower = query.to_lowercase();
+
+        // Convert start_pos to byte offset
+        let start_byte = Self::position_to_byte_offset(buffer, start_pos);
+
+        // Search forward from start_byte
+        let search_content = content.to_lowercase();
+
+        // First, search from start_byte to end
+        if let Some(rel_offset) = search_content[start_byte..].find(&query_lower) {
+            let match_start = start_byte + rel_offset;
+            let match_end = match_start + query.len();
+            let start = Self::byte_offset_to_position(buffer, match_start);
+            let end = Self::byte_offset_to_position(buffer, match_end);
+            return Some((start, end));
+        }
+
+        // Wrap around: search from beginning to start_byte
+        if start_byte > 0 {
+            if let Some(match_start) = search_content[..start_byte].find(&query_lower) {
+                let match_end = match_start + query.len();
+                let start = Self::byte_offset_to_position(buffer, match_start);
+                let end = Self::byte_offset_to_position(buffer, match_end);
+                return Some((start, end));
+            }
+        }
+
+        None
+    }
+
+    /// Converts a Position (line, col) to a byte offset in the buffer content.
+    fn position_to_byte_offset(buffer: &TextBuffer, pos: Position) -> usize {
+        let content = buffer.content();
+        let mut byte_offset = 0;
+        let mut current_line = 0;
+
+        for (idx, ch) in content.char_indices() {
+            if current_line == pos.line {
+                // We're on the target line, count columns
+                let mut col = 0;
+                for (sub_idx, sub_ch) in content[idx..].char_indices() {
+                    if col == pos.col {
+                        return idx + sub_idx;
+                    }
+                    if sub_ch == '\n' {
+                        // Reached end of line before finding column
+                        return idx + sub_idx;
+                    }
+                    col += 1;
+                }
+                // Column is past end of line
+                return content.len();
+            }
+            if ch == '\n' {
+                current_line += 1;
+            }
+            byte_offset = idx + ch.len_utf8();
+        }
+
+        byte_offset.min(content.len())
+    }
+
+    /// Converts a byte offset in the buffer content to a Position (line, col).
+    fn byte_offset_to_position(buffer: &TextBuffer, byte_offset: usize) -> Position {
+        let content = buffer.content();
+        let mut line = 0;
+        let mut col = 0;
+        let mut current_offset = 0;
+
+        for ch in content.chars() {
+            if current_offset >= byte_offset {
+                break;
+            }
+            if ch == '\n' {
+                line += 1;
+                col = 0;
+            } else {
+                col += 1;
+            }
+            current_offset += ch.len_utf8();
+        }
+
+        Position::new(line, col)
+    }
+
+    /// Handles a key event when focus == FindInFile.
+    ///
+    /// Key routing:
+    /// - Escape → close the find strip
+    /// - Return → advance search_origin past current match, re-run search
+    /// - All other keys → delegate to find_mini_buffer.handle_key(), then
+    ///   if content changed, run live search
+    fn handle_key_find(&mut self, event: KeyEvent) {
+        use crate::input::Key;
+
+        match &event.key {
+            Key::Escape => {
+                self.close_find_strip();
+                return;
+            }
+            Key::Return => {
+                // Advance to next match: move search_origin past the current match
+                self.advance_to_next_match();
+                return;
+            }
+            _ => {
+                // Delegate to mini buffer and run live search on content change
+                if let Some(ref mut mini_buffer) = self.find_mini_buffer {
+                    let prev_content = mini_buffer.content();
+                    mini_buffer.handle_key(event);
+                    let new_content = mini_buffer.content();
+
+                    // If content changed, run live search
+                    if prev_content != new_content {
+                        self.run_live_search();
+                    }
+
+                    // Mark dirty for any visual update
+                    self.dirty_region.merge(DirtyRegion::FullViewport);
+                }
+            }
+        }
+    }
+
+    /// Runs the live search and updates the buffer selection.
+    ///
+    /// Called after every key event that changes the minibuffer's content.
+    fn run_live_search(&mut self) {
+        let query = match &self.find_mini_buffer {
+            Some(mb) => mb.content(),
+            None => return,
+        };
+
+        // Perform the search
+        let buffer = self.buffer();
+        let search_origin = self.search_origin;
+        #[cfg(test)]
+        eprintln!("run_live_search: query={:?}, search_origin={:?}, buffer_content={:?}",
+            query, search_origin, buffer.content());
+        let match_result = Self::find_next_match(buffer, &query, search_origin);
+        #[cfg(test)]
+        eprintln!("run_live_search: match_result={:?}", match_result);
+
+        // Now update the buffer based on the result
+        match match_result {
+            Some((start, end)) => {
+                #[cfg(test)]
+                eprintln!("run_live_search: Setting selection from {:?} to {:?}", start, end);
+                // Set the buffer selection to cover the match range
+                self.buffer_mut().set_selection_anchor(start);
+                self.buffer_mut().set_cursor(end);
+                #[cfg(test)]
+                eprintln!("run_live_search: After setting selection, selection_range={:?}", self.buffer().selection_range());
+
+                // Scroll viewport to make match visible
+                let line_count = self.buffer().line_count();
+                let match_line = start.line;
+                if self.viewport_mut().ensure_visible(match_line, line_count) {
+                    self.dirty_region.merge(DirtyRegion::FullViewport);
+                }
+            }
+            None => {
+                // No match: clear the selection
+                self.buffer_mut().clear_selection();
+            }
+        }
+
+        self.dirty_region.merge(DirtyRegion::FullViewport);
+    }
+
+    /// Advances the search to the next match (Enter in find mode).
+    ///
+    /// Moves search_origin past the end of the current match and re-runs search.
+    fn advance_to_next_match(&mut self) {
+        let query = match &self.find_mini_buffer {
+            Some(mb) => mb.content(),
+            None => return,
+        };
+
+        if query.is_empty() {
+            return;
+        }
+
+        // Get current match end position (the cursor position when there's a selection)
+        // If there's a match selection, the cursor is at the end
+        let cursor_pos = self.buffer().cursor_position();
+
+        // Move search origin to cursor position (one past the current match start)
+        // This ensures we find the next match, not the same one
+        self.search_origin = cursor_pos;
+
+        // Run the search from the new origin
+        self.run_live_search();
     }
 
     /// Handles a key event when the selector is focused.
@@ -572,7 +857,9 @@ impl EditorState {
             EditorFocus::Selector => {
                 self.handle_mouse_selector(event);
             }
-            EditorFocus::Buffer => {
+            EditorFocus::Buffer | EditorFocus::FindInFile => {
+                // In FindInFile mode, mouse events still go to the buffer
+                // so the user can scroll/click while searching
                 self.handle_mouse_buffer(event);
             }
         }
@@ -665,6 +952,9 @@ impl EditorState {
     ///
     /// When the selector is open, scroll events are forwarded to the selector
     /// to scroll the item list.
+    ///
+    /// When find-in-file is open, scroll events go to the main buffer (the user
+    /// can scroll while searching).
     pub fn handle_scroll(&mut self, delta: ScrollDelta) {
         // When selector is open, forward scroll to selector
         if self.focus == EditorFocus::Selector {
@@ -672,6 +962,7 @@ impl EditorState {
             return;
         }
 
+        // In Buffer or FindInFile mode, scroll the buffer
         // Create context and forward to focus target
         let font_metrics = self.font_metrics;
         let view_height = self.view_height;
@@ -2155,5 +2446,422 @@ mod tests {
         let title = state.window_title();
         assert!(title.contains("—")); // em-dash separator
         assert!(title.contains("untitled")); // workspace label
+    }
+
+    // =========================================================================
+    // Find-in-File Tests (Chunk: docs/chunks/find_in_file)
+    // =========================================================================
+
+    #[test]
+    fn test_cmd_f_transitions_to_find_focus() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        assert_eq!(state.focus, EditorFocus::Buffer);
+
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        assert_eq!(state.focus, EditorFocus::FindInFile);
+    }
+
+    #[test]
+    fn test_cmd_f_creates_mini_buffer() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        assert!(state.find_mini_buffer.is_none());
+
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        assert!(state.find_mini_buffer.is_some());
+    }
+
+    #[test]
+    fn test_cmd_f_records_search_origin() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Type some content and move cursor
+        state.handle_key(KeyEvent::char('a'));
+        state.handle_key(KeyEvent::char('b'));
+        state.handle_key(KeyEvent::char('c'));
+
+        let cursor_pos = state.buffer().cursor_position();
+
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        // search_origin should equal cursor position at time Cmd+F was pressed
+        assert_eq!(state.search_origin, cursor_pos);
+    }
+
+    #[test]
+    fn test_escape_closes_find_strip() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Open find
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+        assert_eq!(state.focus, EditorFocus::FindInFile);
+
+        // Press Escape
+        let escape = KeyEvent::new(Key::Escape, Modifiers::default());
+        state.handle_key(escape);
+
+        // Should be back to Buffer focus
+        assert_eq!(state.focus, EditorFocus::Buffer);
+        assert!(state.find_mini_buffer.is_none());
+    }
+
+    #[test]
+    fn test_cmd_f_while_open_is_noop() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Open find
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f.clone());
+        assert_eq!(state.focus, EditorFocus::FindInFile);
+
+        // Get the mini buffer content
+        let original_content = state.find_mini_buffer.as_ref().unwrap().content();
+
+        // Press Cmd+F again
+        state.handle_key(cmd_f);
+
+        // Focus should still be FindInFile, mini buffer unchanged
+        assert_eq!(state.focus, EditorFocus::FindInFile);
+        assert_eq!(
+            state.find_mini_buffer.as_ref().unwrap().content(),
+            original_content
+        );
+    }
+
+    #[test]
+    fn test_typing_in_find_selects_match() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Set up buffer with known content
+        *state.buffer_mut() = lite_edit_buffer::TextBuffer::from_str("hello world hello");
+        state.buffer_mut().set_cursor(lite_edit_buffer::Position::new(0, 0));
+
+        // Open find
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        // Type "world"
+        for c in "world".chars() {
+            state.handle_key(KeyEvent::char(c));
+        }
+
+        // Buffer selection should cover "world" (positions 6-11)
+        let selection = state.buffer().selection_range();
+        assert!(selection.is_some(), "Expected a selection after typing in find");
+        let (start, end) = selection.unwrap();
+        assert_eq!(start.col, 6);
+        assert_eq!(end.col, 11);
+    }
+
+    #[test]
+    fn test_no_match_clears_selection() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Set up buffer with known content
+        *state.buffer_mut() = lite_edit_buffer::TextBuffer::from_str("hello world");
+        state.buffer_mut().set_cursor(lite_edit_buffer::Position::new(0, 0));
+
+        // Open find
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        // Type something that doesn't exist
+        for c in "xyz".chars() {
+            state.handle_key(KeyEvent::char(c));
+        }
+
+        // Buffer selection should be cleared
+        let selection = state.buffer().selection_range();
+        assert!(selection.is_none(), "Expected no selection when no match");
+    }
+
+    #[test]
+    fn test_enter_advances_to_next_match() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Set up buffer with multiple occurrences
+        *state.buffer_mut() = lite_edit_buffer::TextBuffer::from_str("foo bar foo baz foo");
+        state.buffer_mut().set_cursor(lite_edit_buffer::Position::new(0, 0));
+
+        // Open find
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        // Type "foo"
+        for c in "foo".chars() {
+            state.handle_key(KeyEvent::char(c));
+        }
+
+        // First match should be at position 0-3
+        let selection1 = state.buffer().selection_range();
+        assert!(selection1.is_some());
+        let (start1, _) = selection1.unwrap();
+        assert_eq!(start1.col, 0);
+
+        // Press Enter to advance
+        let enter = KeyEvent::new(Key::Return, Modifiers::default());
+        state.handle_key(enter);
+
+        // Second match should be at position 8-11
+        let selection2 = state.buffer().selection_range();
+        assert!(selection2.is_some());
+        let (start2, _) = selection2.unwrap();
+        assert_eq!(start2.col, 8);
+
+        // Press Enter again
+        let enter = KeyEvent::new(Key::Return, Modifiers::default());
+        state.handle_key(enter);
+
+        // Third match should be at position 16-19
+        let selection3 = state.buffer().selection_range();
+        assert!(selection3.is_some());
+        let (start3, _) = selection3.unwrap();
+        assert_eq!(start3.col, 16);
+    }
+
+    #[test]
+    fn test_search_wraps_around() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Set up buffer with content and cursor near the end
+        *state.buffer_mut() = lite_edit_buffer::TextBuffer::from_str("hello world");
+        state.buffer_mut().set_cursor(lite_edit_buffer::Position::new(0, 8)); // After "world"
+
+        // Open find
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        // Type "hello" - should wrap around to find it at the beginning
+        for c in "hello".chars() {
+            state.handle_key(KeyEvent::char(c));
+        }
+
+        // Should find "hello" at position 0-5 (wrapped around)
+        let selection = state.buffer().selection_range();
+        assert!(selection.is_some(), "Expected to find 'hello' via wrap-around");
+        let (start, end) = selection.unwrap();
+        assert_eq!(start.col, 0);
+        assert_eq!(end.col, 5);
+    }
+
+    #[test]
+    fn test_case_insensitive_match() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Set up buffer with mixed case
+        *state.buffer_mut() = lite_edit_buffer::TextBuffer::from_str("Hello World HELLO");
+        state.buffer_mut().set_cursor(lite_edit_buffer::Position::new(0, 0));
+
+        // Open find
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        // Type "hello" in lowercase
+        for c in "hello".chars() {
+            state.handle_key(KeyEvent::char(c));
+        }
+
+        // Should find "Hello" at position 0-5 (case-insensitive)
+        let selection = state.buffer().selection_range();
+        assert!(selection.is_some(), "Expected case-insensitive match");
+        let (start, end) = selection.unwrap();
+        assert_eq!(start.col, 0);
+        assert_eq!(end.col, 5);
+    }
+
+    #[test]
+    fn test_find_in_empty_buffer() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Buffer is empty
+
+        // Open find
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        // Type query - should not crash
+        for c in "test".chars() {
+            state.handle_key(KeyEvent::char(c));
+        }
+
+        // No match expected
+        let selection = state.buffer().selection_range();
+        assert!(selection.is_none());
+    }
+
+    #[test]
+    fn test_empty_query_no_selection() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Set up buffer with content
+        *state.buffer_mut() = lite_edit_buffer::TextBuffer::from_str("hello world");
+        state.buffer_mut().set_cursor(lite_edit_buffer::Position::new(0, 0));
+
+        // Open find
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        // Empty query - no search should happen
+        let selection = state.buffer().selection_range();
+        assert!(selection.is_none());
+    }
+
+    #[test]
+    fn test_cmd_f_does_not_insert_f() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Type some content
+        state.handle_key(KeyEvent::char('a'));
+        state.handle_key(KeyEvent::char('b'));
+
+        // Press Cmd+F
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        // Buffer should not have 'f' inserted
+        assert_eq!(state.buffer().content(), "ab");
+    }
+
+    #[test]
+    fn test_multiple_enter_advances_cycles_through_matches() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Set up buffer with two occurrences
+        *state.buffer_mut() = lite_edit_buffer::TextBuffer::from_str("ab ab");
+        state.buffer_mut().set_cursor(lite_edit_buffer::Position::new(0, 0));
+
+        // Open find
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        // Type "ab"
+        state.handle_key(KeyEvent::char('a'));
+        state.handle_key(KeyEvent::char('b'));
+
+        // Debug: check the mini buffer content
+        let mb_content = state.find_mini_buffer.as_ref().map(|mb| mb.content()).unwrap_or_default();
+        eprintln!("Mini buffer content: {:?}", mb_content);
+        eprintln!("Buffer content: {:?}", state.buffer().content());
+        eprintln!("Focus: {:?}", state.focus);
+        eprintln!("Selection: {:?}", state.buffer().selection_range());
+
+        // First match at 0-2
+        let s1 = state.buffer().selection_range().unwrap();
+        assert_eq!(s1.0.col, 0);
+
+        // Press Enter - second match at 3-5
+        state.handle_key(KeyEvent::new(Key::Return, Modifiers::default()));
+        let s2 = state.buffer().selection_range().unwrap();
+        assert_eq!(s2.0.col, 3);
+
+        // Press Enter again - should wrap back to first match at 0-2
+        state.handle_key(KeyEvent::new(Key::Return, Modifiers::default()));
+        let s3 = state.buffer().selection_range().unwrap();
+        assert_eq!(s3.0.col, 0);
     }
 }
