@@ -1,8 +1,15 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/buffer/src/buffer_view.rs
+  - crates/buffer/src/lib.rs
+  - crates/buffer/src/text_buffer.rs
+  - crates/editor/src/glyph_buffer.rs
+  - crates/editor/src/renderer.rs
+  - crates/editor/src/main.rs
+  - crates/editor/src/context.rs
 code_references: []
 narrative: null
 investigation: hierarchical_terminal_tabs
@@ -10,10 +17,13 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-# Implementation note: no chunk dependencies, but builds on existing TextBuffer and renderer
-created_after: ["file_save", "viewport_fractional_scroll", "word_boundary_primitives", "word_forward_delete", "word_jump_navigation"]
+created_after:
+- file_save
+- viewport_fractional_scroll
+- word_boundary_primitives
+- word_forward_delete
+- word_jump_navigation
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

@@ -1,4 +1,5 @@
 // Chunk: docs/chunks/text_buffer - Text buffer data structure with gap buffer backing
+// Chunk: docs/chunks/buffer_view_trait - BufferView trait and supporting types
 
 //! lite-edit-buffer: A text buffer implementation for the lite-edit editor.
 //!
@@ -13,6 +14,13 @@
 //! - Line-based access for efficient rendering
 //! - Dirty line tracking to minimize redraws
 //! - Cursor movement operations
+//!
+//! # BufferView Abstraction
+//!
+//! The [`BufferView`] trait provides a unified rendering interface for both
+//! text editing buffers and terminal emulator buffers. Types like [`Style`],
+//! [`Span`], and [`StyledLine`] enable rich text rendering with terminal-grade
+//! attributes.
 //!
 //! # Example
 //!
@@ -43,10 +51,15 @@
 //! - `DirtyLines::FromLineToEnd(line)` - All lines from `line` to the end changed
 //!   (used when lines are split or joined)
 
+mod buffer_view;
 mod gap_buffer;
 mod line_index;
 mod text_buffer;
 mod types;
 
+// BufferView types
+pub use buffer_view::{
+    BufferView, Color, CursorInfo, CursorShape, NamedColor, Span, Style, StyledLine, UnderlineStyle,
+};
 pub use text_buffer::TextBuffer;
 pub use types::{DirtyLines, Position};

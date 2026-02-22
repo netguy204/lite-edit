@@ -32,9 +32,11 @@ impl Ord for Position {
 
 /// Information about which lines were dirtied by a mutation.
 /// Used by the render loop to compute DirtyRegion.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Chunk: docs/chunks/buffer_view_trait - Added Default derive for BufferView::take_dirty()
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum DirtyLines {
     /// No lines changed (e.g., cursor-only movement or no-op deletion).
+    #[default]
     None,
     /// A single line changed (most insertions, deletions within a line).
     Single(usize),

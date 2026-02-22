@@ -8,170 +8,420 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The `BufferView` trait establishes the contract between buffer implementations and the renderer. This is the keystone abstraction identified in the hierarchical_terminal_tabs investigation: the right unification point is at the **view layer**, not the storage layer.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Strategy:**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. **Define the trait and supporting types in the `buffer` crate.** The types (`BufferView`, `StyledLine`, `Span`, `Style`, `CursorInfo`, `Color`) are foundational vocabulary shared by all buffer implementations.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/buffer_view_trait/GOAL.md)
-with references to the files that you expect to touch.
--->
+2. **Design `Style` for terminal-grade richness from day one.** The investigation emphasizes this: avoid breaking changes later by supporting all terminal attributes upfront (fg/bg color, bold, italic, dim, 5 underline variants + underline color, strikethrough, inverse, hidden).
 
-## Subsystem Considerations
+3. **Keep the trait object-safe.** The goal explicitly requires `Box<dyn BufferView>` and `&dyn BufferView` usage. This means no generic methods, no associated types with complex bounds, and no `Self` in return positions.
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+4. **Implement `BufferView` for `TextBuffer` with trivial defaults.** Each line becomes a single `Span` with default `Style`. This proves the trait works and keeps existing behavior unchanged.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
+5. **Migrate the renderer to consume `BufferView`.** Replace the current `Option<TextBuffer>` with `Option<Box<dyn BufferView>>`. Update `GlyphBuffer::update_from_buffer_with_cursor()` to work with the trait instead of concrete `TextBuffer`.
 
-If no subsystems are relevant, delete this section.
+6. **Preserve all existing rendering behavior.** The demo text must render identically. No visual changes should occur from this refactor.
 
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
+**Testing Philosophy alignment:**
 
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Per `docs/trunk/TESTING_PHILOSOPHY.md`:
+- **TDD for behavioral code**: The `Style` type and `BufferView` trait have meaningful behavior to test (merging dirty lines, generating styled lines, etc.).
+- **Humble view architecture**: The renderer remains humble — it reads `BufferView` and produces pixels. Testing focuses on the model layer (`TextBuffer`'s `BufferView` implementation).
+- **Goal-driven test design**: Tests verify the success criteria directly: object-safety, dirty tracking flow, line content correctness.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Define the `Color` type
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create the `Color` enum supporting all terminal color modes. This is a leaf type with no dependencies.
 
-Example:
+Location: `crates/buffer/src/buffer_view.rs` (new file)
 
-### Step 1: Define the SegmentHeader struct
+```rust
+/// Terminal color representation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Color {
+    /// Default foreground/background (terminal decides)
+    #[default]
+    Default,
+    /// Named ANSI colors (0-15)
+    Named(NamedColor),
+    /// 256-color palette index
+    Indexed(u8),
+    /// 24-bit RGB color
+    Rgb { r: u8, g: u8, b: u8 },
+}
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+/// The 16 standard ANSI colors
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamedColor {
+    Black, Red, Green, Yellow, Blue, Magenta, Cyan, White,
+    BrightBlack, BrightRed, BrightGreen, BrightYellow,
+    BrightBlue, BrightMagenta, BrightCyan, BrightWhite,
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+**Tests:** Unit tests for `Color::Default`, `Color::Rgb`, `Color::Indexed`, `Color::Named` construction and equality.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 2: Define the `UnderlineStyle` enum
+
+Create the underline style enum with 5 variants as specified in the goal.
+
+Location: `crates/buffer/src/buffer_view.rs`
+
+```rust
+/// Underline rendering style
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnderlineStyle {
+    #[default]
+    None,
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+```
+
+**Tests:** Basic construction tests (these are trivial, but establish the API).
+
+### Step 3: Define the `Style` struct
+
+Create the full terminal-grade `Style` struct with all attributes. Use sensible defaults (no styling = default fg, default bg, no attributes).
+
+Location: `crates/buffer/src/buffer_view.rs`
+
+```rust
+/// Terminal-grade text styling attributes
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Style {
+    /// Foreground color
+    pub fg: Color,
+    /// Background color
+    pub bg: Color,
+    /// Bold weight
+    pub bold: bool,
+    /// Italic slant
+    pub italic: bool,
+    /// Dim/faint intensity
+    pub dim: bool,
+    /// Underline style
+    pub underline: UnderlineStyle,
+    /// Underline color (None = use fg color)
+    pub underline_color: Option<Color>,
+    /// Strikethrough line
+    pub strikethrough: bool,
+    /// Inverse video (swap fg/bg at render time)
+    pub inverse: bool,
+    /// Hidden text (don't render glyphs)
+    pub hidden: bool,
+}
+```
+
+**Tests:**
+- `Style::default()` produces unstyled (Default colors, no attributes)
+- Builder pattern tests if we add one (optional)
+- Equality tests for identical and different styles
+
+### Step 4: Define `Span` and `StyledLine`
+
+Create the span-based line representation that the renderer consumes.
+
+Location: `crates/buffer/src/buffer_view.rs`
+
+```rust
+/// A contiguous run of text with uniform styling
+#[derive(Debug, Clone, PartialEq)]
+pub struct Span {
+    /// The text content of this span
+    pub text: String,
+    /// The style applied to this text
+    pub style: Style,
+}
+
+impl Span {
+    /// Creates a new span with the given text and style
+    pub fn new(text: impl Into<String>, style: Style) -> Self {
+        Self { text: text.into(), style }
+    }
+
+    /// Creates an unstyled span (default style)
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self { text: text.into(), style: Style::default() }
+    }
+}
+
+/// A line as the renderer sees it — a sequence of styled spans
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct StyledLine {
+    /// The spans comprising this line
+    pub spans: Vec<Span>,
+}
+
+impl StyledLine {
+    /// Creates a new styled line from spans
+    pub fn new(spans: Vec<Span>) -> Self {
+        Self { spans }
+    }
+
+    /// Creates a line with a single unstyled span
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self { spans: vec![Span::plain(text)] }
+    }
+
+    /// Creates an empty line
+    pub fn empty() -> Self {
+        Self { spans: vec![] }
+    }
+}
+```
+
+**Tests:**
+- `Span::plain("hello")` produces unstyled span
+- `StyledLine::plain("hello")` produces single-span line
+- `StyledLine::empty()` has no spans
+
+### Step 5: Define `CursorShape` and `CursorInfo`
+
+Create the cursor representation for rendering different cursor styles.
+
+Location: `crates/buffer/src/buffer_view.rs`
+
+```rust
+use crate::types::Position;
+
+/// Cursor shape for rendering
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CursorShape {
+    /// Solid block cursor (default for most terminals)
+    #[default]
+    Block,
+    /// Vertical line cursor (insert mode)
+    Beam,
+    /// Horizontal line at bottom of cell
+    Underline,
+    /// Cursor is hidden
+    Hidden,
+}
+
+/// Information about the cursor for rendering
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CursorInfo {
+    /// Position in the buffer (line, column)
+    pub position: Position,
+    /// Visual shape of the cursor
+    pub shape: CursorShape,
+    /// Whether the cursor should blink
+    pub blinking: bool,
+}
+
+impl CursorInfo {
+    /// Creates a new cursor info
+    pub fn new(position: Position, shape: CursorShape, blinking: bool) -> Self {
+        Self { position, shape, blinking }
+    }
+
+    /// Creates a default block cursor at the given position
+    pub fn block(position: Position) -> Self {
+        Self { position, shape: CursorShape::Block, blinking: true }
+    }
+}
+```
+
+**Tests:**
+- `CursorInfo::block(pos)` produces block cursor at position
+- Default shape is Block
+
+### Step 6: Define the `BufferView` trait
+
+Create the core trait that unifies buffer implementations for rendering.
+
+Location: `crates/buffer/src/buffer_view.rs`
+
+```rust
+use crate::types::DirtyLines;
+
+/// A buffer as seen by the renderer — the view abstraction that unifies
+/// file buffers and terminal buffers.
+///
+/// This trait is object-safe: it can be used as `&dyn BufferView` or
+/// `Box<dyn BufferView>`.
+// Chunk: docs/chunks/buffer_view_trait - BufferView trait definition
+pub trait BufferView {
+    /// Returns the total number of lines available for display.
+    fn line_count(&self) -> usize;
+
+    /// Returns a styled representation of the given line.
+    ///
+    /// Returns `None` if the line index is out of bounds.
+    fn styled_line(&self, line: usize) -> Option<StyledLine>;
+
+    /// Drains accumulated dirty state since last call.
+    ///
+    /// Returns which lines need re-rendering. After calling this,
+    /// the buffer's dirty state is reset.
+    fn take_dirty(&mut self) -> DirtyLines;
+
+    /// Returns whether this buffer accepts direct text input.
+    ///
+    /// - `true` for file editing buffers (TextBuffer)
+    /// - `false` for terminal buffers (input goes to PTY stdin instead)
+    fn is_editable(&self) -> bool;
+
+    /// Returns cursor information for display.
+    ///
+    /// Returns `None` if the buffer has no cursor (e.g., read-only view).
+    fn cursor_info(&self) -> Option<CursorInfo>;
+}
+```
+
+**Tests:**
+- Compile-time test: verify trait is object-safe by constructing `Box<dyn BufferView>` with a mock implementation
+- The real behavioral tests come in Step 7 with `TextBuffer`
+
+### Step 7: Implement `BufferView` for `TextBuffer`
+
+Add the trait implementation for the existing `TextBuffer` type. Each line returns a single unstyled span. Dirty tracking flows through `take_dirty()`.
+
+Location: `crates/buffer/src/text_buffer.rs`
+
+**Key changes:**
+1. Add a `dirty_lines: DirtyLines` field to `TextBuffer` to accumulate dirty state
+2. Have mutation methods update this field (merge new dirty state)
+3. Implement `BufferView` methods
+
+```rust
+impl BufferView for TextBuffer {
+    fn line_count(&self) -> usize {
+        self.line_count() // existing method
+    }
+
+    fn styled_line(&self, line: usize) -> Option<StyledLine> {
+        if line >= self.line_count() {
+            return None;
+        }
+        let content = self.line_content(line);
+        Some(StyledLine::plain(content))
+    }
+
+    fn take_dirty(&mut self) -> DirtyLines {
+        std::mem::take(&mut self.dirty_lines)
+    }
+
+    fn is_editable(&self) -> bool {
+        true
+    }
+
+    fn cursor_info(&self) -> Option<CursorInfo> {
+        Some(CursorInfo::block(self.cursor_position()))
+    }
+}
+```
+
+**Implementation detail:** Currently, `TextBuffer` mutation methods return `DirtyLines` directly. We need to also accumulate into an internal field for `take_dirty()`. Options:
+- **Option A**: Add a `dirty_lines` field, have mutations merge into it, AND return the specific mutation's dirty lines (for immediate response).
+- **Option B**: Have mutations only accumulate, and callers use `take_dirty()` at render time.
+
+**Chosen approach: Option A.** This maintains backward compatibility — existing code that uses the return value continues to work. The `dirty_lines` field provides the drain-all-then-render pattern needed by `BufferView`.
+
+**Tests (TDD):**
+1. `styled_line(0)` on buffer with content "hello" returns `StyledLine { spans: [Span { text: "hello", style: default }] }`
+2. `styled_line(1)` on single-line buffer returns `None`
+3. `line_count()` matches existing behavior
+4. `take_dirty()` returns accumulated dirty state and resets to `DirtyLines::None`
+5. `is_editable()` returns `true`
+6. `cursor_info()` returns block cursor at cursor position
+
+### Step 8: Export types from `buffer` crate
+
+Update the crate's `lib.rs` to export the new types publicly.
+
+Location: `crates/buffer/src/lib.rs`
+
+```rust
+mod buffer_view;
+
+pub use buffer_view::{
+    BufferView, Color, CursorInfo, CursorShape,
+    NamedColor, Span, Style, StyledLine, UnderlineStyle,
+};
+```
+
+### Step 9: Update `GlyphBuffer` to accept `BufferView`
+
+Modify `GlyphBuffer::update_from_buffer_with_cursor()` to work with `&dyn BufferView` instead of `&TextBuffer`.
+
+Location: `crates/editor/src/glyph_buffer.rs`
+
+**Changes:**
+- Change parameter type from `&TextBuffer` to `&dyn BufferView`
+- Use `view.styled_line(line)` to get line content
+- For now, extract plain text from the single span (since `TextBuffer` produces unstyled content and the renderer doesn't yet handle per-span styles)
+- Cursor position comes from `view.cursor_info()` instead of direct access
+
+**Note:** This step intentionally doesn't change rendering behavior. We extract text from `StyledLine` spans and render with the existing uniform text color. Per-cell styling is a future chunk (renderer_styled_content).
+
+### Step 10: Update `Renderer` to use `BufferView`
+
+Modify the renderer to store and work with `Box<dyn BufferView>` instead of `Option<TextBuffer>`.
+
+Location: `crates/editor/src/renderer.rs`
+
+**Changes:**
+- Replace `buffer: Option<TextBuffer>` with `buffer: Option<Box<dyn BufferView>>`
+- Update `set_buffer()` to accept `impl BufferView + 'static` or take `Box<dyn BufferView>` directly
+- The `update_glyph_buffer()` method calls `self.buffer.as_ref()?.styled_line(...)` and passes to the glyph buffer
+- The `apply_mutation()` method can be simplified or removed — dirty tracking now lives in `BufferView::take_dirty()`
+
+**Backward compatibility approach:** Create a `set_text_buffer()` helper that boxes a `TextBuffer` and calls the generic `set_buffer()`. This keeps the `main.rs` initialization simple.
+
+### Step 11: Update call sites in `main.rs` and `context.rs`
+
+Update all code that interacts with the renderer's buffer to work with the new abstraction.
+
+Locations: `crates/editor/src/main.rs`, `crates/editor/src/context.rs`
+
+**Key changes:**
+- Buffer initialization: `TextBuffer::new()` → boxed → `renderer.set_buffer()`
+- Direct `buffer_mut()` access patterns need review — for file editing, we still need mutable access to `TextBuffer`. Options:
+  - Downcast `&dyn BufferView` to `&TextBuffer` when needed (ergonomic but couples to concrete type)
+  - Keep a separate `TextBuffer` reference in `EditorContext` alongside the `BufferView` in the renderer (cleaner separation)
+
+**Chosen approach:** The `EditorContext` owns the `TextBuffer` directly (for editing operations), and the renderer receives a shared reference via the `BufferView` trait. The renderer holds a reference to the context's buffer, not its own copy.
+
+**Actually, revisiting:** The current design has `Renderer` own the buffer. For the BufferView abstraction to work cleanly with future terminal buffers (which the renderer would also display), the renderer should hold `Option<&dyn BufferView>` or `Option<Box<dyn BufferView>>`.
+
+**Refined approach for this chunk:** Keep the renderer owning the buffer for now. Change the type to `Box<dyn BufferView>`. For editing, downcast to `&mut TextBuffer`. This is acceptable because this chunk only implements `BufferView` for `TextBuffer`. Future terminal integration will need to revisit ownership.
+
+### Step 12: Integration testing
+
+Verify the application still runs correctly with the refactored code.
+
+**Manual testing:**
+- Launch the editor
+- Verify demo text renders identically to before the refactor
+- Verify cursor renders correctly
+- Verify typing updates the display
+- Verify dirty region tracking works (partial updates)
+
+**Automated tests:**
+- Add an integration test that constructs a renderer with a TextBuffer-backed BufferView and verifies the glyph buffer is populated correctly
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- This chunk depends on chunks listed in `created_after` being complete (merged to trunk).
+- No new external crates required — all types are defined in the workspace.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Downcast ergonomics.** The renderer currently needs mutable access to the buffer for editing. With `BufferView` being a trait object, we'd need to downcast to `TextBuffer` for mutation. This is acceptable for this chunk but worth noting. Alternative: add mutation methods to the trait (but this couples the trait to editing semantics that terminals don't have).
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **String allocation in `styled_line()`.** Each call to `styled_line()` allocates a new `String` in the `Span`. For rendering, this happens every frame for visible lines. The investigation benchmarks showed this is acceptable (< 0.25% of frame budget), but it's worth monitoring. Future optimization: return `Cow<str>` or a borrowed view.
+
+3. **Dirty tracking semantic change.** Currently, `TextBuffer` mutations return `DirtyLines` immediately. With `BufferView::take_dirty()`, the pattern changes to drain-all-then-render. The renderer already uses this pattern (`render_dirty()` checks dirty region), so this aligns well. But call sites that relied on the return value need to be audited.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- POPULATE DURING IMPLEMENTATION, not at planning time. -->
