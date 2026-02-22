@@ -40,6 +40,7 @@ mod input;
 mod left_rail;
 mod metal_view;
 mod renderer;
+mod tab_bar;
 mod selector;
 mod selector_overlay;
 mod shader;

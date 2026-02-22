@@ -218,6 +218,9 @@ pub struct Workspace {
     pub active_tab: usize,
     /// Status indicator for the left rail
     pub status: WorkspaceStatus,
+    // Chunk: docs/chunks/content_tab_bar - Tab bar scrolling
+    /// Horizontal scroll offset for tab bar overflow (in pixels)
+    pub tab_bar_view_offset: f32,
 }
 
 impl Workspace {
@@ -230,6 +233,7 @@ impl Workspace {
             tabs: Vec::new(),
             active_tab: 0,
             status: WorkspaceStatus::Idle,
+            tab_bar_view_offset: 0.0,
         }
     }
 
@@ -243,6 +247,7 @@ impl Workspace {
             tabs: vec![tab],
             active_tab: 0,
             status: WorkspaceStatus::Idle,
+            tab_bar_view_offset: 0.0,
         }
     }
 
