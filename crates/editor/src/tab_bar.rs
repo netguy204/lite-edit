@@ -358,6 +358,7 @@ pub fn tabs_from_workspace(workspace: &Workspace) -> Vec<TabInfo> {
     tabs
 }
 
+// Chunk: docs/chunks/tab_bar_interaction - Disambiguates duplicate filenames with parent directory
 /// Disambiguates tab labels when multiple tabs have the same filename.
 ///
 /// When two or more tabs have the same base filename (e.g., "main.rs"), this

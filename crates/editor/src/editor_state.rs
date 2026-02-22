@@ -1392,6 +1392,7 @@ impl EditorState {
     /// Switches to the tab at the given index in the active workspace.
     ///
     /// Does nothing if the index is out of bounds or if it's the current tab.
+    // Chunk: docs/chunks/tab_bar_interaction - Click-to-switch tab activation
     // Chunk: docs/chunks/tab_click_cursor_placement - Sync viewport on tab switch
     pub fn switch_tab(&mut self, index: usize) {
         let switched = if let Some(workspace) = self.editor.active_workspace_mut() {
