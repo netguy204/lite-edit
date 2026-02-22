@@ -1578,6 +1578,151 @@ mod tests {
     }
 
     // =========================================================================
+    // Chunk: docs/chunks/selector_scroll_end - Row height mismatch bug fix tests
+    // =========================================================================
+
+    /// Step 1 (PLAN.md): Test that demonstrates the row_height mismatch bug.
+    ///
+    /// When the external item_height (from geometry) differs from the RowScroller's
+    /// internal row_height, the selection can end up outside the rendered viewport.
+    ///
+    /// The bug manifests as: the scroller thinks more items are visible than the
+    /// renderer actually draws, so the selection highlight can be outside the
+    /// scissor-clipped area.
+    ///
+    /// This test sets up a SelectorWidget with:
+    /// - 50 items (more than fit in viewport)
+    /// - An external row_height of 20.0 (differs from default 16.0)
+    /// - A viewport that can show 18 items at 20px each (360px)
+    ///
+    /// Without set_item_height, the RowScroller uses row_height=16:
+    /// - visible_rows = floor(360 / 16) = 22 (WRONG - renderer only draws 18)
+    ///
+    /// With set_item_height(20.0):
+    /// - visible_rows = floor(360 / 20) = 18 (CORRECT)
+    ///
+    /// The draw_idx (selection position relative to first_visible) must be
+    /// less than the RENDERER's visible item count (18), not the scroller's.
+    ///
+    /// Chunk: docs/chunks/selector_scroll_end
+    #[test]
+    fn row_height_mismatch_causes_incorrect_visible_rows() {
+        let mut widget = SelectorWidget::new();
+        // RowScroller is initialized with row_height=16.0 (from default FontMetrics)
+
+        // Use an external item_height that differs from the default
+        let external_item_height = 20.0_f32;
+        let renderer_visible_items = 18_usize; // What the renderer actually draws
+        let total_items = 50_usize;
+
+        // Set up items
+        widget.set_items((0..total_items).map(|i| format!("item{}", i)).collect());
+
+        // Simulate what happens WITHOUT calling set_item_height:
+        // The geometry uses external_item_height (20.0), but RowScroller uses 16.0
+        let height_px = renderer_visible_items as f32 * external_item_height;
+        widget.update_visible_size(height_px);
+
+        // Navigate to the last item (index 49)
+        for _ in 0..49 {
+            widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
+        }
+
+        // Verify we reached the last item
+        assert_eq!(widget.selected_index(), 49);
+
+        // BUG: Without the fix, visible_rows = 22 (wrong), so ensure_visible
+        // places the selection at draw_idx = 21 (position 21 in the viewport).
+        // But the renderer only draws 18 items (positions 0-17), so the
+        // selection is OUTSIDE the rendered area!
+        //
+        // Check the draw_idx: selection position relative to first_visible_item
+        let first_visible = widget.first_visible_item();
+        let draw_idx = widget.selected_index() - first_visible;
+
+        // This assertion documents the BUG: draw_idx >= renderer_visible_items
+        // The selection is outside the rendered viewport without the fix.
+        // (When the fix is applied, this test will fail and should be updated.)
+        if draw_idx >= renderer_visible_items {
+            // Bug confirmed: selection is outside rendered area
+            // This is expected WITHOUT the fix
+        } else {
+            // If draw_idx < renderer_visible_items, the bug might not manifest
+            // in this specific scenario, but the visible_rows calculation is
+            // still wrong (22 instead of 18).
+        }
+
+        // The key assertion: visible_rows should match what the renderer draws
+        // Without fix: visible_rows = 22 (from 360/16)
+        // With fix: visible_rows = 18 (from 360/20)
+        let range = widget.visible_item_range();
+        let scroller_visible_rows = range.end - range.start;
+        // The scroller thinks it can show more items than the renderer draws
+        // This is incorrect and causes the selection to be invisible
+        assert!(
+            scroller_visible_rows > renderer_visible_items,
+            "Bug: scroller_visible_rows ({}) should be > renderer_visible_items ({}) without fix",
+            scroller_visible_rows,
+            renderer_visible_items
+        );
+    }
+
+    /// Test that after calling set_item_height, visible_rows is correct.
+    ///
+    /// Chunk: docs/chunks/selector_scroll_end
+    #[test]
+    fn set_item_height_corrects_visible_rows() {
+        let mut widget = SelectorWidget::new();
+
+        // Use an external item_height that differs from the default
+        let external_item_height = 20.0_f32;
+        let renderer_visible_items = 18_usize;
+        let total_items = 50_usize;
+
+        // Set up items
+        widget.set_items((0..total_items).map(|i| format!("item{}", i)).collect());
+
+        // FIX: Call set_item_height BEFORE update_visible_size
+        widget.set_item_height(external_item_height);
+
+        // Now update_visible_size uses the correct row_height
+        let height_px = renderer_visible_items as f32 * external_item_height;
+        widget.update_visible_size(height_px);
+
+        // Navigate to the last item (index 49)
+        for _ in 0..49 {
+            widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
+        }
+
+        // Verify we reached the last item
+        assert_eq!(widget.selected_index(), 49);
+
+        // With the fix: RowScroller uses row_height=20.0
+        // - visible_rows = floor(360 / 20) = 18 (CORRECT)
+        // - draw_idx should be within [0, 17]
+
+        // Check the draw_idx
+        let first_visible = widget.first_visible_item();
+        let draw_idx = widget.selected_index() - first_visible;
+
+        // With the fix, draw_idx should be < renderer_visible_items
+        assert!(
+            draw_idx < renderer_visible_items,
+            "Selection draw_idx {} should be < renderer_visible_items {} with fix",
+            draw_idx,
+            renderer_visible_items
+        );
+
+        // The last item must be in the visible range
+        let range = widget.visible_item_range();
+        assert!(
+            range.contains(&49),
+            "Last item (49) should be in visible_item_range {:?}",
+            range
+        );
+    }
+
+    // =========================================================================
     // Chunk: docs/chunks/selector_scroll_bottom - Bug A / Bug B scroll fix tests
     // =========================================================================
 
@@ -1701,6 +1846,162 @@ mod tests {
             "At last item, selection {} should be in visible_item_range {:?}",
             widget.selected_index(),
             range
+        );
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/selector_scroll_end - Regression tests for scroll-to-bottom fix
+    // =========================================================================
+
+    /// Step 4 (PLAN.md): Comprehensive regression test for end-of-list scrolling.
+    ///
+    /// Creates a SelectorWidget with 2× the panel capacity items, navigates to the
+    /// last item via repeated Down key presses, and verifies:
+    /// - `selected_index()` == last item index
+    /// - `visible_item_range()` contains the last item
+    /// - The selection's draw_idx is within `[0, visible_rows - 1]`
+    ///
+    /// Chunk: docs/chunks/selector_scroll_end
+    #[test]
+    fn regression_scroll_to_bottom_via_arrow_keys() {
+        let mut widget = SelectorWidget::new();
+
+        // External item_height (simulating font_metrics.line_height)
+        let item_height = 18.0_f32;
+        let visible_rows = 10_usize;
+        let total_items = 2 * visible_rows; // 2× panel capacity
+
+        // Set up items
+        widget.set_items((0..total_items).map(|i| format!("item{}", i)).collect());
+
+        // CRITICAL: Set item_height before update_visible_size (this is the fix!)
+        widget.set_item_height(item_height);
+        widget.update_visible_size(visible_rows as f32 * item_height);
+
+        // Navigate to the last item
+        for _ in 0..(total_items - 1) {
+            widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
+        }
+
+        // Verify selected_index is at the last item
+        assert_eq!(
+            widget.selected_index(),
+            total_items - 1,
+            "Selection should be at last item ({})",
+            total_items - 1
+        );
+
+        // Verify last item is in visible_item_range
+        let range = widget.visible_item_range();
+        assert!(
+            range.contains(&(total_items - 1)),
+            "Last item ({}) should be in visible_item_range {:?}",
+            total_items - 1,
+            range
+        );
+
+        // Verify draw_idx is within visible viewport
+        let first_visible = widget.first_visible_item();
+        let draw_idx = widget.selected_index() - first_visible;
+        assert!(
+            draw_idx < visible_rows,
+            "Selection draw_idx {} should be < visible_rows {}",
+            draw_idx,
+            visible_rows
+        );
+    }
+
+    /// Step 5 (PLAN.md): Test mouse scroll to bottom.
+    ///
+    /// Creates a SelectorWidget with many items, sets correct item_height and
+    /// visible size, applies enough scroll delta to reach the maximum scroll
+    /// offset, and verifies the last item is within visible_item_range().
+    ///
+    /// Chunk: docs/chunks/selector_scroll_end
+    #[test]
+    fn regression_scroll_to_bottom_via_mouse_wheel() {
+        let mut widget = SelectorWidget::new();
+
+        // External item_height
+        let item_height = 18.0_f32;
+        let visible_rows = 10_usize;
+        let total_items = 30_usize;
+
+        // Set up items
+        widget.set_items((0..total_items).map(|i| format!("item{}", i)).collect());
+
+        // CRITICAL: Set item_height before update_visible_size
+        widget.set_item_height(item_height);
+        widget.update_visible_size(visible_rows as f32 * item_height);
+
+        // Calculate the scroll delta needed to reach the bottom
+        // max_scroll_offset = (total_items - visible_rows) * item_height
+        let max_scroll = (total_items - visible_rows) as f64 * item_height as f64;
+
+        // Scroll to the bottom (plus a bit more to test clamping)
+        widget.handle_scroll(max_scroll + 100.0);
+
+        // Verify the last item is in visible_item_range
+        let range = widget.visible_item_range();
+        assert!(
+            range.contains(&(total_items - 1)),
+            "Last item ({}) should be in visible_item_range {:?} after scroll",
+            total_items - 1,
+            range
+        );
+
+        // Verify first_visible is at the expected position
+        let expected_first_visible = total_items - visible_rows;
+        assert_eq!(
+            widget.first_visible_item(),
+            expected_first_visible,
+            "first_visible_item should be {} when scrolled to bottom",
+            expected_first_visible
+        );
+    }
+
+    /// Regression test: ensure_visible places the last item at the bottom of the viewport.
+    ///
+    /// When navigating to the last item, the scroll should position it at
+    /// draw_idx = visible_rows - 1, not outside the viewport.
+    ///
+    /// Chunk: docs/chunks/selector_scroll_end
+    #[test]
+    fn regression_ensure_visible_last_item_at_bottom() {
+        let mut widget = SelectorWidget::new();
+
+        let item_height = 20.0_f32;
+        let visible_rows = 5_usize;
+        let total_items = 20_usize;
+
+        widget.set_items((0..total_items).map(|i| format!("item{}", i)).collect());
+        widget.set_item_height(item_height);
+        widget.update_visible_size(visible_rows as f32 * item_height);
+
+        // Jump directly to the last item via repeated Down presses
+        for _ in 0..(total_items - 1) {
+            widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
+        }
+
+        assert_eq!(widget.selected_index(), total_items - 1);
+
+        // The last item should be at the bottom of the viewport
+        // first_visible should be total_items - visible_rows = 15
+        // draw_idx = 19 - 15 = 4 = visible_rows - 1 ✓
+        let first_visible = widget.first_visible_item();
+        let expected_first_visible = total_items - visible_rows;
+        assert_eq!(
+            first_visible, expected_first_visible,
+            "first_visible {} should be {} to show last item at bottom",
+            first_visible, expected_first_visible
+        );
+
+        let draw_idx = widget.selected_index() - first_visible;
+        assert_eq!(
+            draw_idx,
+            visible_rows - 1,
+            "Last item should be at draw_idx {} (bottom of viewport)",
+            visible_rows - 1
         );
     }
 }

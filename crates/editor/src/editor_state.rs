@@ -502,6 +502,12 @@ impl EditorState {
             line_height,
             selector.items().len(),
         );
+        // Chunk: docs/chunks/selector_scroll_end - Sync RowScroller row_height with geometry
+        // The RowScroller is initialized with a default row_height (16.0), but the actual
+        // item height comes from font_metrics.line_height. Without this sync, the scroller
+        // computes an incorrect visible_rows count, causing the selection to be placed
+        // outside the rendered viewport when scrolling to the bottom of a long list.
+        selector.set_item_height(geometry.item_height);
         selector.update_visible_size(geometry.visible_items as f32 * geometry.item_height);
 
         // Store the selector and update focus
@@ -848,6 +854,8 @@ impl EditorState {
             selector.items().len(),
         );
 
+        // Chunk: docs/chunks/selector_scroll_end - Sync RowScroller row_height with geometry
+        selector.set_item_height(geometry.item_height);
         // Update visible size on the selector (for arrow key navigation scroll)
         selector.update_visible_size(geometry.visible_items as f32 * geometry.item_height);
 
@@ -884,6 +892,8 @@ impl EditorState {
                                 line_height,
                                 sel.items().len(),
                             );
+                            // Chunk: docs/chunks/selector_scroll_end - Sync row_height
+                            sel.set_item_height(new_geometry.item_height);
                             sel.update_visible_size(
                                 new_geometry.visible_items as f32 * new_geometry.item_height,
                             );
@@ -1099,6 +1109,8 @@ impl EditorState {
             selector.items().len(),
         );
 
+        // Chunk: docs/chunks/selector_scroll_end - Sync RowScroller row_height with geometry
+        selector.set_item_height(geometry.item_height);
         // Update visible size on the selector (for consistency with scroll/key handling)
         selector.update_visible_size(geometry.visible_items as f32 * geometry.item_height);
 
@@ -1253,6 +1265,8 @@ impl EditorState {
             selector.items().len(),
         );
 
+        // Chunk: docs/chunks/selector_scroll_end - Sync RowScroller row_height with geometry
+        selector.set_item_height(geometry.item_height);
         // Update visible size on the selector (for arrow key navigation scroll)
         selector.update_visible_size(geometry.visible_items as f32 * geometry.item_height);
 
@@ -1621,6 +1635,7 @@ impl EditorState {
     /// Closes the tab at the given index in the active workspace.
     ///
     /// If this is the last tab, creates a new empty tab instead of closing.
+    // Chunk: docs/chunks/content_tab_bar - Close tab with dirty-buffer guard (Cmd+W)
     pub fn close_tab(&mut self, index: usize) {
         if let Some(workspace) = self.editor.active_workspace_mut() {
             // Guard: don't close dirty tabs (confirmation UI is future work)
@@ -1798,6 +1813,7 @@ impl EditorState {
     ///
     /// Positive delta scrolls right (reveals more tabs to the right),
     /// negative delta scrolls left (reveals more tabs to the left).
+    // Chunk: docs/chunks/content_tab_bar - Horizontal tab bar scroll and auto-scroll to active tab
     pub fn scroll_tab_bar(&mut self, delta: f32) {
         if let Some(workspace) = self.editor.active_workspace_mut() {
             workspace.tab_bar_view_offset += delta;
