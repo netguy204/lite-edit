@@ -36,6 +36,8 @@ mod focus;
 mod font;
 mod glyph_atlas;
 mod glyph_buffer;
+// Chunk: docs/chunks/syntax_highlighting - Syntax-highlighted buffer view wrapper
+mod highlighted_buffer;
 mod input;
 mod left_rail;
 mod metal_view;

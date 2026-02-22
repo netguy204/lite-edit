@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use crate::viewport::Viewport;
 use lite_edit_buffer::{BufferView, TextBuffer};
+use lite_edit_syntax::{LanguageRegistry, SyntaxHighlighter, SyntaxTheme};
 use lite_edit_terminal::{AgentConfig, AgentHandle, AgentState, TerminalBuffer};
 
 // =============================================================================
@@ -184,10 +185,10 @@ impl TabBuffer {
 // =============================================================================
 
 // Chunk: docs/chunks/content_tab_bar - Per-tab model: kind, buffer ref, dirty flag, unread badge
+// Chunk: docs/chunks/syntax_highlighting - Added syntax highlighter field
 /// A tab within a workspace.
 ///
 /// Each tab owns its own buffer and viewport (for independent scroll positions).
-#[derive(Debug)]
 pub struct Tab {
     /// Unique identifier for this tab
     pub id: TabId,
@@ -205,6 +206,8 @@ pub struct Tab {
     pub unread: bool,
     /// The file associated with this tab (for file tabs)
     pub associated_file: Option<PathBuf>,
+    /// The syntax highlighter for file tabs (if language detected)
+    highlighter: Option<SyntaxHighlighter>,
 }
 
 impl Tab {
@@ -219,6 +222,7 @@ impl Tab {
             dirty: false,
             unread: false,
             associated_file: path,
+            highlighter: None,
         }
     }
 
@@ -241,6 +245,7 @@ impl Tab {
             dirty: false,
             unread: false,
             associated_file: None,
+            highlighter: None,
         }
     }
 
@@ -255,6 +260,7 @@ impl Tab {
             dirty: false,
             unread: false,
             associated_file: None,
+            highlighter: None,
         }
     }
 
@@ -335,6 +341,102 @@ impl Tab {
     /// Called when the tab becomes active to indicate the user has seen the content.
     pub fn clear_unread(&mut self) {
         self.unread = false;
+    }
+
+    // =========================================================================
+    // Syntax Highlighting (Chunk: docs/chunks/syntax_highlighting)
+    // =========================================================================
+
+    /// Sets up syntax highlighting for this tab based on file extension.
+    ///
+    /// Call this after loading file content. If the extension is recognized,
+    /// a highlighter is created with the full source for initial parsing.
+    ///
+    /// # Arguments
+    ///
+    /// * `registry` - The language registry for extension-to-language mapping
+    /// * `theme` - The syntax theme for styling
+    ///
+    /// Returns `true` if a highlighter was successfully created.
+    pub fn setup_highlighting(
+        &mut self,
+        registry: &LanguageRegistry,
+        theme: SyntaxTheme,
+    ) -> bool {
+        // Only file tabs can have highlighting
+        let (path, buffer) = match (&self.associated_file, &self.buffer) {
+            (Some(p), TabBuffer::File(buf)) => (p, buf),
+            _ => return false,
+        };
+
+        // Get extension from path
+        let ext = match path.extension().and_then(|e| e.to_str()) {
+            Some(e) => e,
+            None => return false,
+        };
+
+        // Look up language config
+        let config = match registry.config_for_extension(ext) {
+            Some(c) => c,
+            None => return false,
+        };
+
+        // Get current buffer content for initial parse
+        let source = buffer.content();
+
+        // Create highlighter
+        match SyntaxHighlighter::new(config, &source, theme) {
+            Some(hl) => {
+                self.highlighter = Some(hl);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Returns a reference to the syntax highlighter, if available.
+    pub fn highlighter(&self) -> Option<&SyntaxHighlighter> {
+        self.highlighter.as_ref()
+    }
+
+    /// Notifies the highlighter of a buffer edit for incremental parsing.
+    ///
+    /// Call this after any buffer mutation (insert, delete, etc.) to keep
+    /// the syntax tree up to date.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - The edit event describing the change
+    pub fn notify_edit(&mut self, event: lite_edit_syntax::EditEvent) {
+        if let (Some(hl), TabBuffer::File(buffer)) = (&mut self.highlighter, &self.buffer) {
+            let source = buffer.content();
+            hl.edit(event, &source);
+        }
+    }
+
+    /// Syncs the highlighter with the current buffer content.
+    ///
+    /// This is a simpler alternative to `notify_edit` that performs a full
+    /// re-parse. Use this when you don't have precise edit information.
+    pub fn sync_highlighter(&mut self) {
+        if let (Some(hl), TabBuffer::File(buffer)) = (&mut self.highlighter, &mut self.buffer) {
+            let source = buffer.content();
+            hl.update_source(&source);
+        }
+    }
+}
+
+impl std::fmt::Debug for Tab {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tab")
+            .field("id", &self.id)
+            .field("label", &self.label)
+            .field("kind", &self.kind)
+            .field("dirty", &self.dirty)
+            .field("unread", &self.unread)
+            .field("associated_file", &self.associated_file)
+            .field("highlighter", &self.highlighter.as_ref().map(|_| "<SyntaxHighlighter>"))
+            .finish()
     }
 }
 

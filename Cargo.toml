@@ -3,7 +3,8 @@
 
 [workspace]
 # Chunk: docs/chunks/terminal_input_encoding - Added input crate
-members = ["crates/buffer", "crates/editor", "crates/input", "crates/terminal"]
+# Chunk: docs/chunks/syntax_highlighting - Added syntax crate
+members = ["crates/buffer", "crates/editor", "crates/input", "crates/syntax", "crates/terminal"]
 resolver = "2"
 
 [workspace.package]

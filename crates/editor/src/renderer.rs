@@ -56,6 +56,8 @@ use crate::workspace::Editor;
 use crate::wrap_layout::WrapLayout;
 // Chunk: docs/chunks/renderer_polymorphic_buffer - Import BufferView for polymorphic rendering
 use lite_edit_buffer::{BufferView, DirtyLines};
+// Chunk: docs/chunks/syntax_highlighting - Highlighted buffer view for syntax coloring
+use crate::highlighted_buffer::HighlightedBufferView;
 
 // =============================================================================
 // Background Color
@@ -991,9 +993,27 @@ impl Renderer {
         self.set_content_y_offset(TAB_BAR_HEIGHT);
 
         // Chunk: docs/chunks/renderer_polymorphic_buffer - Get BufferView from Editor
-        // Update glyph buffer from active tab's BufferView if available
-        if let Some(buffer_view) = editor.active_buffer_view() {
-            self.update_glyph_buffer(buffer_view);
+        // Chunk: docs/chunks/syntax_highlighting - Use HighlightedBufferView for syntax coloring
+        // Update glyph buffer from active tab's BufferView with syntax highlighting
+        if let Some(ws) = editor.active_workspace() {
+            if let Some(tab) = ws.active_tab() {
+                if tab.is_agent_tab() {
+                    // AgentTerminal is a placeholder - get the actual buffer from workspace
+                    if let Some(terminal) = ws.agent_terminal() {
+                        self.update_glyph_buffer(terminal);
+                    }
+                } else if let Some(text_buffer) = tab.as_text_buffer() {
+                    // File tab: use HighlightedBufferView for syntax highlighting
+                    let highlighted_view = HighlightedBufferView::new(
+                        text_buffer,
+                        tab.highlighter(),
+                    );
+                    self.update_glyph_buffer(&highlighted_view);
+                } else {
+                    // Terminal or other buffer type
+                    self.update_glyph_buffer(tab.buffer());
+                }
+            }
         }
         let metal_layer = view.metal_layer();
 
@@ -1312,9 +1332,27 @@ impl Renderer {
         self.set_content_x_offset(RAIL_WIDTH);
 
         // Chunk: docs/chunks/renderer_polymorphic_buffer - Get BufferView from Editor
-        // Update glyph buffer from active tab's BufferView if available
-        if let Some(buffer_view) = editor.active_buffer_view() {
-            self.update_glyph_buffer(buffer_view);
+        // Chunk: docs/chunks/syntax_highlighting - Use HighlightedBufferView for syntax coloring
+        // Update glyph buffer from active tab's BufferView with syntax highlighting
+        if let Some(ws) = editor.active_workspace() {
+            if let Some(tab) = ws.active_tab() {
+                if tab.is_agent_tab() {
+                    // AgentTerminal is a placeholder - get the actual buffer from workspace
+                    if let Some(terminal) = ws.agent_terminal() {
+                        self.update_glyph_buffer(terminal);
+                    }
+                } else if let Some(text_buffer) = tab.as_text_buffer() {
+                    // File tab: use HighlightedBufferView for syntax highlighting
+                    let highlighted_view = HighlightedBufferView::new(
+                        text_buffer,
+                        tab.highlighter(),
+                    );
+                    self.update_glyph_buffer(&highlighted_view);
+                } else {
+                    // Terminal or other buffer type
+                    self.update_glyph_buffer(tab.buffer());
+                }
+            }
         }
         let metal_layer = view.metal_layer();
 
