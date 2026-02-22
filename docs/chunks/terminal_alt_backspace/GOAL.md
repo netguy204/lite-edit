@@ -1,8 +1,10 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/terminal/src/input_encoder.rs
+  - crates/terminal/tests/input_integration.rs
 code_references: []
 narrative: null
 investigation: null
@@ -10,9 +12,10 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["scroll_bottom_deadzone_v3", "terminal_styling_fidelity"]
+created_after:
+- scroll_bottom_deadzone_v3
+- terminal_styling_fidelity
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

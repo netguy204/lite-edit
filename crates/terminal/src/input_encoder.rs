@@ -85,7 +85,14 @@ impl InputEncoder {
             Key::Return => vec![0x0d], // CR
             Key::Tab => vec![0x09],    // HT
             Key::Escape => vec![0x1b], // ESC
-            Key::Backspace => vec![0x7f], // DEL (most modern terminals)
+            // Chunk: docs/chunks/terminal_alt_backspace - Alt+Backspace sends ESC+DEL
+            Key::Backspace => {
+                if modifiers.option {
+                    vec![0x1b, 0x7f] // ESC + DEL for backward word delete
+                } else {
+                    vec![0x7f] // DEL (most modern terminals)
+                }
+            }
 
             // Arrow keys - mode dependent
             Key::Up => Self::encode_arrow(b'A', modifiers, modes),
@@ -716,6 +723,21 @@ mod tests {
         };
         let result = InputEncoder::encode_key(&event, TermMode::NONE);
         assert_eq!(result, b"\x1ba"); // ESC + a
+    }
+
+    // Chunk: docs/chunks/terminal_alt_backspace - Alt+Backspace sends ESC+DEL
+    #[test]
+    fn test_encode_alt_backspace() {
+        let event = KeyEvent {
+            key: Key::Backspace,
+            modifiers: Modifiers {
+                option: true,
+                ..Default::default()
+            },
+        };
+        let result = InputEncoder::encode_key(&event, TermMode::NONE);
+        // Alt+Backspace should send ESC + DEL for backward word delete
+        assert_eq!(result, b"\x1b\x7f");
     }
 
     // =========================================================================
