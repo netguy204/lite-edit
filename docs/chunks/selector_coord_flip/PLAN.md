@@ -8,170 +8,108 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This is a surgical bug fix in `handle_mouse_selector` within `editor_state.rs`. The fix applies the same coordinate transformation pattern already established in `buffer_target.rs` for the main buffer's hit-testing.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The key insight: macOS delivers mouse events with `y = 0` at the **bottom** of the screen, but `calculate_overlay_geometry` computes `list_origin_y` as a **top-relative** offset. The main buffer correctly handles this in `pixel_to_buffer_position` and `pixel_to_buffer_position_wrapped` by computing `flipped_y = view_height - y` before any hit-testing math. The selector handler must do the same.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+**Strategy:**
+1. Before forwarding the mouse event to `SelectorWidget::handle_mouse`, flip the y coordinate using `view_height - y`
+2. Pass this flipped coordinate so the selector operates entirely in top-relative coordinates, matching `list_origin_y`
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/selector_coord_flip/GOAL.md)
-with references to the files that you expect to touch.
--->
+This fix is self-contained and does not change `SelectorWidget` itself — it only corrects the coordinate transformation at the call site.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems directory exists yet. This chunk touches the `selector_*` cluster (6 chunks), which may warrant subsystem documentation in the future. However, this is a targeted bug fix and does not require introducing new architectural patterns.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add a unit test for coordinate flip in handle_mouse_selector
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Write a test that exercises the coordinate transformation logic. Since `handle_mouse_selector` is a private method that depends on `EditorState`, we will test via the public interface or add a focused test at the appropriate level.
 
-Example:
+**Test case**: Given a mouse click with raw macOS coordinates (y=0 at bottom), verify that the selector correctly interprets which row was clicked. Specifically:
+- Click position near the **top** of the view (large raw y) should map to items at the **top** of the list (small list index)
+- Click position near the **bottom** of the view (small raw y) should map to items at the **bottom** of the visible list
 
-### Step 1: Define the SegmentHeader struct
+Since `SelectorWidget::handle_mouse` expects coordinates in top-relative space (matching `list_origin_y`), the test will verify that after the fix, clicking at position `(x, raw_y)` with `raw_y` near `view_height` (top of screen in macOS coords) correctly targets the first visible item.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+**Location**: `crates/editor/src/editor_state.rs` (test module or integration test)
 
-Location: src/segment/format.rs
+**Note**: If testing at the EditorState level is complex due to setup requirements, we may instead add a comment documenting the invariant and rely on the existing `SelectorWidget::handle_mouse` tests which already assume correct coordinate input.
 
-### Step 2: Implement header serialization
+### Step 2: Flip the y coordinate before calling SelectorWidget::handle_mouse
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Modify `handle_mouse_selector` in `editor_state.rs` (around line 891-899) to:
 
-### Step 3: ...
+1. Compute `flipped_y = self.view_height as f64 - position.1`
+2. Pass `(position.0, flipped_y)` to `selector.handle_mouse` instead of `position`
 
----
+**Current code** (lines 889-899):
+```rust
+// Convert mouse position to the format expected by selector
+// Mouse events arrive in view coordinates (y=0 at top)
+let position = event.position;
 
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+// Forward to selector widget
+let outcome = selector.handle_mouse(
+    position,
+    event.kind,
+    geometry.item_height as f64,
+    geometry.list_origin_y as f64,
+);
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+**After fix**:
+```rust
+// Chunk: docs/chunks/selector_coord_flip - Y-coordinate flip for macOS mouse events
+// Flip y-coordinate: macOS uses bottom-left origin, overlay geometry uses top-left
+let flipped_y = (self.view_height as f64) - event.position.1;
+let flipped_position = (event.position.0, flipped_y);
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+// Forward to selector widget with flipped coordinates
+let outcome = selector.handle_mouse(
+    flipped_position,
+    event.kind,
+    geometry.item_height as f64,
+    geometry.list_origin_y as f64,
+);
+```
+
+This matches the pattern in `buffer_target.rs:576` and `buffer_target.rs:645`.
+
+### Step 3: Update the comment to reflect actual coordinate system
+
+The existing comment says "Mouse events arrive in view coordinates (y=0 at top)" which is **incorrect** — macOS uses y=0 at **bottom**. Update the comment to accurately describe the transformation being applied.
+
+### Step 4: Verify existing selector widget tests still pass
+
+Run `cargo test` in `crates/editor` to confirm that:
+- All `SelectorWidget` tests pass (they operate in the correct coordinate space)
+- No regressions in mouse handling
+- The fix doesn't break any other selector behavior
+
+**Command**: `cargo test -p lite_edit_editor`
+
+### Step 5: Manual verification (if possible)
+
+If a test harness exists for running the editor, manually verify:
+- Clicking the first item in the file picker selects item 0
+- Clicking any visible item selects that exact item
+- Scrolling + clicking still works correctly
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+None. This is an independent bug fix with no dependencies on other chunks. The `created_after` entries in the GOAL.md frontmatter are informational ordering, not implementation dependencies.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Test complexity**: Testing `handle_mouse_selector` directly may require substantial EditorState setup. If this proves unwieldy, we may rely on existing `SelectorWidget::handle_mouse` tests (which assume correct input coordinates) combined with code review of the coordinate flip.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Double-flip risk**: If any intermediate layer also flips coordinates, we could end up with a double-flip. Code review confirms this is not the case — `calculate_overlay_geometry` returns top-relative values, and `SelectorWidget::handle_mouse` expects top-relative input.
+
+- **Integration verification**: The fix is mechanical, but full confidence requires manual testing in the actual editor. If the editor can't be run in the test environment, we rely on the test suite and code review.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- POPULATE DURING IMPLEMENTATION -->

@@ -886,13 +886,16 @@ impl EditorState {
         // Update visible_items on the selector (for consistency with scroll/key handling)
         selector.set_visible_items(geometry.visible_items);
 
-        // Convert mouse position to the format expected by selector
-        // Mouse events arrive in view coordinates (y=0 at top)
-        let position = event.position;
+        // Chunk: docs/chunks/selector_coord_flip - Y-coordinate flip for macOS mouse events
+        // Flip y-coordinate: macOS uses bottom-left origin (y=0 at bottom),
+        // but overlay geometry uses top-left origin (y=0 at top).
+        // This matches the pattern in buffer_target.rs for buffer hit-testing.
+        let flipped_y = (self.view_height as f64) - event.position.1;
+        let flipped_position = (event.position.0, flipped_y);
 
-        // Forward to selector widget
+        // Forward to selector widget with flipped coordinates
         let outcome = selector.handle_mouse(
-            position,
+            flipped_position,
             event.kind,
             geometry.item_height as f64,
             geometry.list_origin_y as f64,
