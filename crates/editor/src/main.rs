@@ -39,6 +39,8 @@ mod glyph_buffer;
 mod input;
 mod left_rail;
 mod metal_view;
+// Chunk: docs/chunks/mini_buffer_model - MiniBuffer single-line editing model
+mod mini_buffer;
 mod renderer;
 mod selector;
 mod selector_overlay;
