@@ -2,7 +2,7 @@
 # Chunk: docs/chunks/text_buffer - Text buffer data structure with gap buffer backing
 
 [workspace]
-members = ["crates/buffer", "crates/editor"]
+members = ["crates/buffer", "crates/editor", "crates/terminal"]
 resolver = "2"
 
 [workspace.package]
