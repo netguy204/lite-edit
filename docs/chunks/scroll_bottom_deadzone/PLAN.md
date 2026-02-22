@@ -1,177 +1,176 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+Both bugs stem from a single root cause: `RowScroller::set_scroll_offset_px` clamps
+scroll position using `buffer_line_count`, but when line wrapping is enabled, the
+scroll position operates in **screen row** space (as set by `ensure_visible_wrapped`).
+The clamping formula `max_offset_px = (row_count - visible_rows) * row_height` uses
+buffer line count, but should use total screen row count when wrapping is active.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Fix strategy:**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. **Add a wrap-aware clamping variant** in `Viewport` that computes the maximum
+   scroll position based on total screen rows (sum of all lines' screen row counts),
+   not buffer lines.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/scroll_bottom_deadzone/GOAL.md)
-with references to the files that you expect to touch.
--->
+2. **Modify `handle_scroll` in `BufferFocusTarget`** to use the wrap-aware clamping
+   when wrapping is enabled. This ensures the scroll offset is always clamped
+   correctly, whether set by user scrolling or by `ensure_visible_wrapped`.
 
-## Subsystem Considerations
+3. **Ensure hit-testing consistency**: The `pixel_to_buffer_position_wrapped`
+   function already walks from `first_visible_line` accumulating screen rows.
+   Once the scroll clamping is correct, hit-testing will naturally align because
+   the viewport's `first_visible_line()` will return the correct buffer line.
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+**Testing approach (per TESTING_PHILOSOPHY.md):**
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
+Write tests that verify:
+- Scrolling to max position and back up responds immediately (no deadzone)
+- Click at max scroll position maps to the correct buffer line
+- Tests exercise the boundary: at max scroll, visible_lines before end of content
 
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Since viewport/scroll math is pure Rust with no platform dependencies, tests can
+be unit tests in `viewport.rs` and `row_scroller.rs`.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add `set_scroll_offset_px_wrapped` to Viewport
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add a new method to `Viewport` that clamps scroll offset using total screen rows
+instead of buffer lines. This method should:
 
-Example:
+1. Accept a closure to get line lengths (like `ensure_visible_wrapped` does)
+2. Accept the `WrapLayout` for computing screen rows per line
+3. Compute `total_screen_rows = sum(screen_rows_for_line(line_len_fn(i)) for i in 0..line_count)`
+4. Compute `max_offset_px = (total_screen_rows - visible_rows).max(0) * line_height`
+5. Clamp `scroll_offset_px` to `[0.0, max_offset_px]`
 
-### Step 1: Define the SegmentHeader struct
+Location: `crates/editor/src/viewport.rs`
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+// Chunk: docs/chunks/scroll_bottom_deadzone - Wrap-aware scroll clamping
+pub fn set_scroll_offset_px_wrapped<F>(
+    &mut self,
+    px: f32,
+    line_count: usize,
+    wrap_layout: &WrapLayout,
+    line_len_fn: F,
+) where
+    F: Fn(usize) -> usize,
+{
+    let total_screen_rows = self.compute_total_screen_rows(line_count, wrap_layout, &line_len_fn);
+    let max_rows = total_screen_rows.saturating_sub(self.visible_lines());
+    let max_offset_px = max_rows as f32 * self.line_height();
+    self.scroller.set_scroll_offset_unclamped(px.clamp(0.0, max_offset_px));
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+### Step 2: Write failing tests for scroll deadzone
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Before implementing the fix in `handle_scroll`, write tests that demonstrate the
+bug. Tests should:
 
-## Dependencies
+1. Set up a viewport with wrapping enabled
+2. Create a scenario where wrapped lines produce more screen rows than buffer lines
+3. Scroll to the maximum position
+4. Verify that scrolling back up responds immediately (no stuck offset)
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+Location: `crates/editor/src/viewport.rs` (in `#[cfg(test)]` module)
 
-If there are no dependencies, delete this section.
--->
+Example test structure:
+```rust
+#[test]
+fn test_scroll_at_max_wrapped_responds_immediately() {
+    // 10 buffer lines, some wrap to multiple screen rows
+    // Total screen rows > buffer lines
+    // Scroll to max, then scroll back up by 1px
+    // Assert: scroll_offset_px decreased by 1px (not stuck)
+}
+```
+
+### Step 3: Write failing tests for click-to-cursor at max scroll
+
+Test that clicking at the bottom of the viewport when scrolled to max maps to
+the correct buffer position.
+
+Location: `crates/editor/src/buffer_target.rs` (in `#[cfg(test)]` module)
+
+Example test structure:
+```rust
+#[test]
+fn test_click_at_max_scroll_maps_correctly() {
+    // Set up buffer with wrapped lines
+    // Scroll to maximum position
+    // Click on the last visible line
+    // Assert: cursor is on the expected buffer line (not off-by-one)
+}
+```
+
+### Step 4: Update handle_scroll to use wrap-aware clamping
+
+Modify `BufferFocusTarget::handle_scroll` to use `set_scroll_offset_px_wrapped`
+when wrapping is enabled.
+
+Location: `crates/editor/src/buffer_target.rs`
+
+The modification:
+```rust
+fn handle_scroll(&mut self, delta: ScrollDelta, ctx: &mut EditorContext) {
+    let current_px = ctx.viewport.scroll_offset_px();
+    let new_px = current_px + delta.dy as f32;
+    let line_count = ctx.buffer.line_count();
+
+    // Chunk: docs/chunks/scroll_bottom_deadzone - Wrap-aware scroll clamping
+    let wrap_layout = ctx.wrap_layout();
+    ctx.viewport.set_scroll_offset_px_wrapped(
+        new_px,
+        line_count,
+        &wrap_layout,
+        |line| ctx.buffer.line_len(line),
+    );
+
+    // ... rest unchanged
+}
+```
+
+### Step 5: Verify tests pass and no regressions
+
+1. Run the new tests - they should now pass
+2. Run all existing viewport and scroll tests - they should still pass
+3. Run the full test suite: `cargo test -p lite-edit-editor`
+
+### Step 6: Add regression tests for non-wrapped case
+
+Ensure that the wrap-aware clamping doesn't break the non-wrapped case:
+
+1. Test scroll clamping when no lines wrap (total_screen_rows == line_count)
+2. Verify same behavior as before for simple scrolling scenarios
+
+Location: `crates/editor/src/viewport.rs`
+
+### Step 7: Update code_paths in GOAL.md
+
+Confirm the code_paths frontmatter is accurate:
+- `crates/editor/src/row_scroller.rs` - If modified for clamping helpers
+- `crates/editor/src/viewport.rs` - New wrap-aware clamping method
+- `crates/editor/src/buffer_target.rs` - Modified handle_scroll
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Performance**: `compute_total_screen_rows` iterates all lines on every scroll
+   event. For large files with many wrapped lines, this could add latency. If
+   profiling shows this is a problem, we could cache the total screen row count
+   and invalidate on buffer/wrap changes.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Non-wrapped scroll path**: The existing `set_scroll_offset_px` takes
+   `buffer_line_count` and works correctly for non-wrapped mode. We're adding a
+   parallel path for wrapped mode. Need to ensure callers use the right one.
+
+3. **Interaction with ensure_visible_wrapped**: This method already computes
+   max_offset_px using screen rows. After our change, both user scrolling and
+   cursor-following will use consistent coordinate spaces.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- POPULATE DURING IMPLEMENTATION -->

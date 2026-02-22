@@ -442,6 +442,7 @@ impl FocusTarget for BufferFocusTarget {
     }
 
     // Chunk: docs/chunks/viewport_fractional_scroll - Smooth scrolling with pixel-level precision
+    // Chunk: docs/chunks/scroll_bottom_deadzone - Wrap-aware scroll clamping
     fn handle_scroll(&mut self, delta: ScrollDelta, ctx: &mut EditorContext) {
         // Accumulate raw pixel deltas for smooth scrolling
         // Positive dy = scroll down (content moves up, scroll_offset increases)
@@ -450,7 +451,17 @@ impl FocusTarget for BufferFocusTarget {
         let new_px = current_px + delta.dy as f32;
 
         let line_count = ctx.buffer.line_count();
-        ctx.viewport.set_scroll_offset_px(new_px, line_count);
+
+        // Use wrap-aware clamping to compute max scroll position based on total
+        // screen rows, not buffer lines. This fixes the scroll deadzone at the
+        // bottom when wrapped lines produce more screen rows than buffer lines.
+        let wrap_layout = ctx.wrap_layout();
+        ctx.viewport.set_scroll_offset_px_wrapped(
+            new_px,
+            line_count,
+            &wrap_layout,
+            |line| ctx.buffer.line_len(line),
+        );
 
         // Mark full viewport dirty if we actually scrolled
         // Any scroll (even sub-pixel) requires a redraw for smooth animation
@@ -2635,6 +2646,206 @@ mod tests {
         assert_eq!(viewport.first_visible_line(), 1);
         assert!((viewport.scroll_offset_px() - 21.0).abs() < 0.001);
         assert!((viewport.scroll_fraction_px() - 5.0).abs() < 0.001);
+    }
+
+    // ==================== Scroll Bottom Deadzone Tests ====================
+    // Chunk: docs/chunks/scroll_bottom_deadzone - Wrap-aware scroll clamping regression tests
+
+    #[test]
+    fn test_scroll_with_wrapped_lines_clamps_correctly() {
+        // Test that scrolling uses wrap-aware max computation.
+        // Create content with long lines that will wrap.
+        //
+        // Viewport: 640px wide, 8px glyph = 80 cols
+        // Each 160-char line wraps to 2 screen rows
+        // 10 buffer lines = 20 screen rows
+        // Viewport height: 80px / 16px = 5 visible rows
+        // Max offset = (20 - 5) * 16 = 240
+
+        let long_line = "a".repeat(160); // 160 chars = 2 screen rows at 80 cols
+        let content: String = (0..10).map(|_| long_line.clone()).collect::<Vec<_>>().join("\n");
+        let mut buffer = TextBuffer::from_str(&content);
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(80.0, 100); // 5 visible rows
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                80.0,
+                640.0, // 640px width = 80 cols at 8px glyph
+            );
+            // Try to scroll way past the end
+            target.handle_scroll(ScrollDelta::new(0.0, 1000.0), &mut ctx);
+        }
+
+        // Should clamp to wrapped max: (20 - 5) * 16 = 240
+        // first_visible_screen_row = 240 / 16 = 15
+        assert!(
+            (viewport.scroll_offset_px() - 240.0).abs() < 0.001,
+            "Expected max offset 240.0, got {}. Scroll should account for wrapped lines.",
+            viewport.scroll_offset_px()
+        );
+    }
+
+    #[test]
+    fn test_scroll_at_max_wrapped_responds_to_scroll_up() {
+        // Key regression test: scroll to max, then scroll back up.
+        // Should respond immediately without deadzone.
+
+        let long_line = "a".repeat(160); // 2 screen rows at 80 cols
+        let content: String = (0..10).map(|_| long_line.clone()).collect::<Vec<_>>().join("\n");
+        let mut buffer = TextBuffer::from_str(&content);
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(80.0, 100); // 5 visible rows
+        let mut target = BufferFocusTarget::new();
+
+        // First, scroll to max
+        {
+            let mut dirty = DirtyRegion::None;
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                80.0,
+                640.0,
+            );
+            target.handle_scroll(ScrollDelta::new(0.0, 1000.0), &mut ctx);
+        }
+
+        let max_offset = viewport.scroll_offset_px();
+        assert!((max_offset - 240.0).abs() < 0.001);
+
+        // Now scroll back up by 1 pixel
+        {
+            let mut dirty = DirtyRegion::None;
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                80.0,
+                640.0,
+            );
+            target.handle_scroll(ScrollDelta::new(0.0, -1.0), &mut ctx);
+        }
+
+        // Should respond immediately - offset should decrease by 1
+        assert!(
+            (viewport.scroll_offset_px() - 239.0).abs() < 0.001,
+            "Expected offset 239.0 after scrolling up, got {}. No deadzone should exist.",
+            viewport.scroll_offset_px()
+        );
+    }
+
+    #[test]
+    fn test_click_at_max_scroll_wrapped_maps_correctly() {
+        // Test that clicking at max scroll position maps to the correct buffer line.
+        //
+        // Setup: 10 buffer lines, each wrapping to 2 screen rows = 20 total screen rows
+        // Viewport: 5 visible rows
+        // Max scroll: screen row 15 at top (showing rows 15-19)
+        //
+        // At max scroll, clicking on the last visible line (screen row 19 = row 4 on screen)
+        // should map to buffer line 9, row 1 within that line.
+
+        let long_line = "a".repeat(160); // 2 screen rows at 80 cols
+        let content: String = (0..10).map(|_| long_line.clone()).collect::<Vec<_>>().join("\n");
+        let mut buffer = TextBuffer::from_str(&content);
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(80.0, 100); // 5 visible rows
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Scroll to max
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                80.0,
+                640.0,
+            );
+            target.handle_scroll(ScrollDelta::new(0.0, 1000.0), &mut ctx);
+        }
+
+        // Verify we're at max scroll
+        assert!((viewport.scroll_offset_px() - 240.0).abs() < 0.001);
+
+        // Click on the last visible screen row (row 4 on screen)
+        // view_height = 80, line_height = 16
+        // Screen row 4 is at flipped_y in [64, 80)
+        // For flipped_y = 70, y = 80 - 70 = 10
+        {
+            let mut dirty2 = DirtyRegion::None;
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty2,
+                test_font_metrics(),
+                80.0,
+                640.0,
+            );
+            let event = MouseEvent {
+                kind: MouseEventKind::Down,
+                position: (0.0, 10.0), // y = 10, flipped_y = 70, row 4 on screen
+                modifiers: Modifiers::default(),
+                click_count: 1,
+            };
+            target.handle_mouse(event, &mut ctx);
+        }
+
+        // Screen row 4 relative to viewport = absolute screen row 19 (15 + 4)
+        // Screen row 19 = buffer line 9, row offset 1 (second row of line 9)
+        assert_eq!(
+            buffer.cursor_position().line,
+            9,
+            "Click at max scroll should map to buffer line 9, got {}",
+            buffer.cursor_position().line
+        );
+    }
+
+    #[test]
+    fn test_scroll_non_wrapped_content_unchanged() {
+        // Regression test: ensure non-wrapped content scrolls the same as before.
+        // With short lines that don't wrap, total_screen_rows == buffer_lines,
+        // so max_offset should be (20 - 10) * 16 = 160.
+
+        let content = (0..20)
+            .map(|i| format!("line {}", i)) // Short lines, no wrapping
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut buffer = TextBuffer::from_str(&content);
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0, 100); // 10 visible lines
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+                800.0, // Wide viewport, no wrapping
+            );
+            target.handle_scroll(ScrollDelta::new(0.0, 1000.0), &mut ctx);
+        }
+
+        // With 20 lines, 10 visible, max = (20 - 10) * 16 = 160
+        assert!(
+            (viewport.scroll_offset_px() - 160.0).abs() < 0.001,
+            "Non-wrapped content should clamp to 160.0, got {}",
+            viewport.scroll_offset_px()
+        );
+        assert_eq!(viewport.first_visible_line(), 10);
     }
 
     // ==================== Mouse Drag Selection Tests ====================
