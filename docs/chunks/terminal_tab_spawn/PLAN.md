@@ -8,170 +8,222 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+Wire `Cmd+Shift+T` to spawn a standalone terminal tab using the existing
+infrastructure from `terminal_emulator` and `agent_lifecycle` chunks:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Keybinding**: Add a handler in `EditorState::handle_key` for `Cmd+Shift+T`
+   that calls a new `new_terminal_tab()` method.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **Terminal creation**: The `new_terminal_tab()` method will:
+   - Compute terminal dimensions (cols × rows) from the current viewport size
+     and font metrics
+   - Create a `TerminalBuffer` with those dimensions
+   - Spawn the user's default shell (`$SHELL` or `/bin/sh`)
+   - Generate a label ("Terminal", "Terminal 2", etc.) based on existing
+     terminal tab count
+   - Create a `Tab::new_terminal()` and add it to the active workspace
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/terminal_tab_spawn/GOAL.md)
-with references to the files that you expect to touch.
--->
+3. **Label numbering**: Count existing terminal tabs in the workspace to
+   generate unique labels. First terminal is "Terminal", subsequent ones are
+   "Terminal 2", "Terminal 3", etc.
+
+4. **Testing strategy**: Following the testing philosophy, we'll write tests
+   that verify:
+   - `Cmd+Shift+T` creates a terminal tab (update the existing "does nothing"
+     test)
+   - Multiple presses create multiple terminals with sequential labels
+   - The new tab becomes active
+
+The implementation reuses `Tab::new_terminal()` from workspace.rs (created in
+`terminal_emulator` chunk) and `TerminalBuffer::spawn_shell()` from the
+terminal crate.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems exist yet. This chunk doesn't warrant creating one — it's a
+small, focused feature wiring together existing components.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing tests for Cmd+Shift+T
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Update the existing `test_cmd_shift_t_does_not_create_tab` test to verify the
+new behavior, and add new tests:
 
-Example:
+**Test 1: `test_cmd_shift_t_creates_terminal_tab`**
+- Press `Cmd+Shift+T` on an empty editor state
+- Assert the workspace now has 2 tabs
+- Assert the active tab has `kind == TabKind::Terminal`
+- Assert the tab label is "Terminal"
 
-### Step 1: Define the SegmentHeader struct
+**Test 2: `test_cmd_shift_t_multiple_terminals_numbered`**
+- Press `Cmd+Shift+T` twice
+- Assert the workspace has 3 tabs
+- Assert the first terminal's label is "Terminal"
+- Assert the second terminal's label is "Terminal 2"
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+**Test 3: `test_cmd_shift_t_does_not_insert_t`**
+- Ensure the keystroke doesn't insert 'T' into any buffer
 
-Location: src/segment/format.rs
+Location: `crates/editor/src/editor_state.rs` (test module)
 
-### Step 2: Implement header serialization
+### Step 2: Add helper to count terminal tabs
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Add a private helper method to count existing terminal tabs in the active
+workspace. This is used to generate the numbered label.
 
-### Step 3: ...
+```rust
+/// Counts existing terminal tabs in the active workspace.
+/// Returns 0 if no workspace is active.
+fn terminal_tab_count(&self) -> usize
+```
+
+Location: `crates/editor/src/editor_state.rs` (impl EditorState)
+
+### Step 3: Add `new_terminal_tab()` method
+
+Add the core method that creates a terminal tab:
+
+```rust
+// Chunk: docs/chunks/terminal_tab_spawn - Cmd+Shift+T terminal spawning
+/// Creates a new standalone terminal tab in the active workspace.
+///
+/// The terminal runs the user's default shell from `$SHELL`, falling back
+/// to `/bin/sh`. Terminal dimensions are computed from the current viewport
+/// size and font metrics.
+///
+/// Terminal tabs are labeled "Terminal", "Terminal 2", etc. based on how
+/// many terminal tabs already exist in the workspace.
+pub fn new_terminal_tab(&mut self)
+```
+
+Implementation details:
+1. Compute content area dimensions:
+   - `content_height = view_height - TAB_BAR_HEIGHT`
+   - `content_width = view_width - RAIL_WIDTH`
+2. Compute terminal dimensions:
+   - `rows = (content_height / font_metrics.line_height).floor() as usize`
+   - `cols = (content_width / font_metrics.advance_width).floor() as usize`
+3. Create `TerminalBuffer::new(cols, rows, 5000)` (5000 scrollback lines)
+4. Get shell from `std::env::var("SHELL")` or default to `/bin/sh`
+5. Get working directory from workspace's `root_path` (or current directory)
+6. Call `terminal.spawn_shell(&shell, &cwd)`
+7. Generate label using `terminal_tab_count()`:
+   - 0 existing terminals → "Terminal"
+   - n existing terminals → "Terminal {n+1}"
+8. Create `Tab::new_terminal(tab_id, terminal, label, line_height)`
+9. Add to workspace via `workspace.add_tab(tab)`
+10. Sync viewport and mark dirty
+
+Location: `crates/editor/src/editor_state.rs` (impl EditorState)
+
+### Step 4: Wire keybinding in handle_key
+
+Add the `Cmd+Shift+T` handler in `handle_key()`, near the existing `Cmd+T`
+handler:
+
+```rust
+// Chunk: docs/chunks/terminal_tab_spawn - Create new terminal tab
+// Cmd+Shift+T creates a new terminal tab
+if let Key::Char('t') = event.key {
+    if event.modifiers.shift {
+        self.new_terminal_tab();
+        return;
+    }
+}
+```
+
+Location: `crates/editor/src/editor_state.rs`, in `handle_key()` where `Cmd+T`
+is handled
+
+### Step 5: Add standalone terminal polling
+
+Currently `poll_agents()` only polls the workspace's agent. Standalone terminal
+tabs need their PTY events polled too.
+
+Add to `Workspace`:
+
+```rust
+// Chunk: docs/chunks/terminal_tab_spawn - Poll standalone terminals
+/// Polls PTY events for all standalone terminal tabs.
+///
+/// Returns true if any terminal had output.
+pub fn poll_standalone_terminals(&mut self) -> bool {
+    let mut had_events = false;
+    for tab in &mut self.tabs {
+        if let Some(terminal) = tab.buffer.as_terminal_buffer_mut() {
+            if terminal.poll_events() {
+                had_events = true;
+            }
+        }
+    }
+    had_events
+}
+```
+
+Update `poll_agent()` to also call `poll_standalone_terminals()`, or add a new
+method that polls both.
+
+Location: `crates/editor/src/workspace.rs` and `crates/editor/src/editor_state.rs`
+
+### Step 6: Verify tests pass
+
+Run the tests to verify all criteria are met:
+- `cargo test --package lite-edit-editor test_cmd_shift_t`
+- Verify no regressions in related tests:
+  - `cargo test --package lite-edit-editor test_cmd_t`
+  - `cargo test --package lite-edit-editor test_new_tab`
 
 ---
 
 **BACKREFERENCE COMMENTS**
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
-
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
-
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Add backreference comments to new methods:
+- `new_terminal_tab()`: `// Chunk: docs/chunks/terminal_tab_spawn`
+- Keybinding handler: `// Chunk: docs/chunks/terminal_tab_spawn`
+- `poll_standalone_terminals()`: `// Chunk: docs/chunks/terminal_tab_spawn`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+- **terminal_emulator**: Provides `TerminalBuffer`, `Tab::new_terminal()`, and
+  the PTY spawning infrastructure. (Status: ACTIVE - already implemented)
+- **agent_lifecycle**: Provides the `TabBuffer::Terminal` variant and workspace
+  integration. (Status: ACTIVE - already implemented)
 
-If there are no dependencies, delete this section.
--->
+Both dependencies are complete. The necessary types are:
+- `lite_edit_terminal::TerminalBuffer` - terminal emulator
+- `crate::workspace::Tab::new_terminal()` - terminal tab constructor
+- `crate::workspace::TabKind::Terminal` - tab kind enum variant
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+**Low risk:**
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+1. **Shell spawning failure**: If `$SHELL` points to a non-existent binary,
+   `spawn_shell()` will return an error. We should handle this gracefully —
+   possibly log the error and still create the tab (showing a "shell failed to
+   start" message in the terminal buffer is fine).
+
+2. **Zero-dimension edge case**: If `view_height` or `view_width` haven't been
+   set yet (initial state), terminal dimensions could be zero. The terminal
+   emulator handles this, but we should guard against creating a 0×0 terminal.
+   Minimum dimensions: 1 col × 1 row (or skip creation entirely).
+
+**Requires additional work:**
+
+3. **Standalone terminal polling**: Currently `poll_agents()` only polls the
+   `Workspace.agent` field, not individual terminal tabs. Standalone terminals
+   stored in `TabBuffer::Terminal` won't receive PTY events without adding a
+   polling mechanism.
+
+   **Proposed solution**: Add a `poll_standalone_terminals()` method to
+   `Workspace` that iterates over tabs, finds `TabBuffer::Terminal` variants,
+   and calls `terminal.poll_events()` on each. Call this from `poll_agents()`
+   or from a new `poll_all_terminals()` method in `EditorState`.
+
+   This is a minor addition but necessary for the terminals to actually work.
+   Add as Step 6 in the sequence.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+*To be populated during implementation.*
