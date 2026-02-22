@@ -1,12 +1,16 @@
 ---
-status: IMPLEMENTING
+status: ACTIVE
 ticket: null
 parent_chunk: scroll_wrap_deadzone_v2
 code_paths:
 - crates/editor/src/row_scroller.rs
 - crates/editor/src/viewport.rs
 - crates/editor/src/buffer_target.rs
-code_references: []
+code_references:
+  - ref: crates/editor/src/viewport.rs#Viewport::set_scroll_offset_px_unclamped
+    implements: "Unclamped scroll offset setter for viewport sync to preserve wrap-aware clamping"
+  - ref: crates/editor/src/main.rs#EditorController::update_and_render
+    implements: "Viewport sync now uses unclamped setter to prevent re-clamping after wrap-aware scroll"
 narrative: null
 investigation: null
 subsystems: []
@@ -17,32 +21,6 @@ created_after:
 - terminal_scrollback_viewport
 - renderer_polymorphic_buffer
 ---
-<!--
-╔══════════════════════════════════════════════════════════════════════════════╗
-║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
-║                                                                              ║
-║  AGENT INSTRUCTIONS: When editing this file, preserve this entire comment    ║
-║  block. Only modify the frontmatter YAML and the content sections below      ║
-║  (Minor Goal, Success Criteria, Relationship to Parent). Use targeted edits  ║
-║  that replace specific sections rather than rewriting the entire file.       ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-
-This comment describes schema information that needs to be adhered
-to throughout the process.
-
-STATUS VALUES:
-- FUTURE: This chunk is queued for future work and not yet being implemented
-- IMPLEMENTING: This chunk is in the process of being implemented.
-- ACTIVE: This chunk accurately describes current or recently-merged work
-- SUPERSEDED: Another chunk has modified the code this chunk governed
-- HISTORICAL: Significant drift; kept for archaeology only
-
-FUTURE CHUNK APPROVAL REQUIREMENT:
-ALL FUTURE chunks require operator approval before committing or injecting.
-After refining this GOAL.md, you MUST present it to the operator and wait for
-explicit approval. Do NOT commit or inject until the operator approves.
-This applies whether triggered by "in the background", "create a future chunk",
-or any other mechanism that creates a FUTURE chunk.
 
 COMMIT BOTH FILES: When committing a FUTURE chunk after approval, add the entire
 chunk directory (both GOAL.md and PLAN.md) to the commit, not just GOAL.md. The
