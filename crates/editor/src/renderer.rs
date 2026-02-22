@@ -3,6 +3,7 @@
 // Chunk: docs/chunks/viewport_rendering - Viewport + Buffer-to-Screen Rendering
 // Chunk: docs/chunks/text_selection_rendering - Selection highlight rendering
 // Chunk: docs/chunks/selector_rendering - Selector overlay rendering
+// Chunk: docs/chunks/line_wrap_rendering - Soft line wrapping support
 //!
 //! Metal rendering pipeline
 //!
@@ -11,7 +12,8 @@
 //! text using a glyph atlas and textured quads.
 //!
 //! The renderer manages a Viewport for determining which buffer lines are visible
-//! and supports rendering from a TextBuffer with cursor display.
+//! and supports rendering from a TextBuffer with cursor display. Long lines are
+//! soft-wrapped at the viewport width boundary.
 //!
 //! When a selector (e.g., file picker, command palette) is active, the renderer
 //! draws an overlay panel on top of the editor content.
@@ -37,6 +39,7 @@ use crate::selector::SelectorWidget;
 use crate::selector_overlay::{calculate_overlay_geometry, SelectorGlyphBuffer};
 use crate::shader::GlyphPipeline;
 use crate::viewport::Viewport;
+use crate::wrap_layout::WrapLayout;
 use lite_edit_buffer::{DirtyLines, TextBuffer};
 
 // =============================================================================
@@ -69,6 +72,11 @@ const SELECTION_COLOR: [f32; 4] = [
     0.439, // 0x70 / 255
     0.4,   // 40% opacity
 ];
+
+// Chunk: docs/chunks/line_wrap_rendering - Continuation row border color
+/// The border color for continuation rows: black (solid)
+/// This provides a subtle visual indicator that a line has wrapped.
+const BORDER_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 // =============================================================================
 // Uniforms
@@ -107,6 +115,8 @@ pub struct Renderer {
     cursor_visible: bool,
     /// The glyph buffer for selector overlay rendering (lazy-initialized)
     selector_buffer: Option<SelectorGlyphBuffer>,
+    /// Current viewport width in pixels (for wrap layout calculation)
+    viewport_width_px: f32,
 }
 
 impl Renderer {
@@ -148,6 +158,11 @@ impl Renderer {
         // Create the viewport with the font's line height
         let viewport = Viewport::new(font.metrics.line_height as f32);
 
+        // Get initial viewport width from view (will be updated on resize)
+        let frame = view.frame();
+        let scale = view.scale_factor();
+        let viewport_width_px = (frame.size.width * scale) as f32;
+
         Self {
             command_queue,
             font,
@@ -159,6 +174,7 @@ impl Renderer {
             buffer: None,
             cursor_visible: true,
             selector_buffer: None,
+            viewport_width_px,
         }
     }
 
@@ -194,11 +210,26 @@ impl Renderer {
         self.font.metrics
     }
 
+    /// Returns the current viewport width in pixels
+    pub fn viewport_width_px(&self) -> f32 {
+        self.viewport_width_px
+    }
+
+    // Chunk: docs/chunks/line_wrap_rendering - Create WrapLayout for hit-testing
+    /// Creates a WrapLayout for the current viewport width and font metrics.
+    ///
+    /// This is used by hit-testing code to convert screen positions to buffer positions.
+    pub fn wrap_layout(&self) -> WrapLayout {
+        WrapLayout::new(self.viewport_width_px, &self.font.metrics)
+    }
+
     /// Updates the viewport size based on window dimensions
     ///
-    /// Call this when the window resizes.
-    pub fn update_viewport_size(&mut self, window_height: f32) {
+    /// Call this when the window resizes. Both width and height are needed
+    /// for line wrapping calculations.
+    pub fn update_viewport_size(&mut self, window_width: f32, window_height: f32) {
         self.viewport.update_size(window_height);
+        self.viewport_width_px = window_width;
     }
 
     /// Sets cursor visibility
@@ -237,16 +268,23 @@ impl Renderer {
     }
 
     // Chunk: docs/chunks/viewport_fractional_scroll - Pass y_offset for smooth scrolling
+    // Chunk: docs/chunks/line_wrap_rendering - Use WrapLayout for soft wrapping
     /// Updates the glyph buffer from the current buffer and viewport
     fn update_glyph_buffer(&mut self) {
         if let Some(buffer) = &self.buffer {
             // Get the fractional scroll offset for smooth scrolling
             let y_offset = self.viewport.scroll_fraction_px();
-            self.glyph_buffer.update_from_buffer_with_cursor(
+
+            // Create wrap layout for current viewport width
+            let wrap_layout = WrapLayout::new(self.viewport_width_px, &self.font.metrics);
+
+            // Use wrap-aware rendering
+            self.glyph_buffer.update_from_buffer_with_wrap(
                 &self.device,
                 &self.atlas,
                 buffer,
                 &self.viewport,
+                &wrap_layout,
                 self.cursor_visible,
                 y_offset,
             );
@@ -421,6 +459,34 @@ impl Renderer {
                 encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
                     MTLPrimitiveType::Triangle,
                     selection_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
+        // ==================== Draw Border Quads ====================
+        // Chunk: docs/chunks/line_wrap_rendering - Draw continuation row borders
+        let border_range = self.glyph_buffer.border_range();
+        if !border_range.is_empty() {
+            // Set border color (black)
+            let border_color_ptr =
+                NonNull::new(BORDER_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(
+                    border_color_ptr,
+                    std::mem::size_of::<[f32; 4]>(),
+                    0,
+                );
+            }
+
+            // Draw border quads
+            let index_offset = border_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    border_range.count,
                     MTLIndexType::UInt32,
                     index_buffer,
                     index_offset,

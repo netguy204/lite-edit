@@ -155,6 +155,7 @@ impl LineIndex {
         }
     }
 
+    // Chunk: docs/chunks/clipboard_operations - Bulk line start shift for insert_str
     /// Returns a mutable slice of all line starts strictly after `after_line`.
     ///
     /// Used by `TextBuffer::insert_str` to shift existing line starts in bulk
@@ -164,6 +165,7 @@ impl LineIndex {
         &mut self.line_starts[start..]
     }
 
+    // Chunk: docs/chunks/clipboard_operations - Bulk splice of new line starts for insert_str
     /// Inserts multiple new line-start offsets after `after_line` in a single
     /// splice, preserving the ascending sort order of the array.
     ///
