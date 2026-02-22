@@ -270,6 +270,9 @@ pub struct GlyphBuffer {
     // Chunk: docs/chunks/workspace_model - Content area x offset for left rail
     /// Horizontal offset for content area (e.g., for left rail)
     x_offset: f32,
+    // Chunk: docs/chunks/content_tab_bar - Content area y offset for tab bar
+    /// Vertical offset for content area (e.g., for tab bar)
+    y_offset: f32,
 }
 
 impl GlyphBuffer {
@@ -289,6 +292,7 @@ impl GlyphBuffer {
             underline_range: QuadRange::default(),
             cursor_range: QuadRange::default(),
             x_offset: 0.0,
+            y_offset: 0.0,
         }
     }
 
@@ -304,6 +308,20 @@ impl GlyphBuffer {
     /// Returns the current horizontal offset
     pub fn x_offset(&self) -> f32 {
         self.x_offset
+    }
+
+    // Chunk: docs/chunks/content_tab_bar - Content area y offset for tab bar
+    /// Sets the vertical offset for content area rendering.
+    ///
+    /// When set to a positive value (e.g., TAB_BAR_HEIGHT), all glyphs are shifted
+    /// down by that amount to make room for the tab bar at the top.
+    pub fn set_y_offset(&mut self, offset: f32) {
+        self.y_offset = offset;
+    }
+
+    /// Returns the current vertical offset
+    pub fn y_offset(&self) -> f32 {
+        self.y_offset
     }
 
     /// Returns the vertex buffer, if any
@@ -686,7 +704,9 @@ impl GlyphBuffer {
                         };
 
                         // Generate the quad vertices with per-span fg color
-                        let quad = self.layout.quad_vertices_with_offset(screen_row, col, glyph, y_offset, fg);
+                        // Chunk: docs/chunks/content_tab_bar - Apply y_offset for tab bar
+                        let effective_y_offset = y_offset - self.y_offset;
+                        let quad = self.layout.quad_vertices_with_offset(screen_row, col, glyph, effective_y_offset, fg);
                         vertices.extend_from_slice(&quad);
 
                         indices.push(vertex_offset);
@@ -840,8 +860,10 @@ impl GlyphBuffer {
         y_offset: f32,
         color: [f32; 4],
     ) -> [GlyphVertex; 4] {
-        let (start_x, y) = self.layout.position_for_with_offset(screen_row, start_col, y_offset);
-        let (end_x, _) = self.layout.position_for_with_offset(screen_row, end_col, y_offset);
+        // Chunk: docs/chunks/content_tab_bar - Add y_offset for tab bar
+        let effective_y_offset = y_offset - self.y_offset;
+        let (start_x, y) = self.layout.position_for_with_offset(screen_row, start_col, effective_y_offset);
+        let (end_x, _) = self.layout.position_for_with_offset(screen_row, end_col, effective_y_offset);
 
         // Underline position: at the bottom of the line cell, 2 pixels thick
         let underline_y = y + self.layout.line_height - 2.0;
@@ -869,7 +891,9 @@ impl GlyphBuffer {
         y_offset: f32,
         color: [f32; 4],
     ) -> [GlyphVertex; 4] {
-        let (x, y) = self.layout.position_for_with_offset(screen_row, col, y_offset);
+        // Chunk: docs/chunks/content_tab_bar - Add y_offset for tab bar
+        let effective_y_offset = y_offset - self.y_offset;
+        let (x, y) = self.layout.position_for_with_offset(screen_row, col, effective_y_offset);
         let (u0, v0) = solid_glyph.uv_min;
         let (u1, v1) = solid_glyph.uv_max;
 
@@ -950,8 +974,10 @@ impl GlyphBuffer {
         y_offset: f32,
         color: [f32; 4],
     ) -> [GlyphVertex; 4] {
-        let (start_x, y) = self.layout.position_for_with_xy_offset(screen_row, start_col, self.x_offset, y_offset);
-        let (end_x, _) = self.layout.position_for_with_xy_offset(screen_row, end_col, self.x_offset, y_offset);
+        // Chunk: docs/chunks/content_tab_bar - Add y_offset for tab bar
+        let effective_y_offset = y_offset - self.y_offset;
+        let (start_x, y) = self.layout.position_for_with_xy_offset(screen_row, start_col, self.x_offset, effective_y_offset);
+        let (end_x, _) = self.layout.position_for_with_xy_offset(screen_row, end_col, self.x_offset, effective_y_offset);
 
         // Selection height matches the line height
         let selection_height = self.layout.line_height;
@@ -996,7 +1022,9 @@ impl GlyphBuffer {
         y_offset: f32,
         color: [f32; 4],
     ) -> [GlyphVertex; 4] {
-        let (x, y) = self.layout.position_for_with_xy_offset(screen_row, col, self.x_offset, y_offset);
+        // Chunk: docs/chunks/content_tab_bar - Add y_offset for tab bar
+        let effective_y_offset = y_offset - self.y_offset;
+        let (x, y) = self.layout.position_for_with_xy_offset(screen_row, col, self.x_offset, effective_y_offset);
 
         // Cursor width is a thin bar (2 pixels) for line cursor
         // For now we use a block cursor that's the full glyph width
@@ -1034,7 +1062,8 @@ impl GlyphBuffer {
         y_offset: f32,
         color: [f32; 4],
     ) -> [GlyphVertex; 4] {
-        let y = screen_row as f32 * self.layout.line_height - y_offset;
+        // Chunk: docs/chunks/content_tab_bar - Add y_offset for tab bar
+        let y = screen_row as f32 * self.layout.line_height - y_offset + self.y_offset;
         let x = self.x_offset; // Start at the left edge of the content area
 
         // Border is 2 pixels wide at the left edge
@@ -1353,12 +1382,14 @@ impl GlyphBuffer {
 
                     // Generate quad at the calculated screen position
                     // Chunk: docs/chunks/workspace_model - Apply x_offset for left rail
+                    // Chunk: docs/chunks/content_tab_bar - Apply y_offset for tab bar
+                    let effective_y_offset = y_offset - self.y_offset;
                     let quad = self.layout.quad_vertices_with_xy_offset(
                         screen_row,
                         screen_col,
                         glyph,
                         self.x_offset,
-                        y_offset,
+                        effective_y_offset,
                         glyph_color,
                     );
                     vertices.extend_from_slice(&quad);

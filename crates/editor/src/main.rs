@@ -44,6 +44,7 @@ mod mini_buffer;
 mod renderer;
 // Chunk: docs/chunks/row_scroller_extract - Reusable scroll arithmetic
 mod row_scroller;
+mod tab_bar;
 mod selector;
 mod selector_overlay;
 mod shader;
