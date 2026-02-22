@@ -76,8 +76,12 @@ use lite_edit_buffer::TextBuffer;
 
 use crate::editor_state::{EditorFocus, EditorState};
 use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
-use crate::metal_view::MetalView;
+// Chunk: docs/chunks/cursor_pointer_ui_hints - Cursor region types for dynamic cursor display
+use crate::left_rail::RAIL_WIDTH;
+use crate::metal_view::{CursorRect, CursorRegions, MetalView};
 use crate::renderer::Renderer;
+use crate::selector_overlay::calculate_overlay_geometry;
+use crate::tab_bar::TAB_BAR_HEIGHT;
 
 /// Cursor blink interval in seconds
 const CURSOR_BLINK_INTERVAL: f64 = 0.5;
@@ -353,6 +357,12 @@ impl EditorController {
                     );
                 }
             }
+
+            // Chunk: docs/chunks/cursor_pointer_ui_hints - Update cursor regions after rendering
+            // Update cursor regions to reflect current UI layout. This ensures the
+            // correct cursor (pointer vs I-beam) appears when hovering over different
+            // UI elements like the left rail, tab bar, or buffer content area.
+            self.update_cursor_regions();
         }
     }
 
@@ -398,6 +408,147 @@ impl EditorController {
                 render_buffer.set_selection_anchor(anchor);
             }
         }
+    }
+
+    // Chunk: docs/chunks/cursor_pointer_ui_hints - Calculate cursor regions for UI
+    /// Calculates and sets the cursor regions for the current UI state.
+    ///
+    /// This method determines which areas of the view should display pointer
+    /// (arrow) cursor vs I-beam (text) cursor based on the current layout:
+    ///
+    /// - Left rail (workspace tiles): Pointer cursor
+    /// - Tab bar (content tabs): Pointer cursor
+    /// - Buffer content area: I-beam cursor
+    /// - Selector overlay (when active): Pointer for items, I-beam for query input
+    ///
+    /// Coordinates are converted from pixel space (top-left origin) to point
+    /// space (bottom-left origin) as required by NSView's addCursorRect.
+    fn update_cursor_regions(&self) {
+        let frame = self.metal_view.frame();
+        let scale = self.metal_view.scale_factor();
+
+        // View dimensions in pixels
+        let view_width_px = (frame.size.width * scale) as f32;
+        let view_height_px = (frame.size.height * scale) as f32;
+
+        // View dimensions in points (for NSView coordinate system)
+        let view_width_pt = frame.size.width;
+        let view_height_pt = frame.size.height;
+
+        let mut regions = CursorRegions::new();
+
+        // Helper to convert from pixel coordinates (top-left origin, y-down)
+        // to point coordinates (bottom-left origin, y-up) for NSView
+        let px_to_pt = |y_px: f32, height_px: f32| -> f64 {
+            // Convert y from top-down to bottom-up
+            // top-down: y_px is distance from top
+            // bottom-up: y = view_height - (y_px + height_px)
+            view_height_pt - ((y_px + height_px) as f64 / scale)
+        };
+
+        // ==== Left Rail (Pointer Cursor) ====
+        // The left rail is always visible on the left edge
+        // Geometry: x=0, y=0 (top-down), width=RAIL_WIDTH, height=view_height
+        {
+            let rail_width_pt = RAIL_WIDTH as f64 / scale;
+            // In NSView coords: bottom-left origin, so y=0 is at bottom
+            regions.add_pointer(CursorRect::new(
+                0.0,
+                0.0,
+                rail_width_pt,
+                view_height_pt,
+            ));
+        }
+
+        // ==== Tab Bar (Pointer Cursor) ====
+        // Tab bar is at the top of the content area (right of left rail)
+        // Geometry: x=RAIL_WIDTH, y=0 (top-down), width=view_width-RAIL_WIDTH, height=TAB_BAR_HEIGHT
+        if let Some(workspace) = self.state.editor.active_workspace() {
+            if !workspace.tabs.is_empty() {
+                let tab_bar_x_pt = RAIL_WIDTH as f64 / scale;
+                let tab_bar_width_pt = view_width_pt - tab_bar_x_pt;
+                let tab_bar_height_pt = TAB_BAR_HEIGHT as f64 / scale;
+                // Tab bar is at y=0 in top-down, so in NSView coords it's at view_height - tab_bar_height
+                let tab_bar_y_pt = view_height_pt - tab_bar_height_pt;
+
+                regions.add_pointer(CursorRect::new(
+                    tab_bar_x_pt,
+                    tab_bar_y_pt,
+                    tab_bar_width_pt,
+                    tab_bar_height_pt,
+                ));
+            }
+        }
+
+        // ==== Selector Overlay (Pointer Cursor for items, I-beam for query) ====
+        // When selector is active, it overlays the content area
+        if let EditorFocus::Selector = self.state.focus {
+            if let Some(ref selector) = self.state.active_selector {
+                let line_height = self.state.font_metrics().line_height as f32;
+                let geometry = calculate_overlay_geometry(
+                    view_width_px,
+                    view_height_px,
+                    line_height,
+                    selector.items().len(),
+                );
+
+                // The selector panel takes pointer cursor for the entire panel
+                // (clicking anywhere dismisses or selects)
+                let panel_x_pt = geometry.panel_x as f64 / scale;
+                let panel_y_pt = px_to_pt(geometry.panel_y, geometry.panel_height);
+                let panel_width_pt = geometry.panel_width as f64 / scale;
+                let panel_height_pt = geometry.panel_height as f64 / scale;
+
+                regions.add_pointer(CursorRect::new(
+                    panel_x_pt,
+                    panel_y_pt,
+                    panel_width_pt,
+                    panel_height_pt,
+                ));
+
+                // The query input area within the panel gets I-beam cursor
+                // Query is at the top of the panel (after padding)
+                let query_x_pt = panel_x_pt;
+                let query_y_pt = px_to_pt(geometry.query_row_y, line_height);
+                let query_width_pt = panel_width_pt;
+                let query_height_pt = line_height as f64 / scale;
+
+                regions.add_ibeam(CursorRect::new(
+                    query_x_pt,
+                    query_y_pt,
+                    query_width_pt,
+                    query_height_pt,
+                ));
+            }
+        }
+
+        // ==== Buffer Content Area (I-beam Cursor) ====
+        // The buffer content area is to the right of the left rail and below the tab bar
+        {
+            let content_x_pt = RAIL_WIDTH as f64 / scale;
+            let content_width_pt = view_width_pt - content_x_pt;
+
+            // Y starts below the tab bar (if present)
+            let tab_bar_height_pt = if self.state.editor.active_workspace().map_or(false, |ws| !ws.tabs.is_empty()) {
+                TAB_BAR_HEIGHT as f64 / scale
+            } else {
+                0.0
+            };
+
+            let content_height_pt = view_height_pt - tab_bar_height_pt;
+            // In NSView coords, content starts at y=0 (bottom)
+            let content_y_pt = 0.0;
+
+            regions.add_ibeam(CursorRect::new(
+                content_x_pt,
+                content_y_pt,
+                content_width_pt,
+                content_height_pt,
+            ));
+        }
+
+        // Set the cursor regions on the view
+        self.metal_view.set_cursor_regions(regions);
     }
 
     /// Handles window resize.

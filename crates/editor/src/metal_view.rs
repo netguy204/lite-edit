@@ -39,6 +39,87 @@ pub type MouseHandler = Box<dyn Fn(MouseEvent)>;
 /// Type alias for scroll event handler callback
 pub type ScrollHandler = Box<dyn Fn(ScrollDelta)>;
 
+// =============================================================================
+// Cursor Regions (Chunk: docs/chunks/cursor_pointer_ui_hints)
+// =============================================================================
+
+/// A rectangular region in points (view coordinates) with an associated cursor type.
+///
+/// Coordinates are in the NSView coordinate system (origin at bottom-left).
+/// The x, y values are in points (not pixels), matching the coordinate system
+/// used by `addCursorRect:cursor:`.
+#[derive(Debug, Clone, Copy)]
+pub struct CursorRect {
+    /// X coordinate of the rect origin (left edge)
+    pub x: f64,
+    /// Y coordinate of the rect origin (bottom edge in NSView coords)
+    pub y: f64,
+    /// Width of the rect
+    pub width: f64,
+    /// Height of the rect
+    pub height: f64,
+}
+
+impl CursorRect {
+    /// Creates a new cursor rect from coordinates in points.
+    pub fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
+        Self { x, y, width, height }
+    }
+
+    /// Converts this CursorRect to an NSRect for use with addCursorRect.
+    fn to_ns_rect(&self) -> NSRect {
+        NSRect::new(
+            objc2_foundation::NSPoint::new(self.x, self.y),
+            NSSize::new(self.width, self.height),
+        )
+    }
+}
+
+/// The cursor type to display for a region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorKind {
+    /// Standard pointer cursor (arrow) for clickable UI elements
+    Pointer,
+    /// I-beam cursor for text editing areas
+    IBeam,
+}
+
+/// A collection of cursor regions that map areas of the view to cursor types.
+///
+/// Regions are applied in order, with later regions taking precedence for
+/// overlapping areas. The default cursor (for uncovered areas) is IBeam,
+/// matching the primary text editing use case.
+#[derive(Debug, Clone, Default)]
+pub struct CursorRegions {
+    /// Regions with pointer cursor (left rail tiles, tab bar tabs, etc.)
+    pub pointer_rects: Vec<CursorRect>,
+    /// Regions with I-beam cursor (buffer text area, mini-buffer input, etc.)
+    pub ibeam_rects: Vec<CursorRect>,
+}
+
+impl CursorRegions {
+    /// Creates a new empty CursorRegions collection.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds a pointer cursor region.
+    pub fn add_pointer(&mut self, rect: CursorRect) {
+        self.pointer_rects.push(rect);
+    }
+
+    /// Adds an I-beam cursor region.
+    pub fn add_ibeam(&mut self, rect: CursorRect) {
+        self.ibeam_rects.push(rect);
+    }
+
+    /// Clears all regions.
+    pub fn clear(&mut self) {
+        self.pointer_rects.clear();
+        self.ibeam_rects.clear();
+    }
+}
+
 /// Internal state for MetalView
 pub struct MetalViewIvars {
     /// The CAMetalLayer for Metal rendering
@@ -53,6 +134,9 @@ pub struct MetalViewIvars {
     mouse_handler: RefCell<Option<MouseHandler>>,
     /// Scroll event handler callback
     scroll_handler: RefCell<Option<ScrollHandler>>,
+    // Chunk: docs/chunks/cursor_pointer_ui_hints - Cursor regions for dynamic cursor display
+    /// Cursor regions for different cursor types (pointer vs I-beam)
+    cursor_regions: RefCell<CursorRegions>,
 }
 
 impl Default for MetalViewIvars {
@@ -83,6 +167,7 @@ impl Default for MetalViewIvars {
             key_handler: RefCell::new(None),
             mouse_handler: RefCell::new(None),
             scroll_handler: RefCell::new(None),
+            cursor_regions: RefCell::new(CursorRegions::new()),
         }
     }
 }
@@ -227,13 +312,44 @@ define_class!(
         }
 
         // Chunk: docs/chunks/ibeam_cursor - I-beam cursor over editable area
-        /// Sets up cursor rects to display I-beam cursor over the editable area
+        // Chunk: docs/chunks/cursor_pointer_ui_hints - Dynamic cursor regions
+        /// Sets up cursor rects based on stored cursor regions.
+        ///
+        /// This method is called by the framework when cursor rects need to be
+        /// recalculated (e.g., after window resize or `invalidateCursorRectsForView`).
+        /// It uses the cursor regions stored via `set_cursor_regions` to set up
+        /// different cursor types for different areas:
+        ///
+        /// - Pointer (arrow) cursor for clickable UI elements (left rail, tabs, etc.)
+        /// - I-beam cursor for text editing areas (buffer, mini-buffer)
+        ///
+        /// Regions are applied in order with I-beam regions added last, so they
+        /// take precedence in overlapping areas. This ensures the text editing
+        /// cursor appears over the primary editing region.
         #[unsafe(method(resetCursorRects))]
         fn __reset_cursor_rects(&self) {
             // Clear existing cursor rects
             self.discardCursorRects();
-            // Add I-beam cursor for the entire view bounds
-            self.addCursorRect_cursor(self.bounds(), &NSCursor::IBeamCursor());
+
+            let regions = self.ivars().cursor_regions.borrow();
+
+            // Add pointer cursor rects first (clickable UI elements)
+            let arrow_cursor = NSCursor::arrowCursor();
+            for rect in &regions.pointer_rects {
+                self.addCursorRect_cursor(rect.to_ns_rect(), &arrow_cursor);
+            }
+
+            // Add I-beam cursor rects last (takes precedence in overlapping areas)
+            let ibeam_cursor = NSCursor::IBeamCursor();
+            for rect in &regions.ibeam_rects {
+                self.addCursorRect_cursor(rect.to_ns_rect(), &ibeam_cursor);
+            }
+
+            // If no regions are defined, fall back to I-beam for entire bounds
+            // (maintains backwards compatibility with existing behavior)
+            if regions.pointer_rects.is_empty() && regions.ibeam_rects.is_empty() {
+                self.addCursorRect_cursor(self.bounds(), &ibeam_cursor);
+            }
         }
     }
 );
@@ -328,6 +444,34 @@ impl MetalView {
     /// NSEvent converted to our Rust-native ScrollDelta type.
     pub fn set_scroll_handler(&self, handler: impl Fn(ScrollDelta) + 'static) {
         *self.ivars().scroll_handler.borrow_mut() = Some(Box::new(handler));
+    }
+
+    // Chunk: docs/chunks/cursor_pointer_ui_hints - Set cursor regions for dynamic cursor display
+    /// Sets the cursor regions for this view.
+    ///
+    /// Call this whenever the UI layout changes (e.g., after rendering) to update
+    /// which areas of the view display which cursor type. This replaces any
+    /// previously set regions.
+    ///
+    /// After updating the regions, this method calls `invalidateCursorRectsForView`
+    /// to trigger the system to call `resetCursorRects`, which applies the new
+    /// cursor mappings.
+    ///
+    /// # Arguments
+    /// * `regions` - The cursor regions mapping areas to cursor types
+    ///
+    /// # Cursor Regions
+    /// - Pointer regions: Clickable UI elements (left rail tiles, tab bar tabs,
+    ///   selector items, close buttons, etc.)
+    /// - I-beam regions: Text editing areas (buffer content area, mini-buffer
+    ///   input field, etc.)
+    pub fn set_cursor_regions(&self, regions: CursorRegions) {
+        *self.ivars().cursor_regions.borrow_mut() = regions;
+
+        // Trigger the system to recalculate cursor rects
+        if let Some(window) = self.window() {
+            window.invalidateCursorRectsForView(self);
+        }
     }
 
     /// Converts an NSEvent to our KeyEvent type
@@ -556,5 +700,102 @@ fn get_default_metal_device() -> Option<Retained<ProtocolObject<dyn MTLDevice>>>
         // SAFETY: We just checked that ptr is non-null, and MTLCreateSystemDefaultDevice
         // returns a retained object
         Some(unsafe { Retained::from_raw(ptr).unwrap() })
+    }
+}
+
+// =============================================================================
+// Tests (Chunk: docs/chunks/cursor_pointer_ui_hints)
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cursor_rect_new() {
+        let rect = CursorRect::new(10.0, 20.0, 100.0, 50.0);
+        assert_eq!(rect.x, 10.0);
+        assert_eq!(rect.y, 20.0);
+        assert_eq!(rect.width, 100.0);
+        assert_eq!(rect.height, 50.0);
+    }
+
+    #[test]
+    fn test_cursor_rect_to_ns_rect() {
+        let cursor_rect = CursorRect::new(10.0, 20.0, 100.0, 50.0);
+        let ns_rect = cursor_rect.to_ns_rect();
+        assert_eq!(ns_rect.origin.x, 10.0);
+        assert_eq!(ns_rect.origin.y, 20.0);
+        assert_eq!(ns_rect.size.width, 100.0);
+        assert_eq!(ns_rect.size.height, 50.0);
+    }
+
+    #[test]
+    fn test_cursor_regions_new_is_empty() {
+        let regions = CursorRegions::new();
+        assert!(regions.pointer_rects.is_empty());
+        assert!(regions.ibeam_rects.is_empty());
+    }
+
+    #[test]
+    fn test_cursor_regions_add_pointer() {
+        let mut regions = CursorRegions::new();
+        regions.add_pointer(CursorRect::new(0.0, 0.0, 56.0, 600.0));
+        assert_eq!(regions.pointer_rects.len(), 1);
+        assert!(regions.ibeam_rects.is_empty());
+    }
+
+    #[test]
+    fn test_cursor_regions_add_ibeam() {
+        let mut regions = CursorRegions::new();
+        regions.add_ibeam(CursorRect::new(56.0, 0.0, 944.0, 568.0));
+        assert!(regions.pointer_rects.is_empty());
+        assert_eq!(regions.ibeam_rects.len(), 1);
+    }
+
+    #[test]
+    fn test_cursor_regions_clear() {
+        let mut regions = CursorRegions::new();
+        regions.add_pointer(CursorRect::new(0.0, 0.0, 56.0, 600.0));
+        regions.add_ibeam(CursorRect::new(56.0, 0.0, 944.0, 568.0));
+        assert_eq!(regions.pointer_rects.len(), 1);
+        assert_eq!(regions.ibeam_rects.len(), 1);
+
+        regions.clear();
+        assert!(regions.pointer_rects.is_empty());
+        assert!(regions.ibeam_rects.is_empty());
+    }
+
+    #[test]
+    fn test_cursor_regions_multiple_rects() {
+        let mut regions = CursorRegions::new();
+        // Left rail
+        regions.add_pointer(CursorRect::new(0.0, 0.0, 56.0, 600.0));
+        // Tab bar
+        regions.add_pointer(CursorRect::new(56.0, 568.0, 944.0, 32.0));
+        // Buffer content area
+        regions.add_ibeam(CursorRect::new(56.0, 0.0, 944.0, 568.0));
+
+        assert_eq!(regions.pointer_rects.len(), 2);
+        assert_eq!(regions.ibeam_rects.len(), 1);
+
+        // Verify the rects were stored correctly
+        assert_eq!(regions.pointer_rects[0].width, 56.0); // left rail
+        assert_eq!(regions.pointer_rects[1].height, 32.0); // tab bar
+        assert_eq!(regions.ibeam_rects[0].x, 56.0); // buffer content
+    }
+
+    #[test]
+    fn test_cursor_kind_equality() {
+        assert_eq!(CursorKind::Pointer, CursorKind::Pointer);
+        assert_eq!(CursorKind::IBeam, CursorKind::IBeam);
+        assert_ne!(CursorKind::Pointer, CursorKind::IBeam);
+    }
+
+    #[test]
+    fn test_cursor_regions_default() {
+        let regions = CursorRegions::default();
+        assert!(regions.pointer_rects.is_empty());
+        assert!(regions.ibeam_rects.is_empty());
     }
 }
