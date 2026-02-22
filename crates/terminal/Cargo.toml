@@ -14,6 +14,9 @@ alacritty_terminal = "0.25"
 # Cross-platform PTY spawning
 portable-pty = "0.8"
 
+# POSIX signal handling for graceful process termination (SIGTERM)
+libc = "0.2"
+
 # Low-latency channel for PTY reader thread
 crossbeam-channel = "0.5"
 

@@ -871,7 +871,7 @@ mod tests {
         // Initially at 0
         assert_eq!(vp.first_visible_screen_row(), 0);
 
-        // Set scroll to 3 screen rows
+        // Set scroll to 3 screen rows (use large buffer line count for no clamping)
         vp.set_scroll_offset_px(48.0, 100); // 3 * 16
         assert_eq!(vp.first_visible_screen_row(), 3);
 

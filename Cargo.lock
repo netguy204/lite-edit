@@ -371,6 +371,7 @@ dependencies = [
  "block2",
  "lite-edit-buffer",
  "lite-edit-input",
+ "lite-edit-terminal",
  "notify",
  "objc2",
  "objc2-app-kit",
@@ -397,6 +398,7 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "crossbeam-channel",
+ "libc",
  "lite-edit-buffer",
  "lite-edit-input",
  "portable-pty",

@@ -24,6 +24,8 @@ use crate::font::FontMetrics;
 use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
 use crate::left_rail::{calculate_left_rail_geometry, RAIL_WIDTH};
 use crate::mini_buffer::MiniBuffer;
+// Chunk: docs/chunks/content_tab_bar - Tab bar click handling
+use crate::tab_bar::{calculate_tab_bar_geometry, tabs_from_workspace, TAB_BAR_HEIGHT};
 use crate::selector::{SelectorOutcome, SelectorWidget};
 use crate::selector_overlay::calculate_overlay_geometry;
 use crate::viewport::Viewport;
@@ -299,10 +301,41 @@ impl EditorState {
                 }
             }
 
-            // Cmd+Shift+W closes the active workspace
+            // Cmd+W closes the active tab, Cmd+Shift+W closes the active workspace
             if let Key::Char('w') = event.key {
                 if event.modifiers.shift {
                     self.close_active_workspace();
+                    return;
+                } else {
+                    // Chunk: docs/chunks/content_tab_bar - Close active tab
+                    self.close_active_tab();
+                    return;
+                }
+            }
+
+            // Chunk: docs/chunks/content_tab_bar - Tab cycling shortcuts
+            // Cmd+Shift+] switches to next tab
+            if let Key::Char(']') = event.key {
+                if event.modifiers.shift {
+                    self.next_tab();
+                    return;
+                }
+            }
+
+            // Cmd+Shift+[ switches to previous tab
+            if let Key::Char('[') = event.key {
+                if event.modifiers.shift {
+                    self.prev_tab();
+                    return;
+                }
+            }
+
+            // Chunk: docs/chunks/content_tab_bar - Create new tab
+            // Cmd+T creates a new empty tab in the current workspace
+            // Note: Creates an empty file tab; terminal tab support is in terminal_emulator chunk
+            if let Key::Char('t') = event.key {
+                if !event.modifiers.shift {
+                    self.new_tab();
                     return;
                 }
             }
@@ -809,7 +842,10 @@ impl EditorState {
         // Create context and forward to focus target
         // We need to borrow the active tab's buffer and viewport
         let font_metrics = self.font_metrics;
-        let view_height = self.view_height;
+        // Chunk: docs/chunks/content_tab_bar - Use content area dimensions
+        // Adjust dimensions to account for left rail and tab bar
+        let content_height = self.view_height - TAB_BAR_HEIGHT;
+        let content_width = self.view_width - RAIL_WIDTH;
         let ws = self.editor.active_workspace_mut().expect("no active workspace");
         let tab = ws.active_tab_mut().expect("no active tab");
         let (buffer, viewport) = tab.buffer_and_viewport_mut().expect("not a file tab");
@@ -819,8 +855,8 @@ impl EditorState {
             viewport,
             &mut self.dirty_region,
             font_metrics,
-            view_height,
-            self.view_width,
+            content_height,
+            content_width,
         );
         self.focus_target.handle_key(event, &mut ctx);
     }
@@ -834,6 +870,7 @@ impl EditorState {
     /// widget using the overlay geometry.
     ///
     /// Mouse clicks in the left rail switch workspaces.
+    /// Mouse clicks in the tab bar switch tabs.
     pub fn handle_mouse(&mut self, event: MouseEvent) {
         use crate::input::MouseEventKind;
 
@@ -851,6 +888,17 @@ impl EditorState {
                 }
             }
             // Don't forward rail clicks to buffer
+            return;
+        }
+
+        // Chunk: docs/chunks/content_tab_bar - Tab bar click handling
+        // Check if click is in tab bar region (top of content area)
+        // NSView uses bottom-left origin, so tab bar is at y >= (view_height - TAB_BAR_HEIGHT)
+        if mouse_y >= (self.view_height - TAB_BAR_HEIGHT) as f64 {
+            if let MouseEventKind::Down = event.kind {
+                self.handle_tab_bar_click(mouse_x as f32, mouse_y as f32);
+            }
+            // Don't forward tab bar clicks to buffer
             return;
         }
 
@@ -932,9 +980,36 @@ impl EditorState {
             self.dirty_region.merge(dirty);
         }
 
+        // Chunk: docs/chunks/content_tab_bar - Coordinate transformation for content area
+        // Transform mouse coordinates from full window space to content area space:
+        // - X offset: subtract RAIL_WIDTH (content starts after left rail)
+        // - Y offset: adjust for TAB_BAR_HEIGHT (in NSView coords, subtract from view_height)
+        //
+        // NSView uses bottom-left origin, so:
+        // - y=0 is at BOTTOM of view
+        // - y=view_height is at TOP of view (where tab bar is)
+        //
+        // The content area in NSView coords spans y=[0, view_height - TAB_BAR_HEIGHT)
+        // We adjust view_height so the flip calculation maps correctly to content rows.
+        let (original_x, original_y) = event.position;
+        let adjusted_x = original_x - RAIL_WIDTH as f64;
+        // We pass adjusted_y unchanged but use a reduced view_height for the flip calc
+        // This effectively shifts the coordinate system down by TAB_BAR_HEIGHT
+        let adjusted_y = original_y;
+
+        let adjusted_event = MouseEvent {
+            kind: event.kind,
+            position: (adjusted_x, adjusted_y),
+            modifiers: event.modifiers,
+            click_count: event.click_count,
+        };
+
+        // Adjust view_height for content area (subtract tab bar height)
+        // This makes the y-flip calculation in pixel_to_buffer_position correct
+        let content_height = self.view_height - TAB_BAR_HEIGHT;
+
         // Create context and forward to focus target
         let font_metrics = self.font_metrics;
-        let view_height = self.view_height;
         let ws = self.editor.active_workspace_mut().expect("no active workspace");
         let tab = ws.active_tab_mut().expect("no active tab");
         let (buffer, viewport) = tab.buffer_and_viewport_mut().expect("not a file tab");
@@ -944,10 +1019,10 @@ impl EditorState {
             viewport,
             &mut self.dirty_region,
             font_metrics,
-            view_height,
-            self.view_width,
+            content_height,
+            self.view_width - RAIL_WIDTH, // Content width also adjusted
         );
-        self.focus_target.handle_mouse(event, &mut ctx);
+        self.focus_target.handle_mouse(adjusted_event, &mut ctx);
     }
 
     /// Handles a scroll event by forwarding to the active focus target.
@@ -967,10 +1042,16 @@ impl EditorState {
             return;
         }
 
+        // Chunk: docs/chunks/content_tab_bar - Tab bar horizontal scrolling
+        // Note: horizontal scroll in tab bar region is handled via handle_scroll_tab_bar
+        // which is called from handle_mouse when scroll events occur in tab bar area
+
         // In Buffer or FindInFile mode, scroll the buffer
         // Create context and forward to focus target
         let font_metrics = self.font_metrics;
-        let view_height = self.view_height;
+        // Chunk: docs/chunks/content_tab_bar - Use content area dimensions
+        let content_height = self.view_height - TAB_BAR_HEIGHT;
+        let content_width = self.view_width - RAIL_WIDTH;
         let ws = self.editor.active_workspace_mut().expect("no active workspace");
         let tab = ws.active_tab_mut().expect("no active tab");
         let (buffer, viewport) = tab.buffer_and_viewport_mut().expect("not a file tab");
@@ -980,8 +1061,8 @@ impl EditorState {
             viewport,
             &mut self.dirty_region,
             font_metrics,
-            view_height,
-            self.view_width,
+            content_height,
+            content_width,
         );
         self.focus_target.handle_scroll(delta, &mut ctx);
     }
@@ -1063,6 +1144,35 @@ impl EditorState {
         self.last_cache_version = current_version;
 
         DirtyRegion::FullViewport
+    }
+
+    // =========================================================================
+    // Agent Polling (Chunk: docs/chunks/agent_lifecycle)
+    // =========================================================================
+
+    /// Polls all agents in all workspaces for PTY events.
+    ///
+    /// Call this each frame to:
+    /// 1. Process PTY output from agent processes
+    /// 2. Update agent state machines (Running → NeedsInput → Stale)
+    /// 3. Update workspace status indicators
+    ///
+    /// Returns `DirtyRegion::FullViewport` if any agent had activity,
+    /// otherwise `DirtyRegion::None`.
+    pub fn poll_agents(&mut self) -> DirtyRegion {
+        let mut any_activity = false;
+
+        for workspace in &mut self.editor.workspaces {
+            if workspace.poll_agent() {
+                any_activity = true;
+            }
+        }
+
+        if any_activity {
+            DirtyRegion::FullViewport
+        } else {
+            DirtyRegion::None
+        }
     }
 
     /// Takes the dirty region, leaving `DirtyRegion::None` in its place.
@@ -1233,12 +1343,204 @@ impl EditorState {
             self.dirty_region.merge(DirtyRegion::FullViewport);
         }
     }
+
+    // =========================================================================
+    // Tab Management (Chunk: docs/chunks/content_tab_bar)
+    // =========================================================================
+
+    /// Switches to the tab at the given index in the active workspace.
+    ///
+    /// Does nothing if the index is out of bounds or if it's the current tab.
+    pub fn switch_tab(&mut self, index: usize) {
+        if let Some(workspace) = self.editor.active_workspace_mut() {
+            if index < workspace.tabs.len() && index != workspace.active_tab {
+                workspace.switch_tab(index);
+                // Clear unread badge when switching to a tab
+                if let Some(tab) = workspace.tabs.get_mut(index) {
+                    tab.unread = false;
+                }
+                self.dirty_region.merge(DirtyRegion::FullViewport);
+            }
+        }
+    }
+
+    /// Closes the tab at the given index in the active workspace.
+    ///
+    /// If this is the last tab, creates a new empty tab instead of closing.
+    pub fn close_tab(&mut self, index: usize) {
+        if let Some(workspace) = self.editor.active_workspace_mut() {
+            // Guard: don't close dirty tabs (confirmation UI is future work)
+            if let Some(tab) = workspace.tabs.get(index) {
+                if tab.dirty {
+                    return;
+                }
+            }
+            if workspace.tabs.len() > 1 {
+                workspace.close_tab(index);
+            } else {
+                // Create a new empty tab and close the old one
+                let tab_id = self.editor.gen_tab_id();
+                let line_height = self.editor.line_height();
+                let new_tab = crate::workspace::Tab::empty_file(tab_id, line_height);
+                if let Some(workspace) = self.editor.active_workspace_mut() {
+                    workspace.tabs[0] = new_tab;
+                    workspace.active_tab = 0;
+                }
+            }
+            self.dirty_region.merge(DirtyRegion::FullViewport);
+        }
+    }
+
+    /// Closes the active tab in the active workspace.
+    pub fn close_active_tab(&mut self) {
+        if let Some(workspace) = self.editor.active_workspace() {
+            let active = workspace.active_tab;
+            self.close_tab(active);
+        }
+    }
+
+    /// Cycles to the next tab in the active workspace.
+    ///
+    /// Wraps around from the last tab to the first.
+    /// Does nothing if there's only one tab.
+    pub fn next_tab(&mut self) {
+        if let Some(workspace) = self.editor.active_workspace() {
+            if workspace.tabs.len() > 1 {
+                let next = (workspace.active_tab + 1) % workspace.tabs.len();
+                self.switch_tab(next);
+            }
+        }
+    }
+
+    /// Cycles to the previous tab in the active workspace.
+    ///
+    /// Wraps around from the first tab to the last.
+    /// Does nothing if there's only one tab.
+    pub fn prev_tab(&mut self) {
+        if let Some(workspace) = self.editor.active_workspace() {
+            if workspace.tabs.len() > 1 {
+                let prev = if workspace.active_tab == 0 {
+                    workspace.tabs.len() - 1
+                } else {
+                    workspace.active_tab - 1
+                };
+                self.switch_tab(prev);
+            }
+        }
+    }
+
+    /// Creates a new empty tab in the active workspace and switches to it.
+    ///
+    /// This is triggered by Cmd+T. For now, this creates an empty file tab.
+    /// Terminal tab creation will be added in the terminal_emulator chunk.
+    pub fn new_tab(&mut self) {
+        let tab_id = self.editor.gen_tab_id();
+        let line_height = self.editor.line_height();
+        let new_tab = crate::workspace::Tab::empty_file(tab_id, line_height);
+
+        if let Some(workspace) = self.editor.active_workspace_mut() {
+            workspace.add_tab(new_tab);
+        }
+
+        // Ensure the new tab is visible in the tab bar
+        self.ensure_active_tab_visible();
+        self.dirty_region.merge(DirtyRegion::FullViewport);
+    }
+
+    /// Scrolls the tab bar horizontally.
+    ///
+    /// Positive delta scrolls right (reveals more tabs to the right),
+    /// negative delta scrolls left (reveals more tabs to the left).
+    pub fn scroll_tab_bar(&mut self, delta: f32) {
+        if let Some(workspace) = self.editor.active_workspace_mut() {
+            workspace.tab_bar_view_offset += delta;
+            // Clamp to valid range (minimum 0)
+            if workspace.tab_bar_view_offset < 0.0 {
+                workspace.tab_bar_view_offset = 0.0;
+            }
+            self.dirty_region.merge(DirtyRegion::FullViewport);
+        }
+    }
+
+    /// Ensures the active tab is visible in the tab bar.
+    ///
+    /// If the active tab is scrolled out of view, adjusts the scroll offset
+    /// to bring it into view.
+    pub fn ensure_active_tab_visible(&mut self) {
+        if let Some(workspace) = self.editor.active_workspace() {
+            let tabs = tabs_from_workspace(workspace);
+            let glyph_width = self.font_metrics.advance_width as f32;
+            let geometry = calculate_tab_bar_geometry(
+                self.view_width,
+                &tabs,
+                glyph_width,
+                workspace.tab_bar_view_offset,
+            );
+
+            // Check if active tab is visible
+            if let Some(active_rect) = geometry.tab_rects.get(workspace.active_tab) {
+                let visible_start = RAIL_WIDTH;
+                let visible_end = self.view_width;
+
+                // If tab is to the left of visible area, scroll left
+                if active_rect.x < visible_start {
+                    let scroll_amount = visible_start - active_rect.x;
+                    if let Some(workspace) = self.editor.active_workspace_mut() {
+                        workspace.tab_bar_view_offset -= scroll_amount;
+                        if workspace.tab_bar_view_offset < 0.0 {
+                            workspace.tab_bar_view_offset = 0.0;
+                        }
+                    }
+                }
+
+                // If tab is to the right of visible area, scroll right
+                let tab_right = active_rect.x + active_rect.width;
+                if tab_right > visible_end {
+                    let scroll_amount = tab_right - visible_end;
+                    if let Some(workspace) = self.editor.active_workspace_mut() {
+                        workspace.tab_bar_view_offset += scroll_amount;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Handles a mouse click in the tab bar region.
+    ///
+    /// Determines which tab was clicked and switches to it, or handles
+    /// close button clicks.
+    fn handle_tab_bar_click(&mut self, mouse_x: f32, mouse_y: f32) {
+        if let Some(workspace) = self.editor.active_workspace() {
+            let tabs = tabs_from_workspace(workspace);
+            let glyph_width = self.font_metrics.advance_width as f32;
+            let geometry = calculate_tab_bar_geometry(
+                self.view_width,
+                &tabs,
+                glyph_width,
+                workspace.tab_bar_view_offset,
+            );
+
+            // Check each tab rect
+            for (idx, tab_rect) in geometry.tab_rects.iter().enumerate() {
+                if tab_rect.contains(mouse_x, mouse_y) {
+                    // Check if close button was clicked (close button is part of TabRect)
+                    if tab_rect.is_close_button(mouse_x, mouse_y) {
+                        self.close_tab(idx);
+                        return;
+                    }
+                    // Otherwise, switch to the tab
+                    self.switch_tab(idx);
+                    return;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::input::{Key, Modifiers, ScrollDelta};
+    use crate::input::{Key, Modifiers, MouseEvent, MouseEventKind, ScrollDelta};
     use std::time::Duration;
 
     /// Creates test font metrics with known values
@@ -2864,5 +3166,458 @@ mod tests {
         state.handle_key(KeyEvent::new(Key::Return, Modifiers::default()));
         let s3 = state.buffer().selection_range().unwrap();
         assert_eq!(s3.0.col, 0);
+    }
+
+    // =========================================================================
+    // Rail offset mouse click tests
+    // =========================================================================
+
+    #[test]
+    fn test_mouse_click_accounts_for_rail_offset() {
+        // This test verifies that clicking in the content area positions the
+        // cursor correctly, accounting for the left rail offset (RAIL_WIDTH).
+        //
+        // The bug: handle_mouse_buffer forwards raw window coordinates to the
+        // buffer handler, but the buffer expects content-area-relative coords.
+        // Without subtracting RAIL_WIDTH, clicks land ~7-8 columns to the right.
+        use crate::left_rail::RAIL_WIDTH;
+        use lite_edit_buffer::Position;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(320.0);
+
+        // Set up buffer with known content
+        *state.buffer_mut() = lite_edit_buffer::TextBuffer::from_str("hello world");
+
+        // Click at column 3 in the content area
+        // Window x coordinate = RAIL_WIDTH + (column * glyph_width)
+        // With RAIL_WIDTH = 56, glyph_width = 8, column = 3:
+        // x = 56 + (3 * 8) = 56 + 24 = 80
+        let target_column = 3;
+        let glyph_width = test_font_metrics().advance_width; // 8.0
+        let window_x = RAIL_WIDTH as f64 + (target_column as f64 * glyph_width);
+
+        // y coordinate: we use flipped coordinates (origin at bottom)
+        // Tab bar occupies top 32px (NSView y in [288, 320]).
+        // Content area is NSView y in [0, 288).
+        // Line 0 center: y = (view_height - TAB_BAR_HEIGHT) - line_height/2 = 320 - 32 - 8 = 280
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let content_top = 320.0 - TAB_BAR_HEIGHT as f64;
+        let window_y = content_top - 8.0; // Center of line 0 in content area
+
+        let click_event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (window_x, window_y),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        state.handle_mouse(click_event);
+
+        // The cursor should be at column 3, not column 3 + (56/8) = column 10
+        assert_eq!(
+            state.buffer().cursor_position(),
+            Position::new(0, target_column),
+            "Cursor should be at column {} after clicking at window x={}, \
+             but got column {}. This indicates RAIL_WIDTH ({}) is not being \
+             subtracted from the x coordinate.",
+            target_column,
+            window_x,
+            state.buffer().cursor_position().col,
+            RAIL_WIDTH
+        );
+    }
+
+    #[test]
+    fn test_mouse_click_at_content_edge() {
+        // Test clicking at the very left edge of content area (immediately
+        // right of the rail) positions cursor at column 0
+        use crate::left_rail::RAIL_WIDTH;
+        use lite_edit_buffer::Position;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(320.0);
+
+        *state.buffer_mut() = lite_edit_buffer::TextBuffer::from_str("hello world");
+
+        // Click just to the right of the rail (at the content area edge)
+        // Should position cursor at column 0
+        // Tab bar occupies NSView y in [288, 320]; content area is [0, 288).
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let window_x = RAIL_WIDTH as f64 + 1.0; // Just past the rail
+        let window_y = (320.0 - TAB_BAR_HEIGHT as f64) - 8.0; // Line 0 center in content area
+
+        let click_event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (window_x, window_y),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        state.handle_mouse(click_event);
+
+        assert_eq!(
+            state.buffer().cursor_position(),
+            Position::new(0, 0),
+            "Clicking at the left edge of content area should place cursor at column 0"
+        );
+    }
+
+    // Tab Command Tests (Chunk: docs/chunks/content_tab_bar)
+    // =========================================================================
+
+    #[test]
+    fn test_switch_tab_changes_active_tab() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Add a second tab
+        {
+            let tab_id = state.editor.gen_tab_id();
+            let line_height = state.editor.line_height();
+            let tab = crate::workspace::Tab::empty_file(tab_id, line_height);
+            state.editor.active_workspace_mut().unwrap().add_tab(tab);
+        }
+
+        // Should have 2 tabs, active_tab is 1 (switched to new tab on add)
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 2);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 1);
+
+        // Switch to first tab
+        state.switch_tab(0);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+        assert!(state.is_dirty());
+    }
+
+    #[test]
+    fn test_switch_tab_invalid_index_is_noop() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Only 1 tab exists
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+
+        // Try to switch to invalid index
+        let _ = state.take_dirty_region();
+        state.switch_tab(5);
+
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+        assert!(!state.is_dirty()); // No change, no dirty
+    }
+
+    #[test]
+    fn test_close_tab_removes_tab() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Add a second tab
+        {
+            let tab_id = state.editor.gen_tab_id();
+            let line_height = state.editor.line_height();
+            let tab = crate::workspace::Tab::empty_file(tab_id, line_height);
+            state.editor.active_workspace_mut().unwrap().add_tab(tab);
+        }
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 2);
+
+        // Close the first tab
+        state.close_tab(0);
+
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+        assert!(state.is_dirty());
+    }
+
+    #[test]
+    fn test_close_last_tab_creates_new_empty_tab() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Only 1 tab exists
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+
+        // Close the only tab - should create a new empty one
+        state.close_tab(0);
+
+        // Should still have 1 tab (new empty one)
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+    }
+
+    #[test]
+    fn test_next_tab_cycles_forward() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Add two more tabs
+        for _ in 0..2 {
+            let tab_id = state.editor.gen_tab_id();
+            let line_height = state.editor.line_height();
+            let tab = crate::workspace::Tab::empty_file(tab_id, line_height);
+            state.editor.active_workspace_mut().unwrap().add_tab(tab);
+        }
+        // Now have 3 tabs, active is 2 (last added)
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 3);
+
+        // Switch to first tab
+        state.switch_tab(0);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+
+        // Next tab
+        state.next_tab();
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 1);
+
+        state.next_tab();
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 2);
+
+        // Wrap around
+        state.next_tab();
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+    }
+
+    #[test]
+    fn test_prev_tab_cycles_backward() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Add two more tabs
+        for _ in 0..2 {
+            let tab_id = state.editor.gen_tab_id();
+            let line_height = state.editor.line_height();
+            let tab = crate::workspace::Tab::empty_file(tab_id, line_height);
+            state.editor.active_workspace_mut().unwrap().add_tab(tab);
+        }
+        // Now have 3 tabs, active is 2 (last added)
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 3);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 2);
+
+        // Previous tab
+        state.prev_tab();
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 1);
+
+        state.prev_tab();
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+
+        // Wrap around
+        state.prev_tab();
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 2);
+    }
+
+    #[test]
+    fn test_next_tab_single_tab_is_noop() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Only 1 tab
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+
+        let _ = state.take_dirty_region();
+        state.next_tab();
+
+        // Should remain unchanged
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+        assert!(!state.is_dirty());
+    }
+
+    #[test]
+    fn test_cmd_w_closes_active_tab() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Add a second tab
+        {
+            let tab_id = state.editor.gen_tab_id();
+            let line_height = state.editor.line_height();
+            let tab = crate::workspace::Tab::empty_file(tab_id, line_height);
+            state.editor.active_workspace_mut().unwrap().add_tab(tab);
+        }
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 2);
+
+        // Cmd+W closes the active tab
+        let cmd_w = KeyEvent::new(
+            Key::Char('w'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_w);
+
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+    }
+
+    #[test]
+    fn test_cmd_shift_right_bracket_next_tab() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Add a second tab
+        {
+            let tab_id = state.editor.gen_tab_id();
+            let line_height = state.editor.line_height();
+            let tab = crate::workspace::Tab::empty_file(tab_id, line_height);
+            state.editor.active_workspace_mut().unwrap().add_tab(tab);
+        }
+        // Switch to first tab
+        state.switch_tab(0);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+
+        // Cmd+Shift+] cycles to next tab
+        let cmd_shift_bracket = KeyEvent::new(
+            Key::Char(']'),
+            Modifiers {
+                command: true,
+                shift: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_shift_bracket);
+
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 1);
+    }
+
+    #[test]
+    fn test_cmd_shift_left_bracket_prev_tab() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Add a second tab
+        {
+            let tab_id = state.editor.gen_tab_id();
+            let line_height = state.editor.line_height();
+            let tab = crate::workspace::Tab::empty_file(tab_id, line_height);
+            state.editor.active_workspace_mut().unwrap().add_tab(tab);
+        }
+        // Active tab is 1 (new tab)
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 1);
+
+        // Cmd+Shift+[ cycles to previous tab
+        let cmd_shift_bracket = KeyEvent::new(
+            Key::Char('['),
+            Modifiers {
+                command: true,
+                shift: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_shift_bracket);
+
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+    }
+
+    #[test]
+    fn test_close_active_tab_method() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Add a second tab
+        {
+            let tab_id = state.editor.gen_tab_id();
+            let line_height = state.editor.line_height();
+            let tab = crate::workspace::Tab::empty_file(tab_id, line_height);
+            state.editor.active_workspace_mut().unwrap().add_tab(tab);
+        }
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 2);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 1);
+
+        // Close active tab
+        state.close_active_tab();
+
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+    }
+
+    // =========================================================================
+    // Cmd+T New Tab Tests (Chunk: docs/chunks/content_tab_bar)
+    // =========================================================================
+
+    #[test]
+    fn test_cmd_t_creates_new_tab() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Initially one tab
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+
+        // Cmd+T creates a new tab
+        let cmd_t = KeyEvent::new(
+            Key::Char('t'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_t);
+
+        // Should have 2 tabs, active tab is 1 (switched to new tab)
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 2);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 1);
+    }
+
+    #[test]
+    fn test_cmd_t_does_not_insert_t() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Cmd+T should NOT insert 't' into buffer
+        let cmd_t = KeyEvent::new(
+            Key::Char('t'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_t);
+
+        // Buffer should be empty
+        assert!(state.buffer().is_empty());
+    }
+
+    #[test]
+    fn test_cmd_shift_t_does_not_create_tab() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Initially one tab
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+
+        // Cmd+Shift+T should NOT create a new tab (reserved for future use)
+        let cmd_shift_t = KeyEvent::new(
+            Key::Char('t'),
+            Modifiers {
+                command: true,
+                shift: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_shift_t);
+
+        // Should still have 1 tab (Cmd+Shift+T is not handled)
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+    }
+
+    #[test]
+    fn test_new_tab_method() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+
+        state.new_tab();
+
+        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 2);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 1);
+    }
+
+    #[test]
+    fn test_new_tab_marks_dirty() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Clear any existing dirty state
+        let _ = state.take_dirty_region();
+
+        state.new_tab();
+
+        assert!(state.is_dirty());
     }
 }

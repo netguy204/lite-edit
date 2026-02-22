@@ -308,6 +308,27 @@ impl TerminalBuffer {
         self.pty.as_mut()?.try_wait()
     }
 
+    /// Kills the PTY process.
+    ///
+    /// This sends SIGKILL to immediately terminate the process.
+    pub fn kill(&mut self) -> std::io::Result<()> {
+        if let Some(ref mut pty) = self.pty {
+            pty.kill()
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "No PTY attached",
+            ))
+        }
+    }
+
+    /// Returns the process ID of the PTY child process, if available.
+    ///
+    /// This is used for sending signals (e.g., SIGTERM for graceful shutdown).
+    pub fn process_id(&self) -> Option<u32> {
+        self.pty.as_ref().and_then(|pty| pty.process_id())
+    }
+
     // =========================================================================
     // Cold Scrollback Support
     // =========================================================================

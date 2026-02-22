@@ -47,6 +47,10 @@ use crate::selector_overlay::{
     SelectorGlyphBuffer,
 };
 use crate::shader::GlyphPipeline;
+// Chunk: docs/chunks/content_tab_bar - Content tab bar rendering
+use crate::tab_bar::{
+    calculate_tab_bar_geometry, tabs_from_workspace, TabBarGlyphBuffer, TAB_BAR_HEIGHT,
+};
 use crate::viewport::Viewport;
 use crate::workspace::Editor;
 use crate::wrap_layout::WrapLayout;
@@ -128,6 +132,9 @@ pub struct Renderer {
     selector_buffer: Option<SelectorGlyphBuffer>,
     /// The glyph buffer for left rail (workspace tiles) rendering (lazy-initialized)
     left_rail_buffer: Option<LeftRailGlyphBuffer>,
+    // Chunk: docs/chunks/content_tab_bar - Tab bar rendering
+    /// The glyph buffer for content tab bar rendering (lazy-initialized)
+    tab_bar_buffer: Option<TabBarGlyphBuffer>,
     /// The glyph buffer for find strip rendering (lazy-initialized)
     find_strip_buffer: Option<FindStripGlyphBuffer>,
     /// Current viewport width in pixels (for wrap layout calculation)
@@ -190,6 +197,7 @@ impl Renderer {
             cursor_visible: true,
             selector_buffer: None,
             left_rail_buffer: None,
+            tab_bar_buffer: None,
             find_strip_buffer: None,
             viewport_width_px,
         }
@@ -261,6 +269,15 @@ impl Renderer {
     /// to the right, making room for the workspace tiles on the left.
     pub fn set_content_x_offset(&mut self, offset: f32) {
         self.glyph_buffer.set_x_offset(offset);
+    }
+
+    // Chunk: docs/chunks/content_tab_bar - Content area y offset for tab bar
+    /// Sets the content area vertical offset.
+    ///
+    /// When the tab bar is visible, pass `TAB_BAR_HEIGHT` to shift all editor content
+    /// down, making room for the tab bar at the top.
+    pub fn set_content_y_offset(&mut self, offset: f32) {
+        self.glyph_buffer.set_y_offset(offset);
     }
 
     /// Converts buffer-space DirtyLines to screen-space DirtyRegion
@@ -859,8 +876,10 @@ impl Renderer {
         selector: Option<&SelectorWidget>,
         selector_cursor_visible: bool,
     ) {
-        // Set content area offset to account for left rail
+        // Set content area offset to account for left rail and tab bar
         self.set_content_x_offset(RAIL_WIDTH);
+        // Chunk: docs/chunks/content_tab_bar - Content area y offset for tab bar
+        self.set_content_y_offset(TAB_BAR_HEIGHT);
 
         // Update glyph buffer from TextBuffer if available
         self.update_glyph_buffer();
@@ -914,7 +933,11 @@ impl Renderer {
         // Render left rail first (background layer)
         self.draw_left_rail(&encoder, view, editor);
 
-        // Render editor text content (offset by RAIL_WIDTH)
+        // Chunk: docs/chunks/content_tab_bar - Draw tab bar after left rail
+        // Render tab bar at top of content area
+        self.draw_tab_bar(&encoder, view, editor);
+
+        // Render editor text content (offset by RAIL_WIDTH and TAB_BAR_HEIGHT)
         if self.glyph_buffer.index_count() > 0 {
             self.render_text(&encoder, view);
         }
@@ -1115,6 +1138,15 @@ impl Renderer {
     /// with the left rail.
     pub fn left_rail_width(&self) -> f32 {
         RAIL_WIDTH
+    }
+
+    // Chunk: docs/chunks/content_tab_bar - Tab bar height
+    /// Returns the tab bar height.
+    ///
+    /// The content area should be offset vertically by this amount when the
+    /// active workspace has tabs.
+    pub fn tab_bar_height(&self) -> f32 {
+        TAB_BAR_HEIGHT
     }
 
     // =========================================================================
@@ -1358,6 +1390,193 @@ impl Renderer {
                     MTLIndexType::UInt32,
                     index_buffer,
                     index_offset,
+                );
+            }
+        }
+    }
+
+    // Chunk: docs/chunks/content_tab_bar - Tab bar rendering
+    /// Draws the tab bar at the top of the content area.
+    ///
+    /// The tab bar is positioned to the right of the left rail and spans
+    /// the remaining width of the viewport. Each tab shows its label,
+    /// and the active tab is highlighted.
+    ///
+    /// # Arguments
+    /// * `encoder` - The active render command encoder
+    /// * `view` - The Metal view (for viewport dimensions)
+    /// * `editor` - The Editor state containing workspace information
+    fn draw_tab_bar(
+        &mut self,
+        encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        view: &MetalView,
+        editor: &Editor,
+    ) {
+        use crate::tab_bar::{
+            CLOSE_BUTTON_COLOR, TAB_ACTIVE_COLOR,
+            TAB_BAR_BACKGROUND_COLOR, TAB_INACTIVE_COLOR, TAB_LABEL_COLOR,
+        };
+
+        // Only draw tab bar if there's an active workspace with tabs
+        let workspace = match editor.active_workspace() {
+            Some(ws) => ws,
+            None => return,
+        };
+
+        if workspace.tabs.is_empty() {
+            return;
+        }
+
+        let frame = view.frame();
+        let scale = view.scale_factor();
+        let view_width = (frame.size.width * scale) as f32;
+        let view_height = (frame.size.height * scale) as f32;
+        let glyph_width = self.font.metrics.advance_width as f32;
+
+        // Get tab info from workspace
+        let tabs = tabs_from_workspace(workspace);
+
+        // Calculate tab bar geometry with scroll offset
+        let geometry = calculate_tab_bar_geometry(view_width, &tabs, glyph_width, workspace.tab_bar_view_offset);
+
+        // Ensure tab bar buffer is initialized
+        if self.tab_bar_buffer.is_none() {
+            let layout = GlyphLayout::from_metrics(&self.font.metrics);
+            self.tab_bar_buffer = Some(TabBarGlyphBuffer::new(layout));
+        }
+
+        // Update the tab bar buffer
+        let tab_bar_buffer = self.tab_bar_buffer.as_mut().unwrap();
+        tab_bar_buffer.update(&self.device, &self.atlas, &tabs, &geometry);
+
+        // Get buffers
+        let vertex_buffer = match tab_bar_buffer.vertex_buffer() {
+            Some(b) => b,
+            None => return,
+        };
+        let index_buffer = match tab_bar_buffer.index_buffer() {
+            Some(b) => b,
+            None => return,
+        };
+
+        // Set the render pipeline state
+        encoder.setRenderPipelineState(self.pipeline.pipeline_state());
+
+        // Set the vertex buffer
+        unsafe {
+            encoder.setVertexBuffer_offset_atIndex(Some(vertex_buffer), 0, 0);
+        }
+
+        // Set uniforms (viewport size)
+        let uniforms = Uniforms {
+            viewport_size: [view_width, view_height],
+        };
+        let uniforms_ptr =
+            NonNull::new(&uniforms as *const Uniforms as *mut std::ffi::c_void).unwrap();
+        unsafe {
+            encoder.setVertexBytes_length_atIndex(
+                uniforms_ptr,
+                std::mem::size_of::<Uniforms>(),
+                1,
+            );
+        }
+
+        // Set the atlas texture
+        unsafe {
+            encoder.setFragmentTexture_atIndex(Some(self.atlas.texture()), 0);
+        }
+
+        // Draw background
+        let bg_range = tab_bar_buffer.background_range();
+        if !bg_range.is_empty() {
+            let color_ptr = NonNull::new(TAB_BAR_BACKGROUND_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(color_ptr, std::mem::size_of::<[f32; 4]>(), 0);
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    bg_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    bg_range.start * std::mem::size_of::<u32>(),
+                );
+            }
+        }
+
+        // Draw inactive tab backgrounds
+        let tab_bg_range = tab_bar_buffer.tab_background_range();
+        if !tab_bg_range.is_empty() {
+            let color_ptr = NonNull::new(TAB_INACTIVE_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(color_ptr, std::mem::size_of::<[f32; 4]>(), 0);
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    tab_bg_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    tab_bg_range.start * std::mem::size_of::<u32>(),
+                );
+            }
+        }
+
+        // Draw active tab highlight
+        let active_range = tab_bar_buffer.active_tab_range();
+        if !active_range.is_empty() {
+            let color_ptr = NonNull::new(TAB_ACTIVE_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(color_ptr, std::mem::size_of::<[f32; 4]>(), 0);
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    active_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    active_range.start * std::mem::size_of::<u32>(),
+                );
+            }
+        }
+
+        // Draw indicators (dirty/unread)
+        // Colors are baked into vertex data (dirty = yellow, unread = blue)
+        let indicator_range = tab_bar_buffer.indicator_range();
+        if !indicator_range.is_empty() {
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    indicator_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    indicator_range.start * std::mem::size_of::<u32>(),
+                );
+            }
+        }
+
+        // Draw close buttons
+        let close_range = tab_bar_buffer.close_button_range();
+        if !close_range.is_empty() {
+            let color_ptr = NonNull::new(CLOSE_BUTTON_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(color_ptr, std::mem::size_of::<[f32; 4]>(), 0);
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    close_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    close_range.start * std::mem::size_of::<u32>(),
+                );
+            }
+        }
+
+        // Draw labels
+        let label_range = tab_bar_buffer.label_range();
+        if !label_range.is_empty() {
+            let color_ptr = NonNull::new(TAB_LABEL_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(color_ptr, std::mem::size_of::<[f32; 4]>(), 0);
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    label_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    label_range.start * std::mem::size_of::<u32>(),
                 );
             }
         }
