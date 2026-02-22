@@ -28,7 +28,7 @@ code_references:
   - ref: crates/editor/src/glyph_buffer.rs#GlyphBuffer::border_range
     implements: "Returns index range for continuation row border quads"
   - ref: crates/editor/src/buffer_target.rs
-    implements: "Wrap-aware hit-testing: module provides pixel_to_buffer_position_wrapped (private helper at line 649) for converting pixel coordinates to buffer position by walking screen rows"
+    implements: "Wrap-aware hit-testing: module provides pixel_to_buffer_position_wrapped (private helper at line 655) for converting pixel coordinates to buffer position by walking screen rows"
   - ref: crates/editor/src/viewport.rs#Viewport::ensure_visible_wrapped
     implements: "Wrap-aware cursor visibility ensuring the specific screen row containing cursor is visible"
   - ref: crates/editor/src/renderer.rs#Renderer::wrap_layout

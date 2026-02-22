@@ -1336,4 +1336,115 @@ mod tests {
         assert!((vp_unwrapped.scroll_offset_px() - 80.0).abs() < 0.001);
         assert!((vp_wrapped.scroll_offset_px() - 240.0).abs() < 0.001);
     }
+
+    // =========================================================================
+    // Chunk: docs/chunks/scroll_wrap_deadzone_v2 - Screen row count consistency test
+    // =========================================================================
+
+    #[test]
+    fn test_compute_total_screen_rows_matches_manual_count() {
+        // Verify that compute_total_screen_rows produces the same count
+        // as manually walking the buffer with screen_rows_for_line.
+        //
+        // This is a regression test to ensure the screen row count used
+        // for scroll clamping matches what the renderer actually draws.
+
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(640.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        // Mixed line lengths to exercise different wrapping scenarios
+        let line_lens = vec![
+            40,   // 1 screen row (fits in 80 cols)
+            160,  // 2 screen rows
+            0,    // 1 screen row (empty line)
+            240,  // 3 screen rows
+            80,   // 1 screen row (exact fit)
+            81,   // 2 screen rows (one char over)
+        ];
+
+        // Manual count
+        let mut expected_total: usize = 0;
+        for &len in &line_lens {
+            expected_total += wrap_layout.screen_rows_for_line(len);
+        }
+
+        // Using compute_total_screen_rows (via set_scroll_offset_px_wrapped)
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(160.0, 100); // 10 visible rows
+
+        // To get the total screen rows used, we request scrolling beyond the end
+        // and observe the clamped offset. max_offset = (total - visible) * line_height
+        vp.set_scroll_offset_px_wrapped(10000.0, line_lens.len(), &wrap_layout, |line| line_lens[line]);
+        let max_offset = vp.scroll_offset_px();
+        let computed_total = (max_offset / vp.line_height()) as usize + vp.visible_lines();
+
+        assert_eq!(
+            computed_total, expected_total,
+            "compute_total_screen_rows() = {} but manual count = {}",
+            computed_total, expected_total
+        );
+
+        // Also verify the exact expected value
+        // 1 + 2 + 1 + 3 + 1 + 2 = 10 screen rows
+        assert_eq!(expected_total, 10);
+    }
+
+    #[test]
+    fn test_buffer_line_for_screen_row_covers_all_screen_rows() {
+        // Verify that buffer_line_for_screen_row correctly maps every screen row
+        // back to the appropriate buffer line and row offset.
+
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(640.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        // Line 0: 40 chars (1 screen row: row 0)
+        // Line 1: 160 chars (2 screen rows: rows 1-2)
+        // Line 2: 240 chars (3 screen rows: rows 3-5)
+        let line_lens = vec![40, 160, 240];
+
+        // Expected mappings:
+        // Screen row 0 -> (line 0, offset 0)
+        // Screen row 1 -> (line 1, offset 0)
+        // Screen row 2 -> (line 1, offset 1)
+        // Screen row 3 -> (line 2, offset 0)
+        // Screen row 4 -> (line 2, offset 1)
+        // Screen row 5 -> (line 2, offset 2)
+
+        let expected = vec![
+            (0, 0),  // screen row 0
+            (1, 0),  // screen row 1
+            (1, 1),  // screen row 2
+            (2, 0),  // screen row 3
+            (2, 1),  // screen row 4
+            (2, 2),  // screen row 5
+        ];
+
+        for (screen_row, (expected_line, expected_offset)) in expected.iter().enumerate() {
+            let (actual_line, actual_offset, _) = Viewport::buffer_line_for_screen_row(
+                screen_row,
+                line_lens.len(),
+                &wrap_layout,
+                |line| line_lens[line],
+            );
+
+            assert_eq!(
+                (actual_line, actual_offset),
+                (*expected_line, *expected_offset),
+                "Screen row {} should map to (line {}, offset {}), but got ({}, {})",
+                screen_row, expected_line, expected_offset, actual_line, actual_offset
+            );
+        }
+    }
 }

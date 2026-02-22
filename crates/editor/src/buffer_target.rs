@@ -19,6 +19,7 @@ use crate::context::EditorContext;
 use crate::focus::{FocusTarget, Handled};
 use crate::font::FontMetrics;
 use crate::input::{Key, KeyEvent, MouseEvent, MouseEventKind, ScrollDelta};
+use crate::viewport::Viewport;
 use crate::wrap_layout::WrapLayout;
 use lite_edit_buffer::Position;
 
@@ -642,18 +643,21 @@ where
 /// * `wrap_layout` - WrapLayout for computing screen rows per line
 /// * `scroll_fraction_px` - Fractional scroll offset in pixels. The renderer translates
 ///   content by `-scroll_fraction_px`, so we add it back to `flipped_y` to compensate.
-/// * `first_visible_line` - The first visible buffer line (scroll offset)
+/// * `first_visible_screen_row` - The first visible **screen row** (from scroll offset).
+///   In wrapped mode, scroll_offset_px tracks position in screen row space, not buffer
+///   line space. This parameter is the screen row index, not a buffer line index.
 /// * `line_count` - Total number of lines in the buffer
 /// * `line_len_fn` - Closure to get the character count of a specific buffer line
 ///
 /// # Returns
 /// A buffer `Position` with line and column computed from wrapped coordinates.
+// Chunk: docs/chunks/scroll_wrap_deadzone_v2 - Fixed screen row to buffer line mapping
 fn pixel_to_buffer_position_wrapped<F>(
     position: (f64, f64),
     view_height: f32,
     wrap_layout: &WrapLayout,
     scroll_fraction_px: f32,
-    first_visible_line: usize,
+    first_visible_screen_row: usize,
     line_count: usize,
     line_len_fn: F,
 ) -> Position
@@ -668,52 +672,31 @@ where
     let flipped_y = (view_height as f64) - y;
 
     // Chunk: docs/chunks/click_scroll_fraction_alignment - Account for renderer Y offset
-    // Compute screen row (which row on screen, 0-indexed from top)
+    // Compute screen row relative to viewport (which row on screen, 0-indexed from top)
     // Add scroll_fraction_px to compensate for the renderer's vertical translation
-    let target_screen_row = if flipped_y >= 0.0 && line_height > 0.0 {
+    let viewport_relative_row = if flipped_y >= 0.0 && line_height > 0.0 {
         ((flipped_y + scroll_fraction_px as f64) / line_height as f64).floor() as usize
     } else {
         0
     };
 
-    // Walk buffer lines from first_visible_line, summing screen rows
-    // until we find which buffer line owns the target screen row
-    let mut cumulative_screen_row: usize = 0;
-    let mut found_buffer_line: Option<usize> = None;
-    let mut row_offset_in_line: usize = 0;
+    // Convert viewport-relative row to absolute screen row
+    let absolute_screen_row = first_visible_screen_row + viewport_relative_row;
 
     if line_count == 0 {
         return Position::new(0, 0);
     }
 
-    for buffer_line in first_visible_line..line_count {
-        let line_len = line_len_fn(buffer_line);
-        let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
+    // Convert absolute screen row to buffer line using the same logic as the renderer.
+    // This ensures click handling agrees with what's actually rendered.
+    let (buffer_line, row_offset_in_line, _) = Viewport::buffer_line_for_screen_row(
+        absolute_screen_row,
+        line_count,
+        wrap_layout,
+        &line_len_fn,
+    );
 
-        let next_cumulative = cumulative_screen_row + rows_for_line;
-
-        if target_screen_row < next_cumulative {
-            // This buffer line owns the target screen row
-            found_buffer_line = Some(buffer_line);
-            row_offset_in_line = target_screen_row - cumulative_screen_row;
-            break;
-        }
-
-        cumulative_screen_row = next_cumulative;
-    }
-
-    // If we didn't find the line (click was beyond last line), use last line
-    let buffer_line = found_buffer_line.unwrap_or(line_count - 1);
     let line_len = line_len_fn(buffer_line);
-
-    // If we fell off the end, row_offset should be 0 (click on "virtual" first row past content)
-    // But actually we want to clamp to the last row of the last line
-    let row_offset = if found_buffer_line.is_none() {
-        // Click was below content - put cursor at end of last line
-        wrap_layout.screen_rows_for_line(line_len).saturating_sub(1)
-    } else {
-        row_offset_in_line
-    };
 
     // Compute screen column from x position
     let screen_col = if x >= 0.0 && glyph_width > 0.0 {
@@ -723,7 +706,7 @@ where
     };
 
     // Convert (row_offset, screen_col) to buffer column
-    let buffer_col = wrap_layout.screen_pos_to_buffer_col(row_offset, screen_col);
+    let buffer_col = wrap_layout.screen_pos_to_buffer_col(row_offset_in_line, screen_col);
 
     // Clamp to line length
     let clamped_col = buffer_col.min(line_len);
@@ -3879,5 +3862,187 @@ mod tests {
         assert_eq!(start, Position::new(1, 0));
         assert_eq!(end, Position::new(1, 6));
         assert_eq!(buffer.selected_text(), Some("second".to_string()));
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/scroll_wrap_deadzone_v2 - Click-to-cursor coordinate fix tests
+    // =========================================================================
+
+    /// Creates a wrap layout with 80 columns (640px / 8px glyph width)
+    fn test_wrap_layout_80_cols() -> WrapLayout {
+        WrapLayout::new(640.0, &test_font_metrics())
+    }
+
+    #[test]
+    fn test_click_mixed_wrap_uses_screen_row_as_buffer_line() {
+        // This is the key failing test from the PLAN.md.
+        //
+        // Setup: 5 buffer lines where some wrap to multiple screen rows
+        // Line 0: 160 chars (2 screen rows at 80 cols)
+        // Line 1: 40 chars (1 screen row)
+        // Line 2: 40 chars (1 screen row)
+        // Line 3: 40 chars (1 screen row)
+        // Line 4: 40 chars (1 screen row)
+        // Total: 5 buffer lines, 6 screen rows
+        //
+        // Viewport: 3 visible rows (48px view height / 16px line height)
+        // Max scroll: screen row 3 (6 - 3 = 3)
+        //
+        // At screen row 3, we should see:
+        // - Screen row 0 in viewport = screen row 3 overall = buffer line 2
+        //   (because line 0 takes rows 0-1, line 1 is row 2, line 2 is row 3)
+        //
+        // The bug: pixel_to_buffer_position_wrapped receives first_visible_line=3
+        // (the screen row), but treats it as buffer line 3. When it iterates
+        // `for buffer_line in 3..5`, it starts at buffer line 3, not buffer line 2.
+        //
+        // Clicking on screen row 0 of the viewport (y=48px from bottom with 48px height)
+        // should place cursor on buffer line 2, NOT buffer line 3.
+
+        let wrap_layout = test_wrap_layout_80_cols();
+        let line_lens = vec![160, 40, 40, 40, 40];
+
+        // view_height = 48px (3 visible rows at 16px line height)
+        // first_visible_line = 3 (screen row 3 is the top of viewport at max scroll)
+        // scroll_fraction_px = 0.0 (aligned to row boundary)
+        //
+        // With flipped_y = view_height - y:
+        // Click at y=48 (top of viewport in macOS coords) -> flipped_y = 0 -> screen row 0
+        // Click at y=32 -> flipped_y = 16 -> screen row 1
+        // Click at y=16 -> flipped_y = 32 -> screen row 2
+
+        // Click at y=48 (top of viewport)
+        let position = pixel_to_buffer_position_wrapped(
+            (0.0, 48.0), // x=0, y=48 (top of viewport in macOS coords)
+            48.0,        // view_height
+            &wrap_layout,
+            0.0, // scroll_fraction_px
+            3,   // first_visible_line (this is screen row 3, but the function misinterprets it)
+            5,   // line_count
+            |line| line_lens[line],
+        );
+
+        // At max scroll (screen row 3 is top of viewport):
+        // - Screen row 3 overall = buffer line 2 (line 0 takes rows 0-1, line 1 is row 2)
+        // So clicking on the top of the viewport should land on buffer line 2.
+        //
+        // BUG: The function will return buffer line 3 because it iterates from buffer line 3.
+        assert_eq!(
+            position.line, 2,
+            "Click at top of viewport at max scroll should land on buffer line 2, not line {}. \
+             The first_visible_line=3 is a screen row, not a buffer line index.",
+            position.line
+        );
+    }
+
+    #[test]
+    fn test_click_uniform_wrap_shows_cursor_offset_symptom() {
+        // Test that the cursor placement offset matches what the user sees.
+        //
+        // This demonstrates the ~10 lines offset symptom reported in the GOAL.md.
+        //
+        // Setup: 10 buffer lines, each 160 chars (2 screen rows at 80 cols)
+        // Total: 20 screen rows
+        // Viewport: 5 visible rows (80px view height / 16px line height)
+        // Max scroll: screen row 15 (20 - 5 = 15)
+        //
+        // At screen row 15:
+        // - Screen rows 0-1 = buffer line 0
+        // - Screen rows 2-3 = buffer line 1
+        // - ...
+        // - Screen rows 14-15 = buffer line 7
+        // So screen row 15 is the second row of buffer line 7.
+        //
+        // Clicking at the top of the viewport should land on buffer line 7.
+
+        let wrap_layout = test_wrap_layout_80_cols();
+        let line_lens = vec![160; 10]; // All lines are 160 chars (2 screen rows each)
+
+        // Click at top of viewport (y = view_height = 80)
+        let position = pixel_to_buffer_position_wrapped(
+            (0.0, 80.0), // x=0, y=80 (top of viewport in macOS coords)
+            80.0,        // view_height
+            &wrap_layout,
+            0.0, // scroll_fraction_px
+            15,  // first_visible_line (screen row 15)
+            10,  // line_count
+            |line| line_lens[line],
+        );
+
+        // Screen row 15 corresponds to buffer line 7 (second row of that line)
+        // because each buffer line takes 2 screen rows.
+        assert_eq!(
+            position.line, 7,
+            "Click at top of viewport at screen row 15 should land on buffer line 7, \
+             not line {}. This is the ~10 line offset symptom.",
+            position.line
+        );
+    }
+
+    #[test]
+    fn test_pixel_to_buffer_no_scroll_baseline() {
+        // Baseline test: when not scrolled (first_visible_line=0),
+        // the function should work correctly regardless of the bug.
+
+        let wrap_layout = test_wrap_layout_80_cols();
+        let line_lens = vec![160, 40, 40, 40, 40]; // Line 0 wraps
+
+        // Click at y=48 (screen row 0, which is buffer line 0)
+        let position = pixel_to_buffer_position_wrapped(
+            (0.0, 48.0), // x=0, y=48 (top of 48px viewport)
+            48.0,
+            &wrap_layout,
+            0.0,
+            0, // first_visible_line = 0 (no scroll)
+            5,
+            |line| line_lens[line],
+        );
+
+        assert_eq!(position.line, 0, "With no scroll, click at top should land on buffer line 0");
+    }
+
+    #[test]
+    fn test_pixel_to_buffer_consistency_with_buffer_line_for_screen_row() {
+        // This test verifies that pixel_to_buffer_position_wrapped agrees
+        // with what Viewport::buffer_line_for_screen_row returns.
+        //
+        // The renderer uses buffer_line_for_screen_row to determine which
+        // buffer line to render at each screen row. Click handling should
+        // agree with this.
+
+        let wrap_layout = test_wrap_layout_80_cols();
+        let line_lens = vec![160, 40, 40, 40, 40]; // Line 0 wraps to 2 rows
+
+        // For screen rows 0 through 5, verify pixel_to_buffer_position_wrapped
+        // returns the same buffer line as buffer_line_for_screen_row.
+
+        for screen_row in 0..6 {
+            // What buffer_line_for_screen_row says
+            let (expected_buffer_line, _, _) = Viewport::buffer_line_for_screen_row(
+                screen_row,
+                5,
+                &wrap_layout,
+                |line| line_lens[line],
+            );
+
+            // When scrolled such that screen_row is at the top of viewport,
+            // clicking at the top should return the same buffer line.
+            let position = pixel_to_buffer_position_wrapped(
+                (0.0, 48.0), // Click at top of 48px viewport
+                48.0,
+                &wrap_layout,
+                0.0,
+                screen_row, // first_visible_line = this screen row
+                5,
+                |line| line_lens[line],
+            );
+
+            assert_eq!(
+                position.line, expected_buffer_line,
+                "At first_visible_screen_row={}, pixel_to_buffer_position_wrapped returned line {} \
+                 but buffer_line_for_screen_row expects line {}",
+                screen_row, position.line, expected_buffer_line
+            );
+        }
     }
 }
