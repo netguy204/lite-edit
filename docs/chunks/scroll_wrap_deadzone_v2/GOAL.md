@@ -1,18 +1,24 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: scroll_bottom_deadzone
-code_paths: []
+code_paths:
+- crates/editor/src/buffer_target.rs
+- crates/editor/src/viewport.rs
 code_references: []
 narrative: null
 investigation: null
 subsystems: []
 friction_entries: []
 bug_type: semantic
-depends_on: ["scroll_bottom_deadzone"]
-created_after: ["scroll_bottom_deadzone", "terminal_tab_spawn", "workspace_switching", "word_triclass_boundaries"]
+depends_on:
+- scroll_bottom_deadzone
+created_after:
+- scroll_bottom_deadzone
+- terminal_tab_spawn
+- workspace_switching
+- word_triclass_boundaries
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
