@@ -394,3 +394,43 @@ fn test_alt_backspace_deletes_word() {
         content
     );
 }
+
+// Chunk: docs/chunks/terminal_cmd_backspace - Cmd+Backspace integration test
+#[test]
+fn test_cmd_backspace_deletes_to_line_start() {
+    let (terminal, mut target) = create_terminal_with_shell();
+
+    // Type "echo hello world" (without pressing Enter)
+    type_string(&mut target, "echo hello world");
+
+    // Give shell time to process the input
+    wait_and_poll(&terminal, 100);
+
+    // Send Cmd+Backspace to delete from cursor to line start
+    let cmd_backspace = KeyEvent {
+        key: Key::Backspace,
+        modifiers: Modifiers {
+            command: true,
+            ..Default::default()
+        },
+    };
+    target.handle_key(cmd_backspace);
+
+    // Give shell time to process the line deletion
+    wait_and_poll(&terminal, 100);
+
+    // Type something new to verify the line was cleared
+    type_string(&mut target, "echo CLEARED");
+    press_enter(&mut target);
+
+    // Wait for output
+    wait_and_poll(&terminal, 200);
+
+    // The terminal should output "CLEARED" (the original text was deleted)
+    let content = get_terminal_content(&terminal);
+    assert!(
+        content.contains("CLEARED"),
+        "Expected 'CLEARED' in output after Cmd+Backspace cleared the line, got: {}",
+        content
+    );
+}
