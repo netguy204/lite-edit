@@ -476,6 +476,12 @@ impl EditorState {
             line_height,
             selector.items().len(),
         );
+        // Chunk: docs/chunks/selector_scroll_end - Sync RowScroller row_height with geometry
+        // The RowScroller is initialized with a default row_height (16.0), but the actual
+        // item height comes from font_metrics.line_height. Without this sync, the scroller
+        // computes an incorrect visible_rows count, causing the selection to be placed
+        // outside the rendered viewport when scrolling to the bottom of a long list.
+        selector.set_item_height(geometry.item_height);
         selector.update_visible_size(geometry.visible_items as f32 * geometry.item_height);
 
         // Store the selector and update focus
@@ -780,6 +786,8 @@ impl EditorState {
             selector.items().len(),
         );
 
+        // Chunk: docs/chunks/selector_scroll_end - Sync RowScroller row_height with geometry
+        selector.set_item_height(geometry.item_height);
         // Update visible size on the selector (for arrow key navigation scroll)
         selector.update_visible_size(geometry.visible_items as f32 * geometry.item_height);
 
@@ -816,6 +824,8 @@ impl EditorState {
                                 line_height,
                                 sel.items().len(),
                             );
+                            // Chunk: docs/chunks/selector_scroll_end - Sync row_height
+                            sel.set_item_height(new_geometry.item_height);
                             sel.update_visible_size(
                                 new_geometry.visible_items as f32 * new_geometry.item_height,
                             );
@@ -1025,6 +1035,8 @@ impl EditorState {
             selector.items().len(),
         );
 
+        // Chunk: docs/chunks/selector_scroll_end - Sync RowScroller row_height with geometry
+        selector.set_item_height(geometry.item_height);
         // Update visible size on the selector (for consistency with scroll/key handling)
         selector.update_visible_size(geometry.visible_items as f32 * geometry.item_height);
 
@@ -1179,6 +1191,8 @@ impl EditorState {
             selector.items().len(),
         );
 
+        // Chunk: docs/chunks/selector_scroll_end - Sync RowScroller row_height with geometry
+        selector.set_item_height(geometry.item_height);
         // Update visible size on the selector (for arrow key navigation scroll)
         selector.update_visible_size(geometry.visible_items as f32 * geometry.item_height);
 
