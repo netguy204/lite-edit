@@ -1,10 +1,12 @@
 ---
-status: IMPLEMENTING
+status: HISTORICAL
 ticket: null
 parent_chunk: null
 code_paths:
 - crates/editor/src/editor_state.rs
-code_references: []
+code_references:
+  - ref: crates/editor/src/editor_state.rs#EditorState::handle_mouse_selector
+    implements: "Y-coordinate flip for macOS mouse events in selector overlay"
 narrative: file_picker_viewport
 investigation: null
 subsystems: []
@@ -19,16 +21,6 @@ created_after:
 - file_picker_mini_buffer
 - mini_buffer_model
 ---
-<!--
-╔══════════════════════════════════════════════════════════════════════════════╗
-║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
-║                                                                              ║
-║  AGENT INSTRUCTIONS: When editing this file, preserve this entire comment    ║
-║  block. Only modify the frontmatter YAML and the content sections below      ║
-║  (Minor Goal, Success Criteria, Relationship to Parent). Use targeted edits  ║
-║  that replace specific sections rather than rewriting the entire file.       ║
-╚══════════════════════════════════════════════════════════════════════════════╝
--->
 
 # Chunk Goal
 
