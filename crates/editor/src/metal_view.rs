@@ -442,6 +442,21 @@ impl MetalView {
         const KEY_END: u16 = 0x77;
         const KEY_PAGE_UP: u16 = 0x74;
         const KEY_PAGE_DOWN: u16 = 0x79;
+        // Chunk: docs/chunks/terminal_input_encoding - Terminal input encoding
+        // Function keys and Insert
+        const KEY_INSERT: u16 = 0x72; // Help key on Mac, used as Insert
+        const KEY_F1: u16 = 0x7A;
+        const KEY_F2: u16 = 0x78;
+        const KEY_F3: u16 = 0x63;
+        const KEY_F4: u16 = 0x76;
+        const KEY_F5: u16 = 0x60;
+        const KEY_F6: u16 = 0x61;
+        const KEY_F7: u16 = 0x62;
+        const KEY_F8: u16 = 0x64;
+        const KEY_F9: u16 = 0x65;
+        const KEY_F10: u16 = 0x6D;
+        const KEY_F11: u16 = 0x67;
+        const KEY_F12: u16 = 0x6F;
 
         match key_code {
             KEY_RETURN => return Some(Key::Return),
@@ -457,6 +472,20 @@ impl MetalView {
             KEY_END => return Some(Key::End),
             KEY_PAGE_UP => return Some(Key::PageUp),
             KEY_PAGE_DOWN => return Some(Key::PageDown),
+            // Chunk: docs/chunks/terminal_input_encoding - Terminal input encoding
+            KEY_INSERT => return Some(Key::Insert),
+            KEY_F1 => return Some(Key::F1),
+            KEY_F2 => return Some(Key::F2),
+            KEY_F3 => return Some(Key::F3),
+            KEY_F4 => return Some(Key::F4),
+            KEY_F5 => return Some(Key::F5),
+            KEY_F6 => return Some(Key::F6),
+            KEY_F7 => return Some(Key::F7),
+            KEY_F8 => return Some(Key::F8),
+            KEY_F9 => return Some(Key::F9),
+            KEY_F10 => return Some(Key::F10),
+            KEY_F11 => return Some(Key::F11),
+            KEY_F12 => return Some(Key::F12),
             _ => {}
         }
 
