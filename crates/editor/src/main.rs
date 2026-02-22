@@ -221,12 +221,27 @@ impl EditorController {
             return;
         }
 
+        // Poll for file index updates so picker results stream in on every keystroke
+        // Chunk: docs/chunks/picker_eager_index
+        let picker_dirty = self.state.tick_picker();
+        if picker_dirty.is_dirty() {
+            self.state.dirty_region.merge(picker_dirty);
+        }
+
         self.render_if_dirty();
     }
 
     /// Handles a mouse event by forwarding to the editor state.
     fn handle_mouse(&mut self, event: MouseEvent) {
         self.state.handle_mouse(event);
+
+        // Poll for file index updates so picker results stream in on mouse interaction
+        // Chunk: docs/chunks/picker_eager_index
+        let picker_dirty = self.state.tick_picker();
+        if picker_dirty.is_dirty() {
+            self.state.dirty_region.merge(picker_dirty);
+        }
+
         self.render_if_dirty();
     }
 
@@ -235,6 +250,14 @@ impl EditorController {
     /// Scroll events only affect the viewport position, not the cursor.
     fn handle_scroll(&mut self, delta: ScrollDelta) {
         self.state.handle_scroll(delta);
+
+        // Poll for file index updates so picker results stream in on scroll
+        // Chunk: docs/chunks/picker_eager_index
+        let picker_dirty = self.state.tick_picker();
+        if picker_dirty.is_dirty() {
+            self.state.dirty_region.merge(picker_dirty);
+        }
+
         self.render_if_dirty();
     }
 

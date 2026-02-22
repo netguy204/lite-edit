@@ -221,7 +221,12 @@ impl EditorState {
             should_quit: false,
             focus: EditorFocus::Buffer,
             active_selector: None,
-            file_index: None,
+            // Start FileIndex eagerly at construction time so the background walk
+            // has time to populate before the user opens the picker (Cmd+P)
+            // Chunk: docs/chunks/picker_eager_index
+            file_index: Some(FileIndex::start(
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+            )),
             last_cache_version: 0,
             resolved_path: None,
             find_mini_buffer: None,
@@ -440,13 +445,8 @@ impl EditorState {
     /// Opens the file picker selector.
     /// Chunk: docs/chunks/file_picker - FileIndex initialization, initial query, SelectorWidget setup
     fn open_file_picker(&mut self) {
-        // Get the current working directory
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-
-        // Initialize file_index if needed
-        if self.file_index.is_none() {
-            self.file_index = Some(FileIndex::start(cwd.clone()));
-        }
+        // file_index is initialized eagerly at EditorState construction time;
+        // Chunk: docs/chunks/picker_eager_index
 
         // Query with empty string to get initial results
         let results = self.file_index.as_ref().unwrap().query("");

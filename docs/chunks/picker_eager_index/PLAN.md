@@ -8,170 +8,189 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This is a small, focused bug fix that changes the timing of two operations:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Eager FileIndex initialization** — Move `FileIndex::start(cwd)` from `open_file_picker()` (first Cmd+P) to `EditorState::new()` (app startup). This ensures the background walk has time to populate the cache before the user ever opens the picker.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **Aggressive tick_picker polling** — Call `tick_picker()` after every user event (key, mouse, scroll) in addition to the existing blink-timer call. This ensures that cache updates surface immediately when the user interacts, rather than waiting up to 500ms for the next blink tick.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/picker_eager_index/GOAL.md)
-with references to the files that you expect to touch.
--->
-
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+The approach builds on the existing code structure without changing any public APIs. All modifications are internal to `EditorState` and `EditorController`.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Change `file_index` initialization to construction time
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+In `crates/editor/src/editor_state.rs`, modify `EditorState::new()` to initialize `file_index` eagerly:
 
-Example:
-
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+**Current code** (lines 224-225):
+```rust
+file_index: None,
+last_cache_version: 0,
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+**New code**:
+```rust
+file_index: Some(FileIndex::start(
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+)),
+last_cache_version: 0,
+```
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+This starts the background walk immediately at app startup. By the time the user presses Cmd+P (typically several seconds later), the walk will have discovered most or all files.
+
+### Step 2: Simplify `open_file_picker()` to remove conditional initialization
+
+In `crates/editor/src/editor_state.rs`, remove the conditional `FileIndex` creation from `open_file_picker()`:
+
+**Current code** (lines 442-449):
+```rust
+fn open_file_picker(&mut self) {
+    // Get the current working directory
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    // Initialize file_index if needed
+    if self.file_index.is_none() {
+        self.file_index = Some(FileIndex::start(cwd.clone()));
+    }
+```
+
+**New code**:
+```rust
+fn open_file_picker(&mut self) {
+    // file_index is initialized eagerly at EditorState construction time;
+    // Chunk: docs/chunks/picker_eager_index
+```
+
+Note: Remove the `cwd` variable entirely since it's no longer used. The rest of the function remains unchanged — it still queries the existing `file_index` and creates the selector widget.
+
+### Step 3: Add `tick_picker` call to `handle_key` in EditorController
+
+In `crates/editor/src/main.rs`, call `tick_picker()` at the end of `handle_key()`:
+
+**Current code** (lines 215-225):
+```rust
+fn handle_key(&mut self, event: KeyEvent) {
+    self.state.handle_key(event);
+
+    // Check for quit request
+    if self.state.should_quit {
+        self.terminate_app();
+        return;
+    }
+
+    self.render_if_dirty();
+}
+```
+
+**New code**:
+```rust
+fn handle_key(&mut self, event: KeyEvent) {
+    self.state.handle_key(event);
+
+    // Check for quit request
+    if self.state.should_quit {
+        self.terminate_app();
+        return;
+    }
+
+    // Poll for file index updates so picker results stream in on every keystroke
+    // Chunk: docs/chunks/picker_eager_index
+    let picker_dirty = self.state.tick_picker();
+    if picker_dirty.is_dirty() {
+        self.state.dirty_region.merge(picker_dirty);
+    }
+
+    self.render_if_dirty();
+}
+```
+
+### Step 4: Add `tick_picker` call to `handle_mouse` in EditorController
+
+In `crates/editor/src/main.rs`, call `tick_picker()` at the end of `handle_mouse()`:
+
+**Current code** (lines 228-231):
+```rust
+fn handle_mouse(&mut self, event: MouseEvent) {
+    self.state.handle_mouse(event);
+    self.render_if_dirty();
+}
+```
+
+**New code**:
+```rust
+fn handle_mouse(&mut self, event: MouseEvent) {
+    self.state.handle_mouse(event);
+
+    // Poll for file index updates so picker results stream in on mouse interaction
+    // Chunk: docs/chunks/picker_eager_index
+    let picker_dirty = self.state.tick_picker();
+    if picker_dirty.is_dirty() {
+        self.state.dirty_region.merge(picker_dirty);
+    }
+
+    self.render_if_dirty();
+}
+```
+
+### Step 5: Add `tick_picker` call to `handle_scroll` in EditorController
+
+In `crates/editor/src/main.rs`, call `tick_picker()` at the end of `handle_scroll()`:
+
+**Current code** (lines 236-239):
+```rust
+fn handle_scroll(&mut self, delta: ScrollDelta) {
+    self.state.handle_scroll(delta);
+    self.render_if_dirty();
+}
+```
+
+**New code**:
+```rust
+fn handle_scroll(&mut self, delta: ScrollDelta) {
+    self.state.handle_scroll(delta);
+
+    // Poll for file index updates so picker results stream in on scroll
+    // Chunk: docs/chunks/picker_eager_index
+    let picker_dirty = self.state.tick_picker();
+    if picker_dirty.is_dirty() {
+        self.state.dirty_region.merge(picker_dirty);
+    }
+
+    self.render_if_dirty();
+}
+```
+
+### Step 6: Run existing tests to verify no regressions
+
+```bash
+cargo test --package editor
+```
+
+All existing tests should pass. The behavioral changes are:
+- `FileIndex` is now always initialized (was lazy) — tests that create `EditorState` may see different timing, but `tick_picker()` already handles both `Some` and `None` cases.
+- `tick_picker()` is called more frequently — this is idempotent (returns `DirtyRegion::None` when no updates are needed).
+
+### Step 7: Manual smoke test
+
+1. Build and run the editor: `cargo run`
+2. Press Cmd+P immediately after launch (within ~100ms)
+3. Verify the picker shows the full file list (or a growing list if the walk is still running), not just recency entries
+4. Type a partial filename, verify results filter correctly
+5. Press Escape, wait a few seconds, press Cmd+P again, verify behavior is consistent
+6. If the project has many files, verify results stream in during initial walk (may require a larger project to observe)
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+None. This chunk builds on the existing `FileIndex`, `EditorState`, and `EditorController` infrastructure from the `fuzzy_file_matcher` and `file_picker` chunks.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Test timing sensitivity**: Some tests may have implicit assumptions about when `file_index` is initialized. The change from `None` to `Some(...)` at construction time could affect tests that check `file_index.is_none()`. Review test code to confirm no such assertions exist.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **CWD changes after startup**: If the working directory changes after `EditorState` construction (unlikely in practice), the `FileIndex` will continue indexing the original directory. This is pre-existing behavior (the lazy initialization also used `cwd` at first Cmd+P time, not at each Cmd+P time), so no change in behavior. If this becomes a concern, it could be addressed in a future chunk.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->
