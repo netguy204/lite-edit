@@ -17,6 +17,9 @@ use crate::event::TerminalEvent;
 pub struct PtyHandle {
     /// Writer to send input to PTY stdin.
     master: Box<dyn MasterPty + Send>,
+    /// Writer instance for sending input to the PTY.
+    /// Taken from master once at creation time.
+    writer: Box<dyn Write + Send>,
     /// The child process handle.
     child: Box<dyn Child + Send + Sync>,
     /// Receiver for terminal events from the reader thread.
@@ -87,6 +90,12 @@ impl PtyHandle {
             .try_clone_reader()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
+        // Take the writer once at creation time
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
         // Spawn reader thread
         let tx = event_tx.clone();
         let reader_thread = thread::spawn(move || {
@@ -114,6 +123,7 @@ impl PtyHandle {
 
         Ok(PtyHandle {
             master: pair.master,
+            writer,
             child,
             event_rx,
             reader_thread: Some(reader_thread),
@@ -123,11 +133,8 @@ impl PtyHandle {
 
     /// Writes data to the PTY stdin.
     pub fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
-        let mut writer = self
-            .master
-            .take_writer()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        writer.write_all(data)?;
+        self.writer.write_all(data)?;
+        self.writer.flush()?;
         Ok(())
     }
 

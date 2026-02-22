@@ -17,6 +17,9 @@ lite-edit-buffer = { path = "../buffer" }
 # Terminal emulator and agent lifecycle
 lite-edit-terminal = { path = "../terminal" }
 
+# Chunk: docs/chunks/terminal_input_encoding - Shared input types
+lite-edit-input = { path = "../input" }
+
 # Core Objective-C runtime bindings
 objc2 = "0.6"
 # Foundation framework (NSString, NSRunLoop, etc.)
@@ -43,6 +46,11 @@ notify = "6"
 tempfile = "3"
 
 [build-dependencies]
+
+# Chunk: docs/chunks/terminal_input_encoding - Library for shared types
+[lib]
+name = "lite_edit"
+path = "src/lib.rs"
 
 [[bin]]
 name = "lite-edit"
