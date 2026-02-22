@@ -1,5 +1,5 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
 code_paths: []
@@ -10,9 +10,13 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["scroll_bottom_deadzone", "terminal_tab_spawn", "workspace_switching", "cursor_blink_focus", "word_triclass_boundaries"]
+created_after:
+- scroll_bottom_deadzone
+- terminal_tab_spawn
+- workspace_switching
+- cursor_blink_focus
+- word_triclass_boundaries
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
