@@ -14,7 +14,9 @@ use std::rc::Rc;
 
 use alacritty_terminal::term::TermMode;
 
-use lite_edit_input::{Key, KeyEvent, MouseEvent, ScrollDelta};
+// Chunk: docs/chunks/terminal_clipboard_selection - MouseEventKind import for selection
+use lite_edit_buffer::{BufferView, Position};
+use lite_edit_input::{Key, KeyEvent, MouseEvent, MouseEventKind, ScrollDelta};
 
 use crate::input_encoder::InputEncoder;
 use crate::terminal_buffer::TerminalBuffer;
@@ -169,31 +171,159 @@ impl TerminalFocusTarget {
         }
     }
 
+    // Chunk: docs/chunks/terminal_clipboard_selection - Mouse handling for selection
     /// Handles a mouse event.
     ///
-    /// Mouse events are only sent to the PTY if the terminal has enabled
-    /// mouse reporting mode (e.g., TUI apps like htop, less with mouse mode).
-    pub fn handle_mouse(&mut self, event: MouseEvent, view_origin: (f32, f32)) -> bool {
+    /// When the terminal has mouse reporting mode enabled (e.g., TUI apps like
+    /// htop, vim), mouse events are forwarded to the PTY.
+    ///
+    /// When mouse mode is NOT active, mouse events are used for text selection:
+    /// - Click: Start a new selection (set anchor)
+    /// - Drag: Extend selection (set head)
+    /// - Double-click: Select word at click position
+    /// - Release: Finalize selection (clear if anchor == head)
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - The mouse event
+    /// * `view_origin` - Origin of the terminal view in the window (for coordinate adjustment)
+    /// * `viewport_offset` - The viewport scroll offset in lines (for mapping to document coordinates)
+    ///
+    /// # Returns
+    ///
+    /// `true` if the event was handled and the terminal should be re-rendered.
+    pub fn handle_mouse(
+        &mut self,
+        event: MouseEvent,
+        view_origin: (f32, f32),
+        viewport_offset: usize,
+    ) -> bool {
         let modes = self.terminal.borrow().term_mode();
 
-        // Check if any mouse mode is active
-        if !modes.intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG) {
-            return false;
+        // Check if any mouse mode is active - if so, forward to PTY
+        if modes.intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG) {
+            // Convert pixel position to cell coordinates
+            let (col, row) = self.pixel_to_cell(event.position, view_origin);
+
+            let bytes = InputEncoder::encode_mouse(&event, col, row, modes);
+
+            if bytes.is_empty() {
+                return false;
+            }
+
+            return match self.terminal.borrow_mut().write_input(&bytes) {
+                Ok(_) => true,
+                Err(_) => false,
+            };
         }
 
-        // Convert pixel position to cell coordinates
+        // Mouse mode not active - handle selection
         let (col, row) = self.pixel_to_cell(event.position, view_origin);
+        // Convert screen row to document line (accounting for viewport scroll)
+        let doc_line = viewport_offset + row;
+        let pos = Position::new(doc_line, col);
 
-        let bytes = InputEncoder::encode_mouse(&event, col, row, modes);
+        match event.kind {
+            MouseEventKind::Down => {
+                if event.click_count >= 2 {
+                    // Double-click: select word at position
+                    self.select_word_at(pos);
+                } else {
+                    // Single click: start new selection
+                    let mut terminal = self.terminal.borrow_mut();
+                    terminal.set_selection_anchor(pos);
+                    terminal.set_selection_head(pos);
+                }
+                true
+            }
+            MouseEventKind::Moved => {
+                // Only extend selection if we have an anchor (dragging)
+                let has_anchor = self.terminal.borrow().selection_anchor().is_some();
+                if has_anchor {
+                    self.terminal.borrow_mut().set_selection_head(pos);
+                    true
+                } else {
+                    false
+                }
+            }
+            MouseEventKind::Up => {
+                // Finalize selection - if anchor == head, clear selection
+                let terminal = self.terminal.borrow();
+                let anchor = terminal.selection_anchor();
+                let head = terminal.selection_head();
+                drop(terminal);
 
-        if bytes.is_empty() {
-            return false;
+                if anchor == head {
+                    self.terminal.borrow_mut().clear_selection();
+                }
+                true
+            }
+        }
+    }
+
+    // Chunk: docs/chunks/terminal_clipboard_selection - Word selection
+    /// Selects the word at the given position.
+    ///
+    /// Uses simple word boundary detection: words are contiguous runs of
+    /// alphanumeric characters. Whitespace and punctuation are word boundaries.
+    fn select_word_at(&mut self, pos: Position) {
+        let terminal = self.terminal.borrow();
+
+        // Get the line content
+        let Some(styled_line) = terminal.styled_line(pos.line) else {
+            return;
+        };
+
+        // Convert styled line to plain text
+        let line_text: String = styled_line.spans.iter()
+            .map(|span| span.text.as_str())
+            .collect();
+
+        let chars: Vec<char> = line_text.chars().collect();
+        if chars.is_empty() || pos.col >= chars.len() {
+            return;
         }
 
-        match self.terminal.borrow_mut().write_input(&bytes) {
-            Ok(_) => true,
-            Err(_) => false,
-        }
+        let click_char = chars[pos.col];
+
+        // Determine if we're clicking on a "word" character (alphanumeric) or "other"
+        let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
+
+        // Find word boundaries
+        let (start, end) = if is_word_char(click_char) {
+            // Find start of word
+            let mut start = pos.col;
+            while start > 0 && is_word_char(chars[start - 1]) {
+                start -= 1;
+            }
+            // Find end of word
+            let mut end = pos.col;
+            while end < chars.len() && is_word_char(chars[end]) {
+                end += 1;
+            }
+            (start, end)
+        } else if click_char.is_whitespace() {
+            // Select contiguous whitespace
+            let mut start = pos.col;
+            while start > 0 && chars[start - 1].is_whitespace() {
+                start -= 1;
+            }
+            let mut end = pos.col;
+            while end < chars.len() && chars[end].is_whitespace() {
+                end += 1;
+            }
+            (start, end)
+        } else {
+            // Select just the single character (punctuation, etc.)
+            (pos.col, pos.col + 1)
+        };
+
+        drop(terminal);
+
+        // Set selection
+        let mut terminal = self.terminal.borrow_mut();
+        terminal.set_selection_anchor(Position::new(pos.line, start));
+        terminal.set_selection_head(Position::new(pos.line, end));
     }
 
     /// Writes pasted text to the terminal, respecting bracketed paste mode.
@@ -242,7 +372,7 @@ impl TerminalFocusTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lite_edit_input::{Modifiers, MouseEventKind};
+    use lite_edit_input::Modifiers;
 
     fn create_test_terminal() -> Rc<RefCell<TerminalBuffer>> {
         Rc::new(RefCell::new(TerminalBuffer::new(80, 24, 1000)))
@@ -290,19 +420,25 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_mouse_no_mode() {
+    fn test_handle_mouse_no_mode_starts_selection() {
         let terminal = create_test_terminal();
-        let mut target = TerminalFocusTarget::new(terminal, 8.0, 16.0);
+        let mut target = TerminalFocusTarget::new(terminal.clone(), 8.0, 16.0);
 
-        // Without mouse mode active, mouse events should not be handled
+        // Without mouse mode active, mouse clicks should start selection
         let event = MouseEvent {
             kind: MouseEventKind::Down,
             position: (100.0, 200.0),
             modifiers: Modifiers::default(),
             click_count: 1,
         };
-        let result = target.handle_mouse(event, (0.0, 0.0));
-        assert!(!result);
+        // viewport_offset = 0, so row 12 (200/16) becomes doc line 12
+        let result = target.handle_mouse(event, (0.0, 0.0), 0);
+        assert!(result);
+
+        // Verify selection was started
+        let t = terminal.borrow();
+        assert!(t.selection_anchor().is_some());
+        assert!(t.selection_head().is_some());
     }
 
     #[test]
@@ -382,5 +518,105 @@ mod tests {
         let delta = ScrollDelta::new(0.0, -48.0);
         let action = target.handle_scroll(delta, 5, 10);
         assert_eq!(action, ScrollAction::Primary);
+    }
+
+    // =========================================================================
+    // Selection Tests
+    // Chunk: docs/chunks/terminal_clipboard_selection - Selection behavior tests
+    // =========================================================================
+
+    #[test]
+    fn test_click_sets_anchor() {
+        let terminal = create_test_terminal();
+        let mut target = TerminalFocusTarget::new(terminal.clone(), 10.0, 20.0);
+
+        // Click at pixel (50, 60) with cell size (10, 20) = col 5, row 3
+        let event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (50.0, 60.0),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        target.handle_mouse(event, (0.0, 0.0), 0);
+
+        let t = terminal.borrow();
+        assert_eq!(t.selection_anchor(), Some(Position::new(3, 5)));
+        assert_eq!(t.selection_head(), Some(Position::new(3, 5)));
+    }
+
+    #[test]
+    fn test_drag_extends_selection() {
+        let terminal = create_test_terminal();
+        let mut target = TerminalFocusTarget::new(terminal.clone(), 10.0, 20.0);
+
+        // Click to set anchor
+        let down_event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (50.0, 60.0),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        target.handle_mouse(down_event, (0.0, 0.0), 0);
+
+        // Drag to extend selection
+        let move_event = MouseEvent {
+            kind: MouseEventKind::Moved,
+            position: (150.0, 100.0), // col 15, row 5
+            modifiers: Modifiers::default(),
+            click_count: 0,
+        };
+        target.handle_mouse(move_event, (0.0, 0.0), 0);
+
+        let t = terminal.borrow();
+        assert_eq!(t.selection_anchor(), Some(Position::new(3, 5)));
+        assert_eq!(t.selection_head(), Some(Position::new(5, 15)));
+    }
+
+    #[test]
+    fn test_click_without_drag_clears_selection() {
+        let terminal = create_test_terminal();
+        let mut target = TerminalFocusTarget::new(terminal.clone(), 10.0, 20.0);
+
+        // Click to set anchor
+        let down_event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (50.0, 60.0),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        target.handle_mouse(down_event, (0.0, 0.0), 0);
+
+        // Release without moving (anchor == head)
+        let up_event = MouseEvent {
+            kind: MouseEventKind::Up,
+            position: (50.0, 60.0),
+            modifiers: Modifiers::default(),
+            click_count: 0,
+        };
+        target.handle_mouse(up_event, (0.0, 0.0), 0);
+
+        // Selection should be cleared since anchor == head
+        let t = terminal.borrow();
+        assert!(t.selection_anchor().is_none());
+        assert!(t.selection_head().is_none());
+    }
+
+    #[test]
+    fn test_selection_with_viewport_offset() {
+        let terminal = create_test_terminal();
+        let mut target = TerminalFocusTarget::new(terminal.clone(), 10.0, 20.0);
+
+        // Click at screen row 2 with viewport offset 100
+        // Should result in doc line 102
+        let event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (50.0, 40.0), // col 5, screen row 2
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        target.handle_mouse(event, (0.0, 0.0), 100);
+
+        let t = terminal.borrow();
+        assert_eq!(t.selection_anchor(), Some(Position::new(102, 5)));
     }
 }

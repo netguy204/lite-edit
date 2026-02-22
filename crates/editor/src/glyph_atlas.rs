@@ -1,4 +1,5 @@
 // Chunk: docs/chunks/glyph_rendering - Monospace glyph atlas + text rendering
+// Chunk: docs/chunks/terminal_background_box_drawing - On-demand glyph addition for terminal rendering
 //!
 //! Glyph atlas for texture-based text rendering
 //!
@@ -168,10 +169,8 @@ impl GlyphAtlas {
         let glyph_id = match font.glyph_for_char(c) {
             Some(id) => id,
             None => {
-                // No glyph for this character; use space as fallback
-                if c != ' ' {
-                    return self.add_glyph(font, ' ');
-                }
+                // No glyph for this character; return false to trigger
+                // fallback to space glyph in ensure_glyph
                 return false;
             }
         };
@@ -471,5 +470,145 @@ mod tests {
                 "UV min y should be less than max"
             );
         }
+    }
+
+    // ==================== On-demand glyph extension tests ====================
+    // Chunk: docs/chunks/terminal_background_box_drawing - Glyph atlas on-demand extension
+
+    #[test]
+    fn test_ensure_glyph_adds_on_demand() {
+        let device = get_test_device();
+        let font = Font::new("Menlo-Regular", 14.0, 1.0);
+        let mut atlas = GlyphAtlas::new(&device, &font);
+
+        // Box-drawing horizontal line (U+2500) should not be in atlas initially
+        assert!(
+            atlas.get_glyph('─').is_none(),
+            "Box-drawing char should not be pre-populated"
+        );
+
+        // ensure_glyph should add it on demand
+        let glyph = atlas.ensure_glyph(&font, '─');
+        assert!(glyph.is_some(), "ensure_glyph should add box-drawing char");
+
+        // Now get_glyph should find it
+        assert!(
+            atlas.get_glyph('─').is_some(),
+            "Box-drawing char should now be in atlas"
+        );
+    }
+
+    #[test]
+    fn test_box_drawing_characters_rasterize() {
+        let device = get_test_device();
+        let font = Font::new("Menlo-Regular", 14.0, 1.0);
+        let mut atlas = GlyphAtlas::new(&device, &font);
+
+        // Test common box-drawing characters
+        let box_chars = [
+            '─', // U+2500 horizontal line
+            '│', // U+2502 vertical line
+            '┌', // U+250C top-left corner
+            '┐', // U+2510 top-right corner
+            '└', // U+2514 bottom-left corner
+            '┘', // U+2518 bottom-right corner
+            '├', // U+251C vertical and right
+            '┤', // U+2524 vertical and left
+            '┬', // U+252C horizontal and down
+            '┴', // U+2534 horizontal and up
+            '┼', // U+253C cross
+        ];
+
+        for c in box_chars {
+            let glyph = atlas.ensure_glyph(&font, c);
+            assert!(
+                glyph.is_some(),
+                "Box-drawing char '{}' (U+{:04X}) should be rasterizable",
+                c,
+                c as u32
+            );
+
+            // Verify glyph has valid dimensions
+            let glyph = glyph.unwrap();
+            assert!(glyph.width > 0.0, "Glyph should have positive width");
+            assert!(glyph.height > 0.0, "Glyph should have positive height");
+        }
+    }
+
+    #[test]
+    fn test_block_element_characters_rasterize() {
+        let device = get_test_device();
+        let font = Font::new("Menlo-Regular", 14.0, 1.0);
+        let mut atlas = GlyphAtlas::new(&device, &font);
+
+        // Test common block element characters
+        let block_chars = [
+            '█', // U+2588 full block
+            '▀', // U+2580 upper half block
+            '▄', // U+2584 lower half block
+            '▌', // U+258C left half block
+            '▐', // U+2590 right half block
+            '░', // U+2591 light shade
+            '▒', // U+2592 medium shade
+            '▓', // U+2593 dark shade
+        ];
+
+        for c in block_chars {
+            let glyph = atlas.ensure_glyph(&font, c);
+            assert!(
+                glyph.is_some(),
+                "Block element '{}' (U+{:04X}) should be rasterizable",
+                c,
+                c as u32
+            );
+        }
+    }
+
+    #[test]
+    fn test_non_bmp_character_falls_back_to_space() {
+        let device = get_test_device();
+        let font = Font::new("Menlo-Regular", 14.0, 1.0);
+        let mut atlas = GlyphAtlas::new(&device, &font);
+
+        // Emoji (outside BMP, > U+FFFF) should fall back to space glyph
+        let emoji = '😀'; // U+1F600
+        let glyph = atlas.ensure_glyph(&font, emoji);
+
+        // Should return Some (the space glyph fallback)
+        assert!(
+            glyph.is_some(),
+            "Non-BMP char should fall back to space glyph"
+        );
+
+        // Copy the glyph data to release the borrow
+        let emoji_glyph = glyph.unwrap().clone();
+
+        // The glyph returned should be the space glyph (same UV coordinates)
+        let space_glyph = atlas.get_glyph(' ').unwrap();
+        assert_eq!(
+            space_glyph.uv_min, emoji_glyph.uv_min,
+            "Non-BMP char should get space glyph UV coords"
+        );
+    }
+
+    #[test]
+    fn test_ensure_glyph_is_idempotent() {
+        let device = get_test_device();
+        let font = Font::new("Menlo-Regular", 14.0, 1.0);
+        let mut atlas = GlyphAtlas::new(&device, &font);
+
+        // Call ensure_glyph multiple times for the same character
+        // Clone first result to release the borrow before second call
+        let glyph1 = atlas.ensure_glyph(&font, '─');
+        assert!(glyph1.is_some());
+        let g1 = glyph1.unwrap().clone();
+
+        let glyph2 = atlas.ensure_glyph(&font, '─');
+        assert!(glyph2.is_some());
+        let g2 = glyph2.unwrap();
+
+        // Should return the same glyph info (same UV coordinates)
+        assert_eq!(g1.uv_min, g2.uv_min, "ensure_glyph should be idempotent");
+        assert_eq!(g1.uv_max, g2.uv_max, "ensure_glyph should be idempotent");
     }
 }

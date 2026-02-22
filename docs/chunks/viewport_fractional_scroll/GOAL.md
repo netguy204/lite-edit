@@ -10,7 +10,7 @@ code_paths:
 - crates/editor/tests/viewport_test.rs
 code_references:
   - ref: crates/editor/src/viewport.rs#Viewport::scroll_offset_px
-    implements: "Private field storing pixel-accurate scroll position"
+    implements: "Public method returning pixel-accurate scroll position (delegates to RowScroller)"
   - ref: crates/editor/src/viewport.rs#Viewport::first_visible_line
     implements: "Derives integer line index from pixel offset via floor division"
   - ref: crates/editor/src/viewport.rs#Viewport::scroll_fraction_px

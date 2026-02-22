@@ -116,6 +116,10 @@ pub struct EditorState {
     /// Factory for creating PTY wakeup callbacks.
     /// Set by main.rs after controller creation.
     pty_wakeup_factory: Option<Arc<dyn Fn() -> PtyWakeup + Send + Sync>>,
+    // Chunk: docs/chunks/terminal_tab_initial_render - Deferred PTY poll for initial content
+    /// Flag indicating that a terminal tab was just created and needs
+    /// a deferred poll loop to capture the shell's initial output.
+    pending_terminal_created: bool,
 }
 
 // =============================================================================
@@ -285,6 +289,8 @@ impl EditorState {
             search_origin: Position::new(0, 0),
             // Chunk: docs/chunks/terminal_pty_wakeup - Initialize wakeup factory as None
             pty_wakeup_factory: None,
+            // Chunk: docs/chunks/terminal_tab_initial_render - Deferred PTY poll for initial content
+            pending_terminal_created: false,
         }
     }
 
@@ -1121,6 +1127,39 @@ impl EditorState {
             );
             self.focus_target.handle_key(event, &mut ctx);
         } else if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
+            // Chunk: docs/chunks/terminal_clipboard_selection - Terminal clipboard operations
+            // Check for Cmd+C (copy) and Cmd+V (paste) first
+            use crate::input::Key;
+
+            if event.modifiers.command && !event.modifiers.control {
+                match event.key {
+                    Key::Char('c') | Key::Char('C') => {
+                        // Cmd+C: copy selected text to clipboard
+                        if let Some(text) = terminal.selected_text() {
+                            crate::clipboard::copy_to_clipboard(&text);
+                            terminal.clear_selection();
+                        }
+                        // No-op if no selection (don't send interrupt)
+                        self.dirty_region.merge(DirtyRegion::FullViewport);
+                        return;
+                    }
+                    Key::Char('v') | Key::Char('V') => {
+                        // Cmd+V: paste from clipboard
+                        if let Some(text) = crate::clipboard::paste_from_clipboard() {
+                            // Use bracketed paste encoding
+                            let modes = terminal.term_mode();
+                            let bytes = InputEncoder::encode_paste(&text, modes);
+                            if !bytes.is_empty() {
+                                let _ = terminal.write_input(&bytes);
+                            }
+                        }
+                        self.dirty_region.merge(DirtyRegion::FullViewport);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+
             // Chunk: docs/chunks/terminal_scrollback_viewport - Snap to bottom on keypress
             // Terminal tab: encode key and send to PTY
             // First, snap to bottom if scrolled up in primary screen mode
@@ -1325,40 +1364,100 @@ impl EditorState {
             self.focus_target.handle_mouse(adjusted_event, &mut ctx);
         } else if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
             // Chunk: docs/chunks/terminal_mouse_offset - Fixed terminal mouse Y coordinate calculation
-            // Terminal tab: encode mouse event and send to PTY if mouse mode is enabled
+            // Chunk: docs/chunks/terminal_clipboard_selection - Terminal mouse selection
+            // Terminal tab: handle mouse events for selection or forward to PTY
             let modes = terminal.term_mode();
 
-            // Check if any mouse mode is active
+            // Calculate cell position from pixel coordinates
+            // Use the same coordinate transformation pattern as file buffers:
+            // 1. Subtract RAIL_WIDTH from x (content starts after left rail)
+            // 2. Flip y using content_height (NSView y=0 at bottom → content y=0 at top)
+            // 3. Add scroll_fraction_px to compensate for renderer's Y offset
+            let cell_width = self.font_metrics.advance_width;
+            let cell_height = self.font_metrics.line_height as f32;
+
+            let (x, y) = event.position;
+
+            // X coordinate: subtract rail width
+            let adjusted_x = (x - RAIL_WIDTH as f64).max(0.0);
+
+            // Y coordinate: flip using content_height (same as file buffer path)
+            // content_height = view_height - TAB_BAR_HEIGHT
+            let content_height = self.view_height as f64 - TAB_BAR_HEIGHT as f64;
+            let flipped_y = content_height - y;
+
+            // Account for scroll_fraction_px, matching pixel_to_buffer_position
+            // The renderer translates content by -scroll_fraction_px, so we add it back
+            let scroll_fraction_px = viewport.scroll_fraction_px() as f64;
+            let adjusted_y = (flipped_y + scroll_fraction_px).max(0.0);
+
+            let col = (adjusted_x / cell_width as f64) as usize;
+            let row = (adjusted_y / cell_height as f64) as usize;
+
+            // Check if any mouse mode is active - forward to PTY
             if modes.intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG) {
-                // Calculate cell position from pixel coordinates
-                // Use the same coordinate transformation pattern as file buffers:
-                // 1. Subtract RAIL_WIDTH from x (content starts after left rail)
-                // 2. Flip y using content_height (NSView y=0 at bottom → content y=0 at top)
-                // 3. Add scroll_fraction_px to compensate for renderer's Y offset
-                let cell_width = self.font_metrics.advance_width;
-                let cell_height = self.font_metrics.line_height as f32;
-
-                let (x, y) = event.position;
-
-                // X coordinate: subtract rail width
-                let adjusted_x = (x - RAIL_WIDTH as f64).max(0.0);
-
-                // Y coordinate: flip using content_height (same as file buffer path)
-                // content_height = view_height - TAB_BAR_HEIGHT
-                let content_height = self.view_height as f64 - TAB_BAR_HEIGHT as f64;
-                let flipped_y = content_height - y;
-
-                // Account for scroll_fraction_px, matching pixel_to_buffer_position
-                // The renderer translates content by -scroll_fraction_px, so we add it back
-                let scroll_fraction_px = viewport.scroll_fraction_px() as f64;
-                let adjusted_y = (flipped_y + scroll_fraction_px).max(0.0);
-
-                let col = (adjusted_x / cell_width as f64) as usize;
-                let row = (adjusted_y / cell_height as f64) as usize;
-
                 let bytes = InputEncoder::encode_mouse(&event, col, row, modes);
                 if !bytes.is_empty() {
                     let _ = terminal.write_input(&bytes);
+                }
+            } else {
+                // No mouse mode active - handle selection
+                use crate::input::MouseEventKind;
+
+                // Convert screen row to document line (accounting for viewport scroll)
+                let doc_line = viewport.first_visible_line() + row;
+                let pos = Position::new(doc_line, col);
+
+                match event.kind {
+                    MouseEventKind::Down => {
+                        if event.click_count >= 2 {
+                            // Double-click: select word at position
+                            // Chunk: docs/chunks/terminal_clipboard_selection - Word selection
+                            if let Some(styled_line) = terminal.styled_line(pos.line) {
+                                let line_text: String = styled_line.spans.iter()
+                                    .map(|span| span.text.as_str())
+                                    .collect();
+                                let chars: Vec<char> = line_text.chars().collect();
+                                if !chars.is_empty() && pos.col < chars.len() {
+                                    let click_char = chars[pos.col];
+                                    let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
+                                    let (start, end) = if is_word_char(click_char) {
+                                        let mut s = pos.col;
+                                        while s > 0 && is_word_char(chars[s - 1]) { s -= 1; }
+                                        let mut e = pos.col;
+                                        while e < chars.len() && is_word_char(chars[e]) { e += 1; }
+                                        (s, e)
+                                    } else if click_char.is_whitespace() {
+                                        let mut s = pos.col;
+                                        while s > 0 && chars[s - 1].is_whitespace() { s -= 1; }
+                                        let mut e = pos.col;
+                                        while e < chars.len() && chars[e].is_whitespace() { e += 1; }
+                                        (s, e)
+                                    } else {
+                                        (pos.col, pos.col + 1)
+                                    };
+                                    terminal.set_selection_anchor(Position::new(pos.line, start));
+                                    terminal.set_selection_head(Position::new(pos.line, end));
+                                }
+                            }
+                        } else {
+                            // Single click: start new selection
+                            terminal.set_selection_anchor(pos);
+                            terminal.set_selection_head(pos);
+                        }
+                    }
+                    MouseEventKind::Moved => {
+                        // Only extend selection if we have an anchor (dragging)
+                        if terminal.selection_anchor().is_some() {
+                            terminal.set_selection_head(pos);
+                        }
+                    }
+                    MouseEventKind::Up => {
+                        // Finalize selection - if anchor == head, clear selection
+                        if terminal.selection_anchor() == terminal.selection_head() {
+                            terminal.clear_selection();
+                        }
+                    }
                 }
             }
 
@@ -1367,6 +1466,7 @@ impl EditorState {
         }
         // Other tab types (AgentOutput, Diff): no-op
     }
+
 
     /// Handles a scroll event by forwarding to the active focus target.
     ///
@@ -1572,6 +1672,41 @@ impl EditorState {
         } else {
             DirtyRegion::None
         }
+    }
+
+    // Chunk: docs/chunks/terminal_tab_initial_render - Deferred PTY poll for initial content
+    /// Performs a spin-poll loop to capture a newly created terminal's initial output.
+    ///
+    /// When a terminal tab is created via `new_terminal_tab()`, the shell needs a few
+    /// milliseconds to start and produce its initial prompt. This method polls repeatedly
+    /// (up to 100ms total) until PTY output is detected, giving the shell time to start.
+    ///
+    /// This is called from the EditorController after key events to ensure the terminal
+    /// prompt appears immediately rather than waiting for the next timer tick (500ms).
+    ///
+    /// Returns `DirtyRegion::FullViewport` if any terminal activity was detected,
+    /// otherwise `DirtyRegion::None`.
+    pub fn spin_poll_terminal_startup(&mut self) -> DirtyRegion {
+        use std::time::Duration;
+
+        // Only do the spin-poll if a terminal was just created
+        if !self.pending_terminal_created {
+            return DirtyRegion::None;
+        }
+
+        // Clear the flag immediately
+        self.pending_terminal_created = false;
+
+        // Spin-poll for up to 100ms (10 iterations × 10ms) to give the shell time to start
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(10));
+            let dirty = self.poll_agents();
+            if dirty.is_dirty() {
+                return dirty;
+            }
+        }
+
+        DirtyRegion::None
     }
 
     /// Takes the dirty region, leaving `DirtyRegion::None` in its place.
@@ -2067,6 +2202,11 @@ impl EditorState {
         // Ensure the new tab is visible in the tab bar
         self.ensure_active_tab_visible();
         self.dirty_region.merge(DirtyRegion::FullViewport);
+
+        // Chunk: docs/chunks/terminal_tab_initial_render - Signal that a terminal needs startup polling
+        // Mark that a terminal was created so the controller can do a spin-poll
+        // to capture the shell's initial output (prompt) before rendering.
+        self.pending_terminal_created = true;
     }
 
     /// Scrolls the tab bar horizontally.
@@ -5639,5 +5779,68 @@ mod tests {
         let ws = state.editor.active_workspace().expect("workspace");
         let tab = ws.active_tab().expect("tab");
         assert!(tab.viewport.scroll_offset_px() >= 0.0);
+    }
+
+    // =========================================================================
+    // Terminal Initial Render Tests
+    // Chunk: docs/chunks/terminal_tab_initial_render - Tests for initial terminal rendering
+    // =========================================================================
+
+    /// Tests that poll_agents returns dirty after a new terminal tab is created
+    /// and the shell has had time to produce output.
+    ///
+    /// This validates the core requirement: when a terminal tab is created and
+    /// we poll for PTY events, we should eventually get a dirty region indicating
+    /// that the terminal has content to render.
+    #[test]
+    fn test_poll_agents_dirty_after_terminal_creation() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // The terminal shell needs time to start and produce output.
+        // Poll repeatedly until we get dirty activity.
+        let mut found_dirty = false;
+        for _ in 0..50 {
+            std::thread::sleep(Duration::from_millis(20));
+            let dirty = state.poll_agents();
+            if dirty.is_dirty() {
+                found_dirty = true;
+                break;
+            }
+        }
+
+        assert!(
+            found_dirty,
+            "poll_agents should return dirty when terminal produces output"
+        );
+    }
+
+    /// Tests that new_terminal_tab marks the viewport dirty.
+    ///
+    /// This is separate from the PTY output - the act of creating a terminal
+    /// tab should mark the viewport dirty so that at minimum an initial render
+    /// is triggered (even if it shows an empty terminal).
+    #[test]
+    fn test_new_terminal_tab_marks_dirty() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Clear any existing dirty state
+        let _ = state.take_dirty_region();
+        assert!(!state.is_dirty());
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Should be dirty after creating a tab
+        assert!(
+            state.is_dirty(),
+            "EditorState should be dirty after creating a terminal tab"
+        );
     }
 }

@@ -1,4 +1,5 @@
 // Chunk: docs/chunks/terminal_emulator - Terminal emulator backed by alacritty_terminal
+// Chunk: docs/chunks/terminal_background_box_drawing - Background color and box-drawing character tests
 //! Integration tests for the terminal crate.
 //!
 //! These tests verify that the terminal buffer works correctly with real
@@ -725,5 +726,430 @@ fn test_combined_attributes_captured() {
     assert!(
         found_combined,
         "Expected 'COMBINED' text with red, bold, and underline attributes"
+    );
+}
+
+// =============================================================================
+// Selection and clipboard integration tests
+// Chunk: docs/chunks/terminal_clipboard_selection - Selection and copy/paste tests
+// =============================================================================
+
+use lite_edit_buffer::Position;
+
+/// Test that selection state can be set and read back.
+#[test]
+fn test_selection_set_and_get() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Initially no selection
+    assert!(terminal.selection_anchor().is_none());
+    assert!(terminal.selection_head().is_none());
+
+    // Set selection
+    terminal.set_selection_anchor(Position::new(5, 10));
+    terminal.set_selection_head(Position::new(7, 20));
+
+    assert_eq!(terminal.selection_anchor(), Some(Position::new(5, 10)));
+    assert_eq!(terminal.selection_head(), Some(Position::new(7, 20)));
+
+    // Clear selection
+    terminal.clear_selection();
+    assert!(terminal.selection_anchor().is_none());
+    assert!(terminal.selection_head().is_none());
+}
+
+/// Test that selection_range returns positions in document order.
+#[test]
+fn test_selection_range_ordering() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Forward selection
+    terminal.set_selection_anchor(Position::new(5, 10));
+    terminal.set_selection_head(Position::new(7, 20));
+    let range = terminal.selection_range();
+    assert_eq!(range, Some((Position::new(5, 10), Position::new(7, 20))));
+
+    // Backward selection - should still return in document order
+    terminal.set_selection_anchor(Position::new(7, 20));
+    terminal.set_selection_head(Position::new(5, 10));
+    let range = terminal.selection_range();
+    assert_eq!(range, Some((Position::new(5, 10), Position::new(7, 20))));
+
+    // No selection when anchor equals head
+    terminal.set_selection_anchor(Position::new(5, 10));
+    terminal.set_selection_head(Position::new(5, 10));
+    assert!(terminal.selection_range().is_none());
+}
+
+/// Test that selection is cleared when new PTY output arrives.
+#[test]
+fn test_selection_cleared_on_output() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+    terminal.spawn_shell("/bin/sh", Path::new("/tmp")).unwrap();
+
+    // Wait for initial prompt
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Set a selection
+    terminal.set_selection_anchor(Position::new(0, 0));
+    terminal.set_selection_head(Position::new(1, 10));
+    assert!(terminal.selection_range().is_some());
+
+    // Generate more output by sending a command
+    terminal.write_input(b"echo test\n").unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Selection should be cleared
+    assert!(terminal.selection_anchor().is_none());
+    assert!(terminal.selection_head().is_none());
+}
+
+/// Test that selected_text extracts correct content from terminal grid.
+#[test]
+fn test_selected_text_extraction() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Output some text to select
+    terminal
+        .spawn_command("printf", &["Hello World\\nTest Line\\n"], Path::new("/tmp"))
+        .unwrap();
+
+    // Wait for output
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Find the line with "Hello World"
+    let mut hello_line = None;
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            let text: String = styled.spans.iter().map(|s| &s.text[..]).collect();
+            if text.contains("Hello World") {
+                hello_line = Some(line);
+                break;
+            }
+        }
+    }
+
+    let hello_line = hello_line.expect("Should find 'Hello World' in output");
+
+    // Select "World" (columns 6-11 on that line)
+    terminal.set_selection_anchor(Position::new(hello_line, 6));
+    terminal.set_selection_head(Position::new(hello_line, 11));
+
+    let selected = terminal.selected_text();
+    assert!(
+        selected.is_some(),
+        "Should have selected text"
+    );
+    let selected = selected.unwrap();
+    assert!(
+        selected.contains("World"),
+        "Selected text should contain 'World', got: {:?}",
+        selected
+    );
+}
+
+// =============================================================================
+// Initial render tests
+// Chunk: docs/chunks/terminal_tab_initial_render - Tests for initial terminal content
+// =============================================================================
+
+/// Test that a shell produces visible content after spawning.
+///
+/// This test verifies the core requirement: when a shell is spawned and polled,
+/// it should produce visible content (e.g., a prompt). This is the terminal-level
+/// behavior that underlies the editor's initial render fix.
+#[test]
+fn test_shell_produces_content_after_poll() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+    terminal.spawn_shell("/bin/sh", Path::new("/tmp")).unwrap();
+
+    // Poll multiple times with brief delays to give shell time to produce output
+    let mut has_content = false;
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(20));
+        terminal.poll_events();
+
+        // Check if any line has non-whitespace content
+        for line in 0..terminal.line_count() {
+            if let Some(styled) = terminal.styled_line(line) {
+                let text: String = styled.spans.iter().map(|s| &s.text[..]).collect();
+                if text.trim().len() > 0 {
+                    has_content = true;
+                    break;
+                }
+            }
+        }
+        if has_content {
+            break;
+        }
+    }
+
+    assert!(
+        has_content,
+        "Shell should produce visible content (e.g., prompt) after polling"
+    );
+}
+
+/// Test that poll_events returns true when there is PTY output.
+///
+/// This validates the dirty tracking mechanism that the editor uses to determine
+/// whether a re-render is needed after terminal creation.
+#[test]
+fn test_poll_events_returns_true_on_output() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+    terminal.spawn_shell("/bin/sh", Path::new("/tmp")).unwrap();
+
+    // The shell should produce output (prompt) shortly after spawning.
+    // Poll until we get true from poll_events.
+    let mut got_output = false;
+    for _ in 0..50 {
+        std::thread::sleep(Duration::from_millis(20));
+        if terminal.poll_events() {
+            got_output = true;
+            break;
+        }
+    }
+
+    assert!(
+        got_output,
+        "poll_events should return true when shell produces output"
+    );
+}
+
+// =============================================================================
+// Background color rendering tests
+// Chunk: docs/chunks/terminal_background_box_drawing - Background color verification
+// =============================================================================
+
+/// Test that 256-color indexed background colors are captured.
+#[test]
+fn test_indexed_background_color_captured() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Output text with 256-color background: \e[48;5;196m sets bg to color 196 (red)
+    terminal
+        .spawn_command(
+            "printf",
+            &["\\033[48;5;196mREDBG256\\033[0m"],
+            Path::new("/tmp"),
+        )
+        .unwrap();
+
+    // Wait for output
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Find "REDBG256" and verify it has indexed background color 196
+    let mut found_indexed_bg = false;
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            for span in &styled.spans {
+                if span.text.contains("REDBG256") {
+                    if let Color::Indexed(idx) = span.style.bg {
+                        if idx == 196 {
+                            found_indexed_bg = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if found_indexed_bg {
+            break;
+        }
+    }
+    assert!(
+        found_indexed_bg,
+        "Expected 'REDBG256' text with indexed background color 196"
+    );
+}
+
+/// Test that RGB truecolor background is captured.
+#[test]
+fn test_rgb_background_color_captured() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Output text with RGB truecolor background: \e[48;2;64;128;255m sets bg to RGB(64, 128, 255)
+    terminal
+        .spawn_command(
+            "printf",
+            &["\\033[48;2;64;128;255mRGBBG\\033[0m"],
+            Path::new("/tmp"),
+        )
+        .unwrap();
+
+    // Wait for output
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Find "RGBBG" and verify it has the correct RGB background color
+    let mut found_rgb_bg = false;
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            for span in &styled.spans {
+                if span.text.contains("RGBBG") {
+                    if let Color::Rgb { r, g, b } = span.style.bg {
+                        if r == 64 && g == 128 && b == 255 {
+                            found_rgb_bg = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if found_rgb_bg {
+            break;
+        }
+    }
+    assert!(
+        found_rgb_bg,
+        "Expected 'RGBBG' text with RGB background color (64, 128, 255)"
+    );
+}
+
+/// Test that combined foreground and background colors are captured.
+#[test]
+fn test_combined_fg_bg_colors_captured() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Output text with red foreground on blue background: \e[31;44m
+    terminal
+        .spawn_command(
+            "printf",
+            &["\\033[31;44mFGBG\\033[0m"],
+            Path::new("/tmp"),
+        )
+        .unwrap();
+
+    // Wait for output
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Find "FGBG" and verify it has red foreground and blue background
+    let mut found_combined = false;
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            for span in &styled.spans {
+                if span.text.contains("FGBG") {
+                    if span.style.fg == Color::Named(NamedColor::Red)
+                        && span.style.bg == Color::Named(NamedColor::Blue)
+                    {
+                        found_combined = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if found_combined {
+            break;
+        }
+    }
+    assert!(
+        found_combined,
+        "Expected 'FGBG' text with red foreground and blue background"
+    );
+}
+
+// =============================================================================
+// Box-drawing character tests
+// Chunk: docs/chunks/terminal_background_box_drawing - Box-drawing character verification
+// =============================================================================
+
+/// Test that box-drawing characters are captured in terminal output.
+#[test]
+fn test_box_drawing_characters_captured() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Output a simple box using Unicode box-drawing characters
+    // ┌──┐
+    // │  │
+    // └──┘
+    // We use printf with the raw UTF-8 characters since macOS printf doesn't
+    // support \u escape sequences.
+    terminal
+        .spawn_command(
+            "printf",
+            &["%s\n%s\n%s\n", "┌──┐", "│  │", "└──┘"],
+            Path::new("/tmp"),
+        )
+        .unwrap();
+
+    // Wait for output
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Find box-drawing characters in output
+    let mut found_horizontal = false;  // ─ U+2500
+    let mut found_vertical = false;    // │ U+2502
+    let mut found_corner = false;      // ┌ U+250C
+
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            for span in &styled.spans {
+                if span.text.contains('─') {
+                    found_horizontal = true;
+                }
+                if span.text.contains('│') {
+                    found_vertical = true;
+                }
+                if span.text.contains('┌') {
+                    found_corner = true;
+                }
+            }
+        }
+    }
+    assert!(
+        found_horizontal && found_vertical && found_corner,
+        "Expected box-drawing characters: horizontal={}, vertical={}, corner={}",
+        found_horizontal,
+        found_vertical,
+        found_corner
+    );
+}
+
+/// Test that block element characters are captured in terminal output.
+#[test]
+fn test_block_element_characters_captured() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Output block elements: █ (full block U+2588), ▀ (upper half U+2580)
+    // We use printf with the raw UTF-8 characters since macOS printf doesn't
+    // support \u escape sequences.
+    terminal
+        .spawn_command(
+            "printf",
+            &["%s\n", "█▀"],
+            Path::new("/tmp"),
+        )
+        .unwrap();
+
+    // Wait for output
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Find block element characters in output
+    let mut found_full_block = false;   // █ U+2588
+    let mut found_upper_half = false;   // ▀ U+2580
+
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            for span in &styled.spans {
+                if span.text.contains('█') {
+                    found_full_block = true;
+                }
+                if span.text.contains('▀') {
+                    found_upper_half = true;
+                }
+            }
+        }
+    }
+    assert!(
+        found_full_block && found_upper_half,
+        "Expected block elements: full_block={}, upper_half={}",
+        found_full_block,
+        found_upper_half
     );
 }

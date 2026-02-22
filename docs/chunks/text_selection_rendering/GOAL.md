@@ -17,9 +17,7 @@ code_references:
   - ref: crates/editor/src/renderer.rs#Renderer::render_text
     implements: "Three-pass draw with separate fragment color uniforms per quad category"
   - ref: crates/buffer/src/text_buffer.rs#TextBuffer::selection_anchor
-    implements: "Exposes selection anchor for renderer buffer sync"
-  - ref: crates/editor/src/main.rs#EditorController::sync_renderer_buffer
-    implements: "Syncs selection anchor from edit buffer to renderer buffer"
+    implements: "Exposes selection anchor position for selection_range() calculation"
 narrative: editor_qol_interactions
 investigation: null
 subsystems: []
