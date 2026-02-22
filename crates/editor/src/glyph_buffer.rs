@@ -704,9 +704,11 @@ impl GlyphBuffer {
                         };
 
                         // Generate the quad vertices with per-span fg color
-                        // Chunk: docs/chunks/content_tab_bar - Apply y_offset for tab bar
+                        // Chunk: docs/chunks/tab_bar_layout_fixes - Apply both x_offset and y_offset
+                        // Previously used quad_vertices_with_offset which only applied y_offset,
+                        // causing glyphs to render without the left rail offset (x_offset).
                         let effective_y_offset = y_offset - self.y_offset;
-                        let quad = self.layout.quad_vertices_with_offset(screen_row, col, glyph, effective_y_offset, fg);
+                        let quad = self.layout.quad_vertices_with_xy_offset(screen_row, col, glyph, self.x_offset, effective_y_offset, fg);
                         vertices.extend_from_slice(&quad);
 
                         indices.push(vertex_offset);
@@ -1714,5 +1716,91 @@ mod tests {
         assert_eq!(range.start, 10);
         assert_eq!(range.count, 24);
         assert!(!range.is_empty());
+    }
+
+    // ==================== Tab Bar/Rail Offset Tests ====================
+    // Chunk: docs/chunks/tab_bar_layout_fixes - Glyph positioning with content offsets
+
+    #[test]
+    fn test_position_for_with_xy_offset() {
+        // Test that position_for_with_xy_offset correctly applies both offsets
+        let layout = GlyphLayout::from_metrics(&test_metrics());
+
+        // With x_offset=56 (RAIL_WIDTH) and y_offset=-32 (negative to shift DOWN for tab bar)
+        // Note: y_offset is SUBTRACTED in the calculation, so passing 32 shifts DOWN
+        let (x, y) = layout.position_for_with_xy_offset(0, 0, 56.0, -32.0);
+
+        // x should be 0 + 56 = 56
+        assert_eq!(x, 56.0);
+        // y should be 0 - (-32) = 32 (shifted down by 32 for tab bar)
+        assert_eq!(y, 32.0);
+    }
+
+    #[test]
+    fn test_quad_vertices_with_xy_offset() {
+        // Test that glyph quads are correctly positioned with both offsets
+        let layout = GlyphLayout::from_metrics(&test_metrics());
+
+        let glyph = GlyphInfo {
+            uv_min: (0.0, 0.0),
+            uv_max: (0.1, 0.2),
+            width: 10.0,
+            height: 18.0,
+            bearing_x: 0.0,
+            bearing_y: 12.0,
+        };
+
+        let test_color = [1.0, 0.5, 0.0, 1.0];
+        // x_offset=56 (RAIL_WIDTH), y_offset=-32 (to shift DOWN by 32 for tab bar)
+        let quad = layout.quad_vertices_with_xy_offset(0, 0, &glyph, 56.0, -32.0, test_color);
+
+        // Glyph at row 0, col 0 with offsets should be at:
+        // x = 0 * 8 + 56 = 56
+        // y = 0 * 16 - (-32) = 32
+        assert_eq!(quad[0].position, [56.0, 32.0]);    // top-left
+        assert_eq!(quad[1].position, [66.0, 32.0]);    // top-right (56 + 10)
+        assert_eq!(quad[2].position, [66.0, 50.0]);    // bottom-right (32 + 18)
+        assert_eq!(quad[3].position, [56.0, 50.0]);    // bottom-left
+    }
+
+    #[test]
+    fn test_selection_quad_with_offset_applies_x_offset() {
+        // Selection quads should also apply x_offset
+        let mut glyph_buffer = GlyphBuffer::new(&test_metrics());
+        glyph_buffer.set_x_offset(56.0); // RAIL_WIDTH
+        glyph_buffer.set_y_offset(32.0); // TAB_BAR_HEIGHT
+
+        let solid = test_solid_glyph();
+        let color = test_color();
+
+        // Selection at row 0, cols 0-1, with y_offset=0 (no fractional scroll)
+        let quad = glyph_buffer.create_selection_quad_with_offset(0, 0, 1, &solid, 0.0, color);
+
+        // With x_offset=56 and y_offset=32 (shifted down):
+        // x = 0 + 56 = 56
+        // y = 0 - (0 - 32) = 32 (effective_y_offset = y_offset - self.y_offset = 0 - 32 = -32)
+        assert_eq!(quad[0].position, [56.0, 32.0]);    // top-left
+        assert_eq!(quad[1].position, [64.0, 32.0]);    // top-right (56 + 8)
+        assert_eq!(quad[2].position, [64.0, 48.0]);    // bottom-right (32 + 16)
+        assert_eq!(quad[3].position, [56.0, 48.0]);    // bottom-left
+    }
+
+    #[test]
+    fn test_cursor_quad_with_offset_applies_x_offset() {
+        // Cursor quads should also apply x_offset
+        let mut glyph_buffer = GlyphBuffer::new(&test_metrics());
+        glyph_buffer.set_x_offset(56.0); // RAIL_WIDTH
+        glyph_buffer.set_y_offset(32.0); // TAB_BAR_HEIGHT
+
+        let solid = test_solid_glyph();
+        let color = test_color();
+
+        // Cursor at row 0, col 0, with y_offset=0 (no fractional scroll)
+        let quad = glyph_buffer.create_cursor_quad_with_offset(0, 0, &solid, 0.0, color);
+
+        // With x_offset=56 and y_offset=32:
+        // x = 0 + 56 = 56
+        // y = 0 - (0 - 32) = 32
+        assert_eq!(quad[0].position, [56.0, 32.0]);    // top-left
     }
 }

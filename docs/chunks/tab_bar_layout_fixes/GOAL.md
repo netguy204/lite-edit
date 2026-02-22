@@ -1,21 +1,27 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: content_tab_bar
 code_paths:
-  - crates/editor/src/renderer.rs
-  - crates/editor/src/editor_state.rs
-  - crates/editor/src/glyph_buffer.rs
+- crates/editor/src/renderer.rs
+- crates/editor/src/editor_state.rs
+- crates/editor/src/glyph_buffer.rs
 code_references: []
 narrative: null
 investigation: null
 subsystems: []
 friction_entries: []
 bug_type: implementation
-depends_on: ["content_tab_bar"]
-created_after: ["agent_lifecycle", "content_tab_bar", "terminal_input_encoding", "find_in_file", "cursor_wrap_scroll_alignment", "row_scroller_extract"]
+depends_on:
+- content_tab_bar
+created_after:
+- agent_lifecycle
+- content_tab_bar
+- terminal_input_encoding
+- find_in_file
+- cursor_wrap_scroll_alignment
+- row_scroller_extract
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
