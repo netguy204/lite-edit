@@ -1,4 +1,5 @@
 // Chunk: docs/chunks/content_tab_bar - Content tab bar rendering and interaction
+// Chunk: docs/chunks/tab_bar_interaction - Label derivation and left-truncation
 //!
 //! Tab bar layout and rendering for content tabs within a workspace.
 //!
@@ -29,7 +30,7 @@ use crate::glyph_atlas::{GlyphAtlas, GlyphInfo};
 use crate::glyph_buffer::{GlyphLayout, GlyphVertex, QuadRange};
 use crate::left_rail::RAIL_WIDTH;
 use crate::shader::VERTEX_SIZE;
-use crate::workspace::{Tab, Workspace};
+use crate::workspace::{Tab, TabKind, Workspace};
 
 // =============================================================================
 // Layout Constants
@@ -231,10 +232,33 @@ pub struct TabInfo {
 }
 
 impl TabInfo {
+    // Chunk: docs/chunks/tab_bar_interaction - Derive label from associated_file for file tabs
     /// Creates a TabInfo from a Tab.
+    ///
+    /// For file tabs (`TabKind::File`), the label is derived from the `associated_file`
+    /// path at render time, using the filename component. This ensures the label always
+    /// reflects the current file path rather than a stale snapshot.
+    ///
+    /// For non-file tabs (Terminal, AgentOutput, Diff), the static `tab.label` is used.
     pub fn from_tab(tab: &Tab, index: usize, is_active: bool) -> Self {
+        let label = match tab.kind {
+            TabKind::File => {
+                // Derive label from associated_file for file tabs
+                tab.associated_file
+                    .as_ref()
+                    .and_then(|path| path.file_name())
+                    .and_then(|name| name.to_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "Untitled".to_string())
+            }
+            // Non-file tabs use the static label
+            TabKind::Terminal | TabKind::AgentOutput | TabKind::Diff => {
+                tab.label.clone()
+            }
+        };
+
         Self {
-            label: tab.label.clone(),
+            label,
             is_active,
             is_dirty: tab.dirty,
             is_unread: tab.unread,
@@ -635,12 +659,27 @@ impl TabBarGlyphBuffer {
             let available_width = close_button_left - label_x - CLOSE_BUTTON_GAP;
             let max_chars = (available_width / self.layout.glyph_width).floor() as usize;
 
-            // Truncate label if needed
-            let label: String = if tab_info.label.chars().count() > max_chars && max_chars > 3 {
-                let truncated: String = tab_info.label.chars().take(max_chars - 1).collect();
-                format!("{}…", truncated)
-            } else {
-                tab_info.label.chars().take(max_chars).collect()
+            // Chunk: docs/chunks/tab_bar_interaction - Left-truncation to preserve file extension
+            // Truncate from the left when label exceeds available space, preserving the
+            // end of the filename (which typically contains the extension and distinguishing chars)
+            let label: String = {
+                let char_count = tab_info.label.chars().count();
+                if char_count > max_chars && max_chars > 1 {
+                    // Left-truncate: skip (char_count - max_chars + 1) chars, prepend ellipsis
+                    let skip = char_count - max_chars + 1;
+                    let truncated: String = tab_info.label.chars().skip(skip).collect();
+                    format!("…{}", truncated)
+                } else if char_count > max_chars {
+                    // max_chars is 0 or 1, and label is longer - just show ellipsis or nothing
+                    if max_chars >= 1 {
+                        "…".to_string()
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    // Label fits within max_chars
+                    tab_info.label.clone()
+                }
             };
 
             for (char_idx, c) in label.chars().enumerate() {
@@ -1042,5 +1081,159 @@ mod tests {
         assert_eq!(tabs[0].label, "unique.rs");
         assert_eq!(tabs[1].label, "foo/mod.rs");
         assert_eq!(tabs[2].label, "bar/mod.rs");
+    }
+
+    // =========================================================================
+    // Derived Label Tests (Chunk: docs/chunks/tab_bar_interaction)
+    // =========================================================================
+
+    #[test]
+    fn test_file_tab_label_derived_from_associated_file() {
+        use std::path::PathBuf;
+        use crate::workspace::{Tab, Workspace};
+        use lite_edit_buffer::TextBuffer;
+
+        let mut ws = Workspace::new(1, "test".to_string(), PathBuf::from("/test"));
+
+        // Create a file tab with a stale label but valid associated_file
+        // The label should be derived from associated_file, not from tab.label
+        let tab = Tab::new_file(
+            1,
+            TextBuffer::new(),
+            "stale_label.txt".to_string(), // This is the stale snapshot
+            Some(PathBuf::from("/test/actual_filename.rs")), // This is the truth
+            16.0,
+        );
+        ws.tabs.push(tab);
+
+        let tabs = tabs_from_workspace(&ws);
+
+        // Label should come from associated_file's file_name(), not the stale label
+        assert_eq!(tabs[0].label, "actual_filename.rs");
+    }
+
+    #[test]
+    fn test_file_tab_label_untitled_when_no_associated_file() {
+        use std::path::PathBuf;
+        use crate::workspace::{Tab, Workspace};
+        use lite_edit_buffer::TextBuffer;
+
+        let mut ws = Workspace::new(1, "test".to_string(), PathBuf::from("/test"));
+
+        // Create a file tab with no associated file
+        let tab = Tab::new_file(
+            1,
+            TextBuffer::new(),
+            "SomeLabel".to_string(),
+            None, // No associated file
+            16.0,
+        );
+        ws.tabs.push(tab);
+
+        let tabs = tabs_from_workspace(&ws);
+
+        // Label should fall back to "Untitled" when associated_file is None
+        assert_eq!(tabs[0].label, "Untitled");
+    }
+
+    #[test]
+    fn test_non_file_tab_uses_static_label() {
+        use std::path::PathBuf;
+        use crate::workspace::{Tab, Workspace};
+        use lite_edit_terminal::TerminalBuffer;
+
+        let mut ws = Workspace::new(1, "test".to_string(), PathBuf::from("/test"));
+
+        // Create a terminal tab - should use the static label
+        let terminal = TerminalBuffer::new(80, 24, 1000);
+        let tab = Tab::new_terminal(1, terminal, "My Terminal".to_string(), 16.0);
+        ws.tabs.push(tab);
+
+        let tabs = tabs_from_workspace(&ws);
+
+        // Terminal tabs should use the static tab.label
+        assert_eq!(tabs[0].label, "My Terminal");
+    }
+
+    #[test]
+    fn test_agent_tab_uses_static_label() {
+        use std::path::PathBuf;
+        use crate::workspace::{Tab, Workspace};
+
+        let mut ws = Workspace::new(1, "test".to_string(), PathBuf::from("/test"));
+
+        // Create an agent tab - should use the static label
+        let tab = Tab::new_agent(1, "Claude Agent".to_string(), 16.0);
+        ws.tabs.push(tab);
+
+        let tabs = tabs_from_workspace(&ws);
+
+        // Agent tabs should use the static tab.label
+        assert_eq!(tabs[0].label, "Claude Agent");
+    }
+
+    // =========================================================================
+    // Left-Truncation Tests (Chunk: docs/chunks/tab_bar_interaction)
+    // =========================================================================
+
+    #[test]
+    fn test_left_truncation_preserves_end() {
+        // Test helper function for left-truncation behavior
+        // This mirrors the logic that will be implemented in TabBarGlyphBuffer::update
+        fn left_truncate(label: &str, max_chars: usize) -> String {
+            let char_count = label.chars().count();
+            if char_count > max_chars && max_chars > 1 {
+                // Left-truncate: skip (char_count - max_chars + 1) chars, prepend ellipsis
+                let skip = char_count - max_chars + 1;
+                let truncated: String = label.chars().skip(skip).collect();
+                format!("…{}", truncated)
+            } else if char_count > max_chars {
+                // max_chars is 0 or 1, and label is longer - just show ellipsis or nothing
+                if max_chars >= 1 {
+                    "…".to_string()
+                } else {
+                    String::new()
+                }
+            } else {
+                // Label fits within max_chars
+                label.to_string()
+            }
+        }
+
+        // Long filename should be left-truncated
+        assert_eq!(
+            left_truncate("very_long_module_name.rs", 10),
+            "…e_name.rs"
+        );
+
+        // Disambiguated path should also be left-truncated
+        assert_eq!(
+            left_truncate("src/main.rs", 8),
+            "…main.rs"
+        );
+
+        // Short labels should be unchanged
+        assert_eq!(
+            left_truncate("short.rs", 10),
+            "short.rs"
+        );
+
+        // Exact fit should be unchanged
+        assert_eq!(
+            left_truncate("exactly10!", 10),
+            "exactly10!"
+        );
+
+        // Edge case: max_chars = 1 should just be ellipsis
+        assert_eq!(
+            left_truncate("anything", 1),
+            "…"
+        );
+
+        // Edge case: max_chars = 0 should be empty
+        assert_eq!(
+            left_truncate("anything", 0),
+            ""
+        );
     }
 }
