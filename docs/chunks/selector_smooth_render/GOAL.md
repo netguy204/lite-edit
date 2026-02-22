@@ -1,19 +1,25 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
 code_paths:
-  - crates/editor/src/selector_overlay.rs
+- crates/editor/src/selector_overlay.rs
 code_references: []
 narrative: file_picker_viewport
 investigation: null
 subsystems: []
 friction_entries: []
 bug_type: null
-depends_on: ["selector_row_scroller"]
-created_after: ["renderer_styled_content", "terminal_emulator", "terminal_file_backed_scrollback", "workspace_model", "file_picker_mini_buffer", "mini_buffer_model"]
+depends_on:
+- selector_row_scroller
+created_after:
+- renderer_styled_content
+- terminal_emulator
+- terminal_file_backed_scrollback
+- workspace_model
+- file_picker_mini_buffer
+- mini_buffer_model
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

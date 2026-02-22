@@ -8,170 +8,142 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk modifies `SelectorGlyphBuffer::update_from_widget` in
+`crates/editor/src/selector_overlay.rs` to consume the fractional scroll state
+from `SelectorWidget`, enabling smooth sub-row scrolling in the file picker
+list. The changes mirror the pattern already established in the main buffer
+renderer.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Strategy:**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. **Read `scroll_fraction_px()` from the widget** — The `selector_row_scroller`
+   chunk already exposes this method on `SelectorWidget`.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/selector_smooth_render/GOAL.md)
-with references to the files that you expect to touch.
--->
+2. **Offset list origin by fractional scroll** — Compute `list_y = list_origin_y
+   - frac` so the top item is partially clipped when `scroll_fraction_px > 0`.
+
+3. **Use `visible_item_range()` for the item loop** — This delegates range
+   calculation to `RowScroller`, which already includes the +1 extra row for
+   partial bottom visibility.
+
+4. **Compute each item's Y from the draw index** — Use `draw_idx` (loop index)
+   rather than the absolute item index, since we're iterating over a slice that
+   already starts at `first_visible_item()`.
+
+5. **Apply the same offset to the selection highlight** — The highlight quad Y
+   must be computed using `list_y` and the visible offset of `selected_index`
+   relative to `first_visible_item()`.
+
+**What changes:**
+- `SelectorGlyphBuffer::update_from_widget()`: Item text rendering and selection
+  highlight positioning.
+
+**What does NOT change:**
+- `calculate_overlay_geometry()` — No changes needed.
+- `OverlayGeometry` struct — No changes needed.
+- Panel background and separator rendering — These use fixed geometry.
+
+**Testing approach:**
+
+Following docs/trunk/TESTING_PHILOSOPHY.md, the existing unit tests in
+`selector_overlay.rs` verify geometry calculations. Since the rendering changes
+affect only the Y positioning of quads (which requires a GPU to observe), we
+rely on:
+
+1. Visual verification that trackpad scrolling produces smooth motion.
+2. The existing `selector.rs` tests that verify `scroll_fraction_px()` and
+   `visible_item_range()` work correctly.
+3. The `selector_hittest_tests` chunk (next in the narrative) will add
+   property-based tests to ensure clicks land on the correct rows.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems are relevant to this chunk. The changes are localized to the
+selector overlay rendering code and don't touch any cross-cutting patterns.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Update item list rendering to use fractional scroll offset
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Modify the "Phase 6: Item Text" section of `update_from_widget()` to:
 
-Example:
+1. Read `scroll_fraction_px()` from the widget at the start of the method.
+2. Compute `list_y = geometry.list_origin_y - frac` as the base Y for item
+   rendering.
+3. Replace the current item iteration:
+   ```rust
+   for (i, item) in items
+       .iter()
+       .skip(widget.first_visible_item())
+       .take(geometry.visible_items)
+       .enumerate()
+   ```
+   with iteration over `widget.visible_item_range()`:
+   ```rust
+   let range = widget.visible_item_range();
+   for (draw_idx, item) in widget.items()[range.clone()].iter().enumerate()
+   ```
+4. Compute each item's Y using `list_y + draw_idx as f32 * geometry.item_height`
+   instead of `list_origin_y + i as f32 * geometry.item_height`.
 
-### Step 1: Define the SegmentHeader struct
+Location: `crates/editor/src/selector_overlay.rs`, lines 468-506
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Update selection highlight to use fractional scroll offset
 
-Location: src/segment/format.rs
+Modify the "Phase 2: Selection Highlight" section to:
 
-### Step 2: Implement header serialization
+1. Use the same `list_y` computed in Step 1 (will need to move `frac`
+   computation earlier in the method).
+2. Compute the visible row as `selected - first_visible`, where `first_visible =
+   widget.first_visible_item()`.
+3. Compute the highlight Y using `list_y + visible_row as f32 *
+   geometry.item_height`.
+4. Update the visibility check to use `visible_item_range()` bounds rather than
+   the old `view_offset + visible_items` formula.
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Location: `crates/editor/src/selector_overlay.rs`, lines 373-396
 
-### Step 3: ...
+### Step 3: Clean up capacity estimation
 
----
+Update the capacity estimation near the top of `update_from_widget()` to use
+`visible_item_range().len()` instead of `geometry.visible_items`, since the
+range may include one extra item for partial bottom visibility.
 
-**BACKREFERENCE COMMENTS**
+Location: `crates/editor/src/selector_overlay.rs`, lines 328-336
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+### Step 4: Add chunk backreference comment
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
+Add a backreference comment at the start of the modified sections:
+```rust
+// Chunk: docs/chunks/selector_smooth_render - Fractional scroll offset for smooth list scrolling
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+### Step 5: Run existing tests to verify no regressions
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Run `cargo test -p editor selector_overlay` to ensure all existing geometry
+tests pass. The tests don't exercise fractional scroll (that requires GPU
+rendering), but they verify the geometry calculations are unchanged.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **selector_row_scroller** (ACTIVE) — This chunk depends on the `RowScroller`
+  integration in `SelectorWidget`, which provides `first_visible_item()`,
+  `scroll_fraction_px()`, and `visible_item_range()` methods.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Off-by-one in visible range** — The `visible_item_range()` method already
+   adds +1 for partial bottom visibility, but we should verify that this doesn't
+   cause us to attempt drawing items beyond the list bounds. The range is clamped
+   by `RowScroller::visible_range(item_count)`, so this should be safe.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Selection highlight clipping** — When the selected item is partially
+   scrolled off the top, the highlight quad will extend above `list_origin_y`.
+   This is intentional (mirrors main buffer behavior), but we should verify the
+   Metal render pipeline clips correctly to the overlay panel bounds.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

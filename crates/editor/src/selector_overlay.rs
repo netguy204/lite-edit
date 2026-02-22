@@ -325,12 +325,16 @@ impl SelectorGlyphBuffer {
         geometry: &OverlayGeometry,
         cursor_visible: bool,
     ) {
+        // Chunk: docs/chunks/selector_smooth_render - Fractional scroll offset for smooth list scrolling
+        // Read fractional scroll state early since both selection highlight and item text need it
+        let scroll_frac = widget.scroll_fraction_px();
+        let visible_range = widget.visible_item_range();
+
         // Estimate capacity: 3 rect quads + query chars + cursor + item chars
+        // Use visible_item_range().len() for accurate count (includes +1 extra row for partial bottom visibility)
         let query_len = widget.query().chars().count();
-        let item_chars: usize = widget
-            .items()
+        let item_chars: usize = widget.items()[visible_range.clone()]
             .iter()
-            .take(geometry.visible_items)
             .map(|s| s.chars().count())
             .sum();
         let estimated_quads = 3 + query_len + 1 + item_chars;
@@ -371,15 +375,18 @@ impl SelectorGlyphBuffer {
         self.background_range = QuadRange::new(bg_start, indices.len() - bg_start);
 
         // ==================== Phase 2: Selection Highlight ====================
+        // Chunk: docs/chunks/selector_smooth_render - Fractional scroll offset for smooth list scrolling
+        // Compute list_y with fractional offset so items glide smoothly
+        let list_y = geometry.list_origin_y - scroll_frac;
+
         let sel_start = indices.len();
-        if !widget.items().is_empty() && geometry.visible_items > 0 {
+        if !widget.items().is_empty() && !visible_range.is_empty() {
             let selected = widget.selected_index();
-            let first_visible = widget.first_visible_item();
-            // Only render highlight if selected item is within visible window
-            if selected >= first_visible && selected < first_visible + geometry.visible_items {
+            // Only render highlight if selected item is within visible range
+            if visible_range.contains(&selected) {
                 // Compute the visible row (0 = first visible item)
-                let visible_row = selected - first_visible;
-                let sel_y = geometry.list_origin_y + visible_row as f32 * geometry.item_height;
+                let visible_row = selected - visible_range.start;
+                let sel_y = list_y + visible_row as f32 * geometry.item_height;
                 let quad = self.create_rect_quad(
                     geometry.panel_x,
                     sel_y,
@@ -466,19 +473,16 @@ impl SelectorGlyphBuffer {
         self.query_cursor_range = QuadRange::new(cursor_start, indices.len() - cursor_start);
 
         // ==================== Phase 6: Item Text ====================
+        // Chunk: docs/chunks/selector_smooth_render - Fractional scroll offset for smooth list scrolling
         let item_start = indices.len();
         {
             let items = widget.items();
             let max_x = geometry.content_x + geometry.content_width;
 
-            // Skip items before first_visible_item, take only visible items
-            for (i, item) in items
-                .iter()
-                .skip(widget.first_visible_item())
-                .take(geometry.visible_items)
-                .enumerate()
-            {
-                let y = geometry.list_origin_y + i as f32 * geometry.item_height;
+            // Iterate over visible_item_range (includes +1 extra row for partial bottom visibility)
+            // Use draw_idx for Y positioning since we're iterating over a slice
+            for (draw_idx, item) in items[visible_range.clone()].iter().enumerate() {
+                let y = list_y + draw_idx as f32 * geometry.item_height;
                 let mut x = geometry.content_x;
 
                 for c in item.chars() {
