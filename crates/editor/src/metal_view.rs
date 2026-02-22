@@ -366,10 +366,15 @@ impl MetalView {
 
         let modifiers = self.convert_modifiers(event);
 
+        // Chunk: docs/chunks/word_double_click_select - Double-click word selection
+        // Extract click count for double-click detection
+        let click_count = event.clickCount() as u32;
+
         Some(MouseEvent {
             kind,
             position,
             modifiers,
+            click_count,
         })
     }
 
