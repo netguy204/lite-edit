@@ -37,6 +37,7 @@ use lite_edit_buffer::{Position, TextBuffer};
 const CURSOR_BLINK_INTERVAL_MS: u64 = 500;
 
 /// Which UI element currently owns keyboard/mouse focus.
+/// Chunk: docs/chunks/file_picker - Focus mode enum distinguishing Buffer vs Selector editing mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EditorFocus {
     /// Normal buffer editing mode
@@ -61,6 +62,7 @@ pub enum EditorFocus {
 ///
 /// The `buffer`, `viewport`, and `associated_file` are now accessed through
 /// delegate methods that forward to the active workspace's active tab.
+/// Chunk: docs/chunks/file_picker - File picker state fields (focus, active_selector, file_index, last_cache_version, resolved_path)
 pub struct EditorState {
     /// The workspace/tab model containing all buffers and viewports
     pub editor: Editor,
@@ -277,6 +279,7 @@ impl EditorState {
     ///
     /// If the cursor has been scrolled off-screen, we snap the viewport back
     /// to make the cursor visible BEFORE processing the keystroke.
+    // Chunk: docs/chunks/file_picker - Cmd+P interception and focus-based key routing
     pub fn handle_key(&mut self, event: KeyEvent) {
         use crate::input::Key;
 
@@ -382,6 +385,7 @@ impl EditorState {
     }
 
     /// Handles Cmd+P to toggle the file picker.
+    /// Chunk: docs/chunks/file_picker - Toggle behavior for Cmd+P (open/close file picker)
     fn handle_cmd_p(&mut self) {
         match self.focus {
             EditorFocus::Buffer => {
@@ -399,6 +403,7 @@ impl EditorState {
     }
 
     /// Opens the file picker selector.
+    /// Chunk: docs/chunks/file_picker - FileIndex initialization, initial query, SelectorWidget setup
     fn open_file_picker(&mut self) {
         // Get the current working directory
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -431,6 +436,7 @@ impl EditorState {
     }
 
     /// Closes the active selector.
+    /// Chunk: docs/chunks/file_picker - Selector dismissal and focus return to Buffer
     fn close_selector(&mut self) {
         self.active_selector = None;
         self.focus = EditorFocus::Buffer;
@@ -706,6 +712,7 @@ impl EditorState {
     }
 
     /// Handles a key event when the selector is focused.
+    /// Chunk: docs/chunks/file_picker - Key forwarding to SelectorWidget and SelectorOutcome handling
     fn handle_key_selector(&mut self, event: KeyEvent) {
         let selector = match self.active_selector.as_mut() {
             Some(s) => s,
@@ -763,6 +770,7 @@ impl EditorState {
     }
 
     /// Handles selector confirmation (Enter pressed).
+    /// Chunk: docs/chunks/file_picker - Path resolution, recency recording, and resolved_path storage on Enter
     fn handle_selector_confirm(&mut self, idx: usize) {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
@@ -796,6 +804,7 @@ impl EditorState {
     /// If `idx < items.len()`: returns `cwd / items[idx]`
     /// If `idx == usize::MAX` or query doesn't match: returns `cwd / query` (new file)
     /// If the resolved file doesn't exist, creates it as an empty file.
+    /// Chunk: docs/chunks/file_picker - Path resolution logic (existing file vs new file creation)
     fn resolve_picker_path(
         &self,
         idx: usize,
@@ -887,6 +896,7 @@ impl EditorState {
     ///
     /// Mouse clicks in the left rail switch workspaces.
     /// Mouse clicks in the tab bar switch tabs.
+    /// Chunk: docs/chunks/file_picker - Focus-based mouse routing (selector vs buffer)
     pub fn handle_mouse(&mut self, event: MouseEvent) {
         use crate::input::MouseEventKind;
 
@@ -932,6 +942,7 @@ impl EditorState {
     }
 
     /// Handles a mouse event when the selector is focused.
+    /// Chunk: docs/chunks/file_picker - Mouse forwarding to SelectorWidget with overlay geometry
     fn handle_mouse_selector(&mut self, event: MouseEvent) {
         let selector = match self.active_selector.as_mut() {
             Some(s) => s,
@@ -1051,6 +1062,7 @@ impl EditorState {
     ///
     /// When find-in-file is open, scroll events go to the main buffer (the user
     /// can scroll while searching).
+    /// Chunk: docs/chunks/file_picker - Scroll event routing to selector widget when selector is open
     pub fn handle_scroll(&mut self, delta: ScrollDelta) {
         // When selector is open, forward scroll to selector
         if self.focus == EditorFocus::Selector {
@@ -1083,8 +1095,8 @@ impl EditorState {
         self.focus_target.handle_scroll(delta, &mut ctx);
     }
 
-    // Chunk: docs/chunks/file_picker_scroll - Forwards scroll events to selector when focused
     /// Handles a scroll event when the selector is focused.
+    /// Chunk: docs/chunks/file_picker - Scroll event routing to selector widget when selector is open
     fn handle_scroll_selector(&mut self, delta: ScrollDelta) {
         let selector = match self.active_selector.as_mut() {
             Some(s) => s,
@@ -1123,6 +1135,7 @@ impl EditorState {
     /// initial directory walk.
     ///
     /// Returns `DirtyRegion::FullViewport` if items were updated, `None` otherwise.
+    /// Chunk: docs/chunks/file_picker - Streaming refresh mechanism for background file index updates
     pub fn tick_picker(&mut self) -> DirtyRegion {
         // Only relevant when selector is active
         if self.focus != EditorFocus::Selector {

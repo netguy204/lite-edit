@@ -13,11 +13,11 @@ code_paths:
 - crates/editor/src/main.rs
 - crates/editor/tests/typing_test.rs
 code_references:
-  - ref: crates/editor/src/input.rs#KeyEvent
+  - ref: crates/input/src/lib.rs#KeyEvent
     implements: "Keyboard input event type with key and modifier fields"
-  - ref: crates/editor/src/input.rs#Key
+  - ref: crates/input/src/lib.rs#Key
     implements: "Key enum mapping keyboard keys (chars, arrows, backspace, delete, etc.)"
-  - ref: crates/editor/src/input.rs#Modifiers
+  - ref: crates/input/src/lib.rs#Modifiers
     implements: "Modifier key state (shift, command, option, control)"
   - ref: crates/editor/src/focus.rs#FocusTarget
     implements: "FocusTarget trait with handle_key, handle_scroll, handle_mouse"
@@ -35,8 +35,6 @@ code_references:
     implements: "Consolidated mutable state with cursor blink and dirty region tracking"
   - ref: crates/editor/src/metal_view.rs#MetalView
     implements: "NSView key event forwarding (keyDown, acceptsFirstResponder, modifier capture)"
-  - ref: crates/editor/src/main.rs#EditorController
-    implements: "Drain-all-then-render main loop coordinator"
   - ref: crates/editor/src/main.rs#AppDelegate
     implements: "Application setup, window creation, and cursor blink NSTimer"
 narrative: null
