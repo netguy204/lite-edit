@@ -947,7 +947,14 @@ impl EditorState {
             view_height,
             self.view_width,
         );
-        self.focus_target.handle_mouse(event, &mut ctx);
+
+        // Adjust x position for content area (subtract rail width)
+        // The buffer expects content-area-relative coordinates, not window coordinates
+        let adjusted_event = MouseEvent {
+            position: (event.position.0 - RAIL_WIDTH as f64, event.position.1),
+            ..event
+        };
+        self.focus_target.handle_mouse(adjusted_event, &mut ctx);
     }
 
     /// Handles a scroll event by forwarding to the active focus target.
@@ -1271,7 +1278,7 @@ impl EditorState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::input::{Key, Modifiers, ScrollDelta};
+    use crate::input::{Key, Modifiers, MouseEvent, MouseEventKind, ScrollDelta};
     use std::time::Duration;
 
     /// Creates test font metrics with known values
@@ -2897,5 +2904,94 @@ mod tests {
         state.handle_key(KeyEvent::new(Key::Return, Modifiers::default()));
         let s3 = state.buffer().selection_range().unwrap();
         assert_eq!(s3.0.col, 0);
+    }
+
+    // =========================================================================
+    // Rail offset mouse click tests
+    // =========================================================================
+
+    #[test]
+    fn test_mouse_click_accounts_for_rail_offset() {
+        // This test verifies that clicking in the content area positions the
+        // cursor correctly, accounting for the left rail offset (RAIL_WIDTH).
+        //
+        // The bug: handle_mouse_buffer forwards raw window coordinates to the
+        // buffer handler, but the buffer expects content-area-relative coords.
+        // Without subtracting RAIL_WIDTH, clicks land ~7-8 columns to the right.
+        use crate::left_rail::RAIL_WIDTH;
+        use lite_edit_buffer::Position;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(320.0);
+
+        // Set up buffer with known content
+        *state.buffer_mut() = lite_edit_buffer::TextBuffer::from_str("hello world");
+
+        // Click at column 3 in the content area
+        // Window x coordinate = RAIL_WIDTH + (column * glyph_width)
+        // With RAIL_WIDTH = 56, glyph_width = 8, column = 3:
+        // x = 56 + (3 * 8) = 56 + 24 = 80
+        let target_column = 3;
+        let glyph_width = test_font_metrics().advance_width; // 8.0
+        let window_x = RAIL_WIDTH as f64 + (target_column as f64 * glyph_width);
+
+        // y coordinate: we use flipped coordinates (origin at bottom)
+        // For line 0 with view_height 320 and line_height 16:
+        // flipped_y should be in [0, 16) for line 0
+        // So y = view_height - flipped_y, e.g., y = 320 - 8 = 312
+        let window_y = 320.0 - 8.0; // Should give line 0
+
+        let click_event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (window_x, window_y),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        state.handle_mouse(click_event);
+
+        // The cursor should be at column 3, not column 3 + (56/8) = column 10
+        assert_eq!(
+            state.buffer().cursor_position(),
+            Position::new(0, target_column),
+            "Cursor should be at column {} after clicking at window x={}, \
+             but got column {}. This indicates RAIL_WIDTH ({}) is not being \
+             subtracted from the x coordinate.",
+            target_column,
+            window_x,
+            state.buffer().cursor_position().col,
+            RAIL_WIDTH
+        );
+    }
+
+    #[test]
+    fn test_mouse_click_at_content_edge() {
+        // Test clicking at the very left edge of content area (immediately
+        // right of the rail) positions cursor at column 0
+        use crate::left_rail::RAIL_WIDTH;
+        use lite_edit_buffer::Position;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(320.0);
+
+        *state.buffer_mut() = lite_edit_buffer::TextBuffer::from_str("hello world");
+
+        // Click just to the right of the rail (at the content area edge)
+        // Should position cursor at column 0
+        let window_x = RAIL_WIDTH as f64 + 1.0; // Just past the rail
+        let window_y = 320.0 - 8.0; // Line 0
+
+        let click_event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (window_x, window_y),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        state.handle_mouse(click_event);
+
+        assert_eq!(
+            state.buffer().cursor_position(),
+            Position::new(0, 0),
+            "Clicking at the left edge of content area should place cursor at column 0"
+        );
     }
 }
