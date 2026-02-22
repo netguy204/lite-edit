@@ -1,0 +1,24 @@
+# Chunk: docs/chunks/terminal_emulator - Terminal emulator backed by alacritty_terminal
+
+[package]
+name = "lite-edit-terminal"
+version.workspace = true
+edition.workspace = true
+description = "Terminal emulator for lite-edit backed by alacritty_terminal"
+license.workspace = true
+
+[dependencies]
+# Terminal emulator core (escape sequence parsing, grid management)
+alacritty_terminal = "0.25"
+
+# Cross-platform PTY spawning
+portable-pty = "0.8"
+
+# Low-latency channel for PTY reader thread
+crossbeam-channel = "0.5"
+
+# Internal buffer types (BufferView, Style, Span, StyledLine, DirtyLines, etc.)
+lite-edit-buffer = { path = "../buffer" }
+
+[dev-dependencies]
+# No dev dependencies needed currently

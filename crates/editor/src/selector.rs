@@ -38,7 +38,9 @@
 //! assert_eq!(outcome, SelectorOutcome::Confirmed(0));
 //! ```
 
+use crate::font::FontMetrics;
 use crate::input::{Key, KeyEvent, MouseEventKind};
+use crate::mini_buffer::MiniBuffer;
 
 /// The outcome of handling an input event in the selector widget.
 ///
@@ -71,10 +73,10 @@ pub enum SelectorOutcome {
 /// - Navigation (up/down arrows)
 /// - Confirmation (Enter) and cancellation (Escape)
 /// - Mouse selection and confirmation
-#[derive(Debug, Clone)]
 pub struct SelectorWidget {
-    /// The text the user has typed (filter query).
-    query: String,
+    /// Single-line MiniBuffer for query editing with full affordance set
+    /// (word-jump, kill-line, shift-selection, clipboard, Emacs bindings).
+    mini_buffer: MiniBuffer,
     /// The current list of displayable strings.
     items: Vec<String>,
     /// Index into `items` of the currently highlighted entry.
@@ -95,8 +97,18 @@ impl Default for SelectorWidget {
 impl SelectorWidget {
     /// Creates a new selector widget with empty query, no items, and index 0.
     pub fn new() -> Self {
+        // Default metrics for MiniBuffer (values don't affect query behavior,
+        // only internal viewport calculations which aren't used by selector)
+        let metrics = FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        };
         Self {
-            query: String::new(),
+            mini_buffer: MiniBuffer::new(metrics),
             items: Vec::new(),
             selected_index: 0,
             view_offset: 0,
@@ -105,8 +117,8 @@ impl SelectorWidget {
     }
 
     /// Returns the current query string.
-    pub fn query(&self) -> &str {
-        &self.query
+    pub fn query(&self) -> String {
+        self.mini_buffer.content()
     }
 
     /// Returns the currently selected index.
@@ -162,13 +174,13 @@ impl SelectorWidget {
     /// - **Down arrow**: Increments `selected_index` (ceil at `items.len() - 1`), returns `Pending`.
     /// - **Return/Enter**: Returns `Confirmed(selected_index)`, or `Confirmed(usize::MAX)` if items is empty.
     /// - **Escape**: Returns `Cancelled`.
-    /// - **Backspace** (no command/control modifiers): Removes the last character from `query`, returns `Pending`.
-    /// - **Printable char** (no command/control modifiers): Appends to `query`, resets `selected_index` to 0, returns `Pending`.
-    /// - **All other keys**: Returns `Pending` (no-op).
+    /// - **All other keys**: Delegated to `MiniBuffer` for query editing. If the query
+    ///   changes, resets `selected_index` to 0. Returns `Pending`.
+    ///
+    /// The MiniBuffer provides full editing affordances: character input, backspace,
+    /// word navigation (Option+Left/Right), kill-line (Ctrl+K), selection (Shift+arrows),
+    /// clipboard operations (Cmd+C/V/X), and Emacs-style bindings (Ctrl+A/E/K).
     pub fn handle_key(&mut self, event: &KeyEvent) -> SelectorOutcome {
-        // Check for command/control modifiers - these should not modify the query
-        let has_command_or_control = event.modifiers.command || event.modifiers.control;
-
         match &event.key {
             Key::Up => {
                 self.selected_index = self.selected_index.saturating_sub(1);
@@ -201,16 +213,15 @@ impl SelectorWidget {
                 }
             }
             Key::Escape => SelectorOutcome::Cancelled,
-            Key::Backspace if !has_command_or_control => {
-                self.query.pop();
+            _ => {
+                // Delegate all other keys to MiniBuffer
+                let prev_query = self.mini_buffer.content();
+                self.mini_buffer.handle_key(event.clone());
+                if self.mini_buffer.content() != prev_query {
+                    self.selected_index = 0;
+                }
                 SelectorOutcome::Pending
             }
-            Key::Char(ch) if !has_command_or_control && !ch.is_control() => {
-                self.query.push(*ch);
-                self.selected_index = 0;
-                SelectorOutcome::Pending
-            }
-            _ => SelectorOutcome::Pending,
         }
     }
 
@@ -915,7 +926,9 @@ mod tests {
     }
 
     #[test]
-    fn backspace_with_command_modifier_is_noop() {
+    fn backspace_with_command_modifier_deletes_to_start() {
+        // With MiniBuffer integration, Cmd+Backspace now deletes to start of line
+        // (this is a new affordance we gain from MiniBuffer)
         let mut widget = SelectorWidget::new();
         widget.handle_key(&KeyEvent::char('a'));
         widget.handle_key(&KeyEvent::char('b'));
@@ -931,7 +944,7 @@ mod tests {
 
         let outcome = widget.handle_key(&event);
         assert_eq!(outcome, SelectorOutcome::Pending);
-        assert_eq!(widget.query(), "ab"); // Query should not change
+        assert_eq!(widget.query(), ""); // Cmd+Backspace deletes to start of line
     }
 
     #[test]
