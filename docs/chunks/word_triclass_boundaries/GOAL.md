@@ -1,8 +1,9 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/buffer/src/text_buffer.rs
 code_references: []
 narrative: word_nav
 investigation: null
@@ -11,9 +12,9 @@ friction_entries: []
 bug_type: null
 depends_on:
 - word_boundary_primitives
-created_after: ["file_search_path_matching"]
+created_after:
+- file_search_path_matching
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
