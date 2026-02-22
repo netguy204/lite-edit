@@ -1,19 +1,19 @@
 # Review Feedback
 
-**Iteration:** 1
+**Iteration:** 2
 **Decision:** FEEDBACK
 
 ## Summary
 
-All success criteria satisfied except one: the stop() method uses SIGKILL directly instead of the SIGTERM→wait→SIGKILL pattern specified in GOAL.md. 14 of 15 criteria pass; this functional deviation should be addressed before approval.
+Iteration 1 feedback not addressed: stop() still uses SIGKILL directly instead of SIGTERM→wait→SIGKILL. 14 of 15 success criteria are satisfied. The single gap is in stop() which sends SIGKILL directly via terminal.kill() instead of the graceful SIGTERM→wait→SIGKILL pattern specified in GOAL.md and PLAN.md. This was flagged in iteration 1 but remains unchanged.
 
 ## Issues to Address
 
 ### Issue 1: crates/terminal/src/agent.rs:449-464
 
-**Concern:** stop() sends SIGKILL directly instead of SIGTERM→wait→SIGKILL as specified in GOAL.md and PLAN.md
+**Concern:** stop() sends SIGKILL directly instead of SIGTERM→wait→SIGKILL as specified in GOAL.md ('Stopping a running agent sends SIGTERM') and PLAN.md step 4. This prevents graceful agent shutdown.
 
-**Suggestion:** Add nix crate dependency, send SIGTERM first, wait 100ms with polling, then SIGKILL if needed
+**Suggestion:** Add nix crate, get PID from child handle, send SIGTERM first, wait 100ms polling try_wait(), then SIGKILL if needed. Use exit code -15 for SIGTERM, -9 for SIGKILL.
 
 
 ---
