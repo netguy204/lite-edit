@@ -86,8 +86,11 @@ impl InputEncoder {
             Key::Tab => vec![0x09],    // HT
             Key::Escape => vec![0x1b], // ESC
             // Chunk: docs/chunks/terminal_alt_backspace - Alt+Backspace sends ESC+DEL
+            // Chunk: docs/chunks/terminal_cmd_backspace - Cmd+Backspace sends Ctrl+U
             Key::Backspace => {
-                if modifiers.option {
+                if modifiers.command {
+                    vec![0x15] // Ctrl+U (NAK) for kill line backward
+                } else if modifiers.option {
                     vec![0x1b, 0x7f] // ESC + DEL for backward word delete
                 } else {
                     vec![0x7f] // DEL (most modern terminals)
@@ -738,6 +741,21 @@ mod tests {
         let result = InputEncoder::encode_key(&event, TermMode::NONE);
         // Alt+Backspace should send ESC + DEL for backward word delete
         assert_eq!(result, b"\x1b\x7f");
+    }
+
+    // Chunk: docs/chunks/terminal_cmd_backspace - Cmd+Backspace sends Ctrl+U
+    #[test]
+    fn test_encode_cmd_backspace() {
+        let event = KeyEvent {
+            key: Key::Backspace,
+            modifiers: Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        };
+        let result = InputEncoder::encode_key(&event, TermMode::NONE);
+        // Cmd+Backspace should send Ctrl+U (NAK) for kill-line-backward
+        assert_eq!(result, vec![0x15]);
     }
 
     // =========================================================================
