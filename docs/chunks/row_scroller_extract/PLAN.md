@@ -8,170 +8,188 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This is a pure structural refactor using the "Extract and Delegate" pattern:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Create the new `RowScroller` struct** in a new file `row_scroller.rs` containing
+   the three core fields (`scroll_offset_px`, `visible_rows`, `row_height`) and all
+   thirteen uniform-row scroll methods.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **Refactor `Viewport`** to contain a `RowScroller` field and delegate the shared
+   methods to it. The two buffer-specific methods (`dirty_lines_to_region`,
+   `ensure_visible_wrapped`) remain as `Viewport`-only additions.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/row_scroller_extract/GOAL.md)
-with references to the files that you expect to touch.
--->
+3. **Expose `RowScroller`** from the editor crate's public surface via `pub use` in
+   `main.rs`, and add a `row_scroller() -> &RowScroller` accessor to `Viewport`.
+
+4. **Test-driven development** per TESTING_PHILOSOPHY.md: write unit tests for
+   `RowScroller` first (the red phase), then implement the methods (green phase).
+   Existing `Viewport` tests must pass unchanged after the refactor.
+
+The approach follows the "Humble View Architecture" principle — `RowScroller` is
+pure state manipulation with no platform dependencies, making it fully testable
+without mocking.
+
+**Key insight**: The thirteen methods in `Viewport` that move to `RowScroller` use
+the terms "line"/"lines" (e.g., `first_visible_line`, `visible_lines`). Since
+`RowScroller` is domain-agnostic (it works for any uniform-height row list, not
+just text lines), we rename these to "row"/"rows" (e.g., `first_visible_row`,
+`visible_rows`). `Viewport` keeps its public API unchanged by delegating through
+thin wrappers that preserve the "line" terminology.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems directory exists in this project. This chunk does not touch any
+existing cross-cutting patterns.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Create `RowScroller` struct definition with failing tests
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create `crates/editor/src/row_scroller.rs` with:
 
-Example:
+1. The `RowScroller` struct definition:
+   ```rust
+   pub struct RowScroller {
+       scroll_offset_px: f32,
+       visible_rows: usize,
+       row_height: f32,
+   }
+   ```
 
-### Step 1: Define the SegmentHeader struct
+2. Stub implementations for all thirteen methods (returning placeholder values or
+   panicking with `todo!()`).
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+3. A comprehensive test module with tests for all thirteen methods, covering:
+   - Basic construction (`new` with zero scroll, zero visible rows)
+   - Getters (`row_height`, `visible_rows`, `scroll_offset_px`)
+   - `first_visible_row` derivation from pixel offset
+   - `scroll_fraction_px` calculation
+   - `set_scroll_offset_px` with clamping
+   - `update_size` computing `visible_rows` from height
+   - `visible_range` with edge cases (empty, small buffer, fractional scroll)
+   - `scroll_to` with clamping
+   - `ensure_visible` for rows above, below, and already visible
+   - `row_to_visible_offset` mapping
+   - `visible_offset_to_row` mapping
 
-Location: src/segment/format.rs
+Tests should initially fail (red phase).
 
-### Step 2: Implement header serialization
+Location: `crates/editor/src/row_scroller.rs`
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+### Step 2: Implement `RowScroller` methods
 
-### Step 3: ...
+Implement all thirteen methods to make the tests pass (green phase). The formulas
+are identical to the existing `Viewport` methods, with "line" renamed to "row":
 
----
+| Method | Implementation |
+|--------|----------------|
+| `new(row_height)` | `RowScroller { scroll_offset_px: 0.0, visible_rows: 0, row_height }` |
+| `row_height()` | Getter |
+| `visible_rows()` | Getter |
+| `first_visible_row()` | `(scroll_offset_px / row_height).floor() as usize` |
+| `scroll_fraction_px()` | `scroll_offset_px % row_height` |
+| `scroll_offset_px()` | Getter |
+| `set_scroll_offset_px(px, row_count)` | Clamp to `[0, (row_count - visible_rows) * row_height]` |
+| `update_size(height_px)` | `visible_rows = (height_px / row_height).floor() as usize` |
+| `visible_range(row_count)` | `first..min(first + visible_rows + 1, row_count)` |
+| `scroll_to(row, row_count)` | `set_scroll_offset_px(row * row_height, row_count)` |
+| `ensure_visible(row, row_count)` | Scroll up/down if row outside window; return whether scrolled |
+| `row_to_visible_offset(row)` | `Some(row - first_visible_row())` if visible, else `None` |
+| `visible_offset_to_row(offset)` | `first_visible_row() + offset` |
 
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
+Add module-level backreference:
+```rust
+// Chunk: docs/chunks/row_scroller_extract - RowScroller extraction from Viewport
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `crates/editor/src/row_scroller.rs`
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 3: Add `RowScroller` module to the crate
+
+Add `mod row_scroller;` and `pub use row_scroller::RowScroller;` to `main.rs`
+so that `RowScroller` is part of the editor crate's public surface.
+
+Location: `crates/editor/src/main.rs`
+
+### Step 4: Refactor `Viewport` to contain and delegate to `RowScroller`
+
+Modify `Viewport` to:
+
+1. Replace the three fields (`scroll_offset_px`, `visible_lines`, `line_height`)
+   with a single `scroller: RowScroller` field.
+
+2. Update `new()` to create an inner `RowScroller`.
+
+3. Delegate the thirteen shared methods to `self.scroller`, preserving the
+   existing public API (method names stay as `first_visible_line`, etc.):
+   - `line_height()` → `self.scroller.row_height()`
+   - `visible_lines()` → `self.scroller.visible_rows()`
+   - `first_visible_line()` → `self.scroller.first_visible_row()`
+   - `scroll_fraction_px()` → `self.scroller.scroll_fraction_px()`
+   - `scroll_offset_px()` → `self.scroller.scroll_offset_px()`
+   - `set_scroll_offset_px(px, count)` → `self.scroller.set_scroll_offset_px(px, count)`
+   - `update_size(height)` → `self.scroller.update_size(height)`
+   - `visible_range(count)` → `self.scroller.visible_range(count)`
+   - `scroll_to(line, count)` → `self.scroller.scroll_to(line, count)`
+   - `ensure_visible(line, count)` → `self.scroller.ensure_visible(line, count)`
+   - `buffer_line_to_screen_line(line)` → `self.scroller.row_to_visible_offset(line)`
+   - `screen_line_to_buffer_line(screen)` → `self.scroller.visible_offset_to_row(screen)`
+
+4. Keep `dirty_lines_to_region` and `ensure_visible_wrapped` as `Viewport`-only
+   methods. These call the delegated getters (e.g., `self.first_visible_line()`)
+   to access state.
+
+5. Add a public accessor:
+   ```rust
+   pub fn row_scroller(&self) -> &RowScroller {
+       &self.scroller
+   }
+   ```
+
+Location: `crates/editor/src/viewport.rs`
+
+### Step 5: Verify all existing tests pass
+
+Run `cargo test -p lite-edit` to confirm:
+- All new `RowScroller` tests pass
+- All existing `Viewport` tests pass unchanged
+
+No test modifications should be needed — this confirms the refactor is behavioral
+no-op.
+
+### Step 6: Add documentation
+
+Add doc comments to `RowScroller` explaining:
+- Its purpose (fractional pixel scroll arithmetic for uniform-height rows)
+- How it differs from `Viewport` (no buffer/wrap dependencies)
+- How downstream code (e.g., `SelectorWidget`) can use it directly
+
+Ensure all public methods have `///` doc comments explaining their behavior.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+None. This chunk is independent of the other chunks in the narrative
+(`selector_coord_flip` can be implemented in parallel). The existing `Viewport`
+implementation provides all the logic to extract.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Terminology consistency**: The GOAL.md lists "row_to_visible_offset" and
+   "visible_offset_to_row" as `RowScroller` methods, but `Viewport` has these as
+   `buffer_line_to_screen_line` and `screen_line_to_buffer_line`. The plan
+   delegates through thin wrappers to preserve `Viewport`'s existing API. Confirm
+   this is the intended behavior — callers of `Viewport` should not need changes.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Test coverage**: The existing `Viewport` tests are comprehensive. Running
+   them unchanged after the refactor is the primary validation that behavior is
+   preserved. If any test fails, the refactor has introduced a bug.
+
+3. **Crate visibility**: The editor is currently a binary crate (no `lib.rs`).
+   Exposing `RowScroller` publicly via `pub use` in `main.rs` works, but the
+   downstream `selector_row_scroller` chunk will need to import it correctly.
+   Verify the import path works: `use crate::row_scroller::RowScroller;` (or
+   `use crate::RowScroller;` if re-exported).
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- Populated during implementation -->
