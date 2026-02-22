@@ -1,13 +1,28 @@
 // Chunk: docs/chunks/syntax_highlighting - Highlighted buffer view wrapper
+// Chunk: docs/chunks/syntax_highlight_perf - Viewport-batch highlighting for performance
 
 //! Wrapper that provides syntax-highlighted buffer view.
 //!
 //! This module provides `HighlightedBufferView`, which wraps a `TextBuffer`
 //! and optional `SyntaxHighlighter` to implement `BufferView` with syntax
 //! highlighting support.
+//!
+//! ## Performance
+//!
+//! When `styled_line()` is called, the view triggers viewport-batch highlighting
+//! to populate the highlighter's cache. This ensures that all visible lines are
+//! highlighted in a single pass using `QueryCursor`, rather than re-parsing the
+//! entire file for each line.
 
 use lite_edit_buffer::{BufferView, CursorInfo, DirtyLines, Position, StyledLine, TextBuffer};
 use lite_edit_syntax::SyntaxHighlighter;
+
+/// Default viewport size for batch highlighting.
+///
+/// When `styled_line()` is called, we pre-highlight this many lines starting
+/// from the requested line to populate the cache. This is typically larger than
+/// a screen's worth of lines to handle scrolling without re-highlighting.
+const DEFAULT_VIEWPORT_LINES: usize = 80;
 
 /// A view over TextBuffer that applies syntax highlighting.
 ///
@@ -40,7 +55,16 @@ impl<'a> BufferView for HighlightedBufferView<'a> {
 
         match self.highlighter {
             Some(hl) => {
-                // Use highlighter to get styled line
+                // Pre-populate the cache for a viewport starting at this line.
+                // This is called once per frame, and the cache will serve
+                // subsequent lines without re-highlighting.
+                //
+                // Using interior mutability via RefCell, highlight_viewport()
+                // can be called with &self and will populate the cache.
+                let end_line = (line + DEFAULT_VIEWPORT_LINES).min(self.buffer.line_count());
+                hl.highlight_viewport(line, end_line);
+
+                // Get the styled line from the cache (should be a cache hit)
                 Some(hl.highlight_line(line))
             }
             None => {
@@ -102,7 +126,11 @@ impl<'a> BufferView for HighlightedBufferViewMut<'a> {
 
         match self.highlighter {
             Some(hl) => {
-                // Use highlighter to get styled line
+                // Pre-populate the cache for a viewport starting at this line.
+                let end_line = (line + DEFAULT_VIEWPORT_LINES).min(self.buffer.line_count());
+                hl.highlight_viewport(line, end_line);
+
+                // Get the styled line from the cache (should be a cache hit)
                 Some(hl.highlight_line(line))
             }
             None => {

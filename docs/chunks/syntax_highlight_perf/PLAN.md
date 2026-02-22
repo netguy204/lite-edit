@@ -8,153 +8,171 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The root cause is that `SyntaxHighlighter::highlight_line()` creates a new `Highlighter` and calls `highlight()` on the **full source** for every single line request. The `Highlighter::highlight()` API does its own internal parse, completely bypassing the cached `self.tree` that's properly maintained by the incremental `edit()` path. The renderer calls `highlight_line()` once per visible line (~60 calls per frame), so we get 60 full-file parses per render frame.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**The fix has two parts:**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. **Use `QueryCursor` directly against the cached tree**: Instead of calling `Highlighter::highlight()` (which reparses), use tree-sitter's lower-level `QueryCursor` API to run highlight queries directly against `self.tree`. The `QueryCursor` supports `set_byte_range()` for viewport-scoping.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/syntax_highlight_perf/GOAL.md)
-with references to the files that you expect to touch.
--->
+2. **Batch highlighting for the viewport**: Instead of highlighting line-by-line, add a method to highlight a range of lines in a single pass. The renderer (or `HighlightedBufferView`) can call this once per frame with the visible line range, then cache results per-line.
+
+**Alternative considered**: Caching per-line highlight results with invalidation on edits. This adds complexity around cache invalidation (which lines changed after an edit?) and memory pressure. The viewport-batch approach is simpler: compute once per frame, discard on next frame.
+
+**Performance target from investigation (H2 benchmark)**:
+- Incremental parse: ~120µs per single-char edit
+- Viewport highlight (60 lines): ~170µs
+- Combined: ~290µs (3.6% of 8ms budget)
+
+Currently the implementation spends 14.5ms+ per frame due to 60× full-file reparses.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems are directly relevant to this performance fix. The `viewport_scroll` subsystem is not affected since this is purely internal to the syntax highlighting module.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add viewport-batch highlight method using QueryCursor
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add a new method `highlight_viewport(&self, start_line: usize, end_line: usize) -> Vec<StyledLine>` that:
 
-Example:
+1. Calculates the byte range for `start_line..end_line`
+2. Creates a `QueryCursor` and calls `set_byte_range()` to limit queries to the viewport
+3. Loads the highlight query and runs `cursor.captures()` against `self.tree`
+4. Builds `StyledLine` objects from the captures, grouping by line
+5. Returns the styled lines for the viewport
 
-### Step 1: Define the SegmentHeader struct
+This method uses the already-parsed `self.tree` rather than the `Highlighter::highlight()` API which reparses.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+**Key tree-sitter APIs**:
+- `QueryCursor::new()` - create cursor
+- `cursor.set_byte_range(start..end)` - limit to viewport bytes
+- `cursor.captures(&query, tree.root_node(), source.as_bytes())` - iterate captures
+- Each capture has `.node.start_byte()`, `.node.end_byte()`, and `.index` (capture index)
 
-Location: src/segment/format.rs
+**Location**: `crates/syntax/src/highlighter.rs`
 
-### Step 2: Implement header serialization
+### Step 2: Add highlight Query to SyntaxHighlighter
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+The current implementation uses `HighlightConfiguration` for the `Highlighter::highlight()` API. For direct `QueryCursor` usage, we need to store a compiled `Query` object.
 
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+Add a field `query: Query` to `SyntaxHighlighter`. In `new()`, compile the highlight query:
+```rust
+let query = Query::new(&config.language, config.highlights_query)?;
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Update `LanguageConfig::highlight_config()` to also return the highlights query string so it can be compiled separately for the `QueryCursor` path.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+**Location**: `crates/syntax/src/highlighter.rs`, `crates/syntax/src/registry.rs`
+
+### Step 3: Map captures to styles in viewport highlight
+
+In `highlight_viewport()`, iterate captures and map them to `Style` using the existing `SyntaxTheme`:
+
+1. For each capture, look up `capture.index` in the query's `capture_names()`
+2. Use `theme.style_for_capture(capture_name)` to get the style
+3. Track current position, build spans with styles, handle overlapping captures via a style stack
+
+The logic is similar to `build_styled_line()` but operates on captures from `QueryCursor` rather than `HighlightEvent`s.
+
+**Location**: `crates/syntax/src/highlighter.rs`
+
+### Step 4: Add highlight cache to SyntaxHighlighter
+
+Add a simple cache to avoid re-highlighting the same viewport every frame when nothing changed:
+
+```rust
+struct HighlightCache {
+    start_line: usize,
+    end_line: usize,
+    lines: Vec<StyledLine>,
+    generation: u64, // incremented on each edit()
+}
+```
+
+In `highlight_viewport()`:
+1. Check if cache matches the requested range and current generation
+2. If hit, return cached lines
+3. If miss, compute highlights and cache them
+
+In `edit()` and `update_source()`:
+1. Increment generation counter (invalidates cache)
+
+**Location**: `crates/syntax/src/highlighter.rs`
+
+### Step 5: Update highlight_line to use cached viewport results
+
+Modify `highlight_line()` to:
+1. Check if the requested line is in the cached viewport
+2. If yes, return the cached `StyledLine` directly
+3. If no, fall through to single-line computation (for edge cases)
+
+This is a transitional step. Ideally the renderer would call `highlight_viewport()` directly, but maintaining `highlight_line()` API compatibility reduces change scope.
+
+**Location**: `crates/syntax/src/highlighter.rs`
+
+### Step 6: Update HighlightedBufferView to batch-highlight
+
+Modify `HighlightedBufferView::styled_line()` to leverage the viewport cache efficiently:
+
+Since `styled_line()` is called in order by the renderer (line 0, 1, 2...), detect when we're starting a new viewport and trigger `highlight_viewport()` for the expected range.
+
+Alternative approach: The renderer could be modified to call a viewport-batch method directly. But this requires changing the `BufferView` trait or the render loop. For minimal change, keep using `highlight_line()` and rely on the cache.
+
+**Location**: `crates/editor/src/highlighted_buffer.rs`
+
+### Step 7: Add benchmark test for viewport highlighting
+
+Add a test that verifies viewport highlighting completes within the performance budget:
+
+```rust
+#[test]
+fn test_viewport_highlight_performance() {
+    // Load a large Rust file (~5K lines)
+    // Highlight 60-line viewport
+    // Assert total time < 1ms (leaving headroom for the 8ms budget)
+}
+```
+
+Use a representative file from the codebase (e.g., `editor_state.rs` as in the investigation).
+
+**Location**: `crates/syntax/src/highlighter.rs` (test module)
+
+### Step 8: Verify existing tests pass and add regression tests
+
+1. Run existing `syntax` crate tests to ensure behavior is preserved
+2. Add test: editing a file updates highlighting correctly (cache invalidation)
+3. Add test: `highlight_line()` for lines outside viewport still works
+4. Add test: empty file, single-line file edge cases
+
+**Location**: `crates/syntax/src/highlighter.rs` (test module)
+
+### Step 9: Remove dead code path
+
+After the new implementation is working, the old per-line `Highlighter::highlight()` path in `highlight_line()` becomes dead code for normal operation. Either:
+- Remove it entirely if no longer needed
+- Keep it as a fallback for edge cases (files without trees, error recovery)
+
+Document the decision in code comments.
+
+**Location**: `crates/syntax/src/highlighter.rs`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+- **syntax_highlighting chunk** (ACTIVE): This chunk fixes a bug in the implementation from that chunk. The ACTIVE status means we're building on shipped work.
 
-If there are no dependencies, delete this section.
--->
+No new external dependencies needed. We use tree-sitter's `Query` and `QueryCursor` APIs which are already available via the `tree-sitter` crate.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **QueryCursor capture ordering**: Captures may not be returned in byte-order. Need to verify the iteration order and sort if necessary for proper span construction.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Injection languages**: The current `Highlighter::highlight()` API handles injection languages (e.g., JS inside HTML) via the `injection_callback`. The `QueryCursor` approach may need additional handling for injections. Initial implementation can skip injection support and document as a known limitation for HTML/Markdown files.
+
+3. **Cache memory**: Caching 60 `StyledLine` objects per viewport is minimal (~KB), but verify memory impact for files with very long lines.
+
+4. **Thread safety**: `SyntaxHighlighter` is used from a single thread (the render thread). The cache doesn't need synchronization, but document this assumption.
+
+5. **Query compilation cost**: Compiling the `Query` once in `new()` should be fine (one-time cost on file open). Verify this doesn't regress file open latency significantly.
 
 ## Deviations
 

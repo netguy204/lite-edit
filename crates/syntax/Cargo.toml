@@ -13,8 +13,8 @@ lite-edit-buffer = { path = "../buffer" }
 
 # Core tree-sitter library
 tree-sitter = "0.24"
-# Highlighting event stream API
-tree-sitter-highlight = "0.24"
+# For iterating over QueryCaptures
+streaming-iterator = "0.1"
 
 # Language grammar crates - using versions compatible with tree-sitter 0.24
 tree-sitter-rust = "0.23"

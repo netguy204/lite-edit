@@ -7,20 +7,21 @@
 
 use std::collections::HashMap;
 use tree_sitter::Language;
-use tree_sitter_highlight::HighlightConfiguration;
 
 /// Configuration for a language's syntax highlighting.
 ///
 /// Contains the tree-sitter `Language` and highlight queries needed
-/// to create a `HighlightConfiguration`.
+/// for syntax highlighting via `QueryCursor`.
 pub struct LanguageConfig {
     /// The tree-sitter language
     pub language: Language,
     /// The highlights query (tree-sitter query syntax)
     pub highlights_query: &'static str,
     /// The injections query (for embedded languages)
+    #[allow(dead_code)] // Reserved for future injection support
     pub injections_query: &'static str,
     /// The locals query (for scope-based highlighting)
+    #[allow(dead_code)] // Reserved for future locals support
     pub locals_query: &'static str,
 }
 
@@ -38,25 +39,6 @@ impl LanguageConfig {
             injections_query,
             locals_query,
         }
-    }
-
-    /// Creates a `HighlightConfiguration` for this language.
-    ///
-    /// The `capture_names` parameter determines the mapping from capture
-    /// names to highlight IDs.
-    pub fn highlight_config(
-        &self,
-        capture_names: &[&str],
-    ) -> Option<HighlightConfiguration> {
-        let mut config = HighlightConfiguration::new(
-            self.language.clone(),
-            "source",
-            self.highlights_query,
-            self.injections_query,
-            self.locals_query,
-        ).ok()?;
-        config.configure(capture_names);
-        Some(config)
     }
 }
 

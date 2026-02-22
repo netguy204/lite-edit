@@ -1,20 +1,22 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
 code_paths:
-  - crates/syntax/src/highlighter.rs
-  - crates/editor/src/renderer.rs
+- crates/syntax/src/highlighter.rs
+- crates/syntax/src/registry.rs
+- crates/editor/src/highlighted_buffer.rs
 code_references: []
 narrative: null
 investigation: null
 subsystems: []
 friction_entries: []
 bug_type: semantic
-depends_on: ["syntax_highlighting"]
-created_after: ["syntax_highlighting"]
+depends_on:
+- syntax_highlighting
+created_after:
+- syntax_highlighting
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
