@@ -1,11 +1,11 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
 code_paths:
 - crates/editor/src/renderer.rs
 - crates/editor/src/main.rs
-- crates/editor/src/glyph_buffer.rs
+- crates/editor/src/workspace.rs
 code_references: []
 narrative: null
 investigation: null
@@ -14,9 +14,11 @@ friction_entries: []
 bug_type: null
 depends_on:
 - terminal_active_tab_safety
-created_after: ["terminal_active_tab_safety", "cursor_pointer_ui_hints", "scroll_wrap_deadzone_v2"]
+created_after:
+- terminal_active_tab_safety
+- cursor_pointer_ui_hints
+- scroll_wrap_deadzone_v2
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
