@@ -77,7 +77,7 @@ fragment float4 glyph_fragment(
     texture2d<float> atlas [[texture(0)]]
 ) {
     constexpr sampler atlas_sampler(
-        filter::linear,
+        filter::nearest,
         address::clamp_to_edge
     );
 

@@ -8,153 +8,236 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The bug occurs because the renderer and click handler construct their `WrapLayout` with
+different viewport widths:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+| Location | Width used | Resulting `cols_per_row` |
+|----------|------------|--------------------------|
+| `Renderer::update_glyph_buffer` | `self.viewport_width_px` (full window width) | `floor(window_width / glyph_width)` |
+| `EditorContext::wrap_layout()` | `self.view_width` (content area = window − RAIL_WIDTH) | `floor(content_width / glyph_width)` |
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+This mismatch means the renderer wraps at, say, 100 columns while the click handler
+wraps at 96 columns. When clicking on continuation row N, the
+`screen_pos_to_buffer_col(row_offset, screen_col)` call computes
+`N * 96 + screen_col` instead of `N * 100 + screen_col`, producing a cumulative
+offset of ~4 characters per wrap row.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/wrap_click_offset/GOAL.md)
-with references to the files that you expect to touch.
--->
+**Fix strategy:**
+
+1. **Define content_width consistently.** Content width is `viewport_width_px − RAIL_WIDTH`.
+   This is the width of the text rendering area, which is where wrapping should occur.
+
+2. **Introduce a factory for WrapLayout on Renderer.** The renderer already has a
+   `wrap_layout(&self)` method that returns `WrapLayout::new(self.viewport_width_px, &self.font.metrics)`.
+   However, this uses the **window width** rather than **content width**. We need to either:
+   - Option A: Store content width separately in Renderer and use it everywhere, or
+   - Option B: Have the Renderer subtract RAIL_WIDTH internally when creating WrapLayouts.
+
+3. **Make the renderer's internal rendering use content width.** The
+   `update_glyph_buffer` method creates its WrapLayout with `self.viewport_width_px`.
+   This must become `self.viewport_width_px - RAIL_WIDTH` (content width) to match
+   what the click handler receives via `EditorContext.view_width`.
+
+4. **Add a test that verifies cols_per_row parity.** Create a test that constructs
+   both paths with the same inputs and asserts they produce identical `cols_per_row` values.
+
+The pattern follows the viewport_scroll subsystem's principle: `WrapLayout` is stateless
+and O(1), so there's no cache to invalidate. We simply need both call sites to receive
+the same `viewport_width_px` argument.
+
+**Key insight**: The `Renderer::wrap_layout()` method currently exists for hit-testing
+code to access the layout. However, `EditorState` does not call this method — it
+constructs its own `EditorContext` with a separate `view_width` field. The fix must
+ensure both paths compute content width consistently.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+- **docs/subsystems/viewport_scroll** (DOCUMENTED): This chunk USES the viewport_scroll
+  subsystem. The fix touches `WrapLayout` which is documented as a core component of
+  this subsystem. The subsystem overview states that `WrapLayout` is "used uniformly
+  wherever wrapping coordinates are needed" — the bug is that it's being constructed
+  with *inconsistent* width parameters. This fix enforces that uniformity.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+  No deviations discovered — the subsystem documentation correctly describes the
+  stateless O(1) arithmetic pattern. The issue is purely that two call sites pass
+  different widths, not that either deviates from the subsystem's patterns.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write a failing test for click position on continuation rows
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Before implementing the fix, write a test that exercises the bug. Following the
+testing philosophy's TDD approach, this test must fail initially.
 
-Example:
+Location: `crates/editor/src/buffer_target.rs` (in the `#[cfg(test)]` module)
 
-### Step 1: Define the SegmentHeader struct
+Test scenario:
+1. Create a buffer with a line long enough to wrap (e.g., 200 characters at 80 cols_per_row)
+2. Create a `WrapLayout` with content width (e.g., 640px / 8px glyph = 80 cols)
+3. Simulate a click at continuation row 1, screen column 10
+4. Assert that the computed buffer column is `80 * 1 + 10 = 90`, not some smaller value
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+This test should FAIL with the current code because:
+- The renderer uses `viewport_width_px` (larger)
+- The click handler uses `view_width` (smaller = viewport - RAIL_WIDTH)
+- The test will use content width, matching what the fix will make both paths use
 
-Location: src/segment/format.rs
+### Step 2: Add a content_width field to Renderer
 
-### Step 2: Implement header serialization
+Currently the Renderer stores `viewport_width_px` (full window width). Add a
+separate `content_width_px` field that equals `viewport_width_px - RAIL_WIDTH`.
+This represents the actual rendering area width.
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Location: `crates/editor/src/renderer.rs`
 
-### Step 3: ...
+Changes:
+- Add field `content_width_px: f32` to `Renderer` struct
+- In `Renderer::new()`, initialize `content_width_px = viewport_width_px - RAIL_WIDTH`
+- In `update_viewport_size()`, update both fields:
+  ```rust
+  self.viewport_width_px = window_width;
+  self.content_width_px = window_width - RAIL_WIDTH;
+  ```
+
+### Step 3: Update Renderer::wrap_layout() to use content_width_px
+
+Change the `wrap_layout()` method to use content width instead of full viewport width.
+
+Location: `crates/editor/src/renderer.rs#Renderer::wrap_layout`
+
+Before:
+```rust
+pub fn wrap_layout(&self) -> WrapLayout {
+    WrapLayout::new(self.viewport_width_px, &self.font.metrics)
+}
+```
+
+After:
+```rust
+// Chunk: docs/chunks/wrap_click_offset - Use content width for consistent wrapping
+pub fn wrap_layout(&self) -> WrapLayout {
+    WrapLayout::new(self.content_width_px, &self.font.metrics)
+}
+```
+
+### Step 4: Update update_glyph_buffer() to use content_width_px
+
+The `update_glyph_buffer()` method creates its own WrapLayout inline. Update it
+to use `content_width_px`.
+
+Location: `crates/editor/src/renderer.rs#Renderer::update_glyph_buffer`
+
+Before:
+```rust
+let wrap_layout = WrapLayout::new(self.viewport_width_px, &self.font.metrics);
+```
+
+After:
+```rust
+// Chunk: docs/chunks/wrap_click_offset - Use content width for consistent wrapping
+let wrap_layout = WrapLayout::new(self.content_width_px, &self.font.metrics);
+```
+
+### Step 5: Verify EditorContext::wrap_layout uses consistent width
+
+Confirm that `EditorContext::wrap_layout()` already uses `self.view_width`, which
+is set to `self.view_width - RAIL_WIDTH` in the call sites within `editor_state.rs`.
+
+Location: `crates/editor/src/context.rs#EditorContext::wrap_layout`
+
+Expected (no change needed — this is already correct):
+```rust
+pub fn wrap_layout(&self) -> WrapLayout {
+    WrapLayout::new(self.view_width, &self.font_metrics)
+}
+```
+
+Verify by inspecting `editor_state.rs` where `EditorContext::new` is called:
+- Line ~1296: `self.view_width - RAIL_WIDTH` is passed for mouse events
+- Line ~1093: `content_width = self.view_width - RAIL_WIDTH` for key events
+
+Both paths pass content width. The fix makes the renderer match.
+
+### Step 6: Run the failing test to confirm it now passes
+
+The test from Step 1 should now pass because both the renderer and click handler
+use the same content width for `WrapLayout` construction.
+
+### Step 7: Add a unit test verifying cols_per_row parity
+
+Write a test that explicitly verifies that constructing a WrapLayout via the
+renderer path and the EditorContext path produces identical `cols_per_row` values.
+
+Location: `crates/editor/src/renderer.rs` (in a `#[cfg(test)]` module)
+
+Test:
+```rust
+#[test]
+fn test_wrap_layout_cols_per_row_matches_context() {
+    // Given a viewport width and RAIL_WIDTH
+    let viewport_width = 800.0;
+    let content_width = viewport_width - RAIL_WIDTH;
+    let metrics = FontMetrics { advance_width: 8.0, ... };
+
+    // Both paths should compute the same cols_per_row
+    let renderer_layout = WrapLayout::new(content_width, &metrics);
+    let context_layout = WrapLayout::new(content_width, &metrics);
+
+    assert_eq!(renderer_layout.cols_per_row(), context_layout.cols_per_row());
+}
+```
+
+This test documents the invariant that both paths must agree.
+
+### Step 8: Run existing tests to verify no regressions
+
+Run the full test suite for the editor crate:
+```
+cargo test -p lite-edit-editor
+```
+
+Verify that all existing wrap rendering tests and click position tests pass.
 
 ---
 
 **BACKREFERENCE COMMENTS**
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+Add chunk backreferences to modified code:
+- `// Chunk: docs/chunks/wrap_click_offset - Use content width for consistent wrapping`
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
-
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
-
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+This backreference goes on:
+- The `content_width_px` field definition
+- The `wrap_layout()` method
+- The `update_glyph_buffer()` WrapLayout construction line
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+None. The chunks listed in `created_after` (`scroll_bottom_deadzone_v3`,
+`terminal_input_render_bug`) have already shipped and are ACTIVE. This chunk
+has no implementation dependencies on other FUTURE chunks.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **RAIL_WIDTH is defined in left_rail.rs.** The renderer will need to import
+   `RAIL_WIDTH` from `crate::left_rail`. This creates a dependency between
+   renderer and left_rail modules. This is acceptable since the renderer already
+   imports from left_rail for `LeftRailGlyphBuffer` and related items.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **What if RAIL_WIDTH changes?** The fix ties the renderer's content width
+   calculation to `RAIL_WIDTH`. If RAIL_WIDTH were made dynamic (e.g., different
+   per workspace), both the renderer and EditorContext would need to receive it
+   as a parameter rather than using the constant. For now, RAIL_WIDTH is a
+   compile-time constant, so this is not a concern.
+
+3. **Are there other places that construct WrapLayout?** A quick grep shows
+   WrapLayout is constructed in:
+   - `renderer.rs::update_glyph_buffer()` — fixed in Step 4
+   - `renderer.rs::wrap_layout()` — fixed in Step 3
+   - `context.rs::wrap_layout()` — already correct (uses view_width)
+   - `buffer_target.rs` in tests — test-only, uses explicit widths
+   - `viewport.rs` in `ensure_visible_wrapped` etc. — passed in, not constructed
+
+   No other production construction sites exist.
 
 ## Deviations
 
