@@ -228,6 +228,20 @@ impl TerminalBuffer {
     pub fn try_wait(&mut self) -> Option<i32> {
         self.pty.as_mut()?.try_wait()
     }
+
+    /// Kills the PTY process.
+    ///
+    /// This sends SIGKILL to immediately terminate the process.
+    pub fn kill(&mut self) -> std::io::Result<()> {
+        if let Some(ref mut pty) = self.pty {
+            pty.kill()
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "No PTY attached",
+            ))
+        }
+    }
 }
 
 impl BufferView for TerminalBuffer {

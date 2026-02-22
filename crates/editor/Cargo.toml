@@ -14,6 +14,8 @@ repository = "https://github.com/example/lite-edit"
 [dependencies]
 # Text buffer for editing operations
 lite-edit-buffer = { path = "../buffer" }
+# Terminal emulator and agent lifecycle
+lite-edit-terminal = { path = "../terminal" }
 
 # Core Objective-C runtime bindings
 objc2 = "0.6"

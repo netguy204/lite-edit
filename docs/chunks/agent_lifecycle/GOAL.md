@@ -1,18 +1,29 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/terminal/src/agent.rs
+  - crates/terminal/src/lib.rs
+  - crates/editor/src/workspace.rs
+  - crates/editor/src/editor_state.rs
+  - crates/terminal/tests/agent_integration.rs
 code_references: []
 narrative: null
 investigation: hierarchical_terminal_tabs
 subsystems: []
 friction_entries: []
 bug_type: null
-depends_on: ["terminal_emulator", "workspace_model"]
-created_after: ["file_save", "viewport_fractional_scroll", "word_boundary_primitives", "word_forward_delete", "word_jump_navigation"]
+depends_on:
+- terminal_emulator
+- workspace_model
+created_after:
+- file_save
+- viewport_fractional_scroll
+- word_boundary_primitives
+- word_forward_delete
+- word_jump_navigation
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

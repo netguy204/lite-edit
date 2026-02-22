@@ -773,6 +773,35 @@ impl EditorState {
         DirtyRegion::FullViewport
     }
 
+    // =========================================================================
+    // Agent Polling (Chunk: docs/chunks/agent_lifecycle)
+    // =========================================================================
+
+    /// Polls all agents in all workspaces for PTY events.
+    ///
+    /// Call this each frame to:
+    /// 1. Process PTY output from agent processes
+    /// 2. Update agent state machines (Running → NeedsInput → Stale)
+    /// 3. Update workspace status indicators
+    ///
+    /// Returns `DirtyRegion::FullViewport` if any agent had activity,
+    /// otherwise `DirtyRegion::None`.
+    pub fn poll_agents(&mut self) -> DirtyRegion {
+        let mut any_activity = false;
+
+        for workspace in &mut self.editor.workspaces {
+            if workspace.poll_agent() {
+                any_activity = true;
+            }
+        }
+
+        if any_activity {
+            DirtyRegion::FullViewport
+        } else {
+            DirtyRegion::None
+        }
+    }
+
     /// Takes the dirty region, leaving `DirtyRegion::None` in its place.
     ///
     /// Call this after rendering to reset the dirty state.

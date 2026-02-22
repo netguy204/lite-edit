@@ -1,4 +1,5 @@
 // Chunk: docs/chunks/workspace_model - Workspace model and left rail UI
+// Chunk: docs/chunks/agent_lifecycle - Agent lifecycle tracking for Composer-like workflows
 //!
 //! Workspace data model for the editor.
 //!
@@ -13,6 +14,7 @@ use std::path::PathBuf;
 
 use crate::viewport::Viewport;
 use lite_edit_buffer::{BufferView, TextBuffer};
+use lite_edit_terminal::{AgentConfig, AgentHandle, AgentState, TerminalBuffer};
 
 // =============================================================================
 // ID Types
@@ -74,25 +76,58 @@ pub enum TabKind {
 ///
 /// This enum avoids trait object downcasting complexity by storing concrete
 /// types. The `BufferView` trait is implemented to provide unified rendering.
-#[derive(Debug)]
 pub enum TabBuffer {
     /// A file editing buffer
     File(TextBuffer),
-    // Future: Terminal(TerminalBuffer),
+    /// A standalone terminal (no agent)
+    Terminal(TerminalBuffer),
+    /// A placeholder for the agent terminal.
+    ///
+    /// The actual terminal buffer lives in `Workspace.agent`. When rendering
+    /// a tab with this variant, access `workspace.agent.terminal()` instead.
+    AgentTerminal,
+}
+
+impl std::fmt::Debug for TabBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TabBuffer::File(buf) => f.debug_tuple("File").field(buf).finish(),
+            TabBuffer::Terminal(_) => f.debug_tuple("Terminal").field(&"<TerminalBuffer>").finish(),
+            TabBuffer::AgentTerminal => write!(f, "AgentTerminal"),
+        }
+    }
 }
 
 impl TabBuffer {
     /// Returns a reference to the underlying `BufferView`.
+    ///
+    /// # Panics
+    ///
+    /// Panics for `AgentTerminal` variant, which is a placeholder.
+    /// Use `Workspace::agent_terminal()` instead for agent tabs.
     pub fn as_buffer_view(&self) -> &dyn BufferView {
         match self {
             TabBuffer::File(buf) => buf,
+            TabBuffer::Terminal(buf) => buf,
+            TabBuffer::AgentTerminal => {
+                panic!("AgentTerminal is a placeholder - use Workspace::agent_terminal()")
+            }
         }
     }
 
     /// Returns a mutable reference to the underlying `BufferView`.
+    ///
+    /// # Panics
+    ///
+    /// Panics for `AgentTerminal` variant, which is a placeholder.
+    /// Use `Workspace::agent_terminal_mut()` instead for agent tabs.
     pub fn as_buffer_view_mut(&mut self) -> &mut dyn BufferView {
         match self {
             TabBuffer::File(buf) => buf,
+            TabBuffer::Terminal(buf) => buf,
+            TabBuffer::AgentTerminal => {
+                panic!("AgentTerminal is a placeholder - use Workspace::agent_terminal_mut()")
+            }
         }
     }
 
@@ -102,6 +137,7 @@ impl TabBuffer {
     pub fn as_text_buffer(&self) -> Option<&TextBuffer> {
         match self {
             TabBuffer::File(buf) => Some(buf),
+            TabBuffer::Terminal(_) | TabBuffer::AgentTerminal => None,
         }
     }
 
@@ -111,7 +147,35 @@ impl TabBuffer {
     pub fn as_text_buffer_mut(&mut self) -> Option<&mut TextBuffer> {
         match self {
             TabBuffer::File(buf) => Some(buf),
+            TabBuffer::Terminal(_) | TabBuffer::AgentTerminal => None,
         }
+    }
+
+    /// Attempts to get a reference to the underlying `TerminalBuffer`.
+    ///
+    /// Returns `Some` for terminal tabs, `None` for other tab types.
+    /// For `AgentTerminal`, returns `None` - use `Workspace::agent_terminal()` instead.
+    pub fn as_terminal_buffer(&self) -> Option<&TerminalBuffer> {
+        match self {
+            TabBuffer::Terminal(buf) => Some(buf),
+            TabBuffer::File(_) | TabBuffer::AgentTerminal => None,
+        }
+    }
+
+    /// Attempts to get a mutable reference to the underlying `TerminalBuffer`.
+    ///
+    /// Returns `Some` for terminal tabs, `None` for other tab types.
+    /// For `AgentTerminal`, returns `None` - use `Workspace::agent_terminal_mut()` instead.
+    pub fn as_terminal_buffer_mut(&mut self) -> Option<&mut TerminalBuffer> {
+        match self {
+            TabBuffer::Terminal(buf) => Some(buf),
+            TabBuffer::File(_) | TabBuffer::AgentTerminal => None,
+        }
+    }
+
+    /// Returns true if this is an agent terminal placeholder.
+    pub fn is_agent_terminal(&self) -> bool {
+        matches!(self, TabBuffer::AgentTerminal)
     }
 }
 
@@ -162,6 +226,42 @@ impl Tab {
         Self::new_file(id, TextBuffer::new(), "Untitled".to_string(), None, line_height)
     }
 
+    /// Creates a new agent terminal tab.
+    ///
+    /// This is a placeholder tab - the actual terminal buffer lives in `Workspace.agent`.
+    /// Use `Workspace::agent_terminal()` to access the terminal buffer.
+    pub fn new_agent(id: TabId, label: String, line_height: f32) -> Self {
+        Self {
+            id,
+            label,
+            buffer: TabBuffer::AgentTerminal,
+            viewport: Viewport::new(line_height),
+            kind: TabKind::AgentOutput,
+            dirty: false,
+            unread: false,
+            associated_file: None,
+        }
+    }
+
+    /// Creates a new standalone terminal tab.
+    pub fn new_terminal(id: TabId, terminal: TerminalBuffer, label: String, line_height: f32) -> Self {
+        Self {
+            id,
+            label,
+            buffer: TabBuffer::Terminal(terminal),
+            viewport: Viewport::new(line_height),
+            kind: TabKind::Terminal,
+            dirty: false,
+            unread: false,
+            associated_file: None,
+        }
+    }
+
+    /// Returns true if this is an agent terminal tab.
+    pub fn is_agent_tab(&self) -> bool {
+        self.buffer.is_agent_terminal()
+    }
+
     /// Returns a reference to the buffer as a `BufferView`.
     pub fn buffer(&self) -> &dyn BufferView {
         self.buffer.as_buffer_view()
@@ -188,10 +288,9 @@ impl Tab {
     /// to be passed to a function together. Returns `None` if this is not
     /// a file tab.
     pub fn buffer_and_viewport_mut(&mut self) -> Option<(&mut TextBuffer, &mut Viewport)> {
-        // Currently all tabs are file tabs, but when we add Terminal/Agent tabs,
-        // this will need to handle the other variants
         match &mut self.buffer {
             TabBuffer::File(buf) => Some((buf, &mut self.viewport)),
+            TabBuffer::Terminal(_) | TabBuffer::AgentTerminal => None,
         }
     }
 }
@@ -204,7 +303,6 @@ impl Tab {
 ///
 /// Each workspace represents an independent working context (e.g., a worktree,
 /// an agent session, or a standalone editing environment).
-#[derive(Debug)]
 pub struct Workspace {
     /// Unique identifier for this workspace
     pub id: WorkspaceId,
@@ -218,6 +316,11 @@ pub struct Workspace {
     pub active_tab: usize,
     /// Status indicator for the left rail
     pub status: WorkspaceStatus,
+    /// The agent running in this workspace (if any).
+    ///
+    /// When an agent is attached, its terminal is accessible via `agent_terminal()`.
+    /// The first tab is typically an `AgentTerminal` placeholder that renders from here.
+    pub agent: Option<AgentHandle>,
 }
 
 impl Workspace {
@@ -230,6 +333,7 @@ impl Workspace {
             tabs: Vec::new(),
             active_tab: 0,
             status: WorkspaceStatus::Idle,
+            agent: None,
         }
     }
 
@@ -243,6 +347,7 @@ impl Workspace {
             tabs: vec![tab],
             active_tab: 0,
             status: WorkspaceStatus::Idle,
+            agent: None,
         }
     }
 
@@ -300,6 +405,160 @@ impl Workspace {
     /// Returns the number of tabs in this workspace.
     pub fn tab_count(&self) -> usize {
         self.tabs.len()
+    }
+
+    // =========================================================================
+    // Agent lifecycle methods (Chunk: docs/chunks/agent_lifecycle)
+    // =========================================================================
+
+    /// Computes the workspace status from the agent state.
+    ///
+    /// This derives `WorkspaceStatus` from `AgentState`:
+    /// - No agent → Idle
+    /// - Starting/Running → Running
+    /// - NeedsInput → NeedsInput
+    /// - Stale → Stale
+    /// - Exited(0) → Completed
+    /// - Exited(non-zero) → Errored
+    pub fn compute_status(&self) -> WorkspaceStatus {
+        match &self.agent {
+            None => WorkspaceStatus::Idle,
+            Some(agent) => match agent.state() {
+                AgentState::Starting | AgentState::Running => WorkspaceStatus::Running,
+                AgentState::NeedsInput { .. } => WorkspaceStatus::NeedsInput,
+                AgentState::Stale { .. } => WorkspaceStatus::Stale,
+                AgentState::Exited { code: 0 } => WorkspaceStatus::Completed,
+                AgentState::Exited { .. } => WorkspaceStatus::Errored,
+            },
+        }
+    }
+
+    /// Returns a reference to the agent's terminal buffer, if an agent is attached.
+    pub fn agent_terminal(&self) -> Option<&TerminalBuffer> {
+        self.agent.as_ref().map(|a| a.terminal())
+    }
+
+    /// Returns a mutable reference to the agent's terminal buffer, if an agent is attached.
+    pub fn agent_terminal_mut(&mut self) -> Option<&mut TerminalBuffer> {
+        self.agent.as_mut().map(|a| a.terminal_mut())
+    }
+
+    /// Launches an agent in this workspace.
+    ///
+    /// Creates an `AgentHandle` and adds an `AgentTerminal` tab as the first tab.
+    /// The agent terminal is pinned (always at index 0).
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Agent configuration (command, args, timeouts)
+    /// * `tab_id` - ID for the new agent tab
+    /// * `cols` - Terminal width in columns
+    /// * `rows` - Terminal height in rows
+    /// * `line_height` - Line height for the viewport
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an agent is already attached or if spawning fails.
+    pub fn launch_agent(
+        &mut self,
+        config: AgentConfig,
+        tab_id: TabId,
+        cols: usize,
+        rows: usize,
+        line_height: f32,
+    ) -> std::io::Result<()> {
+        if self.agent.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "Workspace already has an agent attached",
+            ));
+        }
+
+        // Spawn the agent
+        let agent = AgentHandle::spawn(config, cols, rows)?;
+
+        // Create the agent tab
+        let agent_tab = Tab::new_agent(tab_id, "Agent".to_string(), line_height);
+
+        // Insert at the beginning (pinned position)
+        self.tabs.insert(0, agent_tab);
+
+        // Adjust active_tab index if needed
+        if !self.tabs.is_empty() && self.active_tab > 0 {
+            self.active_tab += 1;
+        }
+
+        // Switch to the agent tab
+        self.active_tab = 0;
+
+        // Store the agent handle
+        self.agent = Some(agent);
+
+        // Update status
+        self.status = self.compute_status();
+
+        Ok(())
+    }
+
+    /// Restarts the agent if it's in Exited state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no agent is attached or if the agent is not in Exited state.
+    pub fn restart_agent(&mut self) -> std::io::Result<()> {
+        let agent = self.agent.as_mut().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "No agent attached")
+        })?;
+
+        agent.restart()?;
+        self.status = self.compute_status();
+        Ok(())
+    }
+
+    /// Stops the running agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no agent is attached or if the agent is already exited.
+    pub fn stop_agent(&mut self) -> std::io::Result<()> {
+        let agent = self.agent.as_mut().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "No agent attached")
+        })?;
+
+        agent.stop()?;
+        self.status = self.compute_status();
+        Ok(())
+    }
+
+    /// Polls the agent and updates workspace status.
+    ///
+    /// Call this each frame to process PTY events and update state.
+    /// Returns true if any PTY output was processed.
+    pub fn poll_agent(&mut self) -> bool {
+        let had_events = if let Some(ref mut agent) = self.agent {
+            agent.poll()
+        } else {
+            false
+        };
+
+        // Always update status after polling
+        self.status = self.compute_status();
+
+        had_events
+    }
+}
+
+impl std::fmt::Debug for Workspace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Workspace")
+            .field("id", &self.id)
+            .field("label", &self.label)
+            .field("root_path", &self.root_path)
+            .field("tabs", &self.tabs)
+            .field("active_tab", &self.active_tab)
+            .field("status", &self.status)
+            .field("agent", &self.agent.as_ref().map(|a| a.state()))
+            .finish()
     }
 }
 
