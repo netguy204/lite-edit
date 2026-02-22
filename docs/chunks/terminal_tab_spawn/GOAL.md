@@ -1,11 +1,21 @@
 ---
-status: IMPLEMENTING
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
 - crates/editor/src/editor_state.rs
 - crates/editor/src/workspace.rs
-code_references: []
+code_references:
+  - ref: crates/editor/src/editor_state.rs#EditorState::new_terminal_tab
+    implements: "Creates a new standalone terminal tab with shell spawning, dimension calculation, and numbered labeling"
+  - ref: crates/editor/src/editor_state.rs#EditorState::terminal_tab_count
+    implements: "Helper to count existing terminal tabs for sequential label numbering"
+  - ref: crates/editor/src/editor_state.rs#EditorState::poll_agents
+    implements: "Extended to poll standalone terminals via workspace.poll_standalone_terminals()"
+  - ref: crates/editor/src/workspace.rs#Workspace::poll_standalone_terminals
+    implements: "Polls PTY events for all standalone terminal tabs in a workspace"
+  - ref: crates/editor/src/editor_state.rs#EditorState::handle_key
+    implements: "Cmd+Shift+T keybinding handler that calls new_terminal_tab()"
 narrative: null
 investigation: null
 subsystems: []
@@ -18,16 +28,6 @@ created_after:
 - tab_bar_content_clip
 - click_scroll_fraction_alignment
 ---
-<!--
-╔══════════════════════════════════════════════════════════════════════════════╗
-║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
-║                                                                              ║
-║  AGENT INSTRUCTIONS: When editing this file, preserve this entire comment    ║
-║  block. Only modify the frontmatter YAML and the content sections below      ║
-║  (Minor Goal, Success Criteria, Relationship to Parent). Use targeted edits  ║
-║  that replace specific sections rather than rewriting the entire file.       ║
-╚══════════════════════════════════════════════════════════════════════════════╝
--->
 
 # Chunk Goal
 
