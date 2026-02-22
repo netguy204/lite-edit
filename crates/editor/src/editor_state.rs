@@ -1444,7 +1444,7 @@ impl EditorState {
             );
 
             // Check if active tab is visible
-            if let Some(active_rect) = geometry.tabs.get(workspace.active_tab) {
+            if let Some(active_rect) = geometry.tab_rects.get(workspace.active_tab) {
                 let visible_start = RAIL_WIDTH;
                 let visible_end = self.view_width;
 
@@ -1487,14 +1487,12 @@ impl EditorState {
             );
 
             // Check each tab rect
-            for (idx, tab_rect) in geometry.tabs.iter().enumerate() {
+            for (idx, tab_rect) in geometry.tab_rects.iter().enumerate() {
                 if tab_rect.contains(mouse_x, mouse_y) {
-                    // Check if close button was clicked
-                    if let Some(close_rect) = geometry.close_buttons.get(idx) {
-                        if close_rect.contains(mouse_x, mouse_y) {
-                            self.close_tab(idx);
-                            return;
-                        }
+                    // Check if close button was clicked (close button is part of TabRect)
+                    if tab_rect.is_close_button(mouse_x, mouse_y) {
+                        self.close_tab(idx);
+                        return;
                     }
                     // Otherwise, switch to the tab
                     self.switch_tab(idx);
