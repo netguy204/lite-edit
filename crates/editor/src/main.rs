@@ -8,6 +8,7 @@
 // Chunk: docs/chunks/quit_command - Cmd+Q app termination handling
 // Chunk: docs/chunks/file_picker - File picker (Cmd+P) integration
 // Chunk: docs/chunks/file_save - File-buffer association and Cmd+S save
+// Chunk: docs/chunks/workspace_model - Workspace model and left rail rendering
 //!
 //! lite-edit: A lightweight, GPU-accelerated text editor for macOS
 //!
@@ -36,12 +37,14 @@ mod font;
 mod glyph_atlas;
 mod glyph_buffer;
 mod input;
+mod left_rail;
 mod metal_view;
 mod renderer;
 mod selector;
 mod selector_overlay;
 mod shader;
 mod viewport;
+mod workspace;
 mod wrap_layout;
 
 pub use file_index::FileIndex;
@@ -278,18 +281,19 @@ impl EditorController {
             // Take the dirty region
             let _dirty = self.state.take_dirty_region();
 
-            // Use render_with_selector when selector is active
-            if self.state.focus == EditorFocus::Selector {
-                let selector = self.state.active_selector.as_ref();
-                self.renderer.render_with_selector(
-                    &self.metal_view,
-                    selector,
-                    self.state.cursor_visible, // cursor blink affects selector cursor too
-                );
+            // Chunk: docs/chunks/workspace_model - Render with left rail
+            // Use render_with_editor to include left rail rendering
+            let selector = if self.state.focus == EditorFocus::Selector {
+                self.state.active_selector.as_ref()
             } else {
-                // Normal render when selector is not active
-                self.renderer.render(&self.metal_view);
-            }
+                None
+            };
+            self.renderer.render_with_editor(
+                &self.metal_view,
+                &self.state.editor,
+                selector,
+                self.state.cursor_visible, // cursor blink affects selector cursor too
+            );
         }
     }
 
@@ -312,8 +316,8 @@ impl EditorController {
     /// Syncs the renderer's buffer with the editor state's buffer.
     fn sync_renderer_buffer(&mut self) {
         // Update viewport on renderer - sync the pixel offset for smooth scrolling
-        let buffer_line_count = self.state.buffer.line_count();
-        let state_scroll_px = self.state.viewport.scroll_offset_px();
+        let buffer_line_count = self.state.buffer().line_count();
+        let state_scroll_px = self.state.viewport().scroll_offset_px();
         self.renderer.viewport_mut().set_scroll_offset_px(state_scroll_px, buffer_line_count);
 
         // Sync buffer content
@@ -323,15 +327,15 @@ impl EditorController {
         if let Some(render_buffer) = self.renderer.buffer_mut() {
             // We need to sync the cursor position and content
             // For now, reconstruct the buffer from content
-            let content = self.state.buffer.content();
-            let cursor_pos = self.state.buffer.cursor_position();
+            let content = self.state.buffer().content();
+            let cursor_pos = self.state.buffer().cursor_position();
 
             // Clear and rebuild (not ideal but works for now)
             *render_buffer = TextBuffer::from_str(&content);
             render_buffer.set_cursor(cursor_pos);
 
             // Sync selection anchor (set_cursor clears selection, so do this after)
-            if let Some(anchor) = self.state.buffer.selection_anchor() {
+            if let Some(anchor) = self.state.buffer().selection_anchor() {
                 render_buffer.set_selection_anchor(anchor);
             }
         }
