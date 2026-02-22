@@ -1323,21 +1323,35 @@ impl EditorState {
                 self.view_width - RAIL_WIDTH, // Content width also adjusted
             );
             self.focus_target.handle_mouse(adjusted_event, &mut ctx);
-        } else if let Some(terminal) = tab.as_terminal_buffer_mut() {
+        } else if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
+            // Chunk: docs/chunks/terminal_mouse_offset - Fixed terminal mouse Y coordinate calculation
             // Terminal tab: encode mouse event and send to PTY if mouse mode is enabled
             let modes = terminal.term_mode();
 
             // Check if any mouse mode is active
             if modes.intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG) {
                 // Calculate cell position from pixel coordinates
-                // For now, we use simplified cell calculation. A full implementation
-                // would use TerminalFocusTarget.
+                // Use the same coordinate transformation pattern as file buffers:
+                // 1. Subtract RAIL_WIDTH from x (content starts after left rail)
+                // 2. Flip y using content_height (NSView y=0 at bottom → content y=0 at top)
+                // 3. Add scroll_fraction_px to compensate for renderer's Y offset
                 let cell_width = self.font_metrics.advance_width;
                 let cell_height = self.font_metrics.line_height as f32;
 
                 let (x, y) = event.position;
+
+                // X coordinate: subtract rail width
                 let adjusted_x = (x - RAIL_WIDTH as f64).max(0.0);
-                let adjusted_y = self.view_height as f64 - TAB_BAR_HEIGHT as f64 - y;
+
+                // Y coordinate: flip using content_height (same as file buffer path)
+                // content_height = view_height - TAB_BAR_HEIGHT
+                let content_height = self.view_height as f64 - TAB_BAR_HEIGHT as f64;
+                let flipped_y = content_height - y;
+
+                // Account for scroll_fraction_px, matching pixel_to_buffer_position
+                // The renderer translates content by -scroll_fraction_px, so we add it back
+                let scroll_fraction_px = viewport.scroll_fraction_px() as f64;
+                let adjusted_y = (flipped_y + scroll_fraction_px).max(0.0);
 
                 let col = (adjusted_x / cell_width as f64) as usize;
                 let row = (adjusted_y / cell_height as f64) as usize;
