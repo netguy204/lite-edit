@@ -762,7 +762,12 @@ impl AppDelegate {
     ) -> Retained<NSTimer> {
         // Create a block for the timer callback
         let block = RcBlock::new(move |_timer: NonNull<NSTimer>| {
-            controller.borrow_mut().toggle_cursor_blink();
+            // Use try_borrow_mut to avoid panicking when the controller is
+            // already borrowed (e.g. during a modal dialog like NSOpenPanel
+            // which runs a nested event loop while the key handler holds the borrow).
+            if let Ok(mut ctrl) = controller.try_borrow_mut() {
+                ctrl.toggle_cursor_blink();
+            }
         });
 
         // Create and schedule the timer
