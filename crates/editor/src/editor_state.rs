@@ -5826,6 +5826,7 @@ mod tests {
     }
 
     /// Tests that active_tab_is_file correctly identifies tab types.
+    // Chunk: docs/chunks/terminal_active_tab_safety - Tests active_tab_is_file method
     #[test]
     fn test_active_tab_is_file() {
         use crate::tab_bar::TAB_BAR_HEIGHT;
@@ -5849,6 +5850,7 @@ mod tests {
     }
 
     /// Tests that try_buffer returns None for terminal tabs.
+    // Chunk: docs/chunks/terminal_active_tab_safety - Tests try_buffer method on terminal tabs
     #[test]
     fn test_try_buffer_on_terminal_tab() {
         use crate::tab_bar::TAB_BAR_HEIGHT;
@@ -5867,6 +5869,7 @@ mod tests {
     }
 
     /// Tests that save_file doesn't panic on terminal tabs.
+    // Chunk: docs/chunks/terminal_active_tab_safety - Tests save_file doesn't panic on terminal tabs
     #[test]
     fn test_terminal_tab_save_no_panic() {
         use crate::tab_bar::TAB_BAR_HEIGHT;

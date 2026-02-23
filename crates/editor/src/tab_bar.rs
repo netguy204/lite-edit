@@ -609,6 +609,7 @@ impl TabBarGlyphBuffer {
     }
 
     /// Updates the buffers from the workspace and geometry.
+    // Chunk: docs/chunks/tab_bar_interaction - Left-truncation of labels to preserve file extension
     ///
     /// Builds vertex data in this order:
     /// 1. Tab bar background strip
