@@ -479,6 +479,7 @@ impl EditorState {
     /// to make the cursor visible BEFORE processing the keystroke.
     // Chunk: docs/chunks/quit_command - Intercepts Cmd+Q before delegating to focus target
     // Chunk: docs/chunks/file_picker - Cmd+P interception and focus-based key routing
+    // Chunk: docs/chunks/terminal_paste_render - Paste handler without premature dirty marking
     pub fn handle_key(&mut self, event: KeyEvent) {
         use crate::input::Key;
 

@@ -297,7 +297,7 @@ fn test_ctrl_d_sends_eof() {
 /// This validates the fix for terminal_paste_render - ensuring that
 /// paste content doesn't render as blank spaces.
 ///
-/// Chunk: docs/chunks/terminal_paste_render - Paste rendering test
+/// Chunk: docs/chunks/terminal_paste_render - Integration test validating paste content appears after poll
 #[test]
 fn test_paste_content_appears_after_poll() {
     let terminal = Rc::new(RefCell::new(TerminalBuffer::new(80, 24, 1000)));

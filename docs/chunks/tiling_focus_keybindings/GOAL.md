@@ -1,12 +1,20 @@
 ---
-status: IMPLEMENTING
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
   - crates/editor/src/workspace.rs
   - crates/editor/src/editor_state.rs
   - crates/editor/src/pane_layout.rs
-code_references: []
+code_references:
+  - ref: crates/editor/src/workspace.rs#Workspace::switch_focus
+    implements: "Focus switching between panes in a given direction"
+  - ref: crates/editor/src/workspace.rs#Workspace::move_active_tab
+    implements: "Moves active tab to pane in direction, updating focus"
+  - ref: crates/editor/src/editor_state.rs#EditorState::handle_key
+    implements: "Cmd+Shift+Arrow directional tab movement and Cmd+Option+Arrow focus switching keybindings"
+  - ref: crates/editor/src/editor_state.rs#EditorState::handle_mouse_buffer
+    implements: "Click-to-focus pane switching on mouse down"
 narrative: null
 investigation: tiling_pane_layout
 subsystems: []
