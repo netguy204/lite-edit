@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Chunk: docs/chunks/macos_app_bundle - macOS app bundle packaging
+
+     Entitlements for LiteEdit code signing.
+
+     Note: This app is NOT sandboxed because the terminal emulator requires
+     PTY access which is incompatible with the App Sandbox. This means the
+     app cannot be distributed via the Mac App Store (which requires sandboxing),
+     but can be distributed via direct download with notarization.
+-->
+<plist version="1.0">
+<dict>
+    <!-- App Sandbox: DISABLED
+         The terminal emulator uses PTY (pseudo-terminal) functionality which
+         requires access to /dev/ptmx and related system resources. This is
+         incompatible with the App Sandbox. -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+
+    <!-- Hardened Runtime: Allow unsigned executable memory
+         May be required for JIT compilation or dynamic code generation.
+         Can be set to false if not needed. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <false/>
+
+    <!-- Allow DYLD environment variables (for debugging)
+         Set to false in production for security. -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <false/>
+
+    <!-- Disable library validation (allow loading non-Apple-signed libraries)
+         Set to false for maximum security; only enable if needed for plugins. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <false/>
+</dict>
+</plist>

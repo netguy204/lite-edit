@@ -441,11 +441,149 @@ impl Viewport {
         self.scroller.visible_offset_to_row(screen_line)
     }
 
+    // Chunk: docs/chunks/dirty_region_wrap_aware - Helper for buffer line to absolute screen row
+    /// Computes the absolute screen row where a buffer line starts.
+    ///
+    /// This is the cumulative sum of screen rows for all preceding buffer lines.
+    /// For example, if buffer lines 0-2 each take 2 screen rows, buffer line 3
+    /// starts at screen row 6.
+    ///
+    /// This is O(buffer_line) complexity, but is correct for wrapped mode where
+    /// buffer line indices cannot be directly used as screen row indices.
+    fn buffer_line_to_abs_screen_row<F>(
+        buffer_line: usize,
+        wrap_layout: &crate::wrap_layout::WrapLayout,
+        line_len_fn: &F,
+    ) -> usize
+    where
+        F: Fn(usize) -> usize,
+    {
+        let mut cumulative: usize = 0;
+        for line in 0..buffer_line {
+            cumulative += wrap_layout.screen_rows_for_line(line_len_fn(line));
+        }
+        cumulative
+    }
+
+    // Chunk: docs/chunks/dirty_region_wrap_aware - Wrap-aware dirty region conversion
+    /// Converts buffer-space `DirtyLines` to screen-space `DirtyRegion` with soft wrapping.
+    ///
+    /// Unlike `dirty_lines_to_region`, this method accounts for the fact that
+    /// buffer lines may wrap to multiple screen rows. It computes the cumulative
+    /// screen row for each dirty buffer line and compares against the viewport's
+    /// screen-row-based scroll position.
+    ///
+    /// Use this method when line wrapping is enabled to ensure correct dirty region
+    /// computation even when buffer line indices are much smaller than screen row indices.
+    pub fn dirty_lines_to_region_wrapped<F>(
+        &self,
+        dirty: &DirtyLines,
+        line_count: usize,
+        wrap_layout: &crate::wrap_layout::WrapLayout,
+        line_len_fn: F,
+    ) -> DirtyRegion
+    where
+        F: Fn(usize) -> usize,
+    {
+        let first_visible_screen_row = self.first_visible_screen_row();
+        let visible_screen_rows = self.visible_lines();
+        let visible_end_screen_row = first_visible_screen_row + visible_screen_rows;
+
+        match dirty {
+            DirtyLines::None => DirtyRegion::None,
+
+            DirtyLines::Single(buffer_line) => {
+                // Convert buffer line to its screen row range
+                let line_start_screen_row = Self::buffer_line_to_abs_screen_row(
+                    *buffer_line,
+                    wrap_layout,
+                    &line_len_fn,
+                );
+                let line_len = if *buffer_line < line_count {
+                    line_len_fn(*buffer_line)
+                } else {
+                    0
+                };
+                let line_screen_rows = wrap_layout.screen_rows_for_line(line_len);
+                let line_end_screen_row = line_start_screen_row + line_screen_rows;
+
+                // Check if any part of this buffer line's screen rows are visible
+                if line_end_screen_row <= first_visible_screen_row {
+                    // Entire line is above the viewport
+                    DirtyRegion::None
+                } else if line_start_screen_row >= visible_end_screen_row {
+                    // Entire line is below the viewport
+                    DirtyRegion::None
+                } else {
+                    // Line overlaps the viewport
+                    // Compute the visible portion in viewport-relative coordinates
+                    let visible_start = line_start_screen_row.saturating_sub(first_visible_screen_row);
+                    let visible_end = line_end_screen_row.min(visible_end_screen_row) - first_visible_screen_row;
+                    DirtyRegion::line_range(visible_start, visible_end)
+                }
+            }
+
+            DirtyLines::Range { from, to } => {
+                // Convert buffer line range to screen row range
+                let range_start_screen_row = Self::buffer_line_to_abs_screen_row(
+                    *from,
+                    wrap_layout,
+                    &line_len_fn,
+                );
+                let range_end_screen_row = Self::buffer_line_to_abs_screen_row(
+                    (*to).min(line_count),
+                    wrap_layout,
+                    &line_len_fn,
+                );
+
+                // Check intersection with visible range
+                if range_end_screen_row <= first_visible_screen_row {
+                    DirtyRegion::None
+                } else if range_start_screen_row >= visible_end_screen_row {
+                    DirtyRegion::None
+                } else {
+                    // Compute visible portion
+                    let dirty_start = range_start_screen_row.max(first_visible_screen_row) - first_visible_screen_row;
+                    let dirty_end = range_end_screen_row.min(visible_end_screen_row) - first_visible_screen_row;
+                    DirtyRegion::line_range(dirty_start, dirty_end)
+                }
+            }
+
+            DirtyLines::FromLineToEnd(buffer_line) => {
+                // Dirty from this buffer line to the end of the document
+                let dirty_start_screen_row = Self::buffer_line_to_abs_screen_row(
+                    *buffer_line,
+                    wrap_layout,
+                    &line_len_fn,
+                );
+
+                // If the dirty region starts at or before visible start, full viewport is dirty
+                if dirty_start_screen_row <= first_visible_screen_row {
+                    DirtyRegion::FullViewport
+                } else if dirty_start_screen_row >= visible_end_screen_row {
+                    // Dirty region starts after viewport
+                    DirtyRegion::None
+                } else {
+                    // Dirty region starts within the viewport
+                    let screen_start = dirty_start_screen_row - first_visible_screen_row;
+                    if screen_start == 0 {
+                        DirtyRegion::FullViewport
+                    } else {
+                        DirtyRegion::line_range(screen_start, visible_screen_rows)
+                    }
+                }
+            }
+        }
+    }
+
     /// Converts buffer-space `DirtyLines` to screen-space `DirtyRegion`
     ///
     /// This maps dirty buffer lines to dirty screen lines, accounting for scroll offset.
     /// Lines outside the viewport produce `DirtyRegion::None`.
     /// `FromLineToEnd` that touches the visible range produces `FullViewport`.
+    ///
+    /// **Note**: This method assumes a 1:1 mapping between buffer lines and screen rows.
+    /// When soft line wrapping is enabled, use `dirty_lines_to_region_wrapped` instead.
     pub fn dirty_lines_to_region(
         &self,
         dirty: &DirtyLines,
@@ -1777,6 +1915,337 @@ mod tests {
         assert_eq!(
             last_visible_buffer_line, line_count - 1,
             "At max scroll, the last buffer line should be visible"
+        );
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/dirty_region_wrap_aware - Wrap-aware dirty region conversion tests
+    // =========================================================================
+
+    #[test]
+    fn test_dirty_single_visible_wrapped() {
+        // Test: A buffer line that is visible on screen (because its cumulative screen
+        // rows place it in view) should produce a non-None dirty region, even when
+        // the buffer line index is less than the first_visible_screen_row.
+        //
+        // This is the key regression test for the wrap-aware dirty region bug.
+        //
+        // Scenario:
+        // - 10 buffer lines, each 160 chars (2 screen rows at 80 cols)
+        // - Total: 20 screen rows
+        // - Viewport: 5 visible rows
+        // - Scroll to screen row 10 (buffer line 5 starts there)
+        // - Mark buffer line 5 as dirty
+        // - Expected: dirty region should be non-None (line 5 is visible)
+
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(640.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(80.0, 100); // 5 visible rows
+        assert_eq!(vp.visible_lines(), 5);
+
+        // 10 buffer lines, each 160 chars = 2 screen rows
+        let line_lens = vec![160; 10];
+        let line_count = line_lens.len();
+
+        // Scroll to screen row 10 (buffer line 5 starts at screen row 10)
+        vp.set_scroll_offset_px_wrapped(160.0, line_count, &wrap_layout, |line| line_lens[line]); // 10 rows * 16px
+        assert_eq!(vp.first_visible_screen_row(), 10);
+
+        // Buffer line 5 is at screen row 10 (visible at the top of viewport)
+        // With the old buggy code: 5 < 10 would return DirtyRegion::None
+        // With the fix: buffer line 5's screen row (10) is in visible range [10, 15)
+        let region = vp.dirty_lines_to_region_wrapped(
+            &DirtyLines::Single(5),
+            line_count,
+            &wrap_layout,
+            |line| line_lens[line],
+        );
+
+        // Buffer line 5 occupies screen rows 10-11. First visible is 10, so it maps to screen lines 0-1.
+        assert!(
+            region != DirtyRegion::None,
+            "Buffer line 5 is visible (at screen row 10), dirty region should not be None"
+        );
+    }
+
+    #[test]
+    fn test_dirty_single_not_visible_wrapped() {
+        // Test: A buffer line that is NOT visible should still return DirtyRegion::None.
+
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(640.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(80.0, 100); // 5 visible rows
+
+        // 10 buffer lines, each 160 chars = 2 screen rows
+        let line_lens = vec![160; 10];
+        let line_count = line_lens.len();
+
+        // Scroll to screen row 10 (buffer line 5)
+        vp.set_scroll_offset_px_wrapped(160.0, line_count, &wrap_layout, |line| line_lens[line]);
+        assert_eq!(vp.first_visible_screen_row(), 10);
+
+        // Buffer line 2 is at screen row 4-5, which is not in visible range [10, 15)
+        let region = vp.dirty_lines_to_region_wrapped(
+            &DirtyLines::Single(2),
+            line_count,
+            &wrap_layout,
+            |line| line_lens[line],
+        );
+        assert_eq!(region, DirtyRegion::None, "Buffer line 2 is not visible, should be None");
+
+        // Buffer line 8 is at screen row 16-17, which is not in visible range [10, 15)
+        let region = vp.dirty_lines_to_region_wrapped(
+            &DirtyLines::Single(8),
+            line_count,
+            &wrap_layout,
+            |line| line_lens[line],
+        );
+        assert_eq!(region, DirtyRegion::None, "Buffer line 8 is not visible, should be None");
+    }
+
+    #[test]
+    fn test_dirty_range_wrapped() {
+        // Test: A range of dirty buffer lines should correctly map to screen rows.
+
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(640.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(80.0, 100); // 5 visible rows
+
+        // 10 buffer lines, each 160 chars = 2 screen rows
+        let line_lens = vec![160; 10];
+        let line_count = line_lens.len();
+
+        // Scroll to screen row 10
+        vp.set_scroll_offset_px_wrapped(160.0, line_count, &wrap_layout, |line| line_lens[line]);
+        assert_eq!(vp.first_visible_screen_row(), 10);
+
+        // Buffer lines 5-6 are at screen rows 10-13, which overlaps visible range [10, 15)
+        let region = vp.dirty_lines_to_region_wrapped(
+            &DirtyLines::Range { from: 5, to: 7 },
+            line_count,
+            &wrap_layout,
+            |line| line_lens[line],
+        );
+        assert!(
+            region != DirtyRegion::None,
+            "Buffer lines 5-6 are visible, should produce dirty region"
+        );
+    }
+
+    #[test]
+    fn test_dirty_from_line_to_end_wrapped() {
+        // Test: FromLineToEnd should correctly identify visibility with wrapping.
+
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(640.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(80.0, 100); // 5 visible rows
+
+        // 10 buffer lines, each 160 chars = 2 screen rows
+        let line_lens = vec![160; 10];
+        let line_count = line_lens.len();
+
+        // Scroll to screen row 10
+        vp.set_scroll_offset_px_wrapped(160.0, line_count, &wrap_layout, |line| line_lens[line]);
+
+        // FromLineToEnd(3): buffer line 3 starts at screen row 6, extends to end
+        // Visible range is [10, 15), so this overlaps and should produce FullViewport
+        let region = vp.dirty_lines_to_region_wrapped(
+            &DirtyLines::FromLineToEnd(3),
+            line_count,
+            &wrap_layout,
+            |line| line_lens[line],
+        );
+        assert_eq!(
+            region,
+            DirtyRegion::FullViewport,
+            "FromLineToEnd(3) starts before viewport and extends past, should be FullViewport"
+        );
+
+        // FromLineToEnd(8): buffer line 8 starts at screen row 16, after visible range [10, 15)
+        let region = vp.dirty_lines_to_region_wrapped(
+            &DirtyLines::FromLineToEnd(8),
+            line_count,
+            &wrap_layout,
+            |line| line_lens[line],
+        );
+        assert_eq!(
+            region,
+            DirtyRegion::None,
+            "FromLineToEnd(8) starts after viewport, should be None"
+        );
+    }
+
+    #[test]
+    fn test_dirty_wrapped_heavy_divergence() {
+        // Test: Reproduce the original bug scenario with heavy line wrapping
+        // where buffer line index << first_visible_screen_row.
+        //
+        // Scenario from the bug report:
+        // - File with 55 lines over 200 chars, max 843 chars
+        // - At halfway scroll, first_visible_screen_row ~ 400
+        // - Clicked buffer line ~ 250
+        // - The comparison 250 >= 400 fails in the buggy code
+
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(640.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(320.0, 1000); // 20 visible rows
+
+        // Create lines that wrap heavily: each line is ~400 chars (5 screen rows at 80 cols)
+        let line_lens: Vec<usize> = (0..100).map(|_| 400).collect();
+        let line_count = line_lens.len();
+        // Total screen rows: 100 * 5 = 500
+
+        // Scroll to screen row 200 (roughly halfway)
+        vp.set_scroll_offset_px_wrapped(3200.0, line_count, &wrap_layout, |line| line_lens[line]); // 200 * 16
+        assert_eq!(vp.first_visible_screen_row(), 200);
+
+        // Buffer line 40 starts at screen row 200 (40 * 5 = 200)
+        // With the buggy code: 40 < 200 would return DirtyRegion::None
+        let region = vp.dirty_lines_to_region_wrapped(
+            &DirtyLines::Single(40),
+            line_count,
+            &wrap_layout,
+            |line| line_lens[line],
+        );
+        assert!(
+            region != DirtyRegion::None,
+            "Buffer line 40 (at screen row 200) should be visible when scrolled to row 200"
+        );
+
+        // Buffer line 43 starts at screen row 215 (43 * 5 = 215), still in visible range [200, 220)
+        let region = vp.dirty_lines_to_region_wrapped(
+            &DirtyLines::Single(43),
+            line_count,
+            &wrap_layout,
+            |line| line_lens[line],
+        );
+        assert!(
+            region != DirtyRegion::None,
+            "Buffer line 43 (at screen row 215) should be visible in range [200, 220)"
+        );
+
+        // Buffer line 30 starts at screen row 150, NOT in visible range [200, 220)
+        let region = vp.dirty_lines_to_region_wrapped(
+            &DirtyLines::Single(30),
+            line_count,
+            &wrap_layout,
+            |line| line_lens[line],
+        );
+        assert_eq!(
+            region,
+            DirtyRegion::None,
+            "Buffer line 30 (at screen row 150) should NOT be visible in range [200, 220)"
+        );
+    }
+
+    #[test]
+    fn test_dirty_wrapped_partial_line_visible() {
+        // Test: A buffer line that spans multiple screen rows and only partially
+        // overlaps the viewport should still produce a non-None dirty region.
+
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(640.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(80.0, 100); // 5 visible rows
+
+        // Buffer lines with varying lengths to create enough content for scrolling:
+        // Line 0: 80 chars (1 screen row) - row 0
+        // Line 1: 240 chars (3 screen rows) - rows 1-3
+        // Line 2: 160 chars (2 screen rows) - rows 4-5
+        // Line 3: 240 chars (3 screen rows) - rows 6-8
+        // Line 4: 160 chars (2 screen rows) - rows 9-10
+        // Total: 11 screen rows, max scroll = 6 (11 - 5)
+        let line_lens = vec![80, 240, 160, 240, 160];
+        let line_count = line_lens.len();
+
+        // Scroll to screen row 3 (middle of line 1)
+        vp.set_scroll_offset_px_wrapped(48.0, line_count, &wrap_layout, |line| line_lens[line]); // 3 * 16
+        assert_eq!(vp.first_visible_screen_row(), 3);
+
+        // Buffer line 1 starts at row 1 and ends at row 3. Row 3 is visible.
+        // Even though line 1's buffer index (1) < first_visible_screen_row (3),
+        // its screen rows overlap the visible range.
+        let region = vp.dirty_lines_to_region_wrapped(
+            &DirtyLines::Single(1),
+            line_count,
+            &wrap_layout,
+            |line| line_lens[line],
+        );
+        assert!(
+            region != DirtyRegion::None,
+            "Buffer line 1's last row (3) is visible, should produce dirty region"
+        );
+
+        // Buffer line 2 starts at row 4, which is in visible range [3, 8)
+        let region = vp.dirty_lines_to_region_wrapped(
+            &DirtyLines::Single(2),
+            line_count,
+            &wrap_layout,
+            |line| line_lens[line],
+        );
+        assert!(
+            region != DirtyRegion::None,
+            "Buffer line 2 (rows 4-5) is visible in range [3, 8)"
+        );
+
+        // Buffer line 0 ends at row 0, which is NOT in visible range [3, 8)
+        let region = vp.dirty_lines_to_region_wrapped(
+            &DirtyLines::Single(0),
+            line_count,
+            &wrap_layout,
+            |line| line_lens[line],
+        );
+        assert_eq!(
+            region,
+            DirtyRegion::None,
+            "Buffer line 0 (row 0) is not visible in range [3, 8)"
         );
     }
 }

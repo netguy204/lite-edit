@@ -1792,15 +1792,31 @@ impl EditorState {
         }
     }
 
+    // Chunk: docs/chunks/dirty_region_wrap_aware - Wrap-aware dirty region conversion
     /// Returns the dirty region for just the cursor line.
+    ///
+    /// This uses wrap-aware conversion to correctly handle soft line wrapping,
+    /// where buffer line indices can be much smaller than screen row indices.
     // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
     fn cursor_dirty_region(&self) -> DirtyRegion {
         // For terminal tabs, return FullViewport since the cursor is part of the grid.
         if let Some(buffer) = self.try_buffer() {
             let cursor_line = buffer.cursor_position().line;
-            self.viewport().dirty_lines_to_region(
+            let line_count = buffer.line_count();
+
+            // Create WrapLayout for the current viewport width
+            let wrap_layout = crate::wrap_layout::WrapLayout::new(self.view_width, &self.font_metrics);
+
+            // Capture line lengths for the closure
+            let line_lens: Vec<usize> = (0..line_count)
+                .map(|line| buffer.line_len(line))
+                .collect();
+
+            self.viewport().dirty_lines_to_region_wrapped(
                 &lite_edit_buffer::DirtyLines::Single(cursor_line),
-                buffer.line_count(),
+                line_count,
+                &wrap_layout,
+                |line| line_lens.get(line).copied().unwrap_or(0),
             )
         } else {
             DirtyRegion::FullViewport
