@@ -576,9 +576,10 @@ impl FocusTarget for BufferFocusTarget {
 ///
 /// # Returns
 /// A buffer `Position` with line and column clamped to valid ranges.
+// Chunk: docs/chunks/tiling_workspace_integration - Screen-space coordinates (y=0 at top of content)
 fn pixel_to_buffer_position<F>(
     position: (f64, f64),
-    view_height: f32,
+    _view_height: f32, // Kept for API compatibility but no longer used for flip
     font_metrics: &FontMetrics,
     scroll_fraction_px: f32,
     scroll_offset: usize,
@@ -592,16 +593,16 @@ where
     let line_height = font_metrics.line_height;
     let char_width = font_metrics.advance_width;
 
-    // Flip y-coordinate: macOS uses bottom-left origin, buffer uses top-left
-    let flipped_y = (view_height as f64) - y;
+    // y is already in screen space (y=0 at top of content area)
+    // No flip needed - coordinates are pre-flipped at handle_mouse entry
 
     // Chunk: docs/chunks/click_scroll_fraction_alignment - Account for renderer Y offset
     // Compute screen line (which line on screen, 0-indexed from top)
     // Use truncation (floor for positive values) so clicking in the top half
     // of a line targets that line
     // Add scroll_fraction_px to compensate for the renderer's vertical translation
-    let screen_line = if flipped_y >= 0.0 && line_height > 0.0 {
-        ((flipped_y + scroll_fraction_px as f64) / line_height).floor() as usize
+    let screen_line = if y >= 0.0 && line_height > 0.0 {
+        ((y + scroll_fraction_px as f64) / line_height).floor() as usize
     } else {
         0
     };
@@ -632,6 +633,7 @@ where
 }
 
 // Chunk: docs/chunks/line_wrap_rendering - Wrap-aware pixel-to-buffer position conversion
+// Chunk: docs/chunks/tiling_workspace_integration - Screen-space coordinates (y=0 at top of content)
 /// Converts pixel coordinates to buffer position with soft line wrapping.
 ///
 /// This is the wrap-aware version of hit-testing. It walks buffer lines from
@@ -639,11 +641,11 @@ where
 /// which buffer line owns the clicked screen row.
 ///
 /// # Arguments
-/// * `position` - Pixel position (x, y) in view coordinates
-/// * `view_height` - Total view height in pixels
+/// * `position` - Pixel position (x, y) in content-local screen space (y=0 at top of content)
+/// * `view_height` - Total view height in pixels (kept for API compatibility)
 /// * `wrap_layout` - WrapLayout for computing screen rows per line
 /// * `scroll_fraction_px` - Fractional scroll offset in pixels. The renderer translates
-///   content by `-scroll_fraction_px`, so we add it back to `flipped_y` to compensate.
+///   content by `-scroll_fraction_px`, so we add it back to y to compensate.
 /// * `first_visible_screen_row` - The first visible **screen row** (from scroll offset).
 ///   In wrapped mode, scroll_offset_px tracks position in screen row space, not buffer
 ///   line space. This parameter is the screen row index, not a buffer line index.
@@ -655,7 +657,7 @@ where
 // Chunk: docs/chunks/scroll_wrap_deadzone_v2 - Fixed screen row to buffer line mapping
 fn pixel_to_buffer_position_wrapped<F>(
     position: (f64, f64),
-    view_height: f32,
+    _view_height: f32, // Kept for API compatibility but no longer used for flip
     wrap_layout: &WrapLayout,
     scroll_fraction_px: f32,
     first_visible_screen_row: usize,
@@ -669,14 +671,14 @@ where
     let line_height = wrap_layout.line_height();
     let glyph_width = wrap_layout.glyph_width();
 
-    // Flip y-coordinate: macOS uses bottom-left origin, buffer uses top-left
-    let flipped_y = (view_height as f64) - y;
+    // y is already in screen space (y=0 at top of content area)
+    // No flip needed - coordinates are pre-flipped at handle_mouse entry
 
     // Chunk: docs/chunks/click_scroll_fraction_alignment - Account for renderer Y offset
     // Compute screen row relative to viewport (which row on screen, 0-indexed from top)
     // Add scroll_fraction_px to compensate for the renderer's vertical translation
-    let viewport_relative_row = if flipped_y >= 0.0 && line_height > 0.0 {
-        ((flipped_y + scroll_fraction_px as f64) / line_height as f64).floor() as usize
+    let viewport_relative_row = if y >= 0.0 && line_height > 0.0 {
+        ((y + scroll_fraction_px as f64) / line_height as f64).floor() as usize
     } else {
         0
     };
@@ -1174,17 +1176,16 @@ mod tests {
     }
 
     // ==================== Pixel to Position Tests ====================
+    // Chunk: docs/chunks/tiling_workspace_integration - Tests use screen-space coordinates (y=0 at top)
 
     #[test]
     fn test_pixel_to_position_first_character() {
         // Click at top-left corner (first character of first line)
-        // View height = 160, line_height = 16, char_width = 8
-        // macOS y-coordinate is from bottom, so clicking at the top means y = 160 - small
-        // To hit line 0 (top line), we need flipped_y in [0, 16)
-        // flipped_y = 160 - y, so y should be in (144, 160]
+        // line_height = 16, char_width = 8
+        // In screen space: y=0 at top, line 0 is at y ∈ [0, 16)
         let metrics = test_font_metrics();
         let position = super::pixel_to_buffer_position(
-            (0.0, 155.0), // x=0, y near top (160-155=5, which is in first line)
+            (0.0, 5.0), // x=0, y=5 (in first line region [0, 16))
             160.0,
             &metrics,
             0.0, // no scroll fraction
@@ -1198,11 +1199,11 @@ mod tests {
     #[test]
     fn test_pixel_to_position_second_line() {
         // Click on second line
-        // line_height = 16, so line 1 is at flipped_y in [16, 32)
-        // To get flipped_y = 20, we need y = 160 - 20 = 140
+        // line_height = 16, so line 1 is at y ∈ [16, 32)
+        // y = 20 targets line 1
         let metrics = test_font_metrics();
         let position = super::pixel_to_buffer_position(
-            (0.0, 140.0), // flipped_y = 20, line 1
+            (0.0, 20.0), // y=20, line 1
             160.0,
             &metrics,
             0.0, // no scroll fraction
@@ -1219,7 +1220,7 @@ mod tests {
         // col = floor(24 / 8) = 3
         let metrics = test_font_metrics();
         let position = super::pixel_to_buffer_position(
-            (24.0, 155.0), // x=24, line 0
+            (24.0, 5.0), // x=24, line 0
             160.0,
             &metrics,
             0.0, // no scroll fraction
@@ -1235,7 +1236,7 @@ mod tests {
         // Click past end of line (line has 5 chars, click at col 10)
         let metrics = test_font_metrics();
         let position = super::pixel_to_buffer_position(
-            (80.0, 155.0), // x=80, would be col 10, but line only has 5 chars
+            (80.0, 5.0), // x=80, would be col 10, but line only has 5 chars
             160.0,
             &metrics,
             0.0, // no scroll fraction
@@ -1250,11 +1251,11 @@ mod tests {
     #[test]
     fn test_pixel_to_position_below_last_line() {
         // Click below last line (buffer has 3 lines, click on what would be line 5)
-        // line_height = 16, line 5 is at flipped_y in [80, 96)
-        // flipped_y = 85 means y = 160 - 85 = 75
+        // line_height = 16, line 5 is at y ∈ [80, 96)
+        // y = 85 targets line 5 if it existed
         let metrics = test_font_metrics();
         let position = super::pixel_to_buffer_position(
-            (0.0, 75.0), // would be line 5 if it existed
+            (0.0, 85.0), // would be line 5 if it existed
             160.0,
             &metrics,
             0.0, // no scroll fraction
@@ -1269,10 +1270,10 @@ mod tests {
     #[test]
     fn test_pixel_to_position_with_scroll_offset() {
         // Viewport is scrolled down 5 lines
-        // Click on screen line 0, which should map to buffer line 5
+        // Click on screen line 0 (y near 0), which should map to buffer line 5
         let metrics = test_font_metrics();
         let position = super::pixel_to_buffer_position(
-            (0.0, 155.0), // screen line 0
+            (0.0, 5.0), // screen line 0
             160.0,
             &metrics,
             0.0, // no scroll fraction
@@ -1305,7 +1306,7 @@ mod tests {
         // Click with negative x (shouldn't happen but handle gracefully)
         let metrics = test_font_metrics();
         let position = super::pixel_to_buffer_position(
-            (-10.0, 155.0),
+            (-10.0, 5.0),
             160.0,
             &metrics,
             0.0, // no scroll fraction
@@ -1322,7 +1323,7 @@ mod tests {
         // Should use floor/truncation to target col 1
         let metrics = test_font_metrics();
         let position = super::pixel_to_buffer_position(
-            (12.7, 155.0),
+            (12.7, 5.0),
             160.0,
             &metrics,
             0.0, // no scroll fraction
@@ -1344,8 +1345,8 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         // Click on "world" at column 2 (character 'r')
-        // line 1 is at flipped_y in [16, 32)
-        // y = 160 - 20 = 140 for flipped_y = 20
+        // In screen space: line 1 is at y ∈ [16, 32)
+        // y = 20 targets line 1
         // x = 16 for column 2 (8 * 2)
         {
             let mut ctx = EditorContext::new(
@@ -1358,7 +1359,7 @@ mod tests {
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
-                position: (16.0, 140.0),
+                position: (16.0, 20.0), // x=16 (col 2), y=20 (line 1)
                 modifiers: Modifiers::default(),
                 click_count: 1,
             };
@@ -1370,6 +1371,7 @@ mod tests {
     }
 
     // Chunk: docs/chunks/click_scroll_fraction_alignment - Regression test
+    // Chunk: docs/chunks/tiling_workspace_integration - Tests use screen-space coordinates (y=0 at top)
     #[test]
     fn test_click_with_scroll_fraction_positions_correctly() {
         // Setup: scroll to a fractional position (line 5 + 8 pixels)
@@ -1378,25 +1380,19 @@ mod tests {
         // Renderer places line 5 at y_visual = -scroll_fraction_px = -8
         // (partially clipped off the top). Line 6 is at y_visual = 8, etc.
         //
-        // A click at screen y = 155 (macOS coords, bottom-left origin) where
-        // view_height = 160 gives:
-        //   flipped_y = 160 - 155 = 5 (5 pixels from top)
+        // In screen space (y=0 at top of content):
+        // y = 10 is 10 pixels from top
         //
         // WITHOUT scroll_fraction_px compensation:
-        //   target_row = floor(5 / 16) = 0 → would map to line 5 (first_visible)
+        //   target_row = floor(10 / 16) = 0 → would map to line 5 (first_visible)
         //
         // WITH scroll_fraction_px = 8 compensation:
-        //   target_row = floor((5 + 8) / 16) = floor(0.8125) = 0 → still line 5
+        //   target_row = floor((10 + 8) / 16) = floor(1.125) = 1 → line 6 (CORRECT)
         //
-        // But consider y = 150 (flipped_y = 10):
-        // WITHOUT: floor(10/16) = 0 → line 5
-        // WITH 8px: floor((10+8)/16) = floor(1.125) = 1 → line 6 (CORRECT)
+        // The visual center of line 5 (first visible) is at y = -8 + 8 = 0
+        // The visual center of line 6 is at y = 8 + 8 = 16
         //
-        // The visual center of line 5 (first visible) is at flipped_y = -8 + 8 = 0
-        // The visual center of line 6 is at flipped_y = 8 + 8 = 16
-        //
-        // Clicking at flipped_y = 10 is visually in line 6's region, so we
-        // expect buffer line 6.
+        // Clicking at y = 10 is visually in line 6's region, so we expect buffer line 6.
 
         let content = (0..20).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
         let mut buffer = TextBuffer::from_str(&content);
@@ -1419,11 +1415,11 @@ mod tests {
                 160.0,
                 800.0,
             );
-            // Click at flipped_y = 10 (y = 150 in macOS coords)
+            // Click at y = 10 (in screen space, 10 pixels from top)
             // This is visually in line 6's row (line 5 is partially clipped at top)
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
-                position: (0.0, 150.0), // flipped_y = 10
+                position: (0.0, 10.0), // y=10 in screen space
                 modifiers: Modifiers::default(),
                 click_count: 1,
             };
@@ -1434,18 +1430,19 @@ mod tests {
         assert_eq!(
             buffer.cursor_position().line,
             6,
-            "With scroll_fraction_px=8, clicking at flipped_y=10 should select line 6"
+            "With scroll_fraction_px=8, clicking at y=10 should select line 6"
         );
     }
 
     // Chunk: docs/chunks/click_scroll_fraction_alignment - Unit test for scroll fraction
+    // Chunk: docs/chunks/tiling_workspace_integration - Tests use screen-space coordinates (y=0 at top)
     #[test]
     fn test_pixel_to_position_with_scroll_fraction() {
         // line_height = 16, scroll_fraction_px = 8
-        // flipped_y = 10, without fraction: line 0, with fraction: line 1
+        // y = 10, without fraction: line 0, with fraction: line 1
         let metrics = test_font_metrics();
         let position = super::pixel_to_buffer_position(
-            (0.0, 150.0), // flipped_y = 160 - 150 = 10
+            (0.0, 10.0), // y=10 in screen space
             160.0,
             &metrics,
             8.0, // scroll_fraction_px
@@ -2766,8 +2763,9 @@ mod tests {
 
         // Click on the last visible screen row (row 4 on screen)
         // view_height = 80, line_height = 16
-        // Screen row 4 is at flipped_y in [64, 80)
-        // For flipped_y = 70, y = 80 - 70 = 10
+        // In screen space: row 4 is at y ∈ [64, 80)
+        // y = 70 targets row 4
+        // Chunk: docs/chunks/tiling_workspace_integration - Tests use screen-space coordinates (y=0 at top)
         {
             let mut dirty2 = DirtyRegion::None;
             let mut ctx = EditorContext::new(
@@ -2780,7 +2778,7 @@ mod tests {
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
-                position: (0.0, 10.0), // y = 10, flipped_y = 70, row 4 on screen
+                position: (0.0, 70.0), // y=70 in screen space → row 4
                 modifiers: Modifiers::default(),
                 click_count: 1,
             };
@@ -2869,8 +2867,9 @@ mod tests {
 
         // Click on the last visible line (line 19, which is screen row 9)
         // view_height = 160, line_height = 16
-        // Screen row 9 is at flipped_y in [144, 160)
-        // For flipped_y = 150, y = 160 - 150 = 10
+        // In screen space: row 9 is at y ∈ [144, 160)
+        // y = 150 targets row 9
+        // Chunk: docs/chunks/tiling_workspace_integration - Tests use screen-space coordinates (y=0 at top)
         {
             let mut dirty2 = DirtyRegion::None;
             let mut ctx = EditorContext::new(
@@ -2883,7 +2882,7 @@ mod tests {
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
-                position: (0.0, 10.0), // y = 10, flipped_y = 150, screen row 9
+                position: (0.0, 150.0), // y=150 in screen space → row 9
                 modifiers: Modifiers::default(),
                 click_count: 1,
             };
@@ -2902,6 +2901,7 @@ mod tests {
     // ==================== Mouse Drag Selection Tests ====================
     // Chunk: docs/chunks/mouse_drag_selection - Mouse drag selection
 
+    // Chunk: docs/chunks/tiling_workspace_integration - Tests use screen-space coordinates (y=0 at top)
     #[test]
     fn test_mouse_down_sets_selection_anchor() {
         // After a mouse down event, the selection anchor should be set at the clicked position
@@ -2912,7 +2912,7 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         // Click on "world" at column 2 (character 'r')
-        // line 1 is at flipped_y in [16, 32), y = 160 - 20 = 140 for flipped_y = 20
+        // In screen space: line 1 is at y ∈ [16, 32), so y=20 targets line 1
         // x = 16 for column 2 (8 * 2)
         {
             let mut ctx = EditorContext::new(
@@ -2925,7 +2925,7 @@ mod tests {
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
-                position: (16.0, 140.0),
+                position: (16.0, 20.0), // y=20 in screen space → line 1
                 modifiers: Modifiers::default(),
                 click_count: 1,
             };
@@ -2941,6 +2941,7 @@ mod tests {
         assert!(buffer.has_selection()); // now anchor != cursor
     }
 
+    // Chunk: docs/chunks/tiling_workspace_integration - Tests use screen-space coordinates (y=0 at top)
     #[test]
     fn test_mouse_drag_extends_selection() {
         // Simulate down → moved → moved sequence and verify selection
@@ -2951,7 +2952,7 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         // Mouse down at line 0, column 1 (character 'e')
-        // line 0 is at flipped_y in [0, 16), y = 160 - 5 = 155 for flipped_y = 5
+        // In screen space: line 0 is at y ∈ [0, 16), so y=5 targets line 0
         // x = 8 for column 1
         {
             let mut ctx = EditorContext::new(
@@ -2964,7 +2965,7 @@ mod tests {
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
-                position: (8.0, 155.0),
+                position: (8.0, 5.0), // y=5 in screen space → line 0
                 modifiers: Modifiers::default(),
                 click_count: 1,
             };
@@ -2975,7 +2976,7 @@ mod tests {
         dirty = DirtyRegion::None;
 
         // Drag to line 1, column 3
-        // line 1 is at flipped_y in [16, 32), y = 160 - 20 = 140
+        // In screen space: line 1 is at y ∈ [16, 32), so y=20 targets line 1
         // x = 24 for column 3
         {
             let mut ctx = EditorContext::new(
@@ -2988,7 +2989,7 @@ mod tests {
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Moved,
-                position: (24.0, 140.0),
+                position: (24.0, 20.0), // y=20 in screen space → line 1
                 modifiers: Modifiers::default(),
                 click_count: 1,
             };
@@ -3154,6 +3155,7 @@ mod tests {
         assert_eq!(buffer.selected_text(), Some("ell".to_string()));
     }
 
+    // Chunk: docs/chunks/tiling_workspace_integration - Tests use screen-space coordinates (y=0 at top)
     #[test]
     fn test_drag_past_line_end_clamps_column() {
         // Click, drag past line end, verify column clamped
@@ -3164,6 +3166,7 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         // Mouse down at line 0, column 0
+        // In screen space: y=5 targets line 0
         {
             let mut ctx = EditorContext::new(
                 &mut buffer,
@@ -3175,7 +3178,7 @@ mod tests {
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
-                position: (0.0, 155.0),
+                position: (0.0, 5.0), // y=5 → line 0
                 modifiers: Modifiers::default(),
                 click_count: 1,
             };
@@ -3194,7 +3197,7 @@ mod tests {
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Moved,
-                position: (80.0, 155.0),
+                position: (80.0, 5.0), // y=5 → line 0
                 modifiers: Modifiers::default(),
                 click_count: 1,
             };
@@ -3258,9 +3261,10 @@ mod tests {
         assert_eq!(buffer.cursor_position(), Position::new(1, 0));
     }
 
+    // Chunk: docs/chunks/tiling_workspace_integration - Tests use screen-space coordinates (y=0 at top)
     #[test]
     fn test_drag_above_first_line_clamps_to_first_line() {
-        // Drag with y that results in negative screen line (above view)
+        // Drag with negative y (above the view in screen space)
         let mut buffer = TextBuffer::from_str("hello\nworld");
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
@@ -3268,6 +3272,7 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         // Mouse down at line 1
+        // In screen space: line 1 is at y ∈ [16, 32), so y=20 targets line 1
         {
             let mut ctx = EditorContext::new(
                 &mut buffer,
@@ -3279,16 +3284,15 @@ mod tests {
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Down,
-                position: (0.0, 140.0), // line 1
+                position: (0.0, 20.0), // y=20 → line 1
                 modifiers: Modifiers::default(),
                 click_count: 1,
             };
             target.handle_mouse(event, &mut ctx);
         }
 
-        // Drag to y > view_height (below the coordinate origin, i.e., above the view)
-        // NSView uses bottom-left origin, so y > view_height means above the top of the view
-        // flipped_y = view_height - y would be negative
+        // Drag to y < 0 (above the view in screen space)
+        // Negative y in screen space means above the top of the view
         {
             let mut ctx = EditorContext::new(
                 &mut buffer,
@@ -3300,7 +3304,7 @@ mod tests {
             );
             let event = MouseEvent {
                 kind: MouseEventKind::Moved,
-                position: (0.0, 200.0), // y > view_height, flipped_y < 0
+                position: (0.0, -40.0), // y < 0, above view
                 modifiers: Modifiers::default(),
                 click_count: 1,
             };
@@ -3311,6 +3315,7 @@ mod tests {
         assert_eq!(buffer.cursor_position(), Position::new(0, 0));
     }
 
+    // Chunk: docs/chunks/tiling_workspace_integration - Tests use screen-space coordinates (y=0 at top)
     #[test]
     fn test_mouse_sequence_down_moved_up() {
         // Full lifecycle test: down → moved → moved → up
@@ -3321,6 +3326,7 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         // Mouse down at line 0, column 1
+        // In screen space: y=5 targets line 0
         {
             let mut ctx = EditorContext::new(
                 &mut buffer,
@@ -3333,7 +3339,7 @@ mod tests {
             target.handle_mouse(
                 MouseEvent {
                     kind: MouseEventKind::Down,
-                    position: (8.0, 155.0),
+                    position: (8.0, 5.0), // y=5 → line 0
                     modifiers: Modifiers::default(),
                     click_count: 1,
                 },
@@ -3344,6 +3350,7 @@ mod tests {
         assert!(!buffer.has_selection());
 
         // Drag to line 1, column 2
+        // In screen space: y=20 targets line 1
         dirty = DirtyRegion::None;
         {
             let mut ctx = EditorContext::new(
@@ -3357,7 +3364,7 @@ mod tests {
             target.handle_mouse(
                 MouseEvent {
                     kind: MouseEventKind::Moved,
-                    position: (16.0, 140.0),
+                    position: (16.0, 20.0), // y=20 → line 1
                     modifiers: Modifiers::default(),
                     click_count: 1,
                 },
@@ -3370,6 +3377,7 @@ mod tests {
         assert!(dirty.is_dirty());
 
         // Drag to line 2, column 1
+        // In screen space: y=36 targets line 2
         dirty = DirtyRegion::None;
         {
             let mut ctx = EditorContext::new(
@@ -3383,7 +3391,7 @@ mod tests {
             target.handle_mouse(
                 MouseEvent {
                     kind: MouseEventKind::Moved,
-                    position: (8.0, 124.0),
+                    position: (8.0, 36.0), // y=36 → line 2
                     modifiers: Modifiers::default(),
                     click_count: 1,
                 },
@@ -3407,7 +3415,7 @@ mod tests {
             target.handle_mouse(
                 MouseEvent {
                     kind: MouseEventKind::Up,
-                    position: (8.0, 124.0),
+                    position: (8.0, 36.0), // y=36 → line 2
                     modifiers: Modifiers::default(),
                     click_count: 1,
                 },
@@ -3480,6 +3488,7 @@ mod tests {
         assert_eq!(buffer.selected_text(), Some("ell".to_string()));
     }
 
+    // Chunk: docs/chunks/tiling_workspace_integration - Tests use screen-space coordinates (y=0 at top)
     #[test]
     fn test_drag_updates_dirty_region() {
         // Verify correct lines are marked dirty during drag
@@ -3490,6 +3499,7 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         // Mouse down at line 1
+        // In screen space: y=20 targets line 1
         {
             let mut ctx = EditorContext::new(
                 &mut buffer,
@@ -3502,7 +3512,7 @@ mod tests {
             target.handle_mouse(
                 MouseEvent {
                     kind: MouseEventKind::Down,
-                    position: (0.0, 140.0), // line 1
+                    position: (0.0, 20.0), // y=20 → line 1
                     modifiers: Modifiers::default(),
                     click_count: 1,
                 },
@@ -3515,6 +3525,7 @@ mod tests {
         dirty = DirtyRegion::None;
 
         // Drag to line 3
+        // In screen space: y=52 targets line 3
         {
             let mut ctx = EditorContext::new(
                 &mut buffer,
@@ -3527,7 +3538,7 @@ mod tests {
             target.handle_mouse(
                 MouseEvent {
                     kind: MouseEventKind::Moved,
-                    position: (16.0, 108.0), // flipped_y = 52, line 3
+                    position: (16.0, 52.0), // y=52 → line 3
                     modifiers: Modifiers::default(),
                     click_count: 1,
                 },
@@ -3962,8 +3973,10 @@ mod tests {
         // (the screen row), but treats it as buffer line 3. When it iterates
         // `for buffer_line in 3..5`, it starts at buffer line 3, not buffer line 2.
         //
-        // Clicking on screen row 0 of the viewport (y=48px from bottom with 48px height)
+        // Clicking on screen row 0 of the viewport (y=0 at top)
         // should place cursor on buffer line 2, NOT buffer line 3.
+        //
+        // Chunk: docs/chunks/tiling_workspace_integration - Tests use screen-space coordinates (y=0 at top)
 
         let wrap_layout = test_wrap_layout_80_cols();
         let line_lens = vec![160, 40, 40, 40, 40];
@@ -3972,18 +3985,18 @@ mod tests {
         // first_visible_line = 3 (screen row 3 is the top of viewport at max scroll)
         // scroll_fraction_px = 0.0 (aligned to row boundary)
         //
-        // With flipped_y = view_height - y:
-        // Click at y=48 (top of viewport in macOS coords) -> flipped_y = 0 -> screen row 0
-        // Click at y=32 -> flipped_y = 16 -> screen row 1
-        // Click at y=16 -> flipped_y = 32 -> screen row 2
+        // In screen space (y=0 at top):
+        // Click at y=0 -> screen row 0
+        // Click at y=16 -> screen row 1
+        // Click at y=32 -> screen row 2
 
-        // Click at y=48 (top of viewport)
+        // Click at y=0 (top of viewport in screen space)
         let position = pixel_to_buffer_position_wrapped(
-            (0.0, 48.0), // x=0, y=48 (top of viewport in macOS coords)
-            48.0,        // view_height
+            (0.0, 0.0), // x=0, y=0 (top of viewport in screen space)
+            48.0,       // view_height
             &wrap_layout,
             0.0, // scroll_fraction_px
-            3,   // first_visible_line (this is screen row 3, but the function misinterprets it)
+            3,   // first_visible_line (this is screen row 3)
             5,   // line_count
             |line| line_lens[line],
         );
@@ -3991,8 +4004,6 @@ mod tests {
         // At max scroll (screen row 3 is top of viewport):
         // - Screen row 3 overall = buffer line 2 (line 0 takes rows 0-1, line 1 is row 2)
         // So clicking on the top of the viewport should land on buffer line 2.
-        //
-        // BUG: The function will return buffer line 3 because it iterates from buffer line 3.
         assert_eq!(
             position.line, 2,
             "Click at top of viewport at max scroll should land on buffer line 2, not line {}. \
@@ -4001,6 +4012,7 @@ mod tests {
         );
     }
 
+    // Chunk: docs/chunks/tiling_workspace_integration - Tests use screen-space coordinates (y=0 at top)
     #[test]
     fn test_click_uniform_wrap_shows_cursor_offset_symptom() {
         // Test that the cursor placement offset matches what the user sees.
@@ -4024,10 +4036,10 @@ mod tests {
         let wrap_layout = test_wrap_layout_80_cols();
         let line_lens = vec![160; 10]; // All lines are 160 chars (2 screen rows each)
 
-        // Click at top of viewport (y = view_height = 80)
+        // Click at top of viewport (y=0 in screen space)
         let position = pixel_to_buffer_position_wrapped(
-            (0.0, 80.0), // x=0, y=80 (top of viewport in macOS coords)
-            80.0,        // view_height
+            (0.0, 0.0), // x=0, y=0 (top of viewport in screen space)
+            80.0,       // view_height
             &wrap_layout,
             0.0, // scroll_fraction_px
             15,  // first_visible_line (screen row 15)
@@ -4045,6 +4057,7 @@ mod tests {
         );
     }
 
+    // Chunk: docs/chunks/tiling_workspace_integration - Tests use screen-space coordinates (y=0 at top)
     #[test]
     fn test_pixel_to_buffer_no_scroll_baseline() {
         // Baseline test: when not scrolled (first_visible_line=0),
@@ -4053,9 +4066,9 @@ mod tests {
         let wrap_layout = test_wrap_layout_80_cols();
         let line_lens = vec![160, 40, 40, 40, 40]; // Line 0 wraps
 
-        // Click at y=48 (screen row 0, which is buffer line 0)
+        // Click at y=0 (screen row 0, which is buffer line 0)
         let position = pixel_to_buffer_position_wrapped(
-            (0.0, 48.0), // x=0, y=48 (top of 48px viewport)
+            (0.0, 0.0), // x=0, y=0 (top of 48px viewport in screen space)
             48.0,
             &wrap_layout,
             0.0,
@@ -4067,6 +4080,7 @@ mod tests {
         assert_eq!(position.line, 0, "With no scroll, click at top should land on buffer line 0");
     }
 
+    // Chunk: docs/chunks/tiling_workspace_integration - Tests use screen-space coordinates (y=0 at top)
     #[test]
     fn test_pixel_to_buffer_consistency_with_buffer_line_for_screen_row() {
         // This test verifies that pixel_to_buffer_position_wrapped agrees
@@ -4092,9 +4106,9 @@ mod tests {
             );
 
             // When scrolled such that screen_row is at the top of viewport,
-            // clicking at the top should return the same buffer line.
+            // clicking at the top (y=0) should return the same buffer line.
             let position = pixel_to_buffer_position_wrapped(
-                (0.0, 48.0), // Click at top of 48px viewport
+                (0.0, 0.0), // Click at top of 48px viewport (y=0 in screen space)
                 48.0,
                 &wrap_layout,
                 0.0,
@@ -4114,6 +4128,7 @@ mod tests {
 
     // =========================================================================
     // Chunk: docs/chunks/wrap_click_offset - Click position on continuation rows
+    // Chunk: docs/chunks/tiling_workspace_integration - Tests use screen-space coordinates (y=0 at top)
     // =========================================================================
 
     /// Test that clicking on a continuation row (wrapped row) computes the correct buffer column.
@@ -4152,11 +4167,9 @@ mod tests {
         let view_height = 48.0;
 
         // Click at continuation row 1 (the second screen row of the wrapped line)
-        // In macOS coordinates: y = view_height - flipped_y
-        // flipped_y = 16 means we're on screen row 1 (16px / 16px line height = row 1)
-        // y = 48 - 16 = 32
+        // In screen space: y=16 means row 1 (16px / 16px line height = row 1)
         let position_row1 = pixel_to_buffer_position_wrapped(
-            (80.0, 32.0), // x=80px (col 10 = 80/8), y=32 (flipped_y=16, row 1)
+            (80.0, 16.0), // x=80px (col 10 = 80/8), y=16 (row 1)
             view_height,
             &wrap_layout,
             0.0, // no scroll fraction
@@ -4174,10 +4187,9 @@ mod tests {
         );
 
         // Click at continuation row 2 (the third screen row of the wrapped line)
-        // flipped_y = 32 means we're on screen row 2
-        // y = 48 - 32 = 16
+        // In screen space: y=32 means row 2
         let position_row2 = pixel_to_buffer_position_wrapped(
-            (80.0, 16.0), // x=80px (col 10), y=16 (flipped_y=32, row 2)
+            (80.0, 32.0), // x=80px (col 10), y=32 (row 2)
             view_height,
             &wrap_layout,
             0.0,

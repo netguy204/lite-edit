@@ -5,8 +5,6 @@ parent_chunk: workspace_model
 code_paths:
 - crates/editor/src/editor_state.rs
 code_references:
-  - ref: crates/editor/src/editor_state.rs#EditorState::handle_mouse
-    implements: "Y-coordinate flip for left rail workspace tile hit-testing"
   - ref: crates/editor/src/editor_state.rs#EditorState::next_workspace
     implements: "Cmd+] workspace cycling (next workspace with wrap)"
   - ref: crates/editor/src/editor_state.rs#EditorState::prev_workspace

@@ -46,6 +46,8 @@ mod left_rail;
 mod metal_view;
 // Chunk: docs/chunks/mini_buffer_model - MiniBuffer single-line editing model
 mod mini_buffer;
+// Chunk: docs/chunks/tiling_workspace_integration - Pane layout data structures
+mod pane_layout;
 mod renderer;
 // Chunk: docs/chunks/row_scroller_extract - Reusable scroll arithmetic
 mod row_scroller;
@@ -125,6 +127,7 @@ struct EditorController {
     renderer: Renderer,
     metal_view: Retained<MetalView>,
     /// Last window title that was set, to avoid redundant updates
+    // Chunk: docs/chunks/file_save - Caches window title to avoid redundant NSWindow updates
     last_window_title: String,
 }
 
@@ -355,6 +358,7 @@ impl EditorController {
     ///
     /// Compares the current `state.window_title()` with `last_window_title`.
     /// If different, updates the NSWindow title and caches the new value.
+    // Chunk: docs/chunks/file_save - Updates NSWindow title when associated file changes
     fn update_window_title_if_needed(&mut self) {
         let current_title = self.state.window_title();
         if current_title != self.last_window_title {
@@ -424,7 +428,7 @@ impl EditorController {
         // Tab bar is at the top of the content area (right of left rail)
         // Geometry: x=RAIL_WIDTH, y=0 (top-down), width=view_width-RAIL_WIDTH, height=TAB_BAR_HEIGHT
         if let Some(workspace) = self.state.editor.active_workspace() {
-            if !workspace.tabs.is_empty() {
+            if workspace.tab_count() > 0 {
                 let tab_bar_x_pt = RAIL_WIDTH as f64 / scale;
                 let tab_bar_width_pt = view_width_pt - tab_bar_x_pt;
                 let tab_bar_height_pt = TAB_BAR_HEIGHT as f64 / scale;
@@ -489,7 +493,7 @@ impl EditorController {
             let content_width_pt = view_width_pt - content_x_pt;
 
             // Y starts below the tab bar (if present)
-            let tab_bar_height_pt = if self.state.editor.active_workspace().map_or(false, |ws| !ws.tabs.is_empty()) {
+            let tab_bar_height_pt = if self.state.editor.active_workspace().map_or(false, |ws| ws.tab_count() > 0) {
                 TAB_BAR_HEIGHT as f64 / scale
             } else {
                 0.0

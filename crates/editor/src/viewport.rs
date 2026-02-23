@@ -100,6 +100,7 @@ impl Viewport {
     }
 
     // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Wrap-aware buffer line lookup
+    // Chunk: docs/chunks/scroll_wrap_deadzone_v2 - Authoritative screen row to buffer line conversion
     /// Given a target screen row, finds which buffer line contains it.
     ///
     /// Returns `(buffer_line, screen_row_offset_within_line, cumulative_screen_rows_before_line)`:
