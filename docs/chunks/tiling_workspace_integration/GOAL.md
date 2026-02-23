@@ -1,5 +1,5 @@
 ---
-status: IMPLEMENTING
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
@@ -7,7 +7,87 @@ code_paths:
   - crates/editor/src/editor_state.rs
   - crates/editor/src/buffer_target.rs
   - crates/editor/src/pane_layout.rs
-code_references: []
+code_references:
+  - ref: crates/editor/src/workspace.rs#Workspace
+    implements: "Workspace model with pane_root, active_pane_id, and next_pane_id fields"
+  - ref: crates/editor/src/workspace.rs#Workspace::new
+    implements: "Workspace constructor creating single Leaf pane"
+  - ref: crates/editor/src/workspace.rs#Workspace::with_empty_tab
+    implements: "Workspace constructor with single pane containing one tab"
+  - ref: crates/editor/src/workspace.rs#Workspace::active_pane
+    implements: "Accessor resolving active pane through pane_root"
+  - ref: crates/editor/src/workspace.rs#Workspace::active_pane_mut
+    implements: "Mutable accessor resolving active pane through pane_root"
+  - ref: crates/editor/src/workspace.rs#Workspace::add_tab
+    implements: "Tab addition delegating to active pane"
+  - ref: crates/editor/src/workspace.rs#Workspace::close_tab
+    implements: "Tab close delegating to active pane"
+  - ref: crates/editor/src/workspace.rs#Workspace::switch_tab
+    implements: "Tab switching delegating to active pane"
+  - ref: crates/editor/src/workspace.rs#Workspace::active_tab
+    implements: "Active tab accessor delegating to active pane"
+  - ref: crates/editor/src/workspace.rs#Workspace::tab_count
+    implements: "Tab count in active pane"
+  - ref: crates/editor/src/workspace.rs#Workspace::total_tab_count
+    implements: "Total tab count across all panes"
+  - ref: crates/editor/src/workspace.rs#Workspace::all_panes
+    implements: "All panes accessor for iteration"
+  - ref: crates/editor/src/workspace.rs#Workspace::all_panes_mut
+    implements: "Mutable all panes accessor for iteration"
+  - ref: crates/editor/src/workspace.rs#Workspace::poll_standalone_terminals
+    implements: "Terminal polling iterating all panes"
+  - ref: crates/editor/src/editor_state.rs#EditorState::buffer
+    implements: "Buffer accessor resolving through active_workspace→active_pane→active_tab"
+  - ref: crates/editor/src/editor_state.rs#EditorState::buffer_mut
+    implements: "Mutable buffer accessor resolving through pane tree"
+  - ref: crates/editor/src/editor_state.rs#EditorState::try_buffer
+    implements: "Optional buffer accessor resolving through pane tree"
+  - ref: crates/editor/src/editor_state.rs#EditorState::try_buffer_mut
+    implements: "Optional mutable buffer accessor resolving through pane tree"
+  - ref: crates/editor/src/editor_state.rs#EditorState::viewport
+    implements: "Viewport accessor resolving through pane tree"
+  - ref: crates/editor/src/editor_state.rs#EditorState::viewport_mut
+    implements: "Mutable viewport accessor resolving through pane tree"
+  - ref: crates/editor/src/editor_state.rs#EditorState::associated_file
+    implements: "Associated file accessor resolving through pane tree"
+  - ref: crates/editor/src/editor_state.rs#EditorState::new_tab
+    implements: "New tab creation operating on active pane"
+  - ref: crates/editor/src/editor_state.rs#EditorState::new_terminal_tab
+    implements: "New terminal tab creation operating on active pane"
+  - ref: crates/editor/src/editor_state.rs#EditorState::close_active_tab
+    implements: "Close active tab operating on active pane"
+  - ref: crates/editor/src/editor_state.rs#EditorState::next_tab
+    implements: "Tab cycling operating on active pane"
+  - ref: crates/editor/src/editor_state.rs#EditorState::prev_tab
+    implements: "Reverse tab cycling operating on active pane"
+  - ref: crates/editor/src/editor_state.rs#EditorState::sync_active_tab_viewport
+    implements: "Viewport sync resolving through pane tree"
+  - ref: crates/editor/src/editor_state.rs#EditorState::handle_mouse
+    implements: "Mouse coordinate handling with flip-once-at-entry pattern"
+  - ref: crates/editor/src/editor_state.rs#EditorState::handle_mouse_buffer
+    implements: "Buffer mouse handling receiving screen-space coordinates"
+  - ref: crates/editor/src/editor_state.rs#EditorState::handle_mouse_selector
+    implements: "Selector mouse handling receiving screen-space coordinates"
+  - ref: crates/editor/src/editor_state.rs#EditorState::handle_tab_bar_click
+    implements: "Tab bar click handling with screen-space coordinates"
+  - ref: crates/editor/src/buffer_target.rs#pixel_to_buffer_position
+    implements: "Buffer position calculation expecting screen-space y (no internal flip)"
+  - ref: crates/editor/src/buffer_target.rs#pixel_to_buffer_position_wrapped
+    implements: "Wrapped buffer position calculation expecting screen-space y"
+  - ref: crates/editor/src/pane_layout.rs#Pane
+    implements: "Pane struct with tabs and active_tab (mirrors Workspace tab API)"
+  - ref: crates/editor/src/pane_layout.rs#PaneLayoutNode
+    implements: "Binary pane layout tree with Leaf and Split variants"
+  - ref: crates/editor/src/pane_layout.rs#PaneLayoutNode::get_pane
+    implements: "Pane lookup by ID"
+  - ref: crates/editor/src/pane_layout.rs#PaneLayoutNode::get_pane_mut
+    implements: "Mutable pane lookup by ID"
+  - ref: crates/editor/src/pane_layout.rs#PaneLayoutNode::all_panes
+    implements: "All panes traversal"
+  - ref: crates/editor/src/pane_layout.rs#PaneLayoutNode::all_panes_mut
+    implements: "Mutable all panes traversal"
+  - ref: crates/editor/src/pane_layout.rs#calculate_pane_rects
+    implements: "Pane rectangle calculation in screen space"
 narrative: null
 investigation: tiling_pane_layout
 subsystems: []

@@ -226,6 +226,7 @@ impl EditorState {
     }
 
     /// Returns a reference to the active tab's associated file path.
+    // Chunk: docs/chunks/file_save - Getter for active tab's associated file path
     pub fn associated_file(&self) -> Option<&PathBuf> {
         self.editor
             .active_workspace()
@@ -1039,6 +1040,7 @@ impl EditorState {
 
     /// Handles selector confirmation (Enter pressed).
     /// Chunk: docs/chunks/file_picker - Path resolution, recency recording, and resolved_path storage on Enter
+    // Chunk: docs/chunks/file_save - Integrates file picker confirmation with associate_file
     // Chunk: docs/chunks/workspace_dir_picker - Use workspace's file index and root_path
     fn handle_selector_confirm(&mut self, idx: usize) {
         // Get the workspace root_path as the base directory for path resolution
@@ -1852,6 +1854,7 @@ impl EditorState {
     /// In both cases:
     /// - Stores `path` in `associated_file`
     /// - Marks `DirtyRegion::FullViewport`
+    // Chunk: docs/chunks/file_save - File loading with UTF-8 lossy conversion, cursor/scroll reset
     // Chunk: docs/chunks/tab_click_cursor_placement - Sync viewport on file association
     // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
     // Chunk: docs/chunks/syntax_highlighting - Setup syntax highlighting on file open
@@ -1926,6 +1929,7 @@ impl EditorState {
     ///
     /// Returns the filename if a file is associated, or "Untitled" otherwise.
     /// When multiple workspaces exist, includes the workspace label.
+    // Chunk: docs/chunks/file_save - Derives window title from associated filename or 'Untitled'
     pub fn window_title(&self) -> String {
         let tab_name = self.associated_file()
             .and_then(|p| p.file_name())
@@ -1945,6 +1949,7 @@ impl EditorState {
     ///
     /// If no file is associated, this is a no-op.
     /// On write error, this silently fails (error reporting is out of scope).
+    // Chunk: docs/chunks/file_save - Writes buffer content to associated file path
     // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
     fn save_file(&mut self) {
         // Save only makes sense for file tabs with a TextBuffer

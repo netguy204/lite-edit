@@ -10,7 +10,7 @@ code_paths:
   - crates/editor/src/main.rs
 code_references:
   - ref: crates/editor/src/buffer_target.rs#pixel_to_buffer_position
-    implements: "Core pixel-to-buffer coordinate conversion (y-flip, line/column calculation, clamping)"
+    implements: "Core pixel-to-buffer coordinate conversion (line/column calculation, clamping)"
   - ref: crates/editor/src/buffer_target.rs#BufferFocusTarget::handle_mouse
     implements: "Mouse event handling: converts click coordinates to cursor position"
   - ref: crates/editor/src/metal_view.rs#MetalView::__mouse_down
