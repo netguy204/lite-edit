@@ -8,170 +8,178 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The bug is a type mismatch: `dirty_lines_to_region()` treats `DirtyLines` indices as screen rows, but they're actually buffer line indices. With soft wrapping, one buffer line can occupy multiple screen rows, so a buffer line index will diverge from its cumulative screen row index as scroll position increases.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Strategy**: Add a wrap-aware overload `dirty_lines_to_region_wrapped()` that:
+1. Converts buffer line indices to absolute screen row indices using the existing `WrapLayout::screen_rows_for_line()` helper
+2. Compares those screen row indices against the viewport's screen-row-based scroll position
+3. Produces correct `DirtyRegion` output even when buffer line indices are much smaller than screen row indices
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+**Why a new method instead of modifying the existing one?**
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/dirty_region_wrap_aware/GOAL.md)
-with references to the files that you expect to touch.
--->
+The existing `dirty_lines_to_region(&self, dirty: &DirtyLines, buffer_line_count: usize)` signature doesn't have access to `WrapLayout` or line lengths. Adding those parameters would break all callers and make the method signatures large. Instead:
+- Keep `dirty_lines_to_region` for the common no-wrap case (it's still correct when screen rows ≈ buffer lines)
+- Add `dirty_lines_to_region_wrapped` for wrap-aware callers
+- Update `EditorContext::mark_dirty()` and `EditorState::cursor_dirty_region()` to use the wrapped variant when wrapping is enabled
+
+**Testing approach** (per TESTING_PHILOSOPHY.md):
+- Write failing tests first that reproduce the bug: a buffer line visible on screen but with buffer index < first_visible_screen_row should produce a non-None dirty region
+- The tests will use `WrapLayout` and viewport methods to set up the wrap-aware scenario
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+- **docs/subsystems/viewport_scroll** (DOCUMENTED): This chunk IMPLEMENTS a wrap-aware extension to the dirty region conversion pattern. The subsystem documents that `dirty_lines_to_region` bridges `DirtyLines` to `DirtyRegion`; we're adding a wrap-aware variant that follows the same pattern but accounts for screen-row accumulation.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No deviations discovered—the existing code follows the subsystem's patterns correctly for the unwrapped case.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing tests for wrap-aware dirty region conversion
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create tests in `viewport.rs` that reproduce the bug:
 
-Example:
+1. **test_dirty_single_visible_wrapped**: Set up a viewport scrolled to screen row ~400 with lines that wrap heavily. A buffer line 250 that is visible on screen (because its cumulative screen rows place it in view) should produce a non-None dirty region.
 
-### Step 1: Define the SegmentHeader struct
+2. **test_dirty_range_wrapped**: Similar test for `DirtyLines::Range` with wrapping.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+3. **test_dirty_from_line_to_end_wrapped**: Test that `FromLineToEnd` works correctly when buffer line index is below first_visible_screen_row but the dirty region still overlaps the visible screen rows.
 
-Location: src/segment/format.rs
+These tests will fail initially because no `dirty_lines_to_region_wrapped` method exists.
 
-### Step 2: Implement header serialization
+Location: `crates/editor/src/viewport.rs` test module
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+### Step 2: Implement `dirty_lines_to_region_wrapped`
 
-### Step 3: ...
+Add a new method to `Viewport`:
 
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+/// Converts buffer-space `DirtyLines` to screen-space `DirtyRegion` with soft wrapping.
+///
+/// Unlike `dirty_lines_to_region`, this method accounts for the fact that
+/// buffer lines may wrap to multiple screen rows. It computes the cumulative
+/// screen row for each dirty buffer line and compares against the viewport's
+/// screen-row-based scroll position.
+pub fn dirty_lines_to_region_wrapped<F>(
+    &self,
+    dirty: &DirtyLines,
+    line_count: usize,
+    wrap_layout: &WrapLayout,
+    line_len_fn: F,
+) -> DirtyRegion
+where
+    F: Fn(usize) -> usize,
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Implementation approach:
+1. Use `first_visible_screen_row()` to get the current scroll position in screen rows
+2. For each dirty buffer line, compute its absolute screen row by summing `screen_rows_for_line()` for all preceding lines
+3. Compute `visible_screen_rows` = `visible_lines()` (in screen row terms)
+4. Intersect the dirty screen row range with `[first_visible_screen_row, first_visible_screen_row + visible_screen_rows)`
+5. Return the appropriate `DirtyRegion` variant
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+The helper `buffer_line_to_screen_row` (cumulative sum) will be factored out for reuse.
 
-## Dependencies
+Location: `crates/editor/src/viewport.rs`
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+### Step 3: Add helper for buffer line → absolute screen row conversion
 
-If there are no dependencies, delete this section.
--->
+Add a helper method or inline logic to convert a buffer line index to its absolute screen row:
+
+```rust
+/// Computes the absolute screen row where a buffer line starts.
+///
+/// This is the cumulative sum of screen rows for all preceding buffer lines.
+fn buffer_line_to_abs_screen_row<F>(
+    buffer_line: usize,
+    wrap_layout: &WrapLayout,
+    line_len_fn: F,
+) -> usize
+where
+    F: Fn(usize) -> usize,
+```
+
+This can be a static method since it doesn't need `&self`. It will be used by `dirty_lines_to_region_wrapped` to convert dirty buffer line indices to screen row indices.
+
+Location: `crates/editor/src/viewport.rs`
+
+### Step 4: Update `EditorContext::mark_dirty` to use wrap-aware conversion
+
+Modify `EditorContext::mark_dirty()` to call `dirty_lines_to_region_wrapped` instead of `dirty_lines_to_region`. The context already has access to `wrap_layout()` and `buffer.line_len()`.
+
+```rust
+pub fn mark_dirty(&mut self, dirty_lines: DirtyLines) {
+    let line_count = self.buffer.line_count();
+    let wrap_layout = self.wrap_layout();
+    let screen_dirty = self.viewport.dirty_lines_to_region_wrapped(
+        &dirty_lines,
+        line_count,
+        &wrap_layout,
+        |line| self.buffer.line_len(line),
+    );
+    self.dirty_region.merge(screen_dirty);
+}
+```
+
+Location: `crates/editor/src/context.rs`
+
+### Step 5: Update `EditorState::cursor_dirty_region` to use wrap-aware conversion
+
+The `cursor_dirty_region()` method in `editor_state.rs` also calls `dirty_lines_to_region` with a buffer line index. Update it to use the wrap-aware variant.
+
+This method needs access to `WrapLayout` and line lengths. The `EditorState` has access to:
+- `font_metrics` (for `WrapLayout::new`)
+- `viewport_size.width` (for `WrapLayout::new`)
+- `buffer.line_len()` (for line lengths)
+
+Location: `crates/editor/src/editor_state.rs`
+
+### Step 6: Verify existing tests still pass
+
+Run the existing `dirty_lines_to_region` tests to ensure they still pass. They test the unwrapped case where screen rows ≈ buffer lines, and should continue to work because:
+- Either the tests use the old method (which remains correct for unwrapped)
+- Or the tests use the new method with short lines (where cumulative screen rows ≈ buffer lines)
+
+Run: `cargo test -p lite-edit-editor`
+
+### Step 7: Add integration test for mouse click at scroll position with heavy wrapping
+
+Create a test that simulates the original bug scenario:
+1. Create a buffer with many long lines (>200 chars each)
+2. Scroll to a position where cumulative screen rows >> buffer line index
+3. Simulate a mouse click on a visible line
+4. Assert that `dirty_region` is non-None
+
+This verifies the end-to-end fix through `mark_cursor_dirty()`.
+
+Location: `crates/editor/src/context.rs` or `crates/editor/src/buffer_target.rs` test module
+
+### Step 8: Add backreference comment to new method
+
+Add chunk backreference to `dirty_lines_to_region_wrapped`:
+
+```rust
+// Chunk: docs/chunks/dirty_region_wrap_aware - Wrap-aware dirty region conversion
+pub fn dirty_lines_to_region_wrapped<F>(...) -> DirtyRegion { ... }
+```
+
+Location: `crates/editor/src/viewport.rs`
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Performance**: Computing cumulative screen rows for each dirty line is O(buffer_line), not O(1). For very long documents with many dirty lines, this could be slow. However:
+   - `DirtyLines::Single` (the most common case for cursor movement) only needs one cumulative sum
+   - The existing `ensure_visible_wrapped` already does similar O(n) iteration
+   - This is consistent with the subsystem's "no cache, pure arithmetic" principle from `WrapLayout`
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Backward compatibility**: The old `dirty_lines_to_region` method signature is preserved. Callers that don't need wrap awareness continue to work. However, if a caller should have been using the wrap-aware version, they'll see the existing bug. Consider whether to deprecate the unwrapped version or add a lint.
+
+3. **Edge cases**: Need to handle:
+   - Empty buffer (line_count = 0)
+   - Buffer line index >= line_count
+   - Viewport not initialized (visible_lines = 0)
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

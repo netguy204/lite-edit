@@ -55,8 +55,12 @@ impl WrapLayout {
             1 // Fallback to prevent division by zero
         };
 
-        // Ensure at least 1 column per row
-        let cols_per_row = cols_per_row.max(1);
+        // Ensure at least 1 column per row and cap at a reasonable maximum to
+        // prevent overflow in screen_rows_for_line arithmetic. The cap is set
+        // to usize::MAX / 2 to leave headroom for (char_count + cols_per_row - 1).
+        // This handles cases like MiniBuffer which passes f32::MAX for "no wrapping".
+        const MAX_COLS: usize = usize::MAX / 2;
+        let cols_per_row = cols_per_row.clamp(1, MAX_COLS);
 
         Self {
             cols_per_row,
