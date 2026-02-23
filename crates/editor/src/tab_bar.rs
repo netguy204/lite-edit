@@ -134,7 +134,7 @@ pub const CLOSE_BUTTON_HOVER_COLOR: [f32; 4] = [
     1.0,
 ];
 
-// Chunk: docs/chunks/content_unsaved_tab_tint - Dirty tab tinting colors
+// Chunk: docs/chunks/unsaved_tab_tint - Dirty tab tinting colors
 /// Inactive dirty tab background color (very dim red tint)
 ///
 /// Blends Catppuccin red (#f38ba8) at ~8% with TAB_INACTIVE_COLOR
@@ -667,7 +667,7 @@ impl TabBarGlyphBuffer {
         self.background_range = QuadRange::new(bg_start, indices.len() - bg_start);
 
         // ==================== Phase 2: Inactive Tab Backgrounds ====================
-        // Chunk: docs/chunks/content_unsaved_tab_tint - Use dirty tint for unsaved tabs
+        // Chunk: docs/chunks/unsaved_tab_tint - Use dirty tint for unsaved tabs
         let tab_bg_start = indices.len();
         for tab_rect in &geometry.tab_rects {
             let tab_info = &tabs[tab_rect.tab_index];
@@ -697,7 +697,7 @@ impl TabBarGlyphBuffer {
         self.tab_background_range = QuadRange::new(tab_bg_start, indices.len() - tab_bg_start);
 
         // ==================== Phase 3: Active Tab Highlight ====================
-        // Chunk: docs/chunks/content_unsaved_tab_tint - Use dirty tint for unsaved tabs
+        // Chunk: docs/chunks/unsaved_tab_tint - Use dirty tint for unsaved tabs
         let active_start = indices.len();
         for tab_rect in &geometry.tab_rects {
             let tab_info = &tabs[tab_rect.tab_index];
@@ -1381,7 +1381,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Dirty Tab Color Tests (Chunk: docs/chunks/content_unsaved_tab_tint)
+    // Dirty Tab Color Tests (Chunk: docs/chunks/unsaved_tab_tint)
     // =========================================================================
 
     /// Helper function to simulate the color selection logic from TabBarGlyphBuffer::update

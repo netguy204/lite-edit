@@ -1226,7 +1226,7 @@ impl EditorState {
 
         // Chunk: docs/chunks/syntax_highlighting - Track whether we need to sync highlighter
         let needs_highlighter_sync;
-        // Chunk: docs/chunks/content_unsaved_tab_tint - Track whether we processed a file tab
+        // Chunk: docs/chunks/unsaved_tab_tint - Track whether we processed a file tab
         let mut is_file_tab = false;
 
         // Check if the active tab is a file tab or terminal tab
@@ -1241,7 +1241,7 @@ impl EditorState {
             // Try to get the text buffer and viewport for file tabs
             if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
             // File tab: use the existing BufferFocusTarget path
-            // Chunk: docs/chunks/content_unsaved_tab_tint - Mark this as a file tab for dirty tracking
+            // Chunk: docs/chunks/unsaved_tab_tint - Mark this as a file tab for dirty tracking
             is_file_tab = true;
 
             // Ensure cursor blink visibility is on when typing
@@ -1352,7 +1352,7 @@ impl EditorState {
             self.sync_active_tab_highlighter();
         }
 
-        // Chunk: docs/chunks/content_unsaved_tab_tint - Mark file tab dirty if content changed
+        // Chunk: docs/chunks/unsaved_tab_tint - Mark file tab dirty if content changed
         // If we processed a file tab and the dirty_region indicates changes, mark the tab dirty.
         // This is a conservative heuristic: dirty_region can be set for cursor visibility or
         // viewport scrolling, not just content mutations. We accept some over-marking because
@@ -2120,7 +2120,7 @@ impl EditorState {
     /// On successful save, clears the tab's dirty flag.
     // Chunk: docs/chunks/file_save - Writes buffer content to associated file path
     // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
-    // Chunk: docs/chunks/content_unsaved_tab_tint - Clear dirty flag on successful save
+    // Chunk: docs/chunks/unsaved_tab_tint - Clear dirty flag on successful save
     fn save_file(&mut self) {
         // Save only makes sense for file tabs with a TextBuffer
         if !self.active_tab_is_file() {
@@ -6308,7 +6308,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Dirty Flag Tests (Chunk: docs/chunks/content_unsaved_tab_tint)
+    // Dirty Flag Tests (Chunk: docs/chunks/unsaved_tab_tint)
     // =========================================================================
 
     /// Tests that editing a file buffer sets the tab's dirty flag to true.
