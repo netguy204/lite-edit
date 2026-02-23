@@ -2368,6 +2368,7 @@ impl EditorState {
     /// If this is the last tab in the last pane, creates a new empty tab instead of closing.
     // Chunk: docs/chunks/content_tab_bar - Close tab with dirty-buffer guard (Cmd+W)
     // Chunk: docs/chunks/tiling_workspace_integration - Resolve through pane tree
+    // Chunk: docs/chunks/pane_close_last_tab - Cleanup empty panes on last tab close
     pub fn close_tab(&mut self, index: usize) {
         // Pre-compute values needed for fallback before borrowing workspace mutably
         let tab_id = self.editor.gen_tab_id();
@@ -2376,24 +2377,54 @@ impl EditorState {
         if let Some(workspace) = self.editor.active_workspace_mut() {
             let pane_count = workspace.pane_root.pane_count();
 
-            if let Some(pane) = workspace.active_pane_mut() {
-                // Guard: don't close dirty tabs (confirmation UI is future work)
+            // Guard: don't close dirty tabs (confirmation UI is future work)
+            if let Some(pane) = workspace.active_pane() {
                 if let Some(tab) = pane.tabs.get(index) {
                     if tab.dirty {
                         return;
                     }
                 }
+            }
 
-                if pane.tabs.len() > 1 || pane_count > 1 {
-                    // Close the tab normally
-                    pane.close_tab(index);
-                    // TODO: If pane is now empty and there are multiple panes,
-                    // cleanup empty panes. For now, leave empty panes.
+            if pane_count > 1 {
+                // Multi-pane layout: check if pane will become empty
+                let pane_will_be_empty = workspace.active_pane()
+                    .map(|p| p.tabs.len() == 1)
+                    .unwrap_or(false);
+
+                // Find fallback focus BEFORE mutating (to avoid borrow conflicts)
+                let fallback_focus = if pane_will_be_empty {
+                    workspace.find_fallback_focus()
                 } else {
-                    // Single tab in single pane: replace with empty tab
-                    let new_tab = crate::workspace::Tab::empty_file(tab_id, line_height);
-                    pane.tabs[0] = new_tab;
-                    pane.active_tab = 0;
+                    None
+                };
+
+                // Close the tab
+                if let Some(pane) = workspace.active_pane_mut() {
+                    pane.close_tab(index);
+                }
+
+                // If pane is now empty, cleanup the tree and update focus
+                if pane_will_be_empty {
+                    if let Some(fallback_pane_id) = fallback_focus {
+                        // Update focus BEFORE cleanup (cleanup removes the empty pane)
+                        workspace.active_pane_id = fallback_pane_id;
+                    }
+                    // Cleanup empty panes (collapses the tree)
+                    crate::pane_layout::cleanup_empty_panes(&mut workspace.pane_root);
+                }
+            } else {
+                // Single pane layout
+                if let Some(pane) = workspace.active_pane_mut() {
+                    if pane.tabs.len() > 1 {
+                        // Multiple tabs: just close the tab
+                        pane.close_tab(index);
+                    } else {
+                        // Single tab in single pane: replace with empty tab
+                        let new_tab = crate::workspace::Tab::empty_file(tab_id, line_height);
+                        pane.tabs[0] = new_tab;
+                        pane.active_tab = 0;
+                    }
                 }
             }
             self.dirty_region.merge(DirtyRegion::FullViewport);
@@ -6868,5 +6899,177 @@ mod tests {
 
         // Should fall back to focused pane
         assert_eq!(target_pane_id, pane1_id);
+    }
+
+    // =========================================================================
+    // Pane Close Last Tab Tests (Chunk: docs/chunks/pane_close_last_tab)
+    // =========================================================================
+
+    use crate::pane_layout::{Pane, PaneLayoutNode, SplitDirection};
+
+    /// Helper to create an EditorState with a horizontal split (two panes side by side).
+    /// Each pane has exactly one tab.
+    fn create_hsplit_state() -> EditorState {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+        let line_height = test_font_metrics().line_height as f32;
+
+        // Get the workspace
+        let ws = state.editor.active_workspace_mut().unwrap();
+        let ws_id = ws.id;
+
+        // Create two panes, each with one tab
+        let mut pane1 = Pane::new(1, ws_id);
+        pane1.add_tab(crate::workspace::Tab::empty_file(100, line_height));
+
+        let mut pane2 = Pane::new(2, ws_id);
+        pane2.add_tab(crate::workspace::Tab::empty_file(101, line_height));
+
+        // Create horizontal split layout (pane1 left, pane2 right)
+        ws.pane_root = PaneLayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(PaneLayoutNode::Leaf(pane1)),
+            second: Box::new(PaneLayoutNode::Leaf(pane2)),
+        };
+        ws.active_pane_id = 1; // Start focused on left pane
+        // Note: next_pane_id is private, but we don't need to set it for tests
+        // since we're manually constructing the pane tree
+
+        state
+    }
+
+    /// Closing the last tab in a pane with multiple panes should:
+    /// 1. Remove the empty pane from the layout via cleanup_empty_panes
+    /// 2. Move focus to an adjacent pane
+    /// 3. NOT panic
+    // Chunk: docs/chunks/pane_close_last_tab - Cleanup empty panes on last tab close
+    #[test]
+    fn test_close_last_tab_in_multi_pane_layout_no_panic() {
+        let mut state = create_hsplit_state();
+
+        // Verify initial state: 2 panes
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.pane_root.pane_count(), 2);
+        assert_eq!(ws.active_pane_id, 1);
+
+        // Close the only tab in the active pane (pane 1)
+        // This should NOT panic and should collapse the tree to a single pane
+        state.close_tab(0);
+
+        // After closing, tree should collapse to single pane (pane 2)
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.pane_root.pane_count(), 1, "Tree should collapse to single pane");
+
+        // Active pane should now be pane 2 (the remaining pane)
+        assert_eq!(ws.active_pane_id, 2, "Focus should move to remaining pane");
+
+        // The remaining pane should have its tab
+        let pane = ws.active_pane().expect("should have active pane");
+        assert_eq!(pane.tab_count(), 1);
+    }
+
+    /// Three-pane layout: HSplit(Pane[A], VSplit(Pane[B], Pane[C]))
+    /// Close last tab in B → tree becomes HSplit(Pane[A], Pane[C])
+    #[test]
+    fn test_close_last_tab_in_nested_layout() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+        let line_height = test_font_metrics().line_height as f32;
+
+        let ws = state.editor.active_workspace_mut().unwrap();
+        let ws_id = ws.id;
+
+        // Create three panes
+        let mut pane_a = Pane::new(1, ws_id);
+        pane_a.add_tab(crate::workspace::Tab::empty_file(100, line_height));
+
+        let mut pane_b = Pane::new(2, ws_id);
+        pane_b.add_tab(crate::workspace::Tab::empty_file(101, line_height));
+
+        let mut pane_c = Pane::new(3, ws_id);
+        pane_c.add_tab(crate::workspace::Tab::empty_file(102, line_height));
+
+        // Create HSplit(Pane[A], VSplit(Pane[B], Pane[C]))
+        ws.pane_root = PaneLayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(PaneLayoutNode::Leaf(pane_a)),
+            second: Box::new(PaneLayoutNode::Split {
+                direction: crate::pane_layout::SplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(PaneLayoutNode::Leaf(pane_b)),
+                second: Box::new(PaneLayoutNode::Leaf(pane_c)),
+            }),
+        };
+        ws.active_pane_id = 2; // Focus on pane B
+
+        // Verify initial state: 3 panes
+        assert_eq!(ws.pane_root.pane_count(), 3);
+
+        // Close the only tab in pane B
+        state.close_tab(0);
+
+        // After closing, tree should be HSplit(Pane[A], Pane[C]) - 2 panes
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.pane_root.pane_count(), 2, "Tree should collapse to 2 panes");
+
+        // Pane A and C should still exist
+        assert!(ws.pane_root.get_pane(1).is_some(), "Pane A should exist");
+        assert!(ws.pane_root.get_pane(3).is_some(), "Pane C should exist");
+        // Pane B should be gone
+        assert!(ws.pane_root.get_pane(2).is_none(), "Pane B should be removed");
+
+        // Focus should have moved to an adjacent pane
+        let active_pane = ws.active_pane().expect("should have active pane");
+        assert!(active_pane.id == 1 || active_pane.id == 3, "Focus should be on A or C");
+    }
+
+    /// Single-pane single-tab behavior should be unchanged: replace with empty tab.
+    #[test]
+    fn test_close_last_tab_single_pane_unchanged() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Verify initial state: single pane with one tab
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.pane_root.pane_count(), 1);
+        assert_eq!(ws.tab_count(), 1);
+
+        // Close the only tab
+        state.close_tab(0);
+
+        // Should still have one pane with one (empty) tab
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.pane_root.pane_count(), 1);
+        assert_eq!(ws.tab_count(), 1);
+        assert_eq!(ws.active_tab().unwrap().label, "Untitled");
+    }
+
+    /// Multi-tab pane: closing a non-last tab doesn't trigger cleanup.
+    #[test]
+    fn test_close_non_last_tab_no_cleanup() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Create a second tab
+        state.new_tab();
+
+        // Verify initial state: single pane with two tabs
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.pane_root.pane_count(), 1);
+        assert_eq!(ws.tab_count(), 2);
+
+        // Close the first tab
+        state.close_tab(0);
+
+        // Should still have one pane, now with one tab
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.pane_root.pane_count(), 1);
+        assert_eq!(ws.tab_count(), 1);
     }
 }
