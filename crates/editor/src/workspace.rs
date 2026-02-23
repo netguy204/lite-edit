@@ -1,5 +1,6 @@
 // Chunk: docs/chunks/workspace_model - Workspace model and left rail UI
 // Chunk: docs/chunks/agent_lifecycle - Agent lifecycle tracking for Composer-like workflows
+// Chunk: docs/chunks/workspace_dir_picker - Per-workspace FileIndex
 //!
 //! Workspace data model for the editor.
 //!
@@ -12,6 +13,7 @@
 
 use std::path::PathBuf;
 
+use crate::file_index::FileIndex;
 use crate::viewport::Viewport;
 use lite_edit_buffer::{BufferView, TextBuffer};
 use lite_edit_syntax::{LanguageRegistry, SyntaxHighlighter, SyntaxTheme};
@@ -445,6 +447,7 @@ impl std::fmt::Debug for Tab {
 // =============================================================================
 
 // Chunk: docs/chunks/content_tab_bar - Owns tab list and tab_bar_view_offset for horizontal scroll
+// Chunk: docs/chunks/workspace_dir_picker - Per-workspace FileIndex
 /// A workspace containing multiple tabs.
 ///
 /// Each workspace represents an independent working context (e.g., a worktree,
@@ -470,11 +473,21 @@ pub struct Workspace {
     // Chunk: docs/chunks/content_tab_bar - Tab bar scrolling
     /// Horizontal scroll offset for tab bar overflow (in pixels)
     pub tab_bar_view_offset: f32,
+    // Chunk: docs/chunks/workspace_dir_picker - Per-workspace file index
+    /// The file index for fuzzy file matching in this workspace.
+    ///
+    /// Each workspace has its own FileIndex rooted at its `root_path`, ensuring
+    /// the file picker (Cmd+P) searches the correct directory for each workspace.
+    pub file_index: FileIndex,
+    /// The cache version at the last query (for streaming refresh during indexing).
+    pub last_cache_version: u64,
 }
 
 impl Workspace {
     /// Creates a new workspace with no tabs.
+    // Chunk: docs/chunks/workspace_dir_picker - Initialize FileIndex for workspace
     pub fn new(id: WorkspaceId, label: String, root_path: PathBuf) -> Self {
+        let file_index = FileIndex::start(root_path.clone());
         Self {
             id,
             label,
@@ -484,12 +497,16 @@ impl Workspace {
             status: WorkspaceStatus::Idle,
             agent: None,
             tab_bar_view_offset: 0.0,
+            file_index,
+            last_cache_version: 0,
         }
     }
 
     /// Creates a new workspace with a single empty tab.
+    // Chunk: docs/chunks/workspace_dir_picker - Initialize FileIndex for workspace
     pub fn with_empty_tab(id: WorkspaceId, tab_id: TabId, label: String, root_path: PathBuf, line_height: f32) -> Self {
         let tab = Tab::empty_file(tab_id, line_height);
+        let file_index = FileIndex::start(root_path.clone());
         Self {
             id,
             label,
@@ -499,6 +516,8 @@ impl Workspace {
             status: WorkspaceStatus::Idle,
             agent: None,
             tab_bar_view_offset: 0.0,
+            file_index,
+            last_cache_version: 0,
         }
     }
 
@@ -1249,5 +1268,79 @@ mod tests {
         assert!(ws.tabs[1].unread); // Still unread before switch
         ws.switch_tab(1);
         assert!(!ws.tabs[1].unread); // Cleared after switch
+    }
+
+    // =========================================================================
+    // Workspace FileIndex Tests (Chunk: docs/chunks/workspace_dir_picker)
+    // =========================================================================
+
+    #[test]
+    fn test_workspace_has_file_index() {
+        let ws = Workspace::new(1, "test".to_string(), PathBuf::from("/nonexistent/test"));
+        // FileIndex should be initialized (even for non-existent paths)
+        // The is_indexing flag will be false once the walker completes
+        // (immediately for non-existent paths)
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!ws.file_index.is_indexing());
+    }
+
+    #[test]
+    fn test_workspace_file_index_uses_root_path() {
+        use tempfile::TempDir;
+        use std::fs::File;
+
+        // Create a temp directory with a test file
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        File::create(root.join("test_file.rs")).unwrap();
+
+        let ws = Workspace::new(1, "test".to_string(), root.to_path_buf());
+
+        // Wait for indexing to complete
+        while ws.file_index.is_indexing() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Query should find the test file
+        let results = ws.file_index.query("");
+        assert!(results.iter().any(|r| r.path == PathBuf::from("test_file.rs")));
+    }
+
+    #[test]
+    fn test_multiple_workspaces_have_independent_file_indexes() {
+        use tempfile::TempDir;
+        use std::fs::File;
+
+        // Create two temp directories with different files
+        let temp1 = TempDir::new().unwrap();
+        let temp2 = TempDir::new().unwrap();
+        File::create(temp1.path().join("file_in_ws1.rs")).unwrap();
+        File::create(temp2.path().join("file_in_ws2.rs")).unwrap();
+
+        let ws1 = Workspace::new(1, "ws1".to_string(), temp1.path().to_path_buf());
+        let ws2 = Workspace::new(2, "ws2".to_string(), temp2.path().to_path_buf());
+
+        // Wait for indexing to complete
+        while ws1.file_index.is_indexing() || ws2.file_index.is_indexing() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Each workspace should only see its own files
+        let results1 = ws1.file_index.query("");
+        let results2 = ws2.file_index.query("");
+
+        assert!(results1.iter().any(|r| r.path == PathBuf::from("file_in_ws1.rs")));
+        assert!(!results1.iter().any(|r| r.path == PathBuf::from("file_in_ws2.rs")));
+
+        assert!(results2.iter().any(|r| r.path == PathBuf::from("file_in_ws2.rs")));
+        assert!(!results2.iter().any(|r| r.path == PathBuf::from("file_in_ws1.rs")));
+    }
+
+    #[test]
+    fn test_workspace_with_empty_tab_has_file_index() {
+        let ws = Workspace::with_empty_tab(1, 1, "test".to_string(), PathBuf::from("/nonexistent"), TEST_LINE_HEIGHT);
+        // FileIndex should be initialized
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!ws.file_index.is_indexing());
     }
 }

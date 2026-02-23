@@ -29,8 +29,11 @@ mod clipboard;
 // Chunk: docs/chunks/renderer_styled_content - ColorPalette for styled text
 mod color_palette;
 mod context;
+// Chunk: docs/chunks/workspace_dir_picker - Directory picker for new workspaces
+mod dir_picker;
 mod dirty_region;
 mod editor_state;
+// Chunk: docs/chunks/fuzzy_file_matcher - File index for fuzzy file matching
 pub mod file_index;
 mod focus;
 mod font;
