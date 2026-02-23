@@ -3,18 +3,12 @@ status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
-- crates/editor/src/main.rs
 - crates/editor/src/editor_state.rs
 - crates/terminal/tests/integration.rs
 code_references:
-  - ref: crates/editor/src/editor_state.rs#EditorState::pending_terminal_created
-    implements: "Flag indicating a terminal tab was just created and needs deferred polling"
-  - ref: crates/editor/src/editor_state.rs#EditorState::spin_poll_terminal_startup
-    implements: "Spin-poll loop to capture shell's initial output after tab creation"
-  - ref: crates/editor/src/editor_state.rs#EditorState::new_terminal_tab
-    implements: "Sets pending_terminal_created flag when creating terminal tabs"
-  - ref: crates/editor/src/main.rs#EditorController::handle_key
-    implements: "Calls spin_poll_terminal_startup after key events to render terminal prompts"
+  # Note: pending_terminal_created and spin_poll_terminal_startup were removed by
+  # child chunk terminal_viewport_init which fixed the root cause (viewport visible_rows=0).
+  # The remaining references are tests that validate terminal initial rendering behavior.
   - ref: crates/editor/src/editor_state.rs#tests::test_poll_agents_dirty_after_terminal_creation
     implements: "Test validating poll_agents returns dirty when terminal produces output"
   - ref: crates/editor/src/editor_state.rs#tests::test_new_terminal_tab_marks_dirty

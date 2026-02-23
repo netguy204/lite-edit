@@ -30,7 +30,8 @@
 //! use std::path::Path;
 //!
 //! let mut term = TerminalBuffer::new(80, 24, 5000);
-//! term.spawn_shell("/bin/zsh", Path::new("/home/user")).unwrap();
+//! // spawn_shell() spawns the user's login shell (determined from passwd database)
+//! term.spawn_shell(Path::new("/home/user")).unwrap();
 //!
 //! // Poll for events and render
 //! term.poll_events();

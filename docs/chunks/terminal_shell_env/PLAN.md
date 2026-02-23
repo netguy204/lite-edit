@@ -1,177 +1,117 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+When lite-edit is launched from macOS GUI (Spotlight, Dock, Finder), it inherits a minimal login environment that lacks PATH modifications set up by the user's shell profile chain (`~/.zshrc`, `~/.zprofile`, etc.). This causes tools like `pyenv`, `nvm`, and `rbenv` to not be found in terminals spawned within the app.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The fix is to spawn shells as **login shells** so they source the user's full profile chain. On Unix systems, a login shell is invoked by setting `argv[0]` to `-{shell_basename}` (e.g., `-zsh` instead of `zsh`). This is the standard mechanism used by terminal emulators like Terminal.app, iTerm2, and wezterm.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+The `portable-pty` crate (v0.8.1) already supports this pattern through its `CommandBuilder::new_default_prog()` API, which:
+1. Uses `get_shell()` to determine the user's shell from the passwd database
+2. Sets `argv[0]` to `-{basename}` when spawning
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/terminal_shell_env/GOAL.md)
-with references to the files that you expect to touch.
--->
+We will modify `PtyHandle::spawn` and `spawn_with_wakeup` to accept a `login_shell: bool` parameter that controls whether to spawn as a login shell. The terminal buffer layer will then pass `true` for shell spawning while preserving the ability to spawn non-login processes for other use cases.
 
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/0001-validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/0002-error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/0001-validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+**Testing approach**: Per TESTING_PHILOSOPHY.md, the shell spawning itself is platform-dependent and cannot be easily unit tested. However, we can verify:
+1. The login shell flag propagates correctly through the API
+2. Integration tests can spawn a login shell and verify environment variables are present
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add login_shell parameter to PtyHandle::spawn
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Modify `PtyHandle::spawn()` in `crates/terminal/src/pty.rs` to accept a `login_shell: bool` parameter.
 
-Example:
+When `login_shell` is true:
+- Use `CommandBuilder::new_default_prog()` which automatically:
+  - Reads the user's shell from the passwd database (via `getpwuid`)
+  - Sets `argv[0]` to `-{shell_basename}` for login shell behavior
+  - Respects the `cwd` setting
 
-### Step 1: Define the SegmentHeader struct
+When `login_shell` is false:
+- Use the existing `CommandBuilder::new(cmd)` approach for explicit commands
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Location: `crates/terminal/src/pty.rs`
 
-Location: src/segment/format.rs
+### Step 2: Add login_shell parameter to PtyHandle::spawn_with_wakeup
 
-### Step 2: Implement header serialization
+Apply the same change to `PtyHandle::spawn_with_wakeup()` for consistency.
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+The implementation mirrors Step 1 but includes the wakeup signaling on PTY output.
 
-### Step 3: ...
+Location: `crates/terminal/src/pty.rs`
 
----
+### Step 3: Update TerminalBuffer::spawn_shell to use login shell mode
 
-**BACKREFERENCE COMMENTS**
+Modify `TerminalBuffer::spawn_shell()` and `spawn_shell_with_wakeup()` in `crates/terminal/src/terminal_buffer.rs`:
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+- Change the signature to remove the explicit `shell` parameter
+- Call `PtyHandle::spawn` with `login_shell: true`
+- The shell will be determined automatically by `portable-pty`'s `get_shell()` which reads from `/etc/passwd`
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+This simplifies the API and ensures shells are always spawned as login shells with the correct environment.
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+Location: `crates/terminal/src/terminal_buffer.rs`
 
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
+### Step 4: Update TerminalBuffer::spawn_command for non-login spawning
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Ensure `spawn_command()` and `spawn_command_with_wakeup()` continue to work for explicit commands (non-login shells). These should pass `login_shell: false` to preserve current behavior for running specific commands.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Location: `crates/terminal/src/terminal_buffer.rs`
+
+### Step 5: Update EditorState::new_terminal_tab to use simplified API
+
+Update `EditorState::new_terminal_tab()` in `crates/editor/src/editor_state.rs`:
+
+- Remove the manual `$SHELL` lookup (no longer needed)
+- Call the simplified `spawn_shell_with_wakeup()` or `spawn_shell()` without shell path parameter
+
+This is now cleaner because `portable-pty` handles shell detection internally via the passwd database, which is more reliable than `$SHELL` environment variable (which may not be set in GUI-launched apps).
+
+Location: `crates/editor/src/editor_state.rs`
+
+### Step 6: Add integration test for login shell environment
+
+Create an integration test that:
+1. Spawns a login shell via `PtyHandle::spawn` with `login_shell: true`
+2. Runs `echo $0` to verify the shell reports as a login shell (should show `-zsh` or similar)
+3. Optionally checks that common profile indicators are present
+
+This test verifies the end-to-end behavior without mocking platform-specific details.
+
+Location: `crates/terminal/src/pty.rs` (in the `#[cfg(test)]` module)
+
+### Step 7: Update existing tests
+
+Review and update existing tests in `pty.rs` that call `PtyHandle::spawn()` to include the new `login_shell` parameter:
+- `test_spawn_echo` → use `login_shell: false` (explicit command)
+- `test_spawn_exit_code` → use `login_shell: false` (explicit command)
+
+Location: `crates/terminal/src/pty.rs`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+- **terminal_emulator** chunk: Provides the base `PtyHandle` and `TerminalBuffer` types
+- **terminal_tab_spawn** chunk: Provides `EditorState::new_terminal_tab()` which we modify
 
-If there are no dependencies, delete this section.
--->
+Both are already ACTIVE, so this chunk can proceed.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Shell detection on macOS**: The `portable-pty` crate uses `getpwuid()` to get the user's shell from the passwd database. This should work correctly on macOS, but if a user has modified their shell outside of the standard mechanism, it might not detect the correct shell. This is standard behavior for terminal emulators.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Profile sourcing order**: Login shells source different files than interactive non-login shells:
+   - Login: `/etc/zprofile` → `~/.zprofile` → `/etc/zshrc` → `~/.zshrc` → `/etc/zlogin` → `~/.zlogin`
+   - Interactive non-login: `/etc/zshrc` → `~/.zshrc`
+
+   By spawning as a login shell, we ensure the full chain is sourced, matching standalone terminal emulator behavior.
+
+3. **Performance**: Login shells may have slower startup due to sourcing more files. This is acceptable as it matches user expectations from their regular terminal. Users with slow profiles will see the same behavior in lite-edit as in Terminal.app.
+
+4. **Backward compatibility**: The API change to `spawn_shell()` (removing the shell parameter) is a breaking change to the terminal crate's public API. However, since this is an internal crate, this is acceptable.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

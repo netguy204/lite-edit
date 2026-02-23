@@ -118,7 +118,6 @@ fn test_spawn_shell_with_wakeup() {
     // Create terminal and spawn shell with wakeup
     let mut terminal = TerminalBuffer::new(80, 24, 1000);
     let result = terminal.spawn_shell_with_wakeup(
-        "/bin/sh",
         std::path::Path::new("/tmp"),
         wakeup,
     );

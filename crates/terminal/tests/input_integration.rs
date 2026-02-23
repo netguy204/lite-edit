@@ -19,7 +19,7 @@ fn create_terminal_with_shell() -> (Rc<RefCell<TerminalBuffer>>, TerminalFocusTa
     let terminal = Rc::new(RefCell::new(TerminalBuffer::new(80, 24, 1000)));
     terminal
         .borrow_mut()
-        .spawn_shell("/bin/sh", Path::new("/tmp"))
+        .spawn_shell(Path::new("/tmp"))
         .expect("Failed to spawn shell");
 
     // Give the shell time to initialize

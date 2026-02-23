@@ -2522,11 +2522,17 @@ impl EditorState {
     }
 
     // Chunk: docs/chunks/terminal_tab_spawn - Cmd+Shift+T terminal spawning
+    // Chunk: docs/chunks/terminal_shell_env - Login shell spawning for full environment
     /// Creates a new standalone terminal tab in the active workspace.
     ///
-    /// The terminal runs the user's default shell from `$SHELL`, falling back
-    /// to `/bin/sh`. Terminal dimensions are computed from the current viewport
-    /// size and font metrics.
+    /// The terminal runs the user's default shell from the passwd database,
+    /// spawned as a login shell to ensure the full profile chain is sourced
+    /// (`~/.zprofile`, `~/.zshrc`, etc.). This ensures the terminal has the
+    /// user's complete environment including PATH entries from tools like
+    /// pyenv, nvm, rbenv, etc.
+    ///
+    /// Terminal dimensions are computed from the current viewport size and
+    /// font metrics.
     ///
     /// Terminal tabs are labeled "Terminal", "Terminal 2", etc. based on how
     /// many terminal tabs already exist in the workspace.
@@ -2557,9 +2563,6 @@ impl EditorState {
         // Create terminal buffer with 5000 scrollback lines
         let mut terminal = TerminalBuffer::new(cols, rows, 5000);
 
-        // Get shell from $SHELL or default to /bin/sh
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-
         // Get working directory from workspace's root_path or current directory
         let cwd = self
             .editor
@@ -2568,17 +2571,19 @@ impl EditorState {
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
         // Chunk: docs/chunks/terminal_pty_wakeup - Spawn shell with wakeup if available
-        // Spawn shell with wakeup support if a factory is registered (enables low-latency
-        // PTY output rendering). Falls back to non-wakeup spawn if not available.
+        // Spawn login shell with wakeup support if a factory is registered (enables
+        // low-latency PTY output rendering). Falls back to non-wakeup spawn if not
+        // available. The shell is determined from the passwd database and spawned
+        // as a login shell to get the user's full environment.
         let spawn_result = if let Some(wakeup) = self.create_pty_wakeup() {
-            terminal.spawn_shell_with_wakeup(&shell, &cwd, wakeup)
+            terminal.spawn_shell_with_wakeup(&cwd, wakeup)
         } else {
-            terminal.spawn_shell(&shell, &cwd)
+            terminal.spawn_shell(&cwd)
         };
 
         // Log error but don't fail
         if let Err(e) = spawn_result {
-            eprintln!("Failed to spawn shell '{}': {}", shell, e);
+            eprintln!("Failed to spawn shell: {}", e);
         }
 
         // Generate label based on existing terminal count

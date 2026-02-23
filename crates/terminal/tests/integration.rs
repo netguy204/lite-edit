@@ -14,7 +14,7 @@ use lite_edit_terminal::{BufferView, TerminalBuffer};
 #[test]
 fn test_shell_output_renders() {
     let mut term = TerminalBuffer::new(80, 24, 1000);
-    term.spawn_shell("/bin/sh", Path::new("/tmp")).unwrap();
+    term.spawn_shell(Path::new("/tmp")).unwrap();
 
     // Give shell time to start and produce prompt
     std::thread::sleep(Duration::from_millis(100));
@@ -313,7 +313,7 @@ fn test_shell_prompt_appears() {
     let mut terminal = TerminalBuffer::new(80, 24, 1000);
 
     // Use /bin/sh as it's always available
-    terminal.spawn_shell("/bin/sh", Path::new("/tmp")).unwrap();
+    terminal.spawn_shell(Path::new("/tmp")).unwrap();
 
     // Poll until we see a prompt ($ or #)
     let mut attempts = 0;
@@ -785,7 +785,7 @@ fn test_selection_range_ordering() {
 #[test]
 fn test_selection_cleared_on_output() {
     let mut terminal = TerminalBuffer::new(80, 24, 1000);
-    terminal.spawn_shell("/bin/sh", Path::new("/tmp")).unwrap();
+    terminal.spawn_shell(Path::new("/tmp")).unwrap();
 
     // Wait for initial prompt
     std::thread::sleep(Duration::from_millis(100));
@@ -861,15 +861,21 @@ fn test_selected_text_extraction() {
 /// This test verifies the core requirement: when a shell is spawned and polled,
 /// it should produce visible content (e.g., a prompt). This is the terminal-level
 /// behavior that underlies the editor's initial render fix.
+///
+/// Note: Uses a longer timeout because login shells (spawned via spawn_shell)
+/// source the full profile chain which can take longer than a simple /bin/sh.
+// Chunk: docs/chunks/terminal_shell_env - Increased timeout for login shell startup
 #[test]
 fn test_shell_produces_content_after_poll() {
     let mut terminal = TerminalBuffer::new(80, 24, 1000);
-    terminal.spawn_shell("/bin/sh", Path::new("/tmp")).unwrap();
+    terminal.spawn_shell(Path::new("/tmp")).unwrap();
 
-    // Poll multiple times with brief delays to give shell time to produce output
+    // Poll multiple times with brief delays to give shell time to produce output.
+    // Login shells source profile files (~/.zprofile, ~/.zshrc) which can take
+    // longer than a simple shell, so we use a generous timeout.
     let mut has_content = false;
-    for _ in 0..20 {
-        std::thread::sleep(Duration::from_millis(20));
+    for _ in 0..50 {
+        std::thread::sleep(Duration::from_millis(50));
         terminal.poll_events();
 
         // Check if any line has non-whitespace content
@@ -900,7 +906,7 @@ fn test_shell_produces_content_after_poll() {
 #[test]
 fn test_poll_events_returns_true_on_output() {
     let mut terminal = TerminalBuffer::new(80, 24, 1000);
-    terminal.spawn_shell("/bin/sh", Path::new("/tmp")).unwrap();
+    terminal.spawn_shell(Path::new("/tmp")).unwrap();
 
     // The shell should produce output (prompt) shortly after spawning.
     // Poll until we get true from poll_events.

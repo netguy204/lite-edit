@@ -43,16 +43,29 @@ impl PtyHandle {
     /// * `cwd` - Working directory for the command
     /// * `rows` - Number of terminal rows
     /// * `cols` - Number of terminal columns
+    /// * `login_shell` - If true, spawns as a login shell (sources full profile chain)
     ///
     /// # Returns
     ///
     /// A `PtyHandle` that can be used to interact with the PTY.
+    ///
+    /// # Login Shell Behavior
+    ///
+    /// When `login_shell` is true, the shell is spawned as a login shell by using
+    /// `portable-pty`'s `new_default_prog()` which:
+    /// - Reads the user's shell from the passwd database (via `getpwuid`)
+    /// - Sets `argv[0]` to `-{shell_basename}` for login shell behavior
+    ///
+    /// This ensures the full profile chain is sourced (`~/.zprofile`, `~/.zshrc`, etc.),
+    /// matching the behavior of standalone terminal emulators like Terminal.app.
+    // Chunk: docs/chunks/terminal_shell_env - Login shell spawning for full environment
     pub fn spawn(
         cmd: &str,
         args: &[&str],
         cwd: &Path,
         rows: u16,
         cols: u16,
+        login_shell: bool,
     ) -> std::io::Result<Self> {
         let pty_system = native_pty_system();
 
@@ -69,8 +82,16 @@ impl PtyHandle {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
         // Build the command
-        let mut cmd_builder = CommandBuilder::new(cmd);
-        cmd_builder.args(args);
+        // When login_shell is true, use new_default_prog() which spawns the user's
+        // shell as a login shell (argv[0] = "-zsh" etc.), ensuring the full profile
+        // chain is sourced. Otherwise, use the explicit command.
+        let mut cmd_builder = if login_shell {
+            CommandBuilder::new_default_prog()
+        } else {
+            let mut builder = CommandBuilder::new(cmd);
+            builder.args(args);
+            builder
+        };
         cmd_builder.cwd(cwd);
 
         // Set up environment
@@ -134,6 +155,7 @@ impl PtyHandle {
     }
 
     // Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
+    // Chunk: docs/chunks/terminal_shell_env - Login shell spawning for full environment
     /// Spawns a command in a new PTY with run-loop wakeup support.
     ///
     /// Same as `spawn()`, but signals `wakeup` whenever PTY output arrives,
@@ -147,10 +169,15 @@ impl PtyHandle {
     /// * `rows` - Number of terminal rows
     /// * `cols` - Number of terminal columns
     /// * `wakeup` - Handle to signal the main thread when PTY data arrives
+    /// * `login_shell` - If true, spawns as a login shell (sources full profile chain)
     ///
     /// # Returns
     ///
     /// A `PtyHandle` that can be used to interact with the PTY.
+    ///
+    /// # Login Shell Behavior
+    ///
+    /// See `spawn()` for details on login shell behavior.
     pub fn spawn_with_wakeup(
         cmd: &str,
         args: &[&str],
@@ -158,6 +185,7 @@ impl PtyHandle {
         rows: u16,
         cols: u16,
         wakeup: PtyWakeup,
+        login_shell: bool,
     ) -> std::io::Result<Self> {
         let pty_system = native_pty_system();
 
@@ -174,8 +202,16 @@ impl PtyHandle {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
         // Build the command
-        let mut cmd_builder = CommandBuilder::new(cmd);
-        cmd_builder.args(args);
+        // When login_shell is true, use new_default_prog() which spawns the user's
+        // shell as a login shell (argv[0] = "-zsh" etc.), ensuring the full profile
+        // chain is sourced. Otherwise, use the explicit command.
+        let mut cmd_builder = if login_shell {
+            CommandBuilder::new_default_prog()
+        } else {
+            let mut builder = CommandBuilder::new(cmd);
+            builder.args(args);
+            builder
+        };
         cmd_builder.cwd(cwd);
 
         // Set up environment
@@ -323,13 +359,14 @@ mod tests {
 
     #[test]
     fn test_spawn_echo() {
-        // Spawn a simple echo command
+        // Spawn a simple echo command (explicit command, not login shell)
         let handle = PtyHandle::spawn(
             "echo",
             &["hello"],
             Path::new("/tmp"),
             24,
             80,
+            false, // Not a login shell - explicit command
         );
 
         assert!(handle.is_ok(), "Failed to spawn PTY: {:?}", handle.err());
@@ -354,13 +391,14 @@ mod tests {
 
     #[test]
     fn test_spawn_exit_code() {
-        // Spawn a command that exits immediately with code 0
+        // Spawn a command that exits immediately with code 0 (explicit command, not login shell)
         let mut handle = PtyHandle::spawn(
             "true",
             &[],
             Path::new("/tmp"),
             24,
             80,
+            false, // Not a login shell - explicit command
         ).expect("Failed to spawn PTY");
 
         // Wait for exit
@@ -369,5 +407,66 @@ mod tests {
         // Check exit code
         let exit_code = handle.try_wait();
         assert_eq!(exit_code, Some(0));
+    }
+
+    // Chunk: docs/chunks/terminal_shell_env - Login shell integration test
+    #[test]
+    fn test_spawn_login_shell() {
+        // Spawn a login shell using new_default_prog()
+        // This tests that login_shell=true correctly uses the passwd-detected
+        // shell and sets argv[0] to "-{shell}" for login shell behavior.
+        let handle = PtyHandle::spawn(
+            "", // Ignored when login_shell=true
+            &[],
+            Path::new("/tmp"),
+            24,
+            80,
+            true, // Login shell
+        );
+
+        assert!(handle.is_ok(), "Failed to spawn login shell: {:?}", handle.err());
+        let mut handle = handle.unwrap();
+
+        // Wait for the shell to start
+        std::thread::sleep(Duration::from_millis(200));
+
+        // Drain any initial output (prompt, etc.)
+        while handle.try_recv().is_some() {}
+
+        // Send "echo $0" to the shell to verify it reports as a login shell
+        // (should show "-zsh" or "-bash" etc., with the leading dash)
+        handle.write(b"echo $0\n").expect("Failed to write to PTY");
+
+        // Wait for output with multiple polling attempts
+        let mut output = String::new();
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(100));
+            while let Some(event) = handle.try_recv() {
+                if let TerminalEvent::PtyOutput(data) = event {
+                    output.push_str(&String::from_utf8_lossy(&data));
+                }
+            }
+            // Check if we have the expected output yet
+            if output.contains('-') {
+                break;
+            }
+        }
+
+        // The shell's $0 should start with a dash, indicating it's a login shell
+        // (e.g., "-zsh", "-bash", "-fish")
+        // We check that the output contains a line starting with "-"
+        //
+        // Note: The output may include the echoed command and shell prompt, so we
+        // look for any line that is just a dash followed by a shell name.
+        let has_login_indicator = output.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with('-') && trimmed.len() > 1 && !trimmed.contains(' ')
+        });
+
+        assert!(
+            has_login_indicator,
+            "Expected login shell indicator (argv[0] starting with '-') in output: {}",
+            output
+        );
     }
 }

@@ -160,17 +160,30 @@ impl TerminalBuffer {
         self.hot_scrollback_limit = limit;
     }
 
-    /// Spawns a shell process in this terminal.
+    // Chunk: docs/chunks/terminal_shell_env - Login shell spawning for full environment
+    /// Spawns a login shell in this terminal.
+    ///
+    /// The user's shell is automatically determined from the passwd database
+    /// (via `getpwuid`), and spawned as a login shell so the full profile chain
+    /// (`~/.zprofile`, `~/.zshrc`, etc.) is sourced. This ensures the terminal
+    /// has the user's complete environment including PATH entries from tools
+    /// like pyenv, nvm, rbenv, etc.
     ///
     /// # Arguments
     ///
-    /// * `shell` - Path to the shell (e.g., "/bin/zsh")
     /// * `cwd` - Working directory for the shell
-    pub fn spawn_shell(&mut self, shell: &str, cwd: &Path) -> std::io::Result<()> {
-        self.spawn_command(shell, &[], cwd)
+    pub fn spawn_shell(&mut self, cwd: &Path) -> std::io::Result<()> {
+        let (cols, rows) = self.size;
+        let handle = PtyHandle::spawn("", &[], cwd, rows as u16, cols as u16, true)?;
+        self.pty = Some(handle);
+        Ok(())
     }
 
     /// Spawns a command in this terminal.
+    ///
+    /// Unlike `spawn_shell()`, this runs the explicit command provided,
+    /// not as a login shell. Use this for running specific commands rather
+    /// than interactive shells.
     ///
     /// # Arguments
     ///
@@ -184,23 +197,29 @@ impl TerminalBuffer {
         cwd: &Path,
     ) -> std::io::Result<()> {
         let (cols, rows) = self.size;
-        let handle = PtyHandle::spawn(cmd, args, cwd, rows as u16, cols as u16)?;
+        let handle = PtyHandle::spawn(cmd, args, cwd, rows as u16, cols as u16, false)?;
         self.pty = Some(handle);
         Ok(())
     }
 
     // Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
-    /// Spawns a shell with run-loop wakeup support.
+    // Chunk: docs/chunks/terminal_shell_env - Login shell spawning for full environment
+    /// Spawns a login shell with run-loop wakeup support.
     ///
     /// Same as `spawn_shell()`, but signals `wakeup` whenever PTY output arrives,
     /// allowing the main thread to poll and render promptly.
+    ///
+    /// The user's shell is automatically determined from the passwd database
+    /// and spawned as a login shell for full environment setup.
     pub fn spawn_shell_with_wakeup(
         &mut self,
-        shell: &str,
         cwd: &Path,
         wakeup: PtyWakeup,
     ) -> std::io::Result<()> {
-        self.spawn_command_with_wakeup(shell, &[], cwd, wakeup)
+        let (cols, rows) = self.size;
+        let handle = PtyHandle::spawn_with_wakeup("", &[], cwd, rows as u16, cols as u16, wakeup, true)?;
+        self.pty = Some(handle);
+        Ok(())
     }
 
     // Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
@@ -216,7 +235,7 @@ impl TerminalBuffer {
         wakeup: PtyWakeup,
     ) -> std::io::Result<()> {
         let (cols, rows) = self.size;
-        let handle = PtyHandle::spawn_with_wakeup(cmd, args, cwd, rows as u16, cols as u16, wakeup)?;
+        let handle = PtyHandle::spawn_with_wakeup(cmd, args, cwd, rows as u16, cols as u16, wakeup, false)?;
         self.pty = Some(handle);
         Ok(())
     }
