@@ -589,7 +589,10 @@ define_class!(
         fn window_did_resize(&self, _notification: &NSNotification) {
             let controller_ref = self.ivars().controller.borrow();
             if let Some(controller) = controller_ref.as_ref() {
-                controller.borrow_mut().handle_resize();
+                // Use try_borrow_mut to avoid panicking during modal dialogs.
+                if let Ok(mut ctrl) = controller.try_borrow_mut() {
+                    ctrl.handle_resize();
+                }
             }
         }
 
@@ -601,7 +604,10 @@ define_class!(
             // we need to re-calculate the viewport and re-render.
             let controller_ref = self.ivars().controller.borrow();
             if let Some(controller) = controller_ref.as_ref() {
-                controller.borrow_mut().handle_resize();
+                // Use try_borrow_mut to avoid panicking during modal dialogs.
+                if let Ok(mut ctrl) = controller.try_borrow_mut() {
+                    ctrl.handle_resize();
+                }
             }
         }
     }
