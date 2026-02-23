@@ -1,160 +1,191 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+Create a macOS application bundle (`.app`) with proper structure, code signing, notarization, and DMG packaging. The approach uses standard Apple tooling via shell scripts integrated into the build workflow:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Bundle structure**: Standard macOS `.app` structure with `Contents/MacOS/` (binary), `Contents/Resources/` (icons), and `Contents/Info.plist` (metadata).
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **Icon generation**: Use `sips` and `iconutil` (built-in macOS tools) to convert the source `icon.png` into a proper `.icns` file with all required sizes.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/macos_app_bundle/GOAL.md)
-with references to the files that you expect to touch.
--->
+3. **Code signing**: Use `codesign` with a Developer ID Application certificate. The identity is read from environment variables to avoid hardcoding credentials.
 
-## Subsystem Considerations
+4. **Notarization**: Use `notarytool` (replaces altool, available since macOS 12) to submit the app for notarization, then `stapler` to staple the ticket.
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+5. **DMG creation**: Use `hdiutil` to create a compressed disk image containing the app.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
+6. **Build integration**: A `Makefile` orchestrates the workflow, with a `make bundle` target that runs cargo build in release mode, then packages everything.
 
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Per TESTING_PHILOSOPHY.md, the packaging scripts are "platform shell" code that isn't unit-tested. Verification is done by running the build and checking the outputs with `codesign --verify` and `spctl --assess`.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Create the source icon
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add a placeholder `icon.png` at the project root. This should be at least 1024x1024 pixels (the largest size in the macOS icon set). The actual icon design is out of scope for this chunk—we provide a working placeholder that can be replaced later.
 
-Example:
+Location: `icon.png` (project root)
 
-### Step 1: Define the SegmentHeader struct
+Note: If the user provides their own icon.png, skip this step.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Create the icon generation script
 
-Location: src/segment/format.rs
+Create a script that:
+1. Takes `icon.png` as input
+2. Creates an `iconset` directory with all required sizes (16, 32, 64, 128, 256, 512, 1024 at 1x and 2x)
+3. Uses `sips` to resize the source image to each size
+4. Uses `iconutil` to compile the iconset into `LiteEdit.icns`
 
-### Step 2: Implement header serialization
+Location: `scripts/make-icns.sh`
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+### Step 3: Create the Info.plist template
 
-### Step 3: ...
+Create the Info.plist with:
+- `CFBundleIdentifier`: `com.liteedit.app` (or similar)
+- `CFBundleName`: `LiteEdit`
+- `CFBundleDisplayName`: `LiteEdit`
+- `CFBundleExecutable`: `lite-edit`
+- `CFBundleIconFile`: `LiteEdit` (references `LiteEdit.icns` in Resources)
+- `CFBundleVersion` and `CFBundleShortVersionString`: Read from `Cargo.toml` version (0.1.0)
+- `LSMinimumSystemVersion`: `10.15` (Catalina—minimum for Metal 3 features)
+- `NSHighResolutionCapable`: `true`
+- `NSSupportsAutomaticTermination`: `false`
+- `CFBundlePackageType`: `APPL`
+- `NSPrincipalClass`: `NSApplication`
 
----
+Location: `resources/Info.plist`
 
-**BACKREFERENCE COMMENTS**
+### Step 4: Create the entitlements file
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+Create an entitlements file for code signing with:
+- `com.apple.security.app-sandbox`: `false` (not sandboxed—terminal emulator needs PTY access)
+- `com.apple.security.cs.allow-unsigned-executable-memory`: `true` (if needed for JIT; may not be required)
+- `com.apple.security.automation.apple-events`: `true` (for AppleScript automation if desired)
+- `com.apple.security.device.audio-input`: `false`
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+Note: The PTY functionality requires hardened runtime but cannot be sandboxed. Disable sandbox for now. Document this constraint.
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+Location: `resources/LiteEdit.entitlements`
 
-Format (place immediately before the symbol):
+### Step 5: Create the bundle assembly script
+
+Create a script that:
+1. Creates the `.app` bundle directory structure under `target/bundle/LiteEdit.app/`
+2. Copies `target/release/lite-edit` to `Contents/MacOS/lite-edit`
+3. Copies `LiteEdit.icns` to `Contents/Resources/`
+4. Copies `Info.plist` to `Contents/`
+5. Creates `Contents/PkgInfo` with `APPL????`
+
+Location: `scripts/bundle-app.sh`
+
+### Step 6: Create the code signing script
+
+Create a script that:
+1. Reads `APPLE_DEVELOPER_IDENTITY` from environment (e.g., "Developer ID Application: Name (TEAMID)")
+2. Uses `codesign --deep --force --options runtime --entitlements resources/LiteEdit.entitlements --sign "$APPLE_DEVELOPER_IDENTITY" target/bundle/LiteEdit.app`
+3. Verifies with `codesign --verify --deep --strict target/bundle/LiteEdit.app`
+
+The `--options runtime` enables hardened runtime, required for notarization.
+
+Location: `scripts/codesign-app.sh`
+
+### Step 7: Create the notarization script
+
+Create a script that:
+1. Reads Apple ID credentials from environment:
+   - `APPLE_ID`: Apple ID email
+   - `APPLE_TEAM_ID`: Team ID
+   - `APPLE_APP_PASSWORD`: App-specific password (from appleid.apple.com)
+2. Zips the app: `ditto -c -k --keepParent target/bundle/LiteEdit.app target/bundle/LiteEdit.zip`
+3. Submits for notarization: `xcrun notarytool submit target/bundle/LiteEdit.zip --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait`
+4. Staples the ticket: `xcrun stapler staple target/bundle/LiteEdit.app`
+5. Verifies: `spctl --assess --type exec --verbose target/bundle/LiteEdit.app`
+
+Location: `scripts/notarize-app.sh`
+
+### Step 8: Create the DMG creation script
+
+Create a script that:
+1. Creates a DMG from the `.app` using `hdiutil`
+2. Sets up a simple layout (app + Applications symlink for drag-to-install)
+3. Compresses the DMG
+4. Signs the DMG with the same developer identity
+
+Commands:
+```bash
+hdiutil create -volname "LiteEdit" -srcfolder target/bundle/LiteEdit.app -ov -format UDZO target/bundle/LiteEdit.dmg
+codesign --sign "$APPLE_DEVELOPER_IDENTITY" target/bundle/LiteEdit.dmg
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `scripts/make-dmg.sh`
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 9: Create the Makefile
+
+Create a Makefile with targets:
+- `build`: `cargo build --release`
+- `icns`: Run icon generation script
+- `bundle`: Build + assemble app bundle (depends on `build`, `icns`)
+- `sign`: Code sign the app (depends on `bundle`)
+- `notarize`: Notarize the app (depends on `sign`)
+- `dmg`: Create DMG (depends on `notarize`)
+- `clean`: Remove build artifacts
+
+The `make bundle` target should produce a usable `.app` without signing (for local development).
+The `make dmg` target runs the full pipeline including notarization.
+
+Location: `Makefile`
+
+### Step 10: Update README with bundling instructions
+
+Add a "Packaging for Distribution" section to README.md documenting:
+- Prerequisites (Apple Developer ID, credentials in environment)
+- `make bundle` for local testing
+- `make dmg` for distribution
+- Environment variables needed
+
+Location: `README.md`
+
+### Step 11: Verification
+
+Manually verify:
+1. `make bundle` produces `target/bundle/LiteEdit.app`
+2. `target/bundle/LiteEdit.app/Contents/Info.plist` exists and is valid
+3. `target/bundle/LiteEdit.app/Contents/Resources/LiteEdit.icns` exists
+4. `target/bundle/LiteEdit.app/Contents/MacOS/lite-edit` is the release binary
+5. Double-clicking `LiteEdit.app` in Finder launches the editor
+6. (With signing credentials) `make sign` produces a signed app that passes `codesign --verify`
+7. (With notarization credentials) `make dmg` produces a notarized DMG that passes `spctl --assess`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+- **External tools** (all built into macOS):
+  - `sips` - Image manipulation
+  - `iconutil` - Icon compilation
+  - `codesign` - Code signing
+  - `xcrun notarytool` - Notarization (macOS 12+)
+  - `xcrun stapler` - Ticket stapling
+  - `hdiutil` - DMG creation
+  - `make` - Build orchestration
 
-If there are no dependencies, delete this section.
--->
+- **Apple Developer Program membership** (for signing and notarization):
+  - Developer ID Application certificate installed in Keychain
+  - App-specific password for notarization
+
+- **No Rust crate dependencies** - This is purely build tooling.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Hardened runtime and PTY**: The terminal emulator uses PTY which may require specific entitlements. If notarization fails, we may need to adjust entitlements or use additional exceptions.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Icon source resolution**: The chunk GOAL.md references `icon.png` at project root, but no such file exists yet. Step 1 creates a placeholder, but the operator should provide a proper icon.
+
+- **Notarization latency**: Apple's notarization service can take 5-15 minutes. The script uses `--wait` to block until complete.
+
+- **Apple Silicon vs Intel**: The release binary will be native to the build machine's architecture. Universal binary support (fat binary with both architectures) is out of scope for this chunk but could be added later.
+
+- **Version synchronization**: Info.plist version is manually specified to match Cargo.toml. A future improvement could extract this automatically.
+
+- **Sandbox limitations**: The app is not sandboxed because the terminal emulator needs PTY access. This is intentional but limits Mac App Store distribution (out of scope per docs/trunk/GOAL.md anyway).
 
 ## Deviations
 

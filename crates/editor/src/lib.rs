@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // Chunk: docs/chunks/terminal_input_encoding - Terminal input encoding
 //!
 //! lite-edit library interface.
@@ -22,6 +23,12 @@ mod wrap_layout;
 
 // Chunk: docs/chunks/font_metrics - Font metrics
 mod font;
+
+// Chunk: docs/chunks/fuzzy_file_matcher - File index for fuzzy file matching
+pub mod file_index;
+
+// Chunk: docs/chunks/workspace_dir_picker - Directory picker for new workspaces
+mod dir_picker;
 
 // Chunk: docs/chunks/workspace_model - Workspace model for the editor
 pub mod workspace;

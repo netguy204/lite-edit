@@ -3,3 +3,8 @@
 target/
 *.swp
 .lite-edit-recent
+.DS_Store
+test.cpp
+test.py
+test.sh
+build.sh

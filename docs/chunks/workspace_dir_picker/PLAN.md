@@ -8,153 +8,168 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk introduces directory picking when creating a new workspace (Cmd+N) and makes the `FileIndex` per-workspace. The approach is:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Add NSOpenPanel wrapper module**: Create a thin wrapper around `NSOpenPanel` for directory selection, following the "humble object" pattern used by `clipboard.rs`. The wrapper exposes a single function that shows the dialog and returns `Option<PathBuf>`.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **Change Cmd+N flow**: Instead of immediately creating a workspace with `std::env::current_dir()`, the new flow is:
+   - Show `NSOpenPanel` configured for directory selection
+   - If user selects a directory: create workspace with that path as `root_path`, initialize a `FileIndex` for that workspace
+   - If user cancels: no-op (no workspace created)
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/workspace_dir_picker/GOAL.md)
-with references to the files that you expect to touch.
--->
+3. **Move FileIndex into Workspace**: Currently `EditorState` owns a single `FileIndex`. This chunk moves the `FileIndex` into `Workspace` so each workspace has its own index rooted at its `root_path`. This ensures the file picker (Cmd+P) searches the correct directory for each workspace.
 
-## Subsystem Considerations
+4. **Derive workspace label from directory**: The workspace label will be the last path component of the selected directory (e.g., `/Users/foo/projects/bar` → label "bar").
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+The implementation builds on:
+- `crates/editor/src/clipboard.rs` - Pattern for macOS Cocoa bindings with test isolation
+- `crates/editor/src/workspace.rs` - Workspace model (`Workspace`, `Editor`)
+- `crates/editor/src/editor_state.rs` - Keyboard handling, `new_workspace()` method
+- `crates/editor/src/file_index.rs` - FileIndex for fuzzy file matching
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Create dir_picker module
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create a new module `crates/editor/src/dir_picker.rs` that wraps `NSOpenPanel` for directory selection.
 
-Example:
+**Production implementation:**
+- Use `objc2_app_kit::NSOpenPanel` to create a panel
+- Configure: `setCanChooseFiles(false)`, `setCanChooseDirectories(true)`, `setAllowsMultipleSelection(false)`
+- Call `runModal()` and check result (NSModalResponseOK)
+- Return `Some(PathBuf)` with the selected directory, or `None` if cancelled
 
-### Step 1: Define the SegmentHeader struct
+**Test implementation:**
+- Use a `thread_local!` mock that allows tests to inject a response
+- Provide `mock_set_next_directory(Option<PathBuf>)` for test setup
+- Never touch real NSOpenPanel in tests
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+```rust
+// Public API:
+pub fn pick_directory() -> Option<PathBuf>;
 
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+// Test support (cfg(test) only):
+pub fn mock_set_next_directory(dir: Option<PathBuf>);
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `crates/editor/src/dir_picker.rs`
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 2: Move FileIndex into Workspace
+
+Refactor the ownership of `FileIndex`:
+
+1. **Remove from EditorState:**
+   - Remove `file_index: Option<FileIndex>` field from `EditorState`
+   - Remove `last_cache_version: u64` field from `EditorState`
+
+2. **Add to Workspace:**
+   - Add `file_index: FileIndex` field to `Workspace` struct
+   - Add `last_cache_version: u64` field to `Workspace` struct (for tracking cache changes during file picker)
+
+3. **Initialize FileIndex in workspace creation:**
+   - `Workspace::new()` and `Workspace::with_empty_tab()` accept `root_path` already
+   - Add `FileIndex::start(root_path.clone())` initialization in these constructors
+
+4. **Update EditorState methods:**
+   - `open_file_picker()`: access `file_index` from `self.editor.active_workspace()` instead of `self.file_index`
+   - `handle_selector_confirm()`: access via active workspace
+   - `try_refresh_picker_if_indexing()`: access via active workspace
+   - `poll_agents()`: no change needed (doesn't touch file_index)
+
+Location: `crates/editor/src/workspace.rs`, `crates/editor/src/editor_state.rs`
+
+### Step 3: Update EditorState::new_workspace to show directory picker
+
+Modify `EditorState::new_workspace()` to:
+
+1. Call `dir_picker::pick_directory()`
+2. If `Some(selected_dir)`:
+   - Extract directory name as label: `selected_dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "workspace".to_string())`
+   - Call `self.editor.new_workspace(label, selected_dir)` (this already initializes FileIndex per Step 2)
+   - Mark `dirty_region.merge(DirtyRegion::FullViewport)`
+3. If `None`: return early (no workspace created, no dirty region)
+
+The workspace's `root_path` is now user-selected, and terminals opened in this workspace will use that path (existing wiring in `new_terminal_tab()` already reads `workspace.root_path`).
+
+Location: `crates/editor/src/editor_state.rs`
+
+### Step 4: Update file picker to use workspace's file index
+
+Ensure `open_file_picker()` and related selector methods access the file index from the active workspace:
+
+```rust
+fn open_file_picker(&mut self) {
+    let workspace = match self.editor.active_workspace_mut() {
+        Some(ws) => ws,
+        None => return,
+    };
+
+    let results = workspace.file_index.query("");
+    // ... rest of setup ...
+    workspace.last_cache_version = workspace.file_index.cache_version();
+}
+```
+
+Similarly update:
+- `handle_selector_key()` - re-query from workspace
+- `handle_selector_confirm()` - record_selection on workspace's file_index
+- `try_refresh_picker_if_indexing()` - check workspace's file_index version
+
+Location: `crates/editor/src/editor_state.rs`
+
+### Step 5: Add unit tests
+
+**Test dir_picker module:**
+- `test_mock_pick_directory_returns_set_value()` - verify mock returns injected path
+- `test_mock_pick_directory_returns_none_by_default()` - verify mock returns None when not set
+- `test_mock_pick_directory_consumes_value()` - verify mock is consumed after one call
+
+**Test workspace FileIndex ownership:**
+- `test_workspace_has_file_index()` - verify workspace initializes with FileIndex
+- `test_workspace_file_index_uses_root_path()` - verify FileIndex is rooted at workspace's root_path
+- `test_multiple_workspaces_have_independent_file_indexes()` - verify workspaces don't share indexes
+
+**Test new_workspace flow (EditorState):**
+- `test_new_workspace_with_cancelled_picker_does_nothing()` - mock returns None, workspace count unchanged
+- `test_new_workspace_with_selection_creates_workspace()` - mock returns path, new workspace created with that root_path
+- `test_new_workspace_label_from_directory_name()` - verify label is derived from selected directory
+
+**Test file picker uses workspace index:**
+- `test_file_picker_queries_active_workspace_index()` - verify picker uses current workspace's FileIndex
+
+Location: `crates/editor/src/dir_picker.rs` (mod tests), `crates/editor/src/workspace.rs` (mod tests), `crates/editor/src/editor_state.rs` (mod tests)
+
+### Step 6: Wire up module and update lib.rs
+
+1. Add `mod dir_picker;` to `crates/editor/src/lib.rs`
+2. Verify the build compiles and all tests pass
+3. Manual verification:
+   - Run the editor
+   - Press Cmd+N, verify directory picker appears
+   - Select a directory, verify new workspace appears in left rail with correct label
+   - Press Cmd+N again, cancel the picker, verify no new workspace created
+   - Open file picker (Cmd+P) in new workspace, verify it searches the selected directory
+   - Open terminal (Cmd+Shift+T) in new workspace, verify it starts in the selected directory
+
+Location: `crates/editor/src/lib.rs`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+- `objc2-app-kit` crate already in dependencies (provides `NSOpenPanel`)
+- `workspace_model` chunk (ACTIVE) - provides the Workspace/Editor model
+- `fuzzy_file_matcher` chunk (implicitly ACTIVE) - provides FileIndex
 
-If there are no dependencies, delete this section.
--->
+No new external dependencies required.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **NSOpenPanel runModal() blocks the main thread**: This is acceptable for a file dialog - the user expects modal behavior. However, if the render loop is tied to the NSRunLoop, we need to verify the UI doesn't freeze visibly while the dialog is open.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **FileIndex memory footprint with multiple workspaces**: Each workspace will now have its own FileIndex with its own cache. For very large directories, this could increase memory usage. This is acceptable for v1 - most users won't have many workspaces simultaneously.
+
+3. **Initial workspace at startup**: `Editor::new()` currently creates an initial workspace with `std::env::current_dir()`. This chunk doesn't change startup behavior - only Cmd+N shows the picker. The initial workspace will still use the process's cwd. This is intentional to preserve fast startup without modal dialogs.
+
+4. **Test isolation for NSOpenPanel**: Following the clipboard pattern, tests will use a mock. However, there's no automated integration test that verifies the real NSOpenPanel works correctly. Manual testing is required.
 
 ## Deviations
 

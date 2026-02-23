@@ -6,6 +6,7 @@
 // Chunk: docs/chunks/file_save - File-buffer association and Cmd+S save
 // Chunk: docs/chunks/workspace_model - Workspace model and left rail UI
 // Chunk: docs/chunks/tab_bar_interaction - Click coordinate transformation for tab switching
+// Chunk: docs/chunks/workspace_dir_picker - Directory picker for new workspaces
 //!
 //! Editor state container.
 //!
@@ -19,8 +20,8 @@ use std::time::Instant;
 
 use crate::buffer_target::BufferFocusTarget;
 use crate::context::EditorContext;
+use crate::dir_picker;
 use crate::dirty_region::DirtyRegion;
-use crate::file_index::FileIndex;
 use crate::focus::FocusTarget;
 use crate::font::FontMetrics;
 use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
@@ -70,7 +71,8 @@ pub enum EditorFocus {
 ///
 /// The `buffer`, `viewport`, and `associated_file` are now accessed through
 /// delegate methods that forward to the active workspace's active tab.
-/// Chunk: docs/chunks/file_picker - File picker state fields (focus, active_selector, file_index, last_cache_version, resolved_path)
+/// Chunk: docs/chunks/file_picker - File picker state fields (focus, active_selector, resolved_path)
+// Chunk: docs/chunks/workspace_dir_picker - file_index and last_cache_version moved to Workspace
 pub struct EditorState {
     /// The workspace/tab model containing all buffers and viewports
     pub editor: Editor,
@@ -101,10 +103,6 @@ pub struct EditorState {
     pub focus: EditorFocus,
     /// The active selector widget (when focus == Selector)
     pub active_selector: Option<SelectorWidget>,
-    /// The file index for fuzzy file matching
-    file_index: Option<FileIndex>,
-    /// The cache version at the last query (for streaming refresh)
-    last_cache_version: u64,
     /// The resolved path from the last selector confirmation
     /// (consumed by file_save chunk for buffer association)
     pub resolved_path: Option<PathBuf>,
@@ -276,13 +274,15 @@ impl EditorState {
             }
         }
 
+        // FileIndex is now initialized per-workspace in Workspace::new() and Workspace::with_empty_tab()
+        // Chunk: docs/chunks/workspace_dir_picker - Per-workspace file index
         Self {
             editor,
             dirty_region: DirtyRegion::None,
             focus_target: BufferFocusTarget::new(),
             cursor_visible: true,
             last_keystroke: Instant::now(),
-            // Chunk: docs/chunks/cursor_blink_focus - Initialize overlay cursor state
+            // Chunk: docs/docs/cursor_blink_focus - Initialize overlay cursor state
             overlay_cursor_visible: true,
             last_overlay_keystroke: Instant::now(),
             font_metrics,
@@ -293,13 +293,6 @@ impl EditorState {
             should_quit: false,
             focus: EditorFocus::Buffer,
             active_selector: None,
-            // Start FileIndex eagerly at construction time so the background walk
-            // has time to populate before the user opens the picker (Cmd+P)
-            // Chunk: docs/chunks/picker_eager_index
-            file_index: Some(FileIndex::start(
-                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-            )),
-            last_cache_version: 0,
             resolved_path: None,
             find_mini_buffer: None,
             search_origin: Position::new(0, 0),
@@ -569,12 +562,18 @@ impl EditorState {
     /// Opens the file picker selector.
     /// Chunk: docs/chunks/file_picker - FileIndex initialization, initial query, SelectorWidget setup
     // Chunk: docs/chunks/selector_scroll_bottom - Call update_visible_size after set_items
+    // Chunk: docs/chunks/workspace_dir_picker - Use workspace's file index
     fn open_file_picker(&mut self) {
-        // file_index is initialized eagerly at EditorState construction time;
-        // Chunk: docs/chunks/picker_eager_index
+        // Get the active workspace's file index
+        // Chunk: docs/chunks/workspace_dir_picker - Per-workspace file index
+        let workspace = match self.editor.active_workspace() {
+            Some(ws) => ws,
+            None => return,
+        };
 
         // Query with empty string to get initial results
-        let results = self.file_index.as_ref().unwrap().query("");
+        let results = workspace.file_index.query("");
+        let cache_version = workspace.file_index.cache_version();
 
         // Create a new selector widget
         let mut selector = SelectorWidget::new();
@@ -608,7 +607,12 @@ impl EditorState {
         // Store the selector and update focus
         self.active_selector = Some(selector);
         self.focus = EditorFocus::Selector;
-        self.last_cache_version = self.file_index.as_ref().unwrap().cache_version();
+
+        // Store cache version in workspace (for streaming refresh)
+        // Chunk: docs/chunks/workspace_dir_picker - Per-workspace cache version tracking
+        if let Some(ws) = self.editor.active_workspace_mut() {
+            ws.last_cache_version = cache_version;
+        }
 
         // Chunk: docs/chunks/cursor_blink_focus - Reset cursor states on focus transition
         // Main buffer cursor stays visible (static) while overlay is active
@@ -985,8 +989,10 @@ impl EditorState {
                 let current_query = selector.query();
                 if current_query != prev_query {
                     // Re-query the file index with the new query
-                    if let Some(ref file_index) = self.file_index {
-                        let results = file_index.query(&current_query);
+                    // Chunk: docs/chunks/workspace_dir_picker - Use workspace's file index
+                    if let Some(workspace) = self.editor.active_workspace() {
+                        let results = workspace.file_index.query(&current_query);
+                        let cache_version = workspace.file_index.cache_version();
                         let items: Vec<String> = results
                             .iter()
                             .map(|r| r.path.display().to_string())
@@ -1012,7 +1018,10 @@ impl EditorState {
                                 new_geometry.visible_items as f32 * new_geometry.item_height,
                             );
                         }
-                        self.last_cache_version = file_index.cache_version();
+                        // Update workspace's cache version
+                        if let Some(ws) = self.editor.active_workspace_mut() {
+                            ws.last_cache_version = cache_version;
+                        }
                     }
                 }
                 // Mark dirty for any visual update (selection, query, etc.)
@@ -1030,8 +1039,12 @@ impl EditorState {
 
     /// Handles selector confirmation (Enter pressed).
     /// Chunk: docs/chunks/file_picker - Path resolution, recency recording, and resolved_path storage on Enter
+    // Chunk: docs/chunks/workspace_dir_picker - Use workspace's file index and root_path
     fn handle_selector_confirm(&mut self, idx: usize) {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        // Get the workspace root_path as the base directory for path resolution
+        let base_dir = self.editor.active_workspace()
+            .map(|ws| ws.root_path.clone())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
         // Get items and query from selector
         let (items, query) = if let Some(ref selector) = self.active_selector {
@@ -1041,11 +1054,12 @@ impl EditorState {
         };
 
         // Resolve the path
-        let resolved = self.resolve_picker_path(idx, &items, &query, &cwd);
+        let resolved = self.resolve_picker_path(idx, &items, &query, &base_dir);
 
-        // Record the selection for recency
-        if let Some(ref file_index) = self.file_index {
-            file_index.record_selection(&resolved);
+        // Record the selection for recency in the workspace's file index
+        // Chunk: docs/chunks/workspace_dir_picker - Per-workspace recency tracking
+        if let Some(ws) = self.editor.active_workspace() {
+            ws.file_index.record_selection(&resolved);
         }
 
         // Store the resolved path for file_save chunk to consume
@@ -1622,20 +1636,22 @@ impl EditorState {
     ///
     /// Returns `DirtyRegion::FullViewport` if items were updated, `None` otherwise.
     /// Chunk: docs/chunks/file_picker - Streaming refresh mechanism for background file index updates
+    // Chunk: docs/chunks/workspace_dir_picker - Use workspace's file index
     pub fn tick_picker(&mut self) -> DirtyRegion {
         // Only relevant when selector is active
         if self.focus != EditorFocus::Selector {
             return DirtyRegion::None;
         }
 
-        let file_index = match &self.file_index {
-            Some(idx) => idx,
+        // Get the workspace's file index and last_cache_version
+        let workspace = match self.editor.active_workspace() {
+            Some(ws) => ws,
             None => return DirtyRegion::None,
         };
 
         // Check if cache version has changed
-        let current_version = file_index.cache_version();
-        if current_version <= self.last_cache_version {
+        let current_version = workspace.file_index.cache_version();
+        if current_version <= workspace.last_cache_version {
             return DirtyRegion::None;
         }
 
@@ -1646,7 +1662,7 @@ impl EditorState {
             .map(|s| s.query())
             .unwrap_or_default();
 
-        let results = file_index.query(&query);
+        let results = workspace.file_index.query(&query);
         let items: Vec<String> = results
             .iter()
             .map(|r| r.path.display().to_string())
@@ -1657,7 +1673,10 @@ impl EditorState {
             widget.set_items(items);
         }
 
-        self.last_cache_version = current_version;
+        // Update workspace's cache version
+        if let Some(ws) = self.editor.active_workspace_mut() {
+            ws.last_cache_version = current_version;
+        }
 
         DirtyRegion::FullViewport
     }
@@ -1968,10 +1987,28 @@ impl Default for EditorState {
 impl EditorState {
     /// Creates a new workspace and switches to it.
     ///
-    /// The new workspace has one empty tab.
+    /// Opens a directory picker dialog (NSOpenPanel) for the user to select
+    /// the workspace root directory. If the user selects a directory, a new
+    /// workspace is created with that directory as the root_path. The workspace
+    /// label is derived from the directory name.
+    ///
+    /// If the user cancels the dialog, no workspace is created.
+    // Chunk: docs/chunks/workspace_dir_picker - Directory picker for new workspaces
     pub fn new_workspace(&mut self) {
-        let root_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        self.editor.new_workspace("untitled".to_string(), root_path);
+        // Show directory picker dialog
+        let selected_dir = match dir_picker::pick_directory() {
+            Some(dir) => dir,
+            None => return, // User cancelled, do nothing
+        };
+
+        // Derive workspace label from directory name
+        let label = selected_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "workspace".to_string());
+
+        // Create the workspace with the selected directory
+        self.editor.new_workspace(label, selected_dir);
         self.dirty_region.merge(DirtyRegion::FullViewport);
     }
 
@@ -2390,6 +2427,7 @@ impl EditorState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dir_picker;
     use crate::input::{Key, Modifiers, MouseEvent, MouseEventKind, ScrollDelta};
     use std::time::Duration;
 
@@ -3479,6 +3517,10 @@ mod tests {
 
         assert_eq!(state.editor.workspace_count(), 1);
 
+        // Set up mock directory picker to return a test directory
+        // Chunk: docs/chunks/workspace_dir_picker - Mock directory picker in tests
+        dir_picker::mock_set_next_directory(Some(PathBuf::from("/test/workspace")));
+
         let cmd_n = KeyEvent::new(
             Key::Char('n'),
             Modifiers {
@@ -3499,6 +3541,7 @@ mod tests {
         state.update_viewport_size(160.0);
 
         // Create a second workspace
+        dir_picker::mock_set_next_directory(Some(PathBuf::from("/test/ws2")));
         state.new_workspace();
         assert_eq!(state.editor.workspace_count(), 2);
 
@@ -3546,6 +3589,7 @@ mod tests {
         state.update_viewport_size(160.0);
 
         // Create a second workspace (switches to it)
+        dir_picker::mock_set_next_directory(Some(PathBuf::from("/test/ws2")));
         state.new_workspace();
         assert_eq!(state.editor.active_workspace, 1);
 
@@ -3571,6 +3615,7 @@ mod tests {
         state.update_viewport_size(160.0);
 
         // Create a second workspace
+        dir_picker::mock_set_next_directory(Some(PathBuf::from("/test/ws2")));
         state.new_workspace();
         // Switch back to first
         state.switch_workspace(0);
@@ -3623,14 +3668,16 @@ mod tests {
         // With one workspace, title should just be "Untitled"
         assert_eq!(state.window_title(), "Untitled");
 
-        // Create a second workspace
+        // Create a second workspace named "my_project"
+        // Chunk: docs/chunks/workspace_dir_picker - Workspace label is derived from directory name
+        dir_picker::mock_set_next_directory(Some(PathBuf::from("/test/my_project")));
         state.new_workspace();
         assert_eq!(state.editor.workspace_count(), 2);
 
-        // Now title should include workspace label
+        // Now title should include workspace label (derived from directory name)
         let title = state.window_title();
         assert!(title.contains("—")); // em-dash separator
-        assert!(title.contains("untitled")); // workspace label
+        assert!(title.contains("my_project"), "Title should contain workspace label from directory name, got: {}", title);
     }
 
     // =========================================================================
@@ -3648,6 +3695,7 @@ mod tests {
         state.view_width = 800.0;
 
         // Create a second workspace so we have 2 total
+        dir_picker::mock_set_next_directory(Some(PathBuf::from("/test/ws2")));
         state.new_workspace();
         assert_eq!(state.editor.workspace_count(), 2);
         // Switch back to workspace 0
@@ -3693,7 +3741,9 @@ mod tests {
         state.update_viewport_size(160.0);
 
         // Create 3 workspaces total
+        dir_picker::mock_set_next_directory(Some(PathBuf::from("/test/ws2")));
         state.new_workspace();
+        dir_picker::mock_set_next_directory(Some(PathBuf::from("/test/ws3")));
         state.new_workspace();
         assert_eq!(state.editor.workspace_count(), 3);
 
@@ -3718,7 +3768,9 @@ mod tests {
         state.update_viewport_size(160.0);
 
         // Create 3 workspaces total
+        dir_picker::mock_set_next_directory(Some(PathBuf::from("/test/ws2")));
         state.new_workspace();
+        dir_picker::mock_set_next_directory(Some(PathBuf::from("/test/ws3")));
         state.new_workspace();
         assert_eq!(state.editor.workspace_count(), 3);
 
@@ -3767,6 +3819,7 @@ mod tests {
         state.update_viewport_size(160.0);
 
         // Create second workspace
+        dir_picker::mock_set_next_directory(Some(PathBuf::from("/test/ws2")));
         state.new_workspace();
         state.switch_workspace(0);
         assert_eq!(state.editor.active_workspace, 0);
@@ -3794,6 +3847,7 @@ mod tests {
         state.update_viewport_size(160.0);
 
         // Create second workspace
+        dir_picker::mock_set_next_directory(Some(PathBuf::from("/test/ws2")));
         state.new_workspace();
         assert_eq!(state.editor.active_workspace, 1);
 
@@ -3812,6 +3866,121 @@ mod tests {
 
         assert_eq!(state.editor.active_workspace, 0);
         assert!(state.is_dirty());
+    }
+
+    // =========================================================================
+    // Workspace Directory Picker Tests (Chunk: docs/chunks/workspace_dir_picker)
+    // =========================================================================
+
+    #[test]
+    fn test_new_workspace_with_cancelled_picker_does_nothing() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        assert_eq!(state.editor.workspace_count(), 1);
+        let _ = state.take_dirty_region();
+
+        // Mock returns None (user cancelled)
+        dir_picker::mock_set_next_directory(None);
+        state.new_workspace();
+
+        // Should still have only 1 workspace
+        assert_eq!(state.editor.workspace_count(), 1);
+        // Should not be dirty (no changes made)
+        assert!(!state.is_dirty());
+    }
+
+    #[test]
+    fn test_new_workspace_with_selection_creates_workspace() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        assert_eq!(state.editor.workspace_count(), 1);
+
+        // Mock returns a directory
+        dir_picker::mock_set_next_directory(Some(PathBuf::from("/test/project")));
+        state.new_workspace();
+
+        // Should now have 2 workspaces
+        assert_eq!(state.editor.workspace_count(), 2);
+        // Should be switched to the new workspace
+        assert_eq!(state.editor.active_workspace, 1);
+        // Should be dirty
+        assert!(state.is_dirty());
+    }
+
+    #[test]
+    fn test_new_workspace_label_from_directory_name() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Mock returns a directory with a specific name
+        dir_picker::mock_set_next_directory(Some(PathBuf::from("/home/user/my_project")));
+        state.new_workspace();
+
+        // The workspace label should be derived from the directory name
+        let workspace = state.editor.active_workspace().unwrap();
+        assert_eq!(workspace.label, "my_project");
+        assert_eq!(workspace.root_path, PathBuf::from("/home/user/my_project"));
+    }
+
+    #[test]
+    fn test_new_workspace_root_path_is_selected_directory() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        dir_picker::mock_set_next_directory(Some(PathBuf::from("/specific/path")));
+        state.new_workspace();
+
+        let workspace = state.editor.active_workspace().unwrap();
+        assert_eq!(workspace.root_path, PathBuf::from("/specific/path"));
+    }
+
+    #[test]
+    fn test_file_picker_queries_active_workspace_index() {
+        use tempfile::TempDir;
+        use std::fs::File;
+
+        // Create a temp directory with a test file
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        File::create(root.join("test_file.txt")).unwrap();
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Create a workspace with our temp directory
+        dir_picker::mock_set_next_directory(Some(root.to_path_buf()));
+        state.new_workspace();
+
+        // Wait for indexing to complete
+        while state.editor.active_workspace().unwrap().file_index.is_indexing() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Clear dirty region from workspace creation
+        let _ = state.take_dirty_region();
+
+        // Open file picker (Cmd+P)
+        let cmd_p = KeyEvent::new(
+            Key::Char('p'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_p);
+
+        // Verify selector is active
+        assert_eq!(state.focus, EditorFocus::Selector);
+        assert!(state.active_selector.is_some());
+
+        // Verify the selector contains our test file
+        let selector = state.active_selector.as_ref().unwrap();
+        let items = selector.items();
+        assert!(items.iter().any(|item| item.contains("test_file.txt")),
+            "File picker should contain test_file.txt from workspace's file index");
     }
 
     // =========================================================================
