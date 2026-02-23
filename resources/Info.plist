@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Chunk: docs/chunks/macos_app_bundle - macOS app bundle packaging -->
+<plist version="1.0">
+<dict>
+    <!-- Bundle identification -->
+    <key>CFBundleIdentifier</key>
+    <string>com.liteedit.app</string>
+
+    <key>CFBundleName</key>
+    <string>LiteEdit</string>
+
+    <key>CFBundleDisplayName</key>
+    <string>LiteEdit</string>
+
+    <!-- Executable name (must match the binary in Contents/MacOS/) -->
+    <key>CFBundleExecutable</key>
+    <string>lite-edit</string>
+
+    <!-- Icon file (without .icns extension, references Contents/Resources/LiteEdit.icns) -->
+    <key>CFBundleIconFile</key>
+    <string>LiteEdit</string>
+
+    <!-- Version strings (match Cargo.toml version) -->
+    <key>CFBundleVersion</key>
+    <string>0.1.0</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+
+    <!-- Package type: APPL = Application -->
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <!-- Principal class for Cocoa applications -->
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+
+    <!-- Minimum macOS version (Catalina for Metal 3 features) -->
+    <key>LSMinimumSystemVersion</key>
+    <string>10.15</string>
+
+    <!-- Enable Retina (HiDPI) support -->
+    <key>NSHighResolutionCapable</key>
+    <true/>
+
+    <!-- Disable automatic termination (we manage our own lifecycle) -->
+    <key>NSSupportsAutomaticTermination</key>
+    <false/>
+
+    <!-- Required for Metal apps - indicates GPU usage -->
+    <key>NSRequiresAquaSystemAppearance</key>
+    <false/>
+
+    <!-- Copyright notice -->
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2024 LiteEdit. MIT License.</string>
+
+    <!-- Category for the App Store (if ever submitted) -->
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.developer-tools</string>
+
+    <!-- Unique signature (4-character creator code, legacy but still used) -->
+    <key>CFBundleSignature</key>
+    <string>????</string>
+
+    <!-- Document types - text editor can open any text file -->
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Text Document</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.plain-text</string>
+                <string>public.source-code</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>
