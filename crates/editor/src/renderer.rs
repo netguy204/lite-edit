@@ -475,6 +475,15 @@ impl Renderer {
     // Chunk: docs/chunks/terminal_background_box_drawing - Pass mutable atlas and font for on-demand glyph addition
     /// Updates the glyph buffer from the given buffer view and viewport
     fn update_glyph_buffer(&mut self, view: &dyn BufferView) {
+        self.update_glyph_buffer_with_cursor_visible(view, self.cursor_visible);
+    }
+
+    // Chunk: docs/chunks/cursor_blink_pane_focus - Pane-aware cursor visibility for multi-pane rendering
+    /// Updates the glyph buffer with explicit cursor visibility.
+    ///
+    /// In multi-pane layouts, only the focused pane should show a blinking cursor.
+    /// Unfocused panes pass `cursor_visible: false` to display a static (hidden) cursor.
+    fn update_glyph_buffer_with_cursor_visible(&mut self, view: &dyn BufferView, cursor_visible: bool) {
         // Get the fractional scroll offset for smooth scrolling
         let y_offset = self.viewport.scroll_fraction_px();
 
@@ -491,7 +500,7 @@ impl Renderer {
             view,
             &self.viewport,
             &wrap_layout,
-            self.cursor_visible,
+            cursor_visible,
             y_offset,
         );
     }
@@ -1587,19 +1596,24 @@ impl Renderer {
             let pane_content_width = pane_rect.width;
             self.content_width_px = pane_content_width;
 
-            // Update glyph buffer from tab's buffer
+            // Chunk: docs/chunks/cursor_blink_pane_focus - Only show blinking cursor in focused pane
+            // Focused pane: cursor blinks (shows/hides based on self.cursor_visible)
+            // Unfocused pane: no cursor (always false) - provides clear visual feedback
+            let pane_cursor_visible = is_focused && self.cursor_visible;
+
+            // Update glyph buffer from tab's buffer with pane-specific cursor visibility
             if tab.is_agent_tab() {
                 if let Some(terminal) = workspace.agent_terminal() {
-                    self.update_glyph_buffer(terminal);
+                    self.update_glyph_buffer_with_cursor_visible(terminal, pane_cursor_visible);
                 }
             } else if let Some(text_buffer) = tab.as_text_buffer() {
                 let highlighted_view = HighlightedBufferView::new(
                     text_buffer,
                     tab.highlighter(),
                 );
-                self.update_glyph_buffer(&highlighted_view);
+                self.update_glyph_buffer_with_cursor_visible(&highlighted_view, pane_cursor_visible);
             } else {
-                self.update_glyph_buffer(tab.buffer());
+                self.update_glyph_buffer_with_cursor_visible(tab.buffer(), pane_cursor_visible);
             }
 
             // Render text
