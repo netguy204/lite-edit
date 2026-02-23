@@ -1,4 +1,5 @@
 // Chunk: docs/chunks/syntax_highlighting - Language registry for 13 languages
+// Chunk: docs/chunks/syntax_highlight_perf - LanguageConfig highlights_query for direct QueryCursor usage
 
 //! Language registry mapping file extensions to tree-sitter configurations.
 //!
