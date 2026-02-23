@@ -70,6 +70,7 @@ impl DividerLine {
     }
 }
 
+// Chunk: docs/chunks/tiling_multi_pane_render - Divider line calculation
 /// Calculates divider lines from pane rectangles.
 ///
 /// Dividers appear at the boundary between adjacent panes.
@@ -214,6 +215,7 @@ pub struct FocusBorderSegment {
     pub height: f32,
 }
 
+// Chunk: docs/chunks/tiling_multi_pane_render - Focus border calculation
 /// Calculates the four border segments for the focused pane.
 ///
 /// Returns segments for top, right, bottom, left borders.
@@ -261,6 +263,7 @@ pub fn calculate_focus_border(pane_rect: &PaneRect) -> [FocusBorderSegment; 4] {
 // PaneFrameBuffer
 // =============================================================================
 
+// Chunk: docs/chunks/tiling_multi_pane_render - Pane frame GPU buffer management
 /// Manages vertex and index buffers for pane frame rendering.
 ///
 /// Renders:
