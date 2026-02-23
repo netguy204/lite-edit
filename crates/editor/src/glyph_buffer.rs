@@ -552,12 +552,21 @@ impl GlyphBuffer {
     ) {
         let visible_range = viewport.visible_range(view.line_count());
 
-        // Estimate character count for buffer sizing
+        // Chunk: docs/chunks/glyph_single_styled_line - Pre-collect styled lines to avoid redundant calls
+        // Pre-collect styled lines once per visible buffer line. Previously, styled_line() was called
+        // 3 times per visible line (in background, glyph, and underline phases). This optimization
+        // collects once and references in each phase.
+        let first_visible = viewport.first_visible_line();
+        let styled_lines: Vec<Option<_>> = visible_range.clone()
+            .map(|line| view.styled_line(line))
+            .collect();
+
+        // Estimate character count for buffer sizing using pre-collected styled lines
         // Add extra for background quads, selection quads, underline quads, and cursor
         let mut estimated_chars: usize = 0;
         let mut estimated_spans: usize = 0;
-        for line in visible_range.clone() {
-            if let Some(styled_line) = view.styled_line(line) {
+        for styled_line_opt in &styled_lines {
+            if let Some(styled_line) = styled_line_opt {
                 estimated_chars += styled_line.char_count();
                 estimated_spans += styled_line.spans.len();
             }
@@ -601,10 +610,10 @@ impl GlyphBuffer {
         // Chunk: docs/chunks/renderer_styled_content - Background quads for per-span bg colors
         let background_start_index = indices.len();
 
-        for buffer_line in visible_range.clone() {
-            let screen_row = buffer_line - viewport.first_visible_line();
+        for (idx, buffer_line) in visible_range.clone().enumerate() {
+            let screen_row = buffer_line - first_visible;
 
-            if let Some(styled_line) = view.styled_line(buffer_line) {
+            if let Some(styled_line) = &styled_lines[idx] {
                 let mut col: usize = 0;
                 for span in &styled_line.spans {
                     let span_len = span.text.chars().count();
@@ -686,10 +695,10 @@ impl GlyphBuffer {
         // Chunk: docs/chunks/renderer_styled_content - Per-span foreground colors
         let glyph_start_index = indices.len();
 
-        for buffer_line in visible_range.clone() {
-            let screen_row = buffer_line - viewport.first_visible_line();
+        for (idx, buffer_line) in visible_range.clone().enumerate() {
+            let screen_row = buffer_line - first_visible;
 
-            if let Some(styled_line) = view.styled_line(buffer_line) {
+            if let Some(styled_line) = &styled_lines[idx] {
                 let mut col: usize = 0;
                 for span in &styled_line.spans {
                     // Skip hidden text
@@ -747,10 +756,10 @@ impl GlyphBuffer {
         // Chunk: docs/chunks/renderer_styled_content - Underline rendering
         let underline_start_index = indices.len();
 
-        for buffer_line in visible_range.clone() {
-            let screen_row = buffer_line - viewport.first_visible_line();
+        for (idx, buffer_line) in visible_range.clone().enumerate() {
+            let screen_row = buffer_line - first_visible;
 
-            if let Some(styled_line) = view.styled_line(buffer_line) {
+            if let Some(styled_line) = &styled_lines[idx] {
                 let mut col: usize = 0;
                 for span in &styled_line.spans {
                     let span_len = span.text.chars().count();
@@ -1145,22 +1154,34 @@ impl GlyphBuffer {
                 |line| view.line_len(line),
             );
 
-        // Estimate buffer sizes
-        // We don't know exact counts without iterating, but we can estimate
+        // Chunk: docs/chunks/glyph_single_styled_line - Pre-collect styled lines to avoid redundant calls
+        // Determine which buffer lines will be rendered, then pre-collect styled lines once.
+        // Previously, styled_line() was called 3 times per visible buffer line (in background,
+        // glyph, and underline phases). This optimization collects once and references in each phase.
+        let mut rendered_buffer_lines: Vec<usize> = Vec::new();
         let mut estimated_quads = 0;
-        let mut screen_row = 0;
-
-        // Quick estimate: count chars in visible lines
-        for buffer_line in first_visible_buffer_line..line_count {
-            if screen_row >= max_screen_rows {
-                break;
+        {
+            let mut screen_row: usize = 0;
+            let mut is_first_buffer_line = true;
+            for buffer_line in first_visible_buffer_line..line_count {
+                if screen_row >= max_screen_rows {
+                    break;
+                }
+                rendered_buffer_lines.push(buffer_line);
+                let line_len = view.line_len(buffer_line);
+                let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
+                let start_row_offset = if is_first_buffer_line { screen_row_offset_in_line } else { 0 };
+                is_first_buffer_line = false;
+                estimated_quads += line_len + rows_for_line; // chars + potential borders
+                screen_row += rows_for_line - start_row_offset;
             }
-            let line_len = view.line_len(buffer_line);
-            let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
-            estimated_quads += line_len + rows_for_line; // chars + potential borders
-            screen_row += rows_for_line;
         }
         estimated_quads += 1; // cursor
+
+        // Pre-collect styled lines for all rendered buffer lines
+        let styled_lines: Vec<Option<_>> = rendered_buffer_lines.iter()
+            .map(|&line| view.styled_line(line))
+            .collect();
 
         // Reset quad ranges
         // Chunk: docs/chunks/terminal_styling_fidelity - Added background and underline ranges
@@ -1212,7 +1233,7 @@ impl GlyphBuffer {
             let mut cumulative_screen_row: usize = 0;
             let mut is_first_buffer_line = true;
 
-            for buffer_line in first_visible_buffer_line..line_count {
+            for (idx, &buffer_line) in rendered_buffer_lines.iter().enumerate() {
                 if cumulative_screen_row >= max_screen_rows {
                     break;
                 }
@@ -1229,7 +1250,7 @@ impl GlyphBuffer {
                 is_first_buffer_line = false;
 
                 // Iterate spans and emit background quads for non-default backgrounds
-                if let Some(styled_line) = view.styled_line(buffer_line) {
+                if let Some(styled_line) = &styled_lines[idx] {
                     let mut col: usize = 0;
                     for span in &styled_line.spans {
                         let span_len = span.text.chars().count();
@@ -1441,13 +1462,13 @@ impl GlyphBuffer {
             let mut is_first_buffer_line = true;
             let cols_per_row = wrap_layout.cols_per_row();
 
-            for buffer_line in first_visible_buffer_line..line_count {
+            for (idx, &_buffer_line) in rendered_buffer_lines.iter().enumerate() {
                 if cumulative_screen_row >= max_screen_rows {
                     break;
                 }
 
-                // Get styled_line and iterate spans to preserve per-span colors
-                let styled_line = if let Some(sl) = view.styled_line(buffer_line) {
+                // Get styled_line from pre-collected data and iterate spans to preserve per-span colors
+                let styled_line = if let Some(sl) = &styled_lines[idx] {
                     sl
                 } else {
                     is_first_buffer_line = false;
@@ -1551,7 +1572,7 @@ impl GlyphBuffer {
             let mut cumulative_screen_row: usize = 0;
             let mut is_first_buffer_line = true;
 
-            for buffer_line in first_visible_buffer_line..line_count {
+            for (idx, &buffer_line) in rendered_buffer_lines.iter().enumerate() {
                 if cumulative_screen_row >= max_screen_rows {
                     break;
                 }
@@ -1568,7 +1589,7 @@ impl GlyphBuffer {
                 is_first_buffer_line = false;
 
                 // Iterate spans and emit underline quads for underlined spans
-                if let Some(styled_line) = view.styled_line(buffer_line) {
+                if let Some(styled_line) = &styled_lines[idx] {
                     let mut col: usize = 0;
                     for span in &styled_line.spans {
                         let span_len = span.text.chars().count();

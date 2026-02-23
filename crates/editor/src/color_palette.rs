@@ -187,6 +187,7 @@ impl ColorPalette {
         }
     }
 
+    // Chunk: docs/chunks/renderer_styled_content - Foreground/background color resolution with inverse and dim style transformations
     // Chunk: docs/chunks/terminal_styling_fidelity - Style to RGBA resolution including inverse and dim transformations
     /// Resolves foreground and background colors from a style, applying
     /// inverse and dim transformations.
@@ -196,7 +197,6 @@ impl ColorPalette {
     ///
     /// # Returns
     /// A tuple of (foreground RGBA, background RGBA)
-    // Chunk: docs/chunks/terminal_styling_fidelity - Style to RGBA resolution including inverse and dim transformations
     pub fn resolve_style_colors(&self, style: &Style) -> ([f32; 4], [f32; 4]) {
         let mut fg = self.resolve_color(style.fg, true);
         let mut bg = self.resolve_color(style.bg, false);
