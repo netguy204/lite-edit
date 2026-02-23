@@ -48,6 +48,8 @@ mod metal_view;
 mod mini_buffer;
 // Chunk: docs/chunks/tiling_workspace_integration - Pane layout data structures
 mod pane_layout;
+// Chunk: docs/chunks/tiling_multi_pane_render - Pane frame rendering
+mod pane_frame_buffer;
 mod renderer;
 // Chunk: docs/chunks/row_scroller_extract - Reusable scroll arithmetic
 mod row_scroller;

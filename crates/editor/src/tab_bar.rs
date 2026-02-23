@@ -343,6 +343,77 @@ pub fn calculate_tab_bar_geometry(
     }
 }
 
+// Chunk: docs/chunks/tiling_multi_pane_render - Pane-specific tab bar geometry
+/// Calculates the geometry for a pane's tab bar.
+///
+/// This is similar to `calculate_tab_bar_geometry` but accepts explicit
+/// position and width instead of deriving them from `RAIL_WIDTH`.
+///
+/// # Arguments
+/// * `pane_x` - The X position of the pane
+/// * `pane_y` - The Y position of the pane (tab bar starts here)
+/// * `pane_width` - The width of the pane
+/// * `tabs` - Information about each tab
+/// * `glyph_width` - Width of a single character glyph
+/// * `view_offset` - Current horizontal scroll offset for overflow
+///
+/// # Returns
+/// A `TabBarGeometry` struct with all layout measurements
+pub fn calculate_pane_tab_bar_geometry(
+    pane_x: f32,
+    pane_y: f32,
+    pane_width: f32,
+    tabs: &[TabInfo],
+    glyph_width: f32,
+    view_offset: f32,
+) -> TabBarGeometry {
+    let bar_x = pane_x;
+    let bar_y = pane_y;
+    let bar_width = pane_width.max(0.0);
+    let bar_height = TAB_BAR_HEIGHT;
+
+    let mut tab_rects = Vec::with_capacity(tabs.len());
+    let mut x = bar_x - view_offset;
+    let y = bar_y;
+
+    for (idx, tab_info) in tabs.iter().enumerate() {
+        let tab_width = calculate_tab_width(&tab_info.label, glyph_width);
+
+        // Only add tabs that are at least partially visible
+        let tab_right = x + tab_width;
+        let visible_left = bar_x;
+        let visible_right = bar_x + bar_width;
+
+        if tab_right > visible_left && x < visible_right {
+            // Calculate close button position (right side of tab)
+            let close_x = x + tab_width - TAB_PADDING_H - CLOSE_BUTTON_SIZE;
+            let close_y = y + (bar_height - CLOSE_BUTTON_SIZE) / 2.0;
+            let close_button = CloseButtonRect::new(close_x, close_y, CLOSE_BUTTON_SIZE);
+
+            tab_rects.push(TabRect::new(x, y, tab_width, bar_height, close_button, idx));
+        }
+
+        x += tab_width + TAB_SPACING;
+    }
+
+    // Calculate total width of all tabs
+    let total_tabs_width: f32 = tabs.iter()
+        .map(|t| calculate_tab_width(&t.label, glyph_width) + TAB_SPACING)
+        .sum::<f32>()
+        .max(0.0)
+        - TAB_SPACING; // Remove trailing spacing
+
+    TabBarGeometry {
+        x: bar_x,
+        y: bar_y,
+        width: bar_width,
+        height: bar_height,
+        tab_rects,
+        view_offset,
+        total_tabs_width: total_tabs_width.max(0.0),
+    }
+}
+
 /// Extracts TabInfo list from a workspace.
 ///
 /// Uses the active pane's tabs for display in the tab bar.
@@ -351,6 +422,27 @@ pub fn tabs_from_workspace(workspace: &Workspace) -> Vec<TabInfo> {
     // Get tabs from the active pane
     let tabs_slice = workspace.tabs();
     let active_tab_index = workspace.active_tab_index();
+
+    // Collect raw tab info
+    let mut tabs: Vec<TabInfo> = tabs_slice
+        .iter()
+        .enumerate()
+        .map(|(idx, tab)| TabInfo::from_tab(tab, idx, idx == active_tab_index))
+        .collect();
+
+    // Apply disambiguation to labels with duplicate filenames
+    disambiguate_labels(&mut tabs, tabs_slice);
+
+    tabs
+}
+
+// Chunk: docs/chunks/tiling_multi_pane_render - Pane-specific tab extraction
+/// Extracts TabInfo list from a specific pane.
+///
+/// This is used for multi-pane rendering where each pane has its own tab bar.
+pub fn tabs_from_pane(pane: &crate::pane_layout::Pane) -> Vec<TabInfo> {
+    let tabs_slice = &pane.tabs;
+    let active_tab_index = pane.active_tab;
 
     // Collect raw tab info
     let mut tabs: Vec<TabInfo> = tabs_slice
