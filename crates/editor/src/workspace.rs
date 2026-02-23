@@ -879,6 +879,27 @@ impl Editor {
         editor
     }
 
+    // Chunk: docs/chunks/startup_workspace_dialog - Deferred initialization for startup dialog
+    /// Creates a new editor with no workspaces.
+    ///
+    /// This constructor is used during application startup when the workspace
+    /// directory needs to be selected via a dialog before creating any workspaces.
+    /// After calling this, use `new_workspace()` to add a workspace once the
+    /// directory is known.
+    ///
+    /// # Arguments
+    ///
+    /// * `line_height` - The line height for creating new tabs (from font metrics)
+    pub fn new_deferred(line_height: f32) -> Self {
+        Self {
+            workspaces: Vec::new(),
+            active_workspace: 0,
+            next_workspace_id: 0,
+            next_tab_id: 0,
+            line_height,
+        }
+    }
+
     /// Generates a new unique workspace ID.
     fn gen_workspace_id(&mut self) -> WorkspaceId {
         let id = self.next_workspace_id;
@@ -1408,5 +1429,48 @@ mod tests {
         // FileIndex should be initialized
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(!ws.file_index.is_indexing());
+    }
+
+    // =========================================================================
+    // Deferred Initialization Tests (Chunk: docs/chunks/startup_workspace_dialog)
+    // =========================================================================
+
+    #[test]
+    fn test_editor_new_deferred_has_no_workspaces() {
+        let editor = Editor::new_deferred(TEST_LINE_HEIGHT);
+        assert_eq!(editor.workspace_count(), 0);
+        assert!(editor.active_workspace().is_none());
+    }
+
+    #[test]
+    fn test_editor_new_deferred_can_add_workspace() {
+        let mut editor = Editor::new_deferred(TEST_LINE_HEIGHT);
+        editor.new_workspace("test".to_string(), PathBuf::from("/test"));
+        assert_eq!(editor.workspace_count(), 1);
+        assert!(editor.active_workspace().is_some());
+    }
+
+    #[test]
+    fn test_editor_new_deferred_active_workspace_index_zero() {
+        let editor = Editor::new_deferred(TEST_LINE_HEIGHT);
+        // Even with no workspaces, active_workspace index defaults to 0
+        assert_eq!(editor.active_workspace, 0);
+    }
+
+    #[test]
+    fn test_editor_new_deferred_preserves_line_height() {
+        let editor = Editor::new_deferred(TEST_LINE_HEIGHT);
+        assert_eq!(editor.line_height(), TEST_LINE_HEIGHT);
+    }
+
+    #[test]
+    fn test_editor_new_deferred_first_workspace_gets_tab() {
+        let mut editor = Editor::new_deferred(TEST_LINE_HEIGHT);
+        editor.new_workspace("test".to_string(), PathBuf::from("/test"));
+
+        // new_workspace creates a workspace with one empty tab
+        let ws = editor.active_workspace().unwrap();
+        assert_eq!(ws.tab_count(), 1);
+        assert!(ws.active_tab().is_some());
     }
 }

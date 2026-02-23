@@ -1,8 +1,11 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/editor/src/workspace.rs
+  - crates/editor/src/editor_state.rs
+  - crates/editor/src/main.rs
 code_references: []
 narrative: null
 investigation: null
@@ -10,9 +13,11 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["tiling_workspace_integration", "workspace_dir_picker", "workspace_identicon"]
+created_after:
+- tiling_workspace_integration
+- workspace_dir_picker
+- workspace_identicon
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

@@ -309,6 +309,67 @@ impl EditorState {
         Self::new(TextBuffer::new(), font_metrics)
     }
 
+    // Chunk: docs/chunks/startup_workspace_dialog - Deferred initialization for startup dialog
+    /// Creates an EditorState with no workspaces.
+    ///
+    /// This constructor is used during application startup when the workspace
+    /// directory needs to be selected via a dialog before creating any workspaces.
+    /// The editor will have no active workspace, buffer, or viewport until
+    /// `add_startup_workspace()` is called.
+    ///
+    /// # Arguments
+    ///
+    /// * `font_metrics` - Font metrics for pixel-to-position conversion
+    pub fn new_deferred(font_metrics: FontMetrics) -> Self {
+        let line_height = font_metrics.line_height as f32;
+
+        // Create editor with no workspaces
+        let editor = Editor::new_deferred(line_height);
+
+        Self {
+            editor,
+            dirty_region: DirtyRegion::None,
+            focus_target: BufferFocusTarget::new(),
+            cursor_visible: true,
+            last_keystroke: Instant::now(),
+            overlay_cursor_visible: true,
+            last_overlay_keystroke: Instant::now(),
+            font_metrics,
+            view_height: 0.0,
+            view_width: 10000.0,
+            should_quit: false,
+            focus: EditorFocus::Buffer,
+            active_selector: None,
+            resolved_path: None,
+            find_mini_buffer: None,
+            search_origin: Position::new(0, 0),
+            pty_wakeup_factory: None,
+            language_registry: LanguageRegistry::new(),
+        }
+    }
+
+    // Chunk: docs/chunks/startup_workspace_dialog - Add initial workspace after directory selection
+    /// Adds the initial workspace during application startup.
+    ///
+    /// This method is called after `new_deferred()` once the user has selected
+    /// a directory via the startup dialog. It creates the first workspace and
+    /// adds an empty tab for the welcome screen.
+    ///
+    /// # Arguments
+    ///
+    /// * `root_path` - The root directory for the workspace's file index
+    pub fn add_startup_workspace(&mut self, root_path: PathBuf) {
+        // Derive workspace label from directory name
+        let label = root_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "workspace".to_string());
+
+        // Create the workspace with the selected directory
+        self.editor.new_workspace(label, root_path);
+        self.dirty_region.merge(DirtyRegion::FullViewport);
+    }
+
     /// Returns the font metrics.
     pub fn font_metrics(&self) -> &FontMetrics {
         &self.font_metrics
@@ -6130,5 +6191,61 @@ mod tests {
             "Terminal viewport should have {} visible lines based on content height",
             expected_visible
         );
+    }
+
+    // =========================================================================
+    // Deferred Initialization Tests (Chunk: docs/chunks/startup_workspace_dialog)
+    // =========================================================================
+
+    #[test]
+    fn test_editor_state_new_deferred_has_no_workspace() {
+        let state = EditorState::new_deferred(test_font_metrics());
+        assert_eq!(state.editor.workspace_count(), 0);
+    }
+
+    #[test]
+    fn test_editor_state_new_deferred_can_add_workspace() {
+        let mut state = EditorState::new_deferred(test_font_metrics());
+        dir_picker::mock_set_next_directory(Some(PathBuf::from("/test")));
+        state.new_workspace();
+        assert_eq!(state.editor.workspace_count(), 1);
+    }
+
+    #[test]
+    fn test_editor_state_new_deferred_add_startup_workspace() {
+        let mut state = EditorState::new_deferred(test_font_metrics());
+        state.add_startup_workspace(PathBuf::from("/my/project"));
+
+        // Should have one workspace
+        assert_eq!(state.editor.workspace_count(), 1);
+
+        // Workspace should have the correct root path
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.root_path, PathBuf::from("/my/project"));
+
+        // Workspace label should be derived from directory name
+        assert_eq!(ws.label, "project");
+
+        // Should have one tab (welcome screen)
+        assert_eq!(ws.tab_count(), 1);
+    }
+
+    #[test]
+    fn test_editor_state_new_deferred_workspace_label_from_dirname() {
+        let mut state = EditorState::new_deferred(test_font_metrics());
+        state.add_startup_workspace(PathBuf::from("/home/user/my-awesome-project"));
+
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.label, "my-awesome-project");
+    }
+
+    #[test]
+    fn test_editor_state_new_deferred_root_path_fallback_label() {
+        let mut state = EditorState::new_deferred(test_font_metrics());
+        // Root path "/" has no file_name, should use fallback
+        state.add_startup_workspace(PathBuf::from("/"));
+
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.label, "workspace");
     }
 }
