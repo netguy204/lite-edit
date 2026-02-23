@@ -93,6 +93,10 @@ const HOTKEYS: &[(&str, &[(&str, &str)])] = &[
         ("Cmd+Shift+[", "Previous tab"),
         ("Cmd+1-9", "Switch workspace"),
     ]),
+    ("Panes", &[
+        ("Cmd+Opt+Arrow", "Focus pane in direction"),
+        ("Cmd+Shift+Arrow", "Move tab to pane"),
+    ]),
     ("Editing", &[
         ("Cmd+F", "Find in file"),
         ("Cmd+W", "Close tab"),
