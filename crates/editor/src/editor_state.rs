@@ -1670,6 +1670,7 @@ impl EditorState {
     // Chunk: docs/chunks/viewport_scrolling - Editor-level scroll event routing
     /// Chunk: docs/chunks/file_picker - Scroll event routing to selector widget when selector is open
     // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
+    // Chunk: docs/chunks/pane_hover_scroll - Hover-targeted pane scrolling
     pub fn handle_scroll(&mut self, delta: ScrollDelta) {
         // When selector is open, forward scroll to selector
         if self.focus == EditorFocus::Selector {
@@ -1681,9 +1682,95 @@ impl EditorState {
         // Note: horizontal scroll in tab bar region is handled via handle_scroll_tab_bar
         // which is called from handle_mouse when scroll events occur in tab bar area
 
-        // Check if the active tab is a file tab or terminal tab
-        let ws = self.editor.active_workspace_mut().expect("no active workspace");
-        let tab = ws.active_tab_mut().expect("no active tab");
+        // Chunk: docs/chunks/pane_hover_scroll - Determine target pane from mouse position
+        // If the scroll event has a mouse position, use hit-testing to find the pane
+        // under the cursor. Otherwise, fall back to the focused pane.
+        let target_pane_id = self.find_pane_at_scroll_position(&delta);
+
+        // Scroll the target pane without changing focus
+        self.scroll_pane(target_pane_id, delta);
+    }
+
+    /// Finds the pane under the mouse cursor for hover-scroll routing.
+    ///
+    /// Returns the pane ID under the cursor if the scroll event includes mouse position
+    /// and the position is within the content area. Falls back to the focused pane
+    /// if no position is provided or if the cursor is outside the content area.
+    // Chunk: docs/chunks/pane_hover_scroll - Pane hit-testing for hover-scroll
+    fn find_pane_at_scroll_position(&self, delta: &ScrollDelta) -> crate::pane_layout::PaneId {
+        use crate::pane_layout::calculate_pane_rects;
+
+        // Get the focused pane as the default target
+        let default_pane_id = self
+            .editor
+            .active_workspace()
+            .map(|ws| ws.active_pane_id)
+            .unwrap_or(0);
+
+        // If no mouse position, use the focused pane
+        let (mouse_x, mouse_y) = match delta.mouse_position {
+            Some(pos) => pos,
+            None => return default_pane_id,
+        };
+
+        // Check if we have a workspace with panes
+        let workspace = match self.editor.active_workspace() {
+            Some(ws) => ws,
+            None => return default_pane_id,
+        };
+
+        // Calculate content area bounds
+        let content_height = self.view_height - TAB_BAR_HEIGHT;
+        let content_width = self.view_width - RAIL_WIDTH;
+
+        // Check if mouse is in the content area (below tab bar, right of rail)
+        // mouse_x, mouse_y are in screen coordinates (origin at top-left of view)
+        if mouse_x < RAIL_WIDTH as f64
+            || mouse_y < TAB_BAR_HEIGHT as f64
+            || mouse_x >= self.view_width as f64
+            || mouse_y >= self.view_height as f64
+        {
+            // Mouse is outside content area, use focused pane
+            return default_pane_id;
+        }
+
+        // Convert screen coordinates to content-local coordinates
+        let content_x = (mouse_x - RAIL_WIDTH as f64) as f32;
+        let content_y = (mouse_y - TAB_BAR_HEIGHT as f64) as f32;
+
+        // Calculate pane rects in content-local coordinates
+        let bounds = (0.0, 0.0, content_width, content_height);
+        let pane_rects = calculate_pane_rects(bounds, &workspace.pane_root);
+
+        // Find the pane containing the mouse position
+        for pane_rect in &pane_rects {
+            if pane_rect.contains(content_x, content_y) {
+                return pane_rect.pane_id;
+            }
+        }
+
+        // No pane found at position (shouldn't happen if bounds are correct)
+        default_pane_id
+    }
+
+    /// Scrolls the tab in the specified pane without changing focus.
+    // Chunk: docs/chunks/pane_hover_scroll - Pane-targeted scroll execution
+    fn scroll_pane(&mut self, target_pane_id: crate::pane_layout::PaneId, delta: ScrollDelta) {
+        // Get the target pane's active tab
+        let ws = match self.editor.active_workspace_mut() {
+            Some(ws) => ws,
+            None => return,
+        };
+
+        let pane = match ws.pane_root.get_pane_mut(target_pane_id) {
+            Some(p) => p,
+            None => return,
+        };
+
+        let tab = match pane.active_tab_mut() {
+            Some(t) => t,
+            None => return,
+        };
 
         // Try to get the text buffer and viewport for file tabs
         if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
@@ -6336,5 +6423,295 @@ mod tests {
 
         let ws = state.editor.active_workspace().unwrap();
         assert_eq!(ws.label, "workspace");
+    }
+
+    // =========================================================================
+    // Hover-scroll (pane-targeted scroll) tests
+    // Chunk: docs/chunks/pane_hover_scroll - Tests for hover-targeted pane scrolling
+    // =========================================================================
+
+    #[test]
+    fn test_scroll_without_position_uses_focused_pane() {
+        // Create a buffer with many lines
+        let content = (0..50)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut state = EditorState::new(
+            lite_edit_buffer::TextBuffer::from_str(&content),
+            test_font_metrics(),
+        );
+        state.update_viewport_size(160.0);
+
+        // Initial scroll offset should be 0
+        assert_eq!(state.viewport().first_visible_line(), 0);
+
+        // Scroll without mouse position (mouse_position = None)
+        // This should scroll the focused pane
+        state.handle_scroll(ScrollDelta::new(0.0, 80.0));
+
+        // Viewport should have scrolled
+        assert_eq!(state.viewport().first_visible_line(), 5);
+    }
+
+    #[test]
+    fn test_find_pane_at_scroll_position_returns_focused_when_no_position() {
+        let content = "test content".to_string();
+        let state = EditorState::new(
+            lite_edit_buffer::TextBuffer::from_str(&content),
+            test_font_metrics(),
+        );
+
+        let delta = ScrollDelta::new(0.0, 80.0);
+        let pane_id = state.find_pane_at_scroll_position(&delta);
+
+        // Should return the focused pane ID
+        let expected_pane_id = state
+            .editor
+            .active_workspace()
+            .map(|ws| ws.active_pane_id)
+            .unwrap_or(0);
+        assert_eq!(pane_id, expected_pane_id);
+    }
+
+    #[test]
+    fn test_find_pane_at_scroll_position_outside_content_area_returns_focused() {
+        let content = "test content".to_string();
+        let mut state = EditorState::new(
+            lite_edit_buffer::TextBuffer::from_str(&content),
+            test_font_metrics(),
+        );
+        state.update_viewport_size(160.0);
+
+        // Position in the tab bar area (y < TAB_BAR_HEIGHT)
+        let delta = ScrollDelta::with_position(0.0, 80.0, 100.0, 10.0);
+        let pane_id = state.find_pane_at_scroll_position(&delta);
+
+        // Should return the focused pane ID
+        let expected_pane_id = state
+            .editor
+            .active_workspace()
+            .map(|ws| ws.active_pane_id)
+            .unwrap_or(0);
+        assert_eq!(pane_id, expected_pane_id);
+    }
+
+    #[test]
+    fn test_find_pane_at_scroll_position_in_rail_returns_focused() {
+        let content = "test content".to_string();
+        let mut state = EditorState::new(
+            lite_edit_buffer::TextBuffer::from_str(&content),
+            test_font_metrics(),
+        );
+        state.update_viewport_size(160.0);
+
+        // Position in the left rail area (x < RAIL_WIDTH)
+        let delta = ScrollDelta::with_position(0.0, 80.0, 10.0, 50.0);
+        let pane_id = state.find_pane_at_scroll_position(&delta);
+
+        // Should return the focused pane ID
+        let expected_pane_id = state
+            .editor
+            .active_workspace()
+            .map(|ws| ws.active_pane_id)
+            .unwrap_or(0);
+        assert_eq!(pane_id, expected_pane_id);
+    }
+
+    #[test]
+    fn test_find_pane_at_scroll_position_in_content_area_single_pane() {
+        let content = "test content".to_string();
+        let mut state = EditorState::new(
+            lite_edit_buffer::TextBuffer::from_str(&content),
+            test_font_metrics(),
+        );
+        state.update_viewport_size(160.0);
+
+        // Position in the content area (below tab bar, right of rail)
+        // RAIL_WIDTH = 32.0, TAB_BAR_HEIGHT = 24.0
+        let delta = ScrollDelta::with_position(0.0, 80.0, 100.0, 100.0);
+        let pane_id = state.find_pane_at_scroll_position(&delta);
+
+        // With single pane, should return the only pane's ID
+        let expected_pane_id = state
+            .editor
+            .active_workspace()
+            .map(|ws| ws.active_pane_id)
+            .unwrap_or(0);
+        assert_eq!(pane_id, expected_pane_id);
+    }
+
+    #[test]
+    fn test_scroll_with_position_scrolls_correct_pane_single_pane_setup() {
+        // Create a buffer with many lines
+        let content = (0..50)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut state = EditorState::new(
+            lite_edit_buffer::TextBuffer::from_str(&content),
+            test_font_metrics(),
+        );
+        state.update_viewport_size(160.0);
+
+        // Initial scroll offset should be 0
+        assert_eq!(state.viewport().first_visible_line(), 0);
+
+        // Scroll with mouse position in content area
+        // RAIL_WIDTH = 32.0, TAB_BAR_HEIGHT = 24.0
+        state.handle_scroll(ScrollDelta::with_position(0.0, 80.0, 100.0, 100.0));
+
+        // Viewport should have scrolled (same behavior as without position in single pane)
+        assert_eq!(state.viewport().first_visible_line(), 5);
+    }
+
+    #[test]
+    fn test_scroll_delta_with_position_constructor() {
+        let delta = ScrollDelta::with_position(1.0, 2.0, 100.0, 200.0);
+        assert_eq!(delta.dx, 1.0);
+        assert_eq!(delta.dy, 2.0);
+        assert_eq!(delta.mouse_position, Some((100.0, 200.0)));
+    }
+
+    #[test]
+    fn test_scroll_delta_new_has_no_position() {
+        let delta = ScrollDelta::new(1.0, 2.0);
+        assert_eq!(delta.dx, 1.0);
+        assert_eq!(delta.dy, 2.0);
+        assert_eq!(delta.mouse_position, None);
+    }
+
+    #[test]
+    fn test_scroll_multi_pane_hits_non_focused_pane() {
+        use crate::pane_layout::{Pane, PaneLayoutNode, SplitDirection};
+        use crate::workspace::Tab;
+
+        // Create a state
+        let content = (0..50)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut state = EditorState::new(
+            lite_edit_buffer::TextBuffer::from_str(&content),
+            test_font_metrics(),
+        );
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Create two panes with tabs using explicit IDs (matching workspace tests)
+        let line_height = test_font_metrics().line_height as f32;
+        let pane1_id = 1u64;
+        let pane2_id = 2u64;
+
+        let mut pane1 = Pane::new(pane1_id, 1);
+        pane1.add_tab(Tab::new_file(
+            1,
+            lite_edit_buffer::TextBuffer::from_str(
+                &(0..30).map(|i| format!("pane1 line {}", i)).collect::<Vec<_>>().join("\n"),
+            ),
+            "Pane1".to_string(),
+            None,
+            line_height,
+        ));
+        let mut pane2 = Pane::new(pane2_id, 2);
+        pane2.add_tab(Tab::new_file(
+            2,
+            lite_edit_buffer::TextBuffer::from_str(
+                &(0..30).map(|i| format!("pane2 line {}", i)).collect::<Vec<_>>().join("\n"),
+            ),
+            "Pane2".to_string(),
+            None,
+            line_height,
+        ));
+
+        // Set up split layout: horizontal split (left | right)
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.pane_root = PaneLayoutNode::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: 0.5,
+                first: Box::new(PaneLayoutNode::Leaf(pane1)),
+                second: Box::new(PaneLayoutNode::Leaf(pane2)),
+            };
+            ws.active_pane_id = pane1_id; // Focus on left pane
+        }
+
+        // Content area is right of RAIL_WIDTH (32) and below TAB_BAR_HEIGHT (24)
+        // Content width = 800 - 32 = 768, Content height = 600 - 24 = 576
+        // With horizontal split at ratio 0.5:
+        // - Left pane: x=[0, 384), y=[0, 576)
+        // - Right pane: x=[384, 768), y=[0, 576)
+        //
+        // In screen coordinates (from window top-left):
+        // - Left pane: x=[32, 416), y=[24, 600)
+        // - Right pane: x=[416, 800), y=[24, 600)
+
+        // Scroll with mouse position over the RIGHT pane (while left pane is focused)
+        // Screen coords: x=500 (in right pane), y=100 (below tab bar)
+        let delta = ScrollDelta::with_position(0.0, 48.0, 500.0, 100.0);
+        let target_pane_id = state.find_pane_at_scroll_position(&delta);
+
+        // Should target the right pane (pane2), not the focused left pane (pane1)
+        assert_eq!(target_pane_id, pane2_id, "Scroll should target pane under cursor, not focused pane");
+
+        // Verify focused pane is still pane1
+        let focused_pane_id = state
+            .editor
+            .active_workspace()
+            .map(|ws| ws.active_pane_id)
+            .unwrap_or(0);
+        assert_eq!(focused_pane_id, pane1_id, "Focus should remain on pane1");
+    }
+
+    #[test]
+    fn test_scroll_multi_pane_outside_panes_returns_focused() {
+        use crate::pane_layout::{Pane, PaneLayoutNode, SplitDirection};
+        use crate::workspace::Tab;
+
+        // Create a state
+        let content = "test".to_string();
+        let mut state = EditorState::new(
+            lite_edit_buffer::TextBuffer::from_str(&content),
+            test_font_metrics(),
+        );
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Create two panes
+        let line_height = test_font_metrics().line_height as f32;
+        let pane1_id = 1u64;
+        let pane2_id = 2u64;
+
+        let mut pane1 = Pane::new(pane1_id, 1);
+        pane1.add_tab(Tab::new_file(
+            1,
+            lite_edit_buffer::TextBuffer::from_str("pane1 content"),
+            "Pane1".to_string(),
+            None,
+            line_height,
+        ));
+        let mut pane2 = Pane::new(pane2_id, 2);
+        pane2.add_tab(Tab::new_file(
+            2,
+            lite_edit_buffer::TextBuffer::from_str("pane2 content"),
+            "Pane2".to_string(),
+            None,
+            line_height,
+        ));
+
+        // Set up split layout
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.pane_root = PaneLayoutNode::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: 0.5,
+                first: Box::new(PaneLayoutNode::Leaf(pane1)),
+                second: Box::new(PaneLayoutNode::Leaf(pane2)),
+            };
+            ws.active_pane_id = pane1_id;
+        }
+
+        // Scroll with mouse position in the rail area (outside content panes)
+        let delta = ScrollDelta::with_position(0.0, 48.0, 10.0, 100.0);
+        let target_pane_id = state.find_pane_at_scroll_position(&delta);
+
+        // Should fall back to focused pane
+        assert_eq!(target_pane_id, pane1_id);
     }
 }

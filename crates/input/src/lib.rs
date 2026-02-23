@@ -128,18 +128,49 @@ pub enum Key {
 }
 
 // Chunk: docs/chunks/viewport_scrolling - Scroll event handling
+// Chunk: docs/chunks/pane_hover_scroll - Mouse position for pane-targeted scrolling
 /// Scroll delta from trackpad or mouse wheel.
+///
+/// In a multi-pane layout, the `mouse_position` field is used to determine
+/// which pane should receive the scroll event. When `mouse_position` is `Some`,
+/// the scroll routing logic uses hit-testing to target the pane under the cursor
+/// rather than always routing to the focused pane.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScrollDelta {
     /// Horizontal scroll amount (positive = right)
     pub dx: f64,
     /// Vertical scroll amount (positive = down)
     pub dy: f64,
+    /// Mouse position at the time of the scroll event, in view coordinates (pixels).
+    ///
+    /// This is `Some(x, y)` where the coordinates are in the same coordinate system
+    /// as mouse events: origin at top-left, y increasing downward, in pixel units.
+    /// Used for hover-scroll behavior in multi-pane layouts.
+    pub mouse_position: Option<(f64, f64)>,
 }
 
 impl ScrollDelta {
+    /// Creates a new ScrollDelta with no mouse position.
+    ///
+    /// Use this for programmatic scroll events or when mouse position is unavailable.
     pub fn new(dx: f64, dy: f64) -> Self {
-        Self { dx, dy }
+        Self {
+            dx,
+            dy,
+            mouse_position: None,
+        }
+    }
+
+    /// Creates a new ScrollDelta with a mouse position.
+    ///
+    /// The position should be in view coordinates (pixels from top-left).
+    /// This is used for hover-scroll behavior in multi-pane layouts.
+    pub fn with_position(dx: f64, dy: f64, x: f64, y: f64) -> Self {
+        Self {
+            dx,
+            dy,
+            mouse_position: Some((x, y)),
+        }
     }
 }
 
