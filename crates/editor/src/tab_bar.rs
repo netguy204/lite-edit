@@ -134,6 +134,29 @@ pub const CLOSE_BUTTON_HOVER_COLOR: [f32; 4] = [
     1.0,
 ];
 
+// Chunk: docs/chunks/content_unsaved_tab_tint - Dirty tab tinting colors
+/// Inactive dirty tab background color (very dim red tint)
+///
+/// Blends Catppuccin red (#f38ba8) at ~8% with TAB_INACTIVE_COLOR
+/// to provide a subtle visual cue for unsaved changes.
+pub const TAB_DIRTY_INACTIVE_COLOR: [f32; 4] = [
+    0.22, // 0.15 + 0.08 * 0.95 (red component)
+    0.14, // 0.15 + 0.08 * -0.10 (slightly reduce green)
+    0.17, // 0.18 + 0.08 * -0.10 (slightly reduce blue)
+    1.0,
+];
+
+/// Active dirty tab background color (very dim red tint)
+///
+/// Blends Catppuccin red (#f38ba8) at ~8% with TAB_ACTIVE_COLOR
+/// to provide a subtle visual cue for unsaved changes.
+pub const TAB_DIRTY_ACTIVE_COLOR: [f32; 4] = [
+    0.30, // 0.22 + 0.08 * 0.95 (red component)
+    0.20, // 0.22 + 0.08 * -0.20 (reduce green more)
+    0.25, // 0.28 + 0.08 * -0.35 (reduce blue more)
+    1.0,
+];
+
 // =============================================================================
 // Geometry Types
 // =============================================================================
@@ -552,6 +575,7 @@ impl TabBarGlyphBuffer {
         self.background_range = QuadRange::new(bg_start, indices.len() - bg_start);
 
         // ==================== Phase 2: Inactive Tab Backgrounds ====================
+        // Chunk: docs/chunks/content_unsaved_tab_tint - Use dirty tint for unsaved tabs
         let tab_bg_start = indices.len();
         for tab_rect in &geometry.tab_rects {
             let tab_info = &tabs[tab_rect.tab_index];
@@ -559,13 +583,20 @@ impl TabBarGlyphBuffer {
                 continue; // Skip active tab, it gets its own highlight
             }
 
+            // Select background color based on dirty state
+            let bg_color = if tab_info.is_dirty {
+                TAB_DIRTY_INACTIVE_COLOR
+            } else {
+                TAB_INACTIVE_COLOR
+            };
+
             let quad = self.create_rect_quad(
                 tab_rect.x,
                 tab_rect.y,
                 tab_rect.width,
                 tab_rect.height,
                 solid_glyph,
-                TAB_INACTIVE_COLOR,
+                bg_color,
             );
             vertices.extend_from_slice(&quad);
             Self::push_quad_indices(&mut indices, vertex_offset);
@@ -574,6 +605,7 @@ impl TabBarGlyphBuffer {
         self.tab_background_range = QuadRange::new(tab_bg_start, indices.len() - tab_bg_start);
 
         // ==================== Phase 3: Active Tab Highlight ====================
+        // Chunk: docs/chunks/content_unsaved_tab_tint - Use dirty tint for unsaved tabs
         let active_start = indices.len();
         for tab_rect in &geometry.tab_rects {
             let tab_info = &tabs[tab_rect.tab_index];
@@ -581,13 +613,20 @@ impl TabBarGlyphBuffer {
                 continue;
             }
 
+            // Select background color based on dirty state
+            let bg_color = if tab_info.is_dirty {
+                TAB_DIRTY_ACTIVE_COLOR
+            } else {
+                TAB_ACTIVE_COLOR
+            };
+
             let quad = self.create_rect_quad(
                 tab_rect.x,
                 tab_rect.y,
                 tab_rect.width,
                 tab_rect.height,
                 solid_glyph,
-                TAB_ACTIVE_COLOR,
+                bg_color,
             );
             vertices.extend_from_slice(&quad);
             Self::push_quad_indices(&mut indices, vertex_offset);
@@ -1247,5 +1286,59 @@ mod tests {
             left_truncate("anything", 0),
             ""
         );
+    }
+
+    // =========================================================================
+    // Dirty Tab Color Tests (Chunk: docs/chunks/content_unsaved_tab_tint)
+    // =========================================================================
+
+    /// Helper function to simulate the color selection logic from TabBarGlyphBuffer::update
+    fn select_tab_background_color(is_active: bool, is_dirty: bool) -> [f32; 4] {
+        match (is_active, is_dirty) {
+            (true, true) => TAB_DIRTY_ACTIVE_COLOR,
+            (true, false) => TAB_ACTIVE_COLOR,
+            (false, true) => TAB_DIRTY_INACTIVE_COLOR,
+            (false, false) => TAB_INACTIVE_COLOR,
+        }
+    }
+
+    #[test]
+    fn test_clean_active_tab_uses_active_color() {
+        let color = select_tab_background_color(true, false);
+        assert_eq!(color, TAB_ACTIVE_COLOR);
+    }
+
+    #[test]
+    fn test_clean_inactive_tab_uses_inactive_color() {
+        let color = select_tab_background_color(false, false);
+        assert_eq!(color, TAB_INACTIVE_COLOR);
+    }
+
+    #[test]
+    fn test_dirty_active_tab_uses_dirty_active_color() {
+        let color = select_tab_background_color(true, true);
+        assert_eq!(color, TAB_DIRTY_ACTIVE_COLOR);
+    }
+
+    #[test]
+    fn test_dirty_inactive_tab_uses_dirty_inactive_color() {
+        let color = select_tab_background_color(false, true);
+        assert_eq!(color, TAB_DIRTY_INACTIVE_COLOR);
+    }
+
+    #[test]
+    fn test_dirty_colors_are_distinct_from_clean_colors() {
+        // Dirty colors should be visually distinct from clean colors
+        assert_ne!(TAB_DIRTY_ACTIVE_COLOR, TAB_ACTIVE_COLOR);
+        assert_ne!(TAB_DIRTY_INACTIVE_COLOR, TAB_INACTIVE_COLOR);
+    }
+
+    #[test]
+    fn test_dirty_colors_have_red_tint() {
+        // Dirty colors should have a stronger red component than clean colors
+        assert!(TAB_DIRTY_ACTIVE_COLOR[0] > TAB_ACTIVE_COLOR[0],
+            "Dirty active red component should be higher");
+        assert!(TAB_DIRTY_INACTIVE_COLOR[0] > TAB_INACTIVE_COLOR[0],
+            "Dirty inactive red component should be higher");
     }
 }
