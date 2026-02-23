@@ -95,6 +95,9 @@ enum Command {
     Copy,
     /// Paste from clipboard at cursor (Cmd+V)
     Paste,
+    // Chunk: docs/chunks/clipboard_cut - Cut command variant
+    /// Cut selection to clipboard (Cmd+X)
+    Cut,
 }
 
 /// Resolves a key event to a command.
@@ -208,6 +211,10 @@ fn resolve_command(event: &KeyEvent) -> Option<Command> {
 
         // Cmd+V → paste from clipboard
         Key::Char('v') if mods.command && !mods.control => Some(Command::Paste),
+
+        // Chunk: docs/chunks/clipboard_cut - Cmd+X key binding
+        // Cmd+X → cut selection to clipboard
+        Key::Char('x') if mods.command && !mods.control => Some(Command::Cut),
 
         // Ctrl+A → start of line (Emacs-style)
         Key::Char('a') if mods.control && !mods.command => Some(Command::MoveToLineStart),
@@ -372,6 +379,19 @@ impl BufferFocusTarget {
             Command::Paste => {
                 if let Some(text) = crate::clipboard::paste_from_clipboard() {
                     let dirty = ctx.buffer.insert_str(&text);
+                    ctx.mark_dirty(dirty);
+                    ctx.ensure_cursor_visible();
+                }
+                return;
+            }
+            // Chunk: docs/chunks/clipboard_cut - Cut command execution
+            Command::Cut => {
+                // Get selected text; if no selection, this is a no-op
+                if let Some(text) = ctx.buffer.selected_text() {
+                    // Copy to clipboard first (before mutation)
+                    crate::clipboard::copy_to_clipboard(&text);
+                    // Delete the selection
+                    let dirty = ctx.buffer.delete_selection();
                     ctx.mark_dirty(dirty);
                     ctx.ensure_cursor_visible();
                 }
@@ -2437,6 +2457,306 @@ mod tests {
         assert!(buffer.has_selection());
         // No dirty region since copy doesn't modify the buffer
         assert_eq!(dirty, DirtyRegion::None);
+    }
+
+    // ==================== Cut Tests (Cmd+X) ====================
+    // Chunk: docs/chunks/clipboard_cut - Cut command unit tests
+
+    #[test]
+    fn test_cmd_x_resolves_to_cut() {
+        let event = KeyEvent::new(
+            Key::Char('x'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(resolve_command(&event), Some(Command::Cut));
+    }
+
+    #[test]
+    fn test_cmd_x_with_selection_copies_and_deletes() {
+        let mut buffer = TextBuffer::from_str("hello world");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0, 100);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Select "hello" using shift+right arrows (5 times)
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+                800.0,
+            );
+            for _ in 0..5 {
+                let event = KeyEvent::new(
+                    Key::Right,
+                    Modifiers {
+                        shift: true,
+                        ..Default::default()
+                    },
+                );
+                target.handle_key(event, &mut ctx);
+            }
+        }
+
+        assert!(buffer.has_selection());
+        assert_eq!(buffer.selected_text(), Some("hello".to_string()));
+
+        dirty = DirtyRegion::None;
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+                800.0,
+            );
+            let event = KeyEvent::new(
+                Key::Char('x'),
+                Modifiers {
+                    command: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        // Buffer should have "hello" deleted
+        assert_eq!(buffer.content(), " world");
+        // Clipboard should contain "hello"
+        assert_eq!(
+            crate::clipboard::paste_from_clipboard(),
+            Some("hello".to_string())
+        );
+        // Selection should be cleared after cut
+        assert!(!buffer.has_selection());
+    }
+
+    #[test]
+    fn test_cmd_x_with_no_selection_is_noop() {
+        // Set a known clipboard value
+        crate::clipboard::copy_to_clipboard("original");
+
+        let mut buffer = TextBuffer::from_str("hello");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0, 100);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // No selection
+        assert!(!buffer.has_selection());
+
+        let result = {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+                800.0,
+            );
+            let event = KeyEvent::new(
+                Key::Char('x'),
+                Modifiers {
+                    command: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx)
+        };
+
+        assert_eq!(result, Handled::Yes); // Command was recognized
+        // Buffer unchanged
+        assert_eq!(buffer.content(), "hello");
+        // Clipboard unchanged (still "original")
+        assert_eq!(
+            crate::clipboard::paste_from_clipboard(),
+            Some("original".to_string())
+        );
+        // No dirty region
+        assert_eq!(dirty, DirtyRegion::None);
+    }
+
+    #[test]
+    fn test_cut_then_paste_roundtrip() {
+        let mut buffer = TextBuffer::from_str("hello world");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0, 100);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Select "hello" using shift+right arrows
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+                800.0,
+            );
+            for _ in 0..5 {
+                let event = KeyEvent::new(
+                    Key::Right,
+                    Modifiers {
+                        shift: true,
+                        ..Default::default()
+                    },
+                );
+                target.handle_key(event, &mut ctx);
+            }
+
+            // Cut
+            let cut_event = KeyEvent::new(
+                Key::Char('x'),
+                Modifiers {
+                    command: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(cut_event, &mut ctx);
+        }
+
+        // Buffer is now " world", cursor at position (0, 0)
+        assert_eq!(buffer.content(), " world");
+
+        // Move cursor to end and paste
+        buffer.move_to_buffer_end();
+        dirty = DirtyRegion::None;
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+                800.0,
+            );
+            let event = KeyEvent::new(
+                Key::Char('v'),
+                Modifiers {
+                    command: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        // Buffer should be " worldhello"
+        assert_eq!(buffer.content(), " worldhello");
+    }
+
+    #[test]
+    fn test_select_all_then_cut_empties_buffer() {
+        let mut buffer = TextBuffer::from_str("line1\nline2\nline3");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0, 100);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Cmd+A to select all
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+                800.0,
+            );
+            let event = KeyEvent::new(
+                Key::Char('a'),
+                Modifiers {
+                    command: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        // Verify selection
+        assert!(buffer.has_selection());
+
+        // Cmd+X to cut
+        dirty = DirtyRegion::None;
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+                800.0,
+            );
+            let event = KeyEvent::new(
+                Key::Char('x'),
+                Modifiers {
+                    command: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        // Buffer should be empty (single empty line)
+        assert_eq!(buffer.line_count(), 1);
+        assert_eq!(buffer.line_content(0), "");
+        // Clipboard should have the full content
+        assert_eq!(
+            crate::clipboard::paste_from_clipboard(),
+            Some("line1\nline2\nline3".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cut_multiline_selection() {
+        let mut buffer = TextBuffer::from_str("aaa\nbbb\nccc");
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0, 100);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        // Set anchor at (0, 2) and move cursor to (2, 1) preserving selection
+        // This selects "a\nbbb\nc"
+        buffer.set_selection_anchor(Position::new(0, 2));
+        buffer.move_cursor_preserving_selection(Position::new(2, 1));
+
+        assert!(buffer.has_selection());
+        assert_eq!(buffer.selected_text(), Some("a\nbbb\nc".to_string()));
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+                800.0,
+            );
+            let event = KeyEvent::new(
+                Key::Char('x'),
+                Modifiers {
+                    command: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        // Remaining: "aa" + "cc" = "aacc"
+        assert_eq!(buffer.content(), "aacc");
+        // Clipboard: "a\nbbb\nc"
+        assert_eq!(
+            crate::clipboard::paste_from_clipboard(),
+            Some("a\nbbb\nc".to_string())
+        );
     }
 
     // ==================== Scroll Event Tests ====================

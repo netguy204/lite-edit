@@ -1,177 +1,276 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk adds `Cmd+X` (cut) to complete the macOS clipboard triad. Cut is semantically "copy + delete", which means it combines the existing clipboard infrastructure from `clipboard_operations` with the existing selection deletion from `text_selection_model`.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**High-level strategy:**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. **Add `Cut` variant to Command enum**: A single new variant in `buffer_target.rs`.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/clipboard_cut/GOAL.md)
-with references to the files that you expect to touch.
--->
+2. **Add key resolution for Cmd+X**: Map `Key::Char('x')` with `mods.command && !mods.control` to `Cut` in `resolve_command`. Place it adjacent to the existing `Cmd+C` and `Cmd+V` bindings.
 
-## Subsystem Considerations
+3. **Implement Cut execution**: The `execute_command` handler for `Cut` will:
+   - Call `buffer.selected_text()` to get selection (returns `None` if no selection)
+   - If `Some(text)`, copy to clipboard via `copy_to_clipboard(&text)`
+   - If `Some(text)`, delete the selection via `buffer.delete_selection()`
+   - If no selection, do nothing (standard macOS behavior)
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+**Why this is minimal**: All building blocks already exist:
+- `copy_to_clipboard()` from `clipboard.rs` (with test mock)
+- `buffer.selected_text()` from `text_selection_model`
+- `buffer.delete_selection()` from `text_selection_model`
+- Key resolution pattern in `resolve_command`
+- Command execution pattern in `execute_command`
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
+No new APIs are needed. This is pure composition of existing primitives.
 
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/0001-validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/0002-error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/0001-validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+**Testing strategy per TESTING_PHILOSOPHY.md**:
+- Write failing unit tests first for `resolve_command` mapping
+- Write failing integration tests for Cut behavior through `BufferFocusTarget`
+- The mock clipboard from `clipboard_operations` handles clipboard isolation
+- Tests verify boundary cases: no selection, single-line selection, multiline selection
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add Cut command variant (RED phase)
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+First, write a failing test for the key resolution:
 
-Example:
-
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+#[test]
+fn test_cmd_x_resolves_to_cut() {
+    let event = KeyEvent::new(Key::Char('x'), Modifiers { command: true, ..Default::default() });
+    assert_eq!(resolve_command(&event), Some(Command::Cut));
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+This test will fail because `Command::Cut` doesn't exist.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Then add the `Cut` variant to the `Command` enum in `buffer_target.rs`:
+
+```rust
+// Chunk: docs/chunks/clipboard_cut - Cut command variant
+/// Cut selection to clipboard (Cmd+X)
+Cut,
+```
+
+Location: `crates/editor/src/buffer_target.rs`, in the `Command` enum, adjacent to `Copy` and `Paste`.
+
+### Step 2: Add Cmd+X key resolution (GREEN phase)
+
+Add the key binding in `resolve_command`, adjacent to the existing clipboard bindings:
+
+```rust
+// Chunk: docs/chunks/clipboard_cut - Cmd+X key binding
+// Cmd+X → cut selection to clipboard
+Key::Char('x') if mods.command && !mods.control => Some(Command::Cut),
+```
+
+Location: `crates/editor/src/buffer_target.rs`, in `resolve_command`, alongside `Cmd+C` and `Cmd+V`.
+
+The test from Step 1 should now pass.
+
+### Step 3: Add Cut execution tests (RED phase for behavior)
+
+Write failing tests for Cut behavior before implementing:
+
+```rust
+#[test]
+fn test_cmd_x_with_selection_copies_and_deletes() {
+    let mut buffer = TextBuffer::from_str("hello world");
+    buffer.set_cursor(0, 0);
+    // Select "hello" (chars 0-5)
+    buffer.set_selection_anchor(Some(Position::new(0, 0)));
+    buffer.set_cursor(0, 5);
+
+    let mut viewport = Viewport::new(16.0);
+    viewport.update_size(160.0);
+    let mut dirty = DirtyRegion::None;
+    let mut target = BufferFocusTarget::new();
+
+    {
+        let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+        let event = KeyEvent::new(Key::Char('x'), Modifiers { command: true, ..Default::default() });
+        target.handle_key(event, &mut ctx);
+    }
+
+    // Buffer should have "hello" deleted
+    assert_eq!(buffer.content(), " world");
+    // Clipboard should contain "hello"
+    assert_eq!(crate::clipboard::paste_from_clipboard(), Some("hello".to_string()));
+}
+
+#[test]
+fn test_cmd_x_with_no_selection_is_noop() {
+    // Clear mock clipboard
+    crate::clipboard::copy_to_clipboard("original");
+
+    let mut buffer = TextBuffer::from_str("hello");
+    // No selection
+    assert!(!buffer.has_selection());
+
+    let mut viewport = Viewport::new(16.0);
+    viewport.update_size(160.0);
+    let mut dirty = DirtyRegion::None;
+    let mut target = BufferFocusTarget::new();
+
+    {
+        let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+        let event = KeyEvent::new(Key::Char('x'), Modifiers { command: true, ..Default::default() });
+        target.handle_key(event, &mut ctx);
+    }
+
+    // Buffer unchanged
+    assert_eq!(buffer.content(), "hello");
+    // Clipboard unchanged (still "original")
+    assert_eq!(crate::clipboard::paste_from_clipboard(), Some("original".to_string()));
+    // No dirty region
+    assert_eq!(dirty, DirtyRegion::None);
+}
+
+#[test]
+fn test_cut_then_paste_roundtrip() {
+    let mut buffer = TextBuffer::from_str("hello world");
+    buffer.set_cursor(0, 0);
+    // Select "hello"
+    buffer.set_selection_anchor(Some(Position::new(0, 0)));
+    buffer.set_cursor(0, 5);
+
+    let mut viewport = Viewport::new(16.0);
+    viewport.update_size(160.0);
+    let mut dirty = DirtyRegion::None;
+    let mut target = BufferFocusTarget::new();
+
+    // Cut
+    {
+        let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+        let event = KeyEvent::new(Key::Char('x'), Modifiers { command: true, ..Default::default() });
+        target.handle_key(event, &mut ctx);
+    }
+
+    // Move cursor to end and paste
+    buffer.move_to_buffer_end();
+    {
+        let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+        let event = KeyEvent::new(Key::Char('v'), Modifiers { command: true, ..Default::default() });
+        target.handle_key(event, &mut ctx);
+    }
+
+    // Buffer should be " worldhello"
+    assert_eq!(buffer.content(), " worldhello");
+}
+
+#[test]
+fn test_select_all_then_cut_empties_buffer() {
+    let mut buffer = TextBuffer::from_str("line1\nline2\nline3");
+    let mut viewport = Viewport::new(16.0);
+    viewport.update_size(160.0);
+    let mut dirty = DirtyRegion::None;
+    let mut target = BufferFocusTarget::new();
+
+    // Cmd+A to select all
+    {
+        let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+        let event = KeyEvent::new(Key::Char('a'), Modifiers { command: true, ..Default::default() });
+        target.handle_key(event, &mut ctx);
+    }
+
+    // Cmd+X to cut
+    dirty = DirtyRegion::None;
+    {
+        let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+        let event = KeyEvent::new(Key::Char('x'), Modifiers { command: true, ..Default::default() });
+        target.handle_key(event, &mut ctx);
+    }
+
+    // Buffer should be empty (single empty line)
+    assert_eq!(buffer.line_count(), 1);
+    assert_eq!(buffer.line_content(0), "");
+    // Clipboard should have the full content
+    assert_eq!(crate::clipboard::paste_from_clipboard(), Some("line1\nline2\nline3".to_string()));
+}
+
+#[test]
+fn test_cut_multiline_selection() {
+    let mut buffer = TextBuffer::from_str("aaa\nbbb\nccc");
+    // Select from middle of line 0 to middle of line 2: "a\nbbb\nc"
+    buffer.set_selection_anchor(Some(Position::new(0, 2)));
+    buffer.set_cursor(2, 1);
+
+    let mut viewport = Viewport::new(16.0);
+    viewport.update_size(160.0);
+    let mut dirty = DirtyRegion::None;
+    let mut target = BufferFocusTarget::new();
+
+    {
+        let mut ctx = EditorContext::new(&mut buffer, &mut viewport, &mut dirty);
+        let event = KeyEvent::new(Key::Char('x'), Modifiers { command: true, ..Default::default() });
+        target.handle_key(event, &mut ctx);
+    }
+
+    // Remaining: "aa" + "cc" = "aacc"
+    assert_eq!(buffer.content(), "aacc");
+    // Clipboard: "a\nbbb\nc"
+    assert_eq!(crate::clipboard::paste_from_clipboard(), Some("a\nbbb\nc".to_string()));
+}
+```
+
+### Step 4: Implement Cut execution (GREEN phase)
+
+Add the command execution in `execute_command`:
+
+```rust
+// Chunk: docs/chunks/clipboard_cut - Cut command execution
+Command::Cut => {
+    // Get selected text; if no selection, this is a no-op
+    if let Some(text) = ctx.buffer.selected_text() {
+        // Copy to clipboard first (before mutation)
+        crate::clipboard::copy_to_clipboard(&text);
+        // Delete the selection
+        let dirty = ctx.buffer.delete_selection();
+        ctx.mark_dirty(dirty);
+        ctx.ensure_cursor_visible();
+    }
+    return;
+}
+```
+
+Location: `crates/editor/src/buffer_target.rs`, in `execute_command`, adjacent to `Copy` and `Paste`.
+
+All tests from Step 3 should now pass.
+
+### Step 5: Update GOAL.md code_paths
+
+Update the `code_paths` field in `docs/chunks/clipboard_cut/GOAL.md`:
+
+```yaml
+code_paths:
+  - crates/editor/src/buffer_target.rs
+```
+
+This chunk only modifies `buffer_target.rs` — it reuses the existing `clipboard.rs` without modification.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+**Chunk dependencies:**
+- `clipboard_operations` (ACTIVE): Provides `copy_to_clipboard()` and the mock clipboard infrastructure for tests.
+- `text_selection_model` (ACTIVE): Provides `buffer.selected_text()` and `buffer.delete_selection()`.
 
-If there are no dependencies, delete this section.
--->
+**External dependencies:**
+- None. All required functionality already exists in the codebase.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+**Low risk implementation**: This chunk is pure composition of existing, tested primitives. The only new code is:
+1. One enum variant
+2. One key binding match arm
+3. ~8 lines of execution logic
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+**Potential edge case**: If a future implementation adds undo support, Cut should be undoable as a single operation. Currently undo is out of scope (per the GOAL.md note "If undo is supported"), so this is not a blocker.
+
+**Clipboard side effects**: The clipboard write (`copy_to_clipboard`) is intentionally not undoable — this matches standard macOS behavior where Cmd+Z undoes the deletion but doesn't restore the previous clipboard content.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- POPULATE DURING IMPLEMENTATION, not at planning time. -->
