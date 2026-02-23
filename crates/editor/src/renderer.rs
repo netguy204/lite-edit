@@ -1598,8 +1598,8 @@ impl Renderer {
 
             // Chunk: docs/chunks/cursor_blink_pane_focus - Only show blinking cursor in focused pane
             // Focused pane: cursor blinks (shows/hides based on self.cursor_visible)
-            // Unfocused pane: no cursor (always false) - provides clear visual feedback
-            let pane_cursor_visible = is_focused && self.cursor_visible;
+            // Unfocused pane: static cursor (always visible) - provides clear visual feedback
+            let pane_cursor_visible = if is_focused { self.cursor_visible } else { true };
 
             // Update glyph buffer from tab's buffer with pane-specific cursor visibility
             if tab.is_agent_tab() {
