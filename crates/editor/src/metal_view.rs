@@ -530,6 +530,7 @@ impl MetalView {
     /// Converts an NSEvent scroll wheel event to our ScrollDelta type
     ///
     // Chunk: docs/chunks/viewport_scrolling - NSEvent to ScrollDelta conversion
+    // Chunk: docs/chunks/pane_hover_scroll - Extract mouse position for hover-scroll targeting
     /// macOS scroll wheel events provide delta values in points. For trackpads
     /// with "natural scrolling" enabled (the default), scrolling down (content
     /// moves up) produces positive deltaY values.
@@ -537,6 +538,9 @@ impl MetalView {
     /// We convert the delta to our ScrollDelta type with the convention:
     /// - Positive dy = scroll down (content moves up, scroll_offset increases)
     /// - Negative dy = scroll up (content moves down, scroll_offset decreases)
+    ///
+    /// The mouse position at the time of the scroll event is also captured to
+    /// enable hover-scroll behavior in multi-pane layouts.
     fn convert_scroll_event(&self, event: &NSEvent) -> Option<ScrollDelta> {
         // NSEvent scrolling delta methods
         // scrollingDeltaX/Y return CGFloat (f64 on 64-bit)
@@ -549,6 +553,23 @@ impl MetalView {
             return None;
         }
 
+        // Extract mouse position from the scroll event
+        // Get location in window coordinates
+        let location_in_window = event.locationInWindow();
+
+        // Convert to view coordinates
+        let location_in_view: objc2_foundation::NSPoint =
+            unsafe { msg_send![self, convertPoint: location_in_window, fromView: std::ptr::null::<NSView>()] };
+
+        // Get the scale factor and view bounds for coordinate conversion
+        let scale = self.ivars().scale_factor.get();
+        let frame = self.frame();
+
+        // Convert to pixels and flip Y coordinate from bottom-left to top-left origin
+        // NSView uses bottom-left origin, but our event system uses top-left
+        let x_px = location_in_view.x * scale;
+        let y_px = (frame.size.height - location_in_view.y) * scale;
+
         // macOS "natural scrolling" (default on trackpads) inverts the direction:
         // - Moving fingers down on trackpad = negative deltaY = content scrolls up
         // - Moving fingers up on trackpad = positive deltaY = content scrolls down
@@ -557,7 +578,7 @@ impl MetalView {
         // - Positive dy = scroll down (show content further in the document)
         //
         // So we negate the delta to match our convention.
-        Some(ScrollDelta::new(-dx, -dy))
+        Some(ScrollDelta::with_position(-dx, -dy, x_px, y_px))
     }
 
     /// Converts NSEvent modifier flags to our Modifiers type
