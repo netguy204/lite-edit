@@ -74,12 +74,30 @@ impl<'a> EditorContext<'a> {
         WrapLayout::new(self.view_width, &self.font_metrics)
     }
 
+    // Chunk: docs/chunks/dirty_region_wrap_aware - Wrap-aware dirty region conversion
     /// Marks lines as dirty, converting buffer-space DirtyLines to screen-space DirtyRegion.
+    ///
+    /// This uses wrap-aware conversion to correctly handle soft line wrapping,
+    /// where buffer line indices can be much smaller than screen row indices.
+    /// The method computes cumulative screen rows for each dirty buffer line
+    /// and compares against the viewport's screen-row-based scroll position.
     ///
     /// This merges the new dirty region into the accumulated dirty region.
     pub fn mark_dirty(&mut self, dirty_lines: DirtyLines) {
         let line_count = self.buffer.line_count();
-        let screen_dirty = self.viewport.dirty_lines_to_region(&dirty_lines, line_count);
+        let wrap_layout = self.wrap_layout();
+
+        // Capture line lengths to avoid borrowing conflicts
+        let line_lens: Vec<usize> = (0..line_count)
+            .map(|line| self.buffer.line_len(line))
+            .collect();
+
+        let screen_dirty = self.viewport.dirty_lines_to_region_wrapped(
+            &dirty_lines,
+            line_count,
+            &wrap_layout,
+            |line| line_lens.get(line).copied().unwrap_or(0),
+        );
         self.dirty_region.merge(screen_dirty);
     }
 
