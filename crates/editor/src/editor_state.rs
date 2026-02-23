@@ -587,6 +587,58 @@ impl EditorState {
                     }
                 }
             }
+
+            // Chunk: docs/chunks/tiling_focus_keybindings - Directional tab movement
+            // Cmd+Shift+Arrow moves the active tab in that direction
+            if event.modifiers.shift {
+                use crate::pane_layout::{Direction, MoveResult};
+
+                let direction = match event.key {
+                    Key::Right => Some(Direction::Right),
+                    Key::Left => Some(Direction::Left),
+                    Key::Down => Some(Direction::Down),
+                    Key::Up => Some(Direction::Up),
+                    _ => None,
+                };
+
+                if let Some(dir) = direction {
+                    if let Some(workspace) = self.editor.active_workspace_mut() {
+                        let result = workspace.move_active_tab(dir);
+                        match result {
+                            MoveResult::MovedToExisting { .. } | MoveResult::MovedToNew { .. } => {
+                                self.dirty_region.merge(DirtyRegion::FullViewport);
+                            }
+                            MoveResult::Rejected | MoveResult::SourceNotFound => {
+                                // No-op, no visual change
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+
+            // Chunk: docs/chunks/tiling_focus_keybindings - Focus switching between panes
+            // Cmd+Option+Arrow switches focus to the pane in that direction
+            if event.modifiers.option && !event.modifiers.shift {
+                use crate::pane_layout::Direction;
+
+                let direction = match event.key {
+                    Key::Right => Some(Direction::Right),
+                    Key::Left => Some(Direction::Left),
+                    Key::Down => Some(Direction::Down),
+                    Key::Up => Some(Direction::Up),
+                    _ => None,
+                };
+
+                if let Some(dir) = direction {
+                    if let Some(workspace) = self.editor.active_workspace_mut() {
+                        if workspace.switch_focus(dir) {
+                            self.dirty_region.merge(DirtyRegion::FullViewport);
+                        }
+                    }
+                    return;
+                }
+            }
         }
 
         // Route based on current focus
@@ -1417,17 +1469,55 @@ impl EditorState {
     /// Handles a mouse event when the buffer is focused.
     // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
     // Chunk: docs/chunks/tiling_workspace_integration - Receives screen-space coordinates (y=0 at top)
+    // Chunk: docs/chunks/tiling_focus_keybindings - Click-to-focus pane switching
     fn handle_mouse_buffer(&mut self, event: MouseEvent) {
+        use crate::input::MouseEventKind;
+        use crate::pane_layout::calculate_pane_rects;
+
         // Record event time for cursor blink reset (same as keystroke)
         self.last_keystroke = Instant::now();
-
-        // Check if the active tab is a file tab or terminal tab
-        let ws = self.editor.active_workspace_mut().expect("no active workspace");
-        let tab = ws.active_tab_mut().expect("no active tab");
 
         // event.position is in screen space (y=0 at top of window)
         // Content area starts at y=TAB_BAR_HEIGHT and x=RAIL_WIDTH
         let (screen_x, screen_y) = event.position;
+
+        // Chunk: docs/chunks/tiling_focus_keybindings - Click-to-focus pane switching
+        // Check which pane was clicked and update focus if different
+        if let MouseEventKind::Down = event.kind {
+            let content_height = self.view_height - TAB_BAR_HEIGHT;
+            let content_width = self.view_width - RAIL_WIDTH;
+
+            // Calculate pane rects in content-local coordinates
+            // Bounds: (x, y, width, height) where (0,0) is top-left of content area
+            let bounds = (0.0, 0.0, content_width, content_height);
+
+            if let Some(workspace) = self.editor.active_workspace() {
+                let pane_rects = calculate_pane_rects(bounds, &workspace.pane_root);
+                let current_pane_id = workspace.active_pane_id;
+
+                // Convert screen coordinates to content-local coordinates for hit testing
+                let content_x = (screen_x - RAIL_WIDTH as f64).max(0.0) as f32;
+                let content_y = (screen_y - TAB_BAR_HEIGHT as f64).max(0.0) as f32;
+
+                // Find which pane contains the click
+                for pane_rect in &pane_rects {
+                    if pane_rect.contains(content_x, content_y) {
+                        if pane_rect.pane_id != current_pane_id {
+                            // Switch focus to the clicked pane
+                            if let Some(ws) = self.editor.active_workspace_mut() {
+                                ws.active_pane_id = pane_rect.pane_id;
+                            }
+                            self.dirty_region.merge(DirtyRegion::FullViewport);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Now get the (potentially updated) active tab
+        let ws = self.editor.active_workspace_mut().expect("no active workspace");
+        let tab = ws.active_tab_mut().expect("no active tab");
 
         // Transform to content-local coordinates:
         // - Subtract RAIL_WIDTH from x
@@ -1502,8 +1592,6 @@ impl EditorState {
                 }
             } else {
                 // No mouse mode active - handle selection
-                use crate::input::MouseEventKind;
-
                 // Convert screen row to document line (accounting for viewport scroll)
                 let doc_line = viewport.first_visible_line() + row;
                 let pos = Position::new(doc_line, col);

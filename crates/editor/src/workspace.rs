@@ -562,6 +562,80 @@ impl Workspace {
     }
 
     // =========================================================================
+    // Pane focus and tab movement (Chunk: docs/chunks/tiling_focus_keybindings)
+    // =========================================================================
+
+    /// Switches focus to the pane in the given direction.
+    ///
+    /// Uses `find_target_in_direction` to determine which pane is visually
+    /// adjacent in the given direction. If an existing pane is found, updates
+    /// `active_pane_id` to that pane.
+    ///
+    /// # Returns
+    ///
+    /// `true` if focus was switched to a different pane, `false` if no pane
+    /// exists in that direction (focus remains unchanged).
+    pub fn switch_focus(&mut self, direction: crate::pane_layout::Direction) -> bool {
+        use crate::pane_layout::MoveTarget;
+
+        let target = self.pane_root.find_target_in_direction(self.active_pane_id, direction);
+
+        match target {
+            MoveTarget::ExistingPane(target_id) => {
+                self.active_pane_id = target_id;
+                true
+            }
+            MoveTarget::SplitPane(_, _) => {
+                // No adjacent pane in that direction - focus stays put
+                false
+            }
+        }
+    }
+
+    /// Moves the active tab of the focused pane in the given direction.
+    ///
+    /// Uses `move_tab` from `pane_layout` to:
+    /// - Move the tab to an existing pane in that direction, OR
+    /// - Create a new pane via split if no existing target
+    ///
+    /// After a successful move, focus follows the moved tab to its new pane.
+    ///
+    /// # Returns
+    ///
+    /// The `MoveResult` indicating what happened.
+    pub fn move_active_tab(&mut self, direction: crate::pane_layout::Direction) -> crate::pane_layout::MoveResult {
+        use crate::pane_layout::{move_tab, MoveResult};
+
+        let source_pane_id = self.active_pane_id;
+
+        // Pre-generate pane ID to avoid borrow conflict
+        // (We can't capture `self` in the closure while also borrowing `pane_root` mutably)
+        let new_pane_id = self.gen_pane_id();
+
+        let result = move_tab(
+            &mut self.pane_root,
+            source_pane_id,
+            direction,
+            || new_pane_id,
+        );
+
+        // Update focus to follow the moved tab
+        match result {
+            MoveResult::MovedToExisting { target_pane_id, .. } => {
+                self.active_pane_id = target_pane_id;
+            }
+            MoveResult::MovedToNew { new_pane_id, .. } => {
+                self.active_pane_id = new_pane_id;
+            }
+            MoveResult::Rejected | MoveResult::SourceNotFound => {
+                // Focus unchanged
+            }
+        }
+
+        result
+    }
+
+    // =========================================================================
     // Tab operations - delegate to active pane
     // =========================================================================
 
@@ -1472,5 +1546,164 @@ mod tests {
         let ws = editor.active_workspace().unwrap();
         assert_eq!(ws.tab_count(), 1);
         assert!(ws.active_tab().is_some());
+    }
+
+    // =========================================================================
+    // Pane Focus and Tab Movement Tests (Chunk: docs/chunks/tiling_focus_keybindings)
+    // =========================================================================
+
+    use crate::pane_layout::{Direction, Pane, PaneLayoutNode, SplitDirection};
+
+    // Helper to create a workspace with a horizontal split (two panes side by side)
+    fn create_hsplit_workspace() -> Workspace {
+        let mut ws = Workspace::new(1, "test".to_string(), PathBuf::from("/test"));
+
+        // Create two panes with tabs
+        let mut pane1 = Pane::new(1, 1);
+        pane1.add_tab(Tab::empty_file(1, TEST_LINE_HEIGHT));
+        pane1.add_tab(Tab::empty_file(2, TEST_LINE_HEIGHT));
+
+        let mut pane2 = Pane::new(2, 1);
+        pane2.add_tab(Tab::empty_file(3, TEST_LINE_HEIGHT));
+
+        // Create horizontal split layout (pane1 left, pane2 right)
+        ws.pane_root = PaneLayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(PaneLayoutNode::Leaf(pane1)),
+            second: Box::new(PaneLayoutNode::Leaf(pane2)),
+        };
+        ws.active_pane_id = 1; // Start focused on left pane
+        ws.next_pane_id = 3;   // Next ID after pane1 and pane2
+
+        ws
+    }
+
+    #[test]
+    fn test_switch_focus_right() {
+        let mut ws = create_hsplit_workspace();
+        assert_eq!(ws.active_pane_id, 1); // Start on left pane
+
+        let switched = ws.switch_focus(Direction::Right);
+
+        assert!(switched);
+        assert_eq!(ws.active_pane_id, 2); // Now on right pane
+    }
+
+    #[test]
+    fn test_switch_focus_left() {
+        let mut ws = create_hsplit_workspace();
+        ws.active_pane_id = 2; // Start on right pane
+
+        let switched = ws.switch_focus(Direction::Left);
+
+        assert!(switched);
+        assert_eq!(ws.active_pane_id, 1); // Now on left pane
+    }
+
+    #[test]
+    fn test_switch_focus_no_pane_in_direction() {
+        let mut ws = create_hsplit_workspace();
+        assert_eq!(ws.active_pane_id, 1); // Start on left pane
+
+        // Try to switch left (no pane there)
+        let switched = ws.switch_focus(Direction::Left);
+
+        assert!(!switched); // No switch happened
+        assert_eq!(ws.active_pane_id, 1); // Still on left pane
+    }
+
+    #[test]
+    fn test_switch_focus_single_pane() {
+        let ws_id = 1;
+        let mut ws = Workspace::with_empty_tab(ws_id, 1, "test".to_string(), PathBuf::from("/test"), TEST_LINE_HEIGHT);
+
+        // Get the initial pane ID (which is 0 from gen_pane_id)
+        let initial_pane_id = ws.active_pane_id;
+
+        // Single pane - no direction has a target
+        let switched = ws.switch_focus(Direction::Right);
+
+        assert!(!switched);
+        assert_eq!(ws.active_pane_id, initial_pane_id);
+    }
+
+    #[test]
+    fn test_move_active_tab_creates_split() {
+        // Create workspace with single pane, two tabs
+        let mut ws = Workspace::with_empty_tab(1, 1, "test".to_string(), PathBuf::from("/test"), TEST_LINE_HEIGHT);
+        ws.add_tab(Tab::empty_file(2, TEST_LINE_HEIGHT));
+        // Now pane has 2 tabs, active_tab = 1 (second tab)
+
+        let result = ws.move_active_tab(Direction::Right);
+
+        // Should create a new pane via split
+        use crate::pane_layout::MoveResult;
+        assert!(matches!(result, MoveResult::MovedToNew { .. }));
+
+        // Layout should now have 2 panes
+        assert_eq!(ws.pane_root.pane_count(), 2);
+
+        // Focus should follow the moved tab
+        let new_pane_id = match result {
+            MoveResult::MovedToNew { new_pane_id, .. } => new_pane_id,
+            _ => panic!("Expected MovedToNew"),
+        };
+        assert_eq!(ws.active_pane_id, new_pane_id);
+    }
+
+    #[test]
+    fn test_move_active_tab_to_existing() {
+        let mut ws = create_hsplit_workspace();
+        // Left pane (1) has 2 tabs, right pane (2) has 1 tab
+        // Focus on left pane, active tab is second tab
+
+        let result = ws.move_active_tab(Direction::Right);
+
+        use crate::pane_layout::MoveResult;
+        assert!(matches!(result, MoveResult::MovedToExisting { target_pane_id: 2, .. }));
+
+        // Focus should follow to right pane
+        assert_eq!(ws.active_pane_id, 2);
+
+        // Left pane should now have 1 tab
+        assert_eq!(ws.pane_root.get_pane(1).unwrap().tab_count(), 1);
+
+        // Right pane should now have 2 tabs
+        assert_eq!(ws.pane_root.get_pane(2).unwrap().tab_count(), 2);
+    }
+
+    #[test]
+    fn test_move_active_tab_single_tab_rejected() {
+        // Create workspace with single pane, single tab
+        let mut ws = Workspace::with_empty_tab(1, 1, "test".to_string(), PathBuf::from("/test"), TEST_LINE_HEIGHT);
+
+        let result = ws.move_active_tab(Direction::Right);
+
+        // Should be rejected (can't split single-tab pane with no existing target)
+        use crate::pane_layout::MoveResult;
+        assert_eq!(result, MoveResult::Rejected);
+
+        // Layout unchanged
+        assert_eq!(ws.pane_root.pane_count(), 1);
+    }
+
+    #[test]
+    fn test_move_active_tab_single_tab_to_existing() {
+        let mut ws = create_hsplit_workspace();
+        // Switch to pane 2 which has only 1 tab
+        ws.active_pane_id = 2;
+
+        let result = ws.move_active_tab(Direction::Left);
+
+        use crate::pane_layout::MoveResult;
+        assert!(matches!(result, MoveResult::MovedToExisting { target_pane_id: 1, .. }));
+
+        // Focus should follow to left pane
+        assert_eq!(ws.active_pane_id, 1);
+
+        // Since pane 2 is now empty, it should be cleaned up
+        // The tree should collapse back to a single pane
+        assert_eq!(ws.pane_root.pane_count(), 1);
     }
 }

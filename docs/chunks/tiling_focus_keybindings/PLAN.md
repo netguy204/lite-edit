@@ -8,153 +8,137 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk wires the existing pane tree model and movement operations (from `tiling_tree_model` and `tiling_tab_movement`) to user input, completing the tiling pane sequence. The implementation follows the editor's established patterns:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Keybindings** are intercepted in `EditorState::handle_key()` before delegating to focus targets — this is where `Cmd+Shift+Arrow` (tab movement) and `Cmd+Option+Arrow` (focus switching) will be handled.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **Mouse click-to-focus** integrates into the existing `handle_mouse()` pipeline from `tiling_workspace_integration` — the hit-test that determines which pane was clicked also sets focus.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/tiling_focus_keybindings/GOAL.md)
-with references to the files that you expect to touch.
--->
+3. **Keyboard input routing** already resolves through `active_workspace → active_pane → active_tab` thanks to `tiling_workspace_integration`. Changing `active_pane_id` automatically routes subsequent input to the correct pane.
+
+The implementation uses pure functions from `pane_layout.rs` (`find_target_in_direction`, `move_tab`) and existing coordinate handling from `tiling_workspace_integration`'s screen-space pipeline. No ad-hoc coordinate math is introduced.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No existing subsystems are directly relevant to this chunk. The work is self-contained within the editor's input handling layer.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add `switch_focus` helper to Workspace
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create a method `Workspace::switch_focus(direction: Direction) -> bool` that:
+1. Calls `pane_root.find_target_in_direction(active_pane_id, direction)`.
+2. If result is `MoveTarget::ExistingPane(target_id)`, sets `active_pane_id = target_id` and returns `true`.
+3. If result is `SplitPane`, returns `false` (no adjacent pane in that direction — focus stays put).
 
-Example:
+Location: `crates/editor/src/workspace.rs`
 
-### Step 1: Define the SegmentHeader struct
+### Step 2: Add `move_active_tab` helper to Workspace
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Create a method `Workspace::move_active_tab(&mut self, direction: Direction) -> MoveResult` that:
+1. Captures current `active_pane_id` as the source.
+2. Calls `pane_layout::move_tab(&mut self.pane_root, source_pane_id, direction, || self.gen_pane_id())`.
+3. If result is `MovedToExisting { target_pane_id, .. }` or `MovedToNew { new_pane_id, .. }`, updates `active_pane_id` to the target/new pane (focus follows the moved tab).
+4. Returns the `MoveResult` so the caller can determine if a redraw is needed.
 
-Location: src/segment/format.rs
+Location: `crates/editor/src/workspace.rs`
 
-### Step 2: Implement header serialization
+### Step 3: Wire Cmd+Shift+Arrow keybindings for directional tab movement
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+In `EditorState::handle_key()`, add handling for `Cmd+Shift+Arrow` before delegating to focus targets:
+- `Cmd+Shift+Right` → call `move_active_tab(Direction::Right)` on active workspace.
+- `Cmd+Shift+Left` → call `move_active_tab(Direction::Left)`.
+- `Cmd+Shift+Down` → call `move_active_tab(Direction::Down)`.
+- `Cmd+Shift+Up` → call `move_active_tab(Direction::Up)`.
 
-### Step 3: ...
+After a successful move (`MovedToExisting` or `MovedToNew`), set `dirty_region = DirtyRegion::FullViewport` (pane layout changed). If `Rejected` or `SourceNotFound`, no visual change — no-op.
 
----
+These bindings use arrow keys, so they don't conflict with existing `Cmd+Shift+[/]` (bracket keys for tab cycling).
 
-**BACKREFERENCE COMMENTS**
+Location: `crates/editor/src/editor_state.rs` (within `handle_key` method, after workspace-level shortcuts but before focus routing)
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+### Step 4: Wire Cmd+Option+Arrow keybindings for focus switching
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+In `EditorState::handle_key()`, add handling for `Cmd+Option+Arrow`:
+- `Cmd+Option+Right` → call `switch_focus(Direction::Right)` on active workspace.
+- `Cmd+Option+Left` → call `switch_focus(Direction::Left)`.
+- `Cmd+Option+Down` → call `switch_focus(Direction::Down)`.
+- `Cmd+Option+Up` → call `switch_focus(Direction::Up)`.
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+After a successful focus switch (returns `true`), set `dirty_region = DirtyRegion::FullViewport` (focused pane indicator changes). If `false`, no-op.
 
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
+Location: `crates/editor/src/editor_state.rs`
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+### Step 5: Add mouse click-to-focus in handle_mouse()
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Extend `EditorState::handle_mouse()` (or `handle_mouse_buffer`) to set pane focus when clicking within a pane:
+
+1. Before routing the click to a specific handler, check which pane contains the click point using `calculate_pane_rects()` and `PaneRect::contains()`.
+2. If the clicked pane is different from `active_pane_id`, update `active_pane_id` to the clicked pane.
+3. Only trigger a dirty region if focus actually changed (avoid unnecessary redraws when clicking within the already-focused pane).
+4. Then proceed with the existing click handling (tab bar click, content click, etc.) — the click will now route to the correct pane.
+
+The coordinate pipeline from `tiling_workspace_integration` already computes `PaneRect` values in screen space and transforms to pane-local coordinates at dispatch. This step adds focus-switching logic before dispatch.
+
+Location: `crates/editor/src/editor_state.rs` (within `handle_mouse` and/or `handle_mouse_buffer`)
+
+### Step 6: Ensure existing tab/workspace shortcuts use focused pane
+
+Verify that the following shortcuts operate on the focused pane (they should, thanks to `tiling_workspace_integration`):
+- `Cmd+T` creates a new tab in the focused pane.
+- `Cmd+Shift+T` creates a new terminal tab in the focused pane.
+- `Cmd+W` closes the active tab in the focused pane (if pane becomes empty, cleanup runs).
+- `Cmd+Shift+[/]` cycles tabs within the focused pane.
+
+No code changes expected — just verification that the pane-aware delegate pattern works correctly.
+
+Location: `crates/editor/src/editor_state.rs` (verification only)
+
+### Step 7: Add unit tests for switch_focus
+
+Create tests in `crates/editor/src/workspace.rs` (in the existing `#[cfg(test)]` module):
+- **Focus switch to existing neighbor**: `HSplit(Pane[A], Pane[B])`, focus A, switch right → focus B.
+- **Focus switch blocked**: `HSplit(Pane[A], Pane[B])`, focus B, switch right → returns false, focus stays B.
+- **Focus switch across nested tree**: `HSplit(Pane[A], VSplit(Pane[B], Pane[C]))`, focus C, switch left → focus A.
+- **Focus switch vertical**: `VSplit(Pane[A], Pane[B])`, focus A, switch down → focus B.
+- **Focus switch single pane**: Single pane, switch any direction → returns false.
+
+### Step 8: Add unit tests for move_active_tab keybinding integration
+
+Create tests in `crates/editor/src/editor_state.rs` (in the existing `#[cfg(test)]` module):
+- **Tab movement creates split**: Single pane with 2 tabs, Cmd+Shift+Right → tree has 2 panes, tab moved.
+- **Tab movement to existing neighbor**: `HSplit(Pane[A, B], Pane[C])`, focus A, Cmd+Shift+Right on B → B joins pane with C.
+- **Tab movement rejection**: Single pane with 1 tab, Cmd+Shift+Right → no-op, tree unchanged.
+- **Focus follows moved tab**: After successful move, `active_pane_id` is the target pane.
+
+### Step 9: Add unit tests for mouse click-to-focus
+
+Create tests in `crates/editor/src/editor_state.rs`:
+- **Click unfocused pane switches focus**: Setup `HSplit(Pane[A], Pane[B])` with A focused. Click in B's content area → `active_pane_id` is B.
+- **Click focused pane no-op**: Click in A when A is focused → no change, no dirty region triggered for focus.
+- **Click tab bar of unfocused pane**: Click in B's tab bar region → focus switches to B, tab switching logic runs.
+
+### Step 10: Integration verification
+
+Run the full test suite to ensure:
+- All existing tests pass (backward compatibility with single-pane workspaces).
+- New keybindings don't conflict with existing shortcuts.
+- Terminal tabs and agent tabs continue to work within panes.
+- Welcome screen and selector overlay render relative to the focused pane.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **tiling_multi_pane_render**: The renderer already supports multiple panes with divider lines and focus indicators. This chunk adds the input handling that changes which pane is focused.
+- **tiling_tab_movement**: Provides `move_tab()` and `find_target_in_direction()` functions used by this chunk.
+- **tiling_workspace_integration**: Provides the pane-aware workspace model and coordinate handling pipeline.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Arrow key conflicts on macOS**: Need to verify that `Cmd+Option+Arrow` isn't intercepted by macOS for Mission Control or window management. If so, consider alternative bindings (e.g., `Ctrl+Cmd+Arrow`). Test on a clean macOS installation.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Edge case: Empty pane after tab close via Cmd+W**: When `Cmd+W` closes the last tab in a focused pane, cleanup should collapse the pane and switch focus to the promoted sibling. Verify this works correctly.
+
+- **Focus indicator update timing**: Ensure the dirty region is set correctly so the focus border updates immediately on focus switch, not on the next frame.
 
 ## Deviations
 
@@ -169,9 +153,4 @@ When reality diverges from the plan, document it here:
 Minor deviations (renamed a function, used a different helper) don't need
 documentation. Significant deviations (changed the approach, skipped a step,
 added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->
