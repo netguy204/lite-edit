@@ -1078,7 +1078,7 @@ impl EditorState {
         self.last_keystroke = Instant::now();
 
         // Chunk: docs/chunks/syntax_highlighting - Track whether we need to sync highlighter
-        let mut needs_highlighter_sync = false;
+        let needs_highlighter_sync;
 
         // Check if the active tab is a file tab or terminal tab
         // Use a block to limit the borrow scope

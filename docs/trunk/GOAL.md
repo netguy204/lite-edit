@@ -10,47 +10,36 @@ Write in terms of WHAT and WHY, not HOW. The how belongs in SPEC.md and in chunk
 
 ## Problem Statement
 
-<!--
-What problem does this project solve? Who experiences this problem?
-Be specific enough that someone could determine whether a given solution
-actually addresses the problem.
--->
+Modern code editors are either fast but limited (terminal editors), or feature-rich but heavyweight (Electron-based editors, IDEs). Developers who want a responsive, native editing experience on macOS must compromise on one axis or the other.
+
+lite-edit solves this by providing a lightweight, GPU-accelerated text editor for macOS that combines the responsiveness of a native Metal-rendered application with the features needed for daily coding work — including an integrated terminal emulator that feels like a normal buffer tab rather than a separate, special-cased UI area.
 
 ## Required Properties
 
-<!--
-What properties MUST the solution have to be considered successful?
-These are non-negotiable. Examples:
-- "Must handle 10K messages/second sustained throughput"
-- "Must survive process crash without data loss"
-- "Must run without external dependencies"
-
-Be precise. "Fast" is not a property. "P99 latency under 5ms" is.
--->
+- **Low latency rendering**: Keystroke-to-glyph P99 latency under 8ms.
+- **Native Metal rendering**: All text and UI rendered directly via Metal on macOS. No Electron, no webview.
+- **Integrated terminal emulator**: A built-in terminal that behaves like a regular editor buffer tab — same tab bar, same navigation, same visual weight. Not a special panel or drawer.
+- **Minimal footprint**: Small binary, fast startup, low memory baseline.
+- **Tree-sitter syntax highlighting**: Language-aware highlighting via tree-sitter grammars.
+- **File navigation**: Fuzzy file picker and find-in-file search.
 
 ## Constraints
 
-<!--
-What limitations exist on the solution space? These might be:
-- Technical: must run on Linux, must use less than 100MB memory
-- Organizational: must be maintainable by a small team, must not require ops expertise
-- Timeline: must be usable for X by Y date
-
-Constraints help rule out solutions that might otherwise seem attractive.
--->
+- **macOS only**: Targets macOS with Metal. No cross-platform abstraction layers.
+- **Rust**: Core implementation in Rust using `objc2` crate family for Cocoa/Metal bindings.
+- **No runtime dependencies**: Ships as a standalone binary. No bundled runtimes or interpreters.
+- **Small team maintainability**: Architecture must be understandable and modifiable by a small team.
 
 ## Out of Scope
 
-<!--
-What are you explicitly NOT trying to solve? This prevents scope creep
-and helps others understand the boundaries of the project.
-
-Being explicit about non-goals is as important as being explicit about goals.
--->
+- Cross-platform support (Linux, Windows).
+- LSP / language server integration (may come later but is not a current goal).
+- Plugin ecosystem or extension API.
+- Collaborative editing.
 
 ## Success Criteria
 
-<!--
-How will you know when the project has achieved its goal?
-These should be concrete and verifiable, tied to the Required Properties above.
--->
+- The editor can open, edit, and save source files with syntax highlighting.
+- Terminal tabs are indistinguishable in navigation and visual treatment from file buffer tabs.
+- Rendering latency meets the <8ms P99 target on Apple Silicon Macs.
+- Cold startup to interactive window in under 200ms.
