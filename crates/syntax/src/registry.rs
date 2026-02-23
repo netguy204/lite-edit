@@ -66,10 +66,17 @@ impl LanguageRegistry {
         );
         configs.insert("rs", rust_config);
 
-        // C++ (uses HIGHLIGHT_QUERY - no S)
+        // C++ needs the C highlight query as a base, with C++-specific additions layered on top.
+        // The C++ grammar's HIGHLIGHT_QUERY only covers C++-specific constructs (templates,
+        // namespaces, `this`, etc.), while fundamental constructs like types, keywords, and
+        // functions are defined in the C grammar's query.
+        let cpp_combined_query: &'static str = Box::leak(
+            format!("{}\n{}", tree_sitter_c::HIGHLIGHT_QUERY, tree_sitter_cpp::HIGHLIGHT_QUERY)
+                .into_boxed_str(),
+        );
         let cpp_config = LanguageConfig::new(
             tree_sitter_cpp::LANGUAGE.into(),
-            tree_sitter_cpp::HIGHLIGHT_QUERY,
+            cpp_combined_query,
             "",
             "",
         );
