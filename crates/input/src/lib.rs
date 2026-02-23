@@ -1,11 +1,16 @@
 // Chunk: docs/chunks/editable_buffer - Main loop + input events + editable buffer
 // Chunk: docs/chunks/terminal_input_encoding - Shared input types crate
+// Chunk: docs/chunks/pty_wakeup_reentrant - WakeupSignal trait for cross-crate PTY wakeup
 //!
 //! Input event types for keyboard, mouse, and scroll handling.
 //!
 //! These types abstract over macOS NSEvent details and provide a clean
 //! Rust-native interface for input handling. This crate is shared between
 //! the editor and terminal crates to avoid circular dependencies.
+//!
+//! Additionally, this crate provides the `WakeupSignal` trait for cross-crate
+//! PTY wakeup signaling, allowing the terminal crate to signal the editor's
+//! event loop without depending on the editor crate directly.
 
 /// A keyboard event.
 #[derive(Debug, Clone, PartialEq)]
@@ -197,6 +202,46 @@ pub enum MouseEventKind {
     Up,
     /// Mouse moved (with button held for drag)
     Moved,
+}
+
+// Chunk: docs/chunks/pty_wakeup_reentrant - WakeupSignal trait for cross-crate PTY wakeup
+/// Trait for signaling the main thread's event loop from background threads.
+///
+/// This trait allows the terminal crate to signal the editor's event loop
+/// when PTY data arrives, without depending on the editor crate directly.
+/// The editor provides an implementation that sends `EditorEvent::PtyWakeup`
+/// to the event channel.
+///
+/// # Thread Safety
+///
+/// Implementations must be `Send + Sync` so that they can be used from the
+/// PTY reader thread. The `signal()` method should be cheap and non-blocking.
+///
+/// # Example
+///
+/// ```ignore
+/// // In the editor crate:
+/// struct EventSenderSignal(mpsc::Sender<EditorEvent>);
+///
+/// impl WakeupSignal for EventSenderSignal {
+///     fn signal(&self) {
+///         let _ = self.0.send(EditorEvent::PtyWakeup);
+///         // Wake the run loop...
+///     }
+/// }
+///
+/// // In the terminal crate:
+/// fn spawn_shell(wakeup: impl WakeupSignal) {
+///     // ... reader thread calls wakeup.signal() when data arrives
+/// }
+/// ```
+pub trait WakeupSignal: Send + Sync {
+    /// Signal that PTY data is available.
+    ///
+    /// This method should be cheap and non-blocking. It's called from the
+    /// PTY reader thread whenever data arrives. The implementation should
+    /// wake the main thread's event loop to process the data.
+    fn signal(&self);
 }
 
 #[cfg(test)]

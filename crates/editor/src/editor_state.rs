@@ -7,6 +7,7 @@
 // Chunk: docs/chunks/workspace_model - Workspace model and left rail UI
 // Chunk: docs/chunks/tab_bar_interaction - Click coordinate transformation for tab switching
 // Chunk: docs/chunks/workspace_dir_picker - Directory picker for new workspaces
+// Chunk: docs/chunks/pty_wakeup_reentrant - EventSender for PTY wakeup
 //!
 //! Editor state container.
 //!
@@ -15,13 +16,14 @@
 //! focus target event handling.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Instant;
 
 use crate::buffer_target::BufferFocusTarget;
 use crate::context::EditorContext;
 use crate::dir_picker;
 use crate::dirty_region::DirtyRegion;
+// Chunk: docs/chunks/pty_wakeup_reentrant - EventSender for PTY wakeup
+use crate::event_channel::EventSender;
 use crate::focus::FocusTarget;
 use crate::font::FontMetrics;
 use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
@@ -39,6 +41,7 @@ use lite_edit_syntax::{LanguageRegistry, SyntaxTheme};
 // Chunk: docs/chunks/terminal_active_tab_safety - Terminal input encoding
 // Chunk: docs/chunks/terminal_scrollback_viewport - Terminal scroll action result
 // Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
+// Chunk: docs/chunks/pty_wakeup_reentrant - WakeupSignal trait for cross-crate PTY wakeup
 use lite_edit_terminal::{BufferView, InputEncoder, PtyWakeup, TermMode};
 
 /// Duration in milliseconds for cursor blink interval
@@ -112,10 +115,10 @@ pub struct EditorState {
     /// The buffer position from which the current search started
     /// (used as the search origin; only advances when Enter is pressed)
     pub search_origin: Position,
-    // Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
-    /// Factory for creating PTY wakeup callbacks.
-    /// Set by main.rs after controller creation.
-    pty_wakeup_factory: Option<Arc<dyn Fn() -> PtyWakeup + Send + Sync>>,
+    // Chunk: docs/chunks/pty_wakeup_reentrant - EventSender for PTY wakeup
+    /// Event sender for creating PTY wakeup handles.
+    /// Set by main.rs during setup. PtyWakeup handles signal through this sender.
+    event_sender: Option<EventSender>,
     // Chunk: docs/chunks/syntax_highlighting - Language registry for extension lookup
     /// Language registry for syntax highlighting.
     language_registry: LanguageRegistry,
@@ -298,7 +301,7 @@ impl EditorState {
             find_mini_buffer: None,
             search_origin: Position::new(0, 0),
             // Chunk: docs/chunks/terminal_pty_wakeup - Initialize wakeup factory as None
-            pty_wakeup_factory: None,
+            event_sender: None,
             // Chunk: docs/chunks/syntax_highlighting - Initialize language registry
             language_registry: LanguageRegistry::new(),
         }
@@ -343,7 +346,7 @@ impl EditorState {
             resolved_path: None,
             find_mini_buffer: None,
             search_origin: Position::new(0, 0),
-            pty_wakeup_factory: None,
+            event_sender: None,
             language_registry: LanguageRegistry::new(),
         }
     }
@@ -375,23 +378,27 @@ impl EditorState {
         &self.font_metrics
     }
 
-    // Chunk: docs/chunks/terminal_pty_wakeup - PTY wakeup factory management
-    /// Sets the factory for creating PTY wakeup handles.
+    // Chunk: docs/chunks/pty_wakeup_reentrant - EventSender for PTY wakeup
+    /// Sets the event sender for creating PTY wakeup handles.
     ///
-    /// The factory is called when spawning new terminals to create a wakeup
-    /// handle that signals the main thread when PTY data arrives.
-    pub fn set_pty_wakeup_factory(
-        &mut self,
-        factory: impl Fn() -> PtyWakeup + Send + Sync + 'static,
-    ) {
-        self.pty_wakeup_factory = Some(Arc::new(factory));
+    /// The sender is cloned when spawning new terminals to create PtyWakeup
+    /// handles that signal through the unified event queue.
+    pub fn set_event_sender(&mut self, sender: EventSender) {
+        self.event_sender = Some(sender);
     }
 
-    /// Creates a PTY wakeup handle using the registered factory.
+    // Chunk: docs/chunks/terminal_pty_wakeup - Creates PtyWakeup handle from registered EventSender
+    /// Creates a PTY wakeup handle using the stored event sender.
     ///
-    /// Returns `None` if no factory has been registered.
+    /// Returns `None` if no event sender has been set.
+    ///
+    /// The returned `PtyWakeup` will signal through the event channel when
+    /// PTY data arrives, avoiding the reentrant borrow issues of the old
+    /// global callback approach.
     pub fn create_pty_wakeup(&self) -> Option<PtyWakeup> {
-        self.pty_wakeup_factory.as_ref().map(|f| f())
+        self.event_sender.as_ref().map(|sender| {
+            PtyWakeup::with_signal(Box::new(sender.clone()))
+        })
     }
 
     /// Updates the viewport size based on window dimensions in pixels.

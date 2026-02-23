@@ -2,6 +2,7 @@
 // Chunk: docs/chunks/editable_buffer - Main loop + input events + editable buffer
 // Chunk: docs/chunks/mouse_click_cursor - Mouse click cursor positioning
 // Chunk: docs/chunks/viewport_scrolling - Scroll event handling
+// Chunk: docs/chunks/pty_wakeup_reentrant - EventSender-based event delivery
 //!
 //! Metal-backed NSView implementation
 //!
@@ -10,6 +11,14 @@
 //!
 //! The view also handles keyboard and mouse input, converting NSEvent events
 //! to our Rust-native KeyEvent and MouseEvent types.
+//!
+//! ## Event Delivery
+//!
+//! Events can be delivered in two ways:
+//! 1. **EventSender** (preferred): Events are sent through an `mpsc` channel
+//!    to the drain loop, eliminating `Rc<RefCell<>>` borrow conflicts.
+//! 2. **Closures** (legacy): Direct callback closures, kept for backward
+//!    compatibility during the transition.
 
 use std::cell::{Cell, RefCell};
 
@@ -21,6 +30,7 @@ use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSRect, NSSize};
 use objc2_metal::MTLDevice;
 use objc2_quartz_core::{CALayer, CAMetalLayer};
 
+use crate::event_channel::EventSender;
 use crate::input::{Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind, ScrollDelta};
 
 // CGFloat is a type alias for f64 on 64-bit systems
@@ -128,11 +138,14 @@ pub struct MetalViewIvars {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     /// Current backing scale factor (for retina support)
     scale_factor: Cell<CGFloat>,
-    /// Key event handler callback
+    // Chunk: docs/chunks/pty_wakeup_reentrant - EventSender for unified event queue
+    /// Event sender for the unified event queue (preferred over closures)
+    event_sender: RefCell<Option<EventSender>>,
+    /// Key event handler callback (legacy, kept for backward compatibility)
     key_handler: RefCell<Option<KeyHandler>>,
-    /// Mouse event handler callback
+    /// Mouse event handler callback (legacy, kept for backward compatibility)
     mouse_handler: RefCell<Option<MouseHandler>>,
-    /// Scroll event handler callback
+    /// Scroll event handler callback (legacy, kept for backward compatibility)
     scroll_handler: RefCell<Option<ScrollHandler>>,
     // Chunk: docs/chunks/cursor_pointer_ui_hints - Cursor regions for dynamic cursor display
     /// Cursor regions for different cursor types (pointer vs I-beam)
@@ -164,6 +177,7 @@ impl Default for MetalViewIvars {
             metal_layer,
             device,
             scale_factor: Cell::new(1.0),
+            event_sender: RefCell::new(None),
             key_handler: RefCell::new(None),
             mouse_handler: RefCell::new(None),
             scroll_handler: RefCell::new(None),
@@ -247,12 +261,20 @@ define_class!(
         }
 
         /// Handle key down events
+        // Chunk: docs/chunks/pty_wakeup_reentrant - Prefer EventSender over closure
         #[unsafe(method(keyDown:))]
         fn __key_down(&self, event: &NSEvent) {
             if let Some(key_event) = self.convert_key_event(event) {
-                let handler = self.ivars().key_handler.borrow();
-                if let Some(handler) = handler.as_ref() {
-                    handler(key_event);
+                // Prefer EventSender if available, fall back to closure handler
+                let sender = self.ivars().event_sender.borrow();
+                if let Some(sender) = sender.as_ref() {
+                    let _ = sender.send_key(key_event);
+                } else {
+                    drop(sender);
+                    let handler = self.ivars().key_handler.borrow();
+                    if let Some(handler) = handler.as_ref() {
+                        handler(key_event);
+                    }
                 }
             }
         }
@@ -265,49 +287,77 @@ define_class!(
         }
 
         // Chunk: docs/chunks/mouse_click_cursor - NSView mouseDown: override - receives macOS mouse events
+        // Chunk: docs/chunks/pty_wakeup_reentrant - Prefer EventSender over closure
         /// Handle mouse down events
         #[unsafe(method(mouseDown:))]
         fn __mouse_down(&self, event: &NSEvent) {
             if let Some(mouse_event) = self.convert_mouse_event(event, MouseEventKind::Down) {
-                let handler = self.ivars().mouse_handler.borrow();
-                if let Some(handler) = handler.as_ref() {
-                    handler(mouse_event);
+                let sender = self.ivars().event_sender.borrow();
+                if let Some(sender) = sender.as_ref() {
+                    let _ = sender.send_mouse(mouse_event);
+                } else {
+                    drop(sender);
+                    let handler = self.ivars().mouse_handler.borrow();
+                    if let Some(handler) = handler.as_ref() {
+                        handler(mouse_event);
+                    }
                 }
             }
         }
 
         // Chunk: docs/chunks/mouse_drag_selection - Mouse drag selection
+        // Chunk: docs/chunks/pty_wakeup_reentrant - Prefer EventSender over closure
         /// Handle mouse dragged events
         #[unsafe(method(mouseDragged:))]
         fn __mouse_dragged(&self, event: &NSEvent) {
             if let Some(mouse_event) = self.convert_mouse_event(event, MouseEventKind::Moved) {
-                let handler = self.ivars().mouse_handler.borrow();
-                if let Some(handler) = handler.as_ref() {
-                    handler(mouse_event);
+                let sender = self.ivars().event_sender.borrow();
+                if let Some(sender) = sender.as_ref() {
+                    let _ = sender.send_mouse(mouse_event);
+                } else {
+                    drop(sender);
+                    let handler = self.ivars().mouse_handler.borrow();
+                    if let Some(handler) = handler.as_ref() {
+                        handler(mouse_event);
+                    }
                 }
             }
         }
 
         // Chunk: docs/chunks/mouse_drag_selection - Mouse drag selection
+        // Chunk: docs/chunks/pty_wakeup_reentrant - Prefer EventSender over closure
         /// Handle mouse up events
         #[unsafe(method(mouseUp:))]
         fn __mouse_up(&self, event: &NSEvent) {
             if let Some(mouse_event) = self.convert_mouse_event(event, MouseEventKind::Up) {
-                let handler = self.ivars().mouse_handler.borrow();
-                if let Some(handler) = handler.as_ref() {
-                    handler(mouse_event);
+                let sender = self.ivars().event_sender.borrow();
+                if let Some(sender) = sender.as_ref() {
+                    let _ = sender.send_mouse(mouse_event);
+                } else {
+                    drop(sender);
+                    let handler = self.ivars().mouse_handler.borrow();
+                    if let Some(handler) = handler.as_ref() {
+                        handler(mouse_event);
+                    }
                 }
             }
         }
 
         // Chunk: docs/chunks/viewport_scrolling - macOS scrollWheel event handler
+        // Chunk: docs/chunks/pty_wakeup_reentrant - Prefer EventSender over closure
         /// Handle scroll wheel events (trackpad, mouse wheel)
         #[unsafe(method(scrollWheel:))]
         fn __scroll_wheel(&self, event: &NSEvent) {
             if let Some(scroll_delta) = self.convert_scroll_event(event) {
-                let handler = self.ivars().scroll_handler.borrow();
-                if let Some(handler) = handler.as_ref() {
-                    handler(scroll_delta);
+                let sender = self.ivars().event_sender.borrow();
+                if let Some(sender) = sender.as_ref() {
+                    let _ = sender.send_scroll(scroll_delta);
+                } else {
+                    drop(sender);
+                    let handler = self.ivars().scroll_handler.borrow();
+                    if let Some(handler) = handler.as_ref() {
+                        handler(scroll_delta);
+                    }
                 }
             }
         }
@@ -422,28 +472,50 @@ impl MetalView {
         }
     }
 
-    /// Sets the key event handler callback
+    // Chunk: docs/chunks/pty_wakeup_reentrant - EventSender replaces individual closures
+    /// Sets the event sender for unified event delivery.
+    ///
+    /// When set, all input events (key, mouse, scroll) are sent through this
+    /// sender rather than the individual handler closures. This is the preferred
+    /// approach as it eliminates `Rc<RefCell<>>` borrow conflicts.
+    ///
+    /// # Arguments
+    /// * `sender` - The EventSender to use for event delivery
+    pub fn set_event_sender(&self, sender: EventSender) {
+        *self.ivars().event_sender.borrow_mut() = Some(sender);
+    }
+
+    /// Sets the key event handler callback (legacy)
     ///
     /// The handler will be called for each keyDown event, with the
     /// NSEvent converted to our Rust-native KeyEvent type.
+    ///
+    /// Note: If an EventSender is set via `set_event_sender`, it takes
+    /// precedence over this handler.
     pub fn set_key_handler(&self, handler: impl Fn(KeyEvent) + 'static) {
         *self.ivars().key_handler.borrow_mut() = Some(Box::new(handler));
     }
 
     // Chunk: docs/chunks/mouse_click_cursor - Mouse handler callback registration (parallel to set_key_handler)
-    /// Sets the mouse event handler callback
+    /// Sets the mouse event handler callback (legacy)
     ///
     /// The handler will be called for each mouseDown event, with the
     /// NSEvent converted to our Rust-native MouseEvent type.
+    ///
+    /// Note: If an EventSender is set via `set_event_sender`, it takes
+    /// precedence over this handler.
     pub fn set_mouse_handler(&self, handler: impl Fn(MouseEvent) + 'static) {
         *self.ivars().mouse_handler.borrow_mut() = Some(Box::new(handler));
     }
 
     // Chunk: docs/chunks/viewport_scrolling - Scroll handler registration
-    /// Sets the scroll event handler callback
+    /// Sets the scroll event handler callback (legacy)
     ///
     /// The handler will be called for each scrollWheel event, with the
     /// NSEvent converted to our Rust-native ScrollDelta type.
+    ///
+    /// Note: If an EventSender is set via `set_event_sender`, it takes
+    /// precedence over this handler.
     pub fn set_scroll_handler(&self, handler: impl Fn(ScrollDelta) + 'static) {
         *self.ivars().scroll_handler.borrow_mut() = Some(Box::new(handler));
     }
