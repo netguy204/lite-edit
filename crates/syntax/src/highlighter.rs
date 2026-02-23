@@ -26,6 +26,14 @@ use std::cell::RefCell;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor, Tree};
 
+// Chunk: docs/chunks/highlight_capture_alloc - Reduce per-frame allocations in hot path
+/// A capture entry: (start_byte, end_byte, capture_index).
+///
+/// The capture_index is a `u32` used to look up the capture name from `Query::capture_names()`.
+/// This avoids allocating a `String` for each capture, eliminating hundreds of heap allocations
+/// per viewport highlight.
+type CaptureEntry = (usize, usize, u32);
+
 /// Cache for viewport highlight results.
 ///
 /// Stores highlighted lines for a specific viewport range and generation.
@@ -149,6 +157,8 @@ pub struct SyntaxHighlighter {
     /// - line_offsets[0] == 0
     /// - For i > 0: line_offsets[i] == byte index immediately after the '\n' ending line i-1
     line_offsets: Vec<usize>,
+    /// Reusable buffer for captures to avoid per-frame allocation.
+    captures_buffer: RefCell<Vec<CaptureEntry>>,
 }
 
 impl SyntaxHighlighter {
@@ -185,6 +195,7 @@ impl SyntaxHighlighter {
             generation: 0,
             cache: RefCell::new(HighlightCache::new()),
             line_offsets,
+            captures_buffer: RefCell::new(Vec::new()),
         })
     }
 
@@ -352,14 +363,17 @@ impl SyntaxHighlighter {
             .map(|(_, e)| e)
             .unwrap_or(self.source.len());
 
-        // Collect all captures in the viewport using QueryCursor
-        let captures = self.collect_captures_in_range(viewport_start, viewport_end);
+        // Collect all captures in the viewport using QueryCursor (populates captures_buffer)
+        self.collect_captures_in_range(viewport_start, viewport_end);
 
         // Build styled lines for each line in the viewport
         let mut lines = Vec::with_capacity(end_line - start_line);
-        for line_idx in start_line..end_line {
-            let styled = self.build_line_from_captures(line_idx, &captures);
-            lines.push(styled);
+        {
+            let captures = self.captures_buffer.borrow();
+            for line_idx in start_line..end_line {
+                let styled = self.build_line_from_captures(line_idx, &captures);
+                lines.push(styled);
+            }
         }
 
         // Update the cache
@@ -368,34 +382,36 @@ impl SyntaxHighlighter {
 
     /// Collects all captures in a byte range using QueryCursor.
     ///
-    /// Returns a sorted vector of (start_byte, end_byte, capture_name) tuples.
-    fn collect_captures_in_range(&self, start_byte: usize, end_byte: usize) -> Vec<(usize, usize, String)> {
+    /// Populates `self.captures_buffer` with sorted (start_byte, end_byte, capture_index) tuples.
+    /// The buffer is cleared and reused to avoid per-frame allocations.
+    fn collect_captures_in_range(&self, start_byte: usize, end_byte: usize) {
+        let mut buffer = self.captures_buffer.borrow_mut();
+        buffer.clear();
+
         let mut cursor = QueryCursor::new();
         cursor.set_byte_range(start_byte..end_byte);
 
         let source_bytes = self.source.as_bytes();
         let root_node = self.tree.root_node();
 
-        let mut captures: Vec<(usize, usize, String)> = Vec::new();
-
         // Use StreamingIterator to iterate over captures
         let mut captures_iter = cursor.captures(&self.query, root_node, source_bytes);
         while let Some((mat, capture_idx)) = captures_iter.next() {
             let capture = &mat.captures[*capture_idx];
             let node = capture.node;
-            if let Some(name) = self.query.capture_names().get(capture.index as usize) {
-                captures.push((node.start_byte(), node.end_byte(), (*name).to_string()));
-            }
+            // Store capture.index (u32) instead of allocating a String
+            buffer.push((node.start_byte(), node.end_byte(), capture.index));
         }
 
         // Sort by start position (captures may not be in order)
-        captures.sort_by_key(|(start, _, _)| *start);
-
-        captures
+        buffer.sort_by_key(|(start, _, _)| *start);
     }
 
     /// Builds a StyledLine for a specific line from pre-collected captures.
-    fn build_line_from_captures(&self, line_idx: usize, captures: &[(usize, usize, String)]) -> StyledLine {
+    ///
+    /// Uses binary search to find the first relevant capture, reducing per-line
+    /// iteration from O(total_captures) to O(overlapping_captures + log(total_captures)).
+    fn build_line_from_captures(&self, line_idx: usize, captures: &[CaptureEntry]) -> StyledLine {
         let (line_start, line_end) = match self.line_byte_range(line_idx) {
             Some(range) => range,
             None => return StyledLine::empty(),
@@ -406,15 +422,19 @@ impl SyntaxHighlighter {
             return StyledLine::empty();
         }
 
+        // Binary search to find first capture that could overlap this line.
+        // A capture at (cap_start, cap_end) overlaps if cap_end > line_start.
+        let first_relevant = captures.partition_point(|(_, cap_end, _)| *cap_end <= line_start);
+
         // Find captures that overlap with this line
         let mut spans = Vec::new();
         let mut covered_until = line_start;
 
-        // Filter captures that overlap this line
-        for (cap_start, cap_end, cap_name) in captures {
-            // Skip captures entirely before or after our line
-            if *cap_end <= line_start || *cap_start >= line_end {
-                continue;
+        // Iterate only from the first relevant capture
+        for (cap_start, cap_end, cap_idx) in &captures[first_relevant..] {
+            // Early exit: captures are sorted by start, so once start >= line_end, no more overlap
+            if *cap_start >= line_end {
+                break;
             }
 
             // Clamp to line boundaries
@@ -436,11 +456,15 @@ impl SyntaxHighlighter {
                 }
             }
 
-            // Add this capture with its style
+            // Add this capture with its style (resolve capture name lazily)
             let capture_text = &self.source[actual_start..actual_end];
             if !capture_text.is_empty() {
-                if let Some(style) = self.theme.style_for_capture(cap_name) {
-                    spans.push(Span::new(capture_text, *style));
+                if let Some(cap_name) = self.query.capture_names().get(*cap_idx as usize) {
+                    if let Some(style) = self.theme.style_for_capture(cap_name) {
+                        spans.push(Span::new(capture_text, *style));
+                    } else {
+                        spans.push(Span::plain(capture_text));
+                    }
                 } else {
                     spans.push(Span::plain(capture_text));
                 }
@@ -469,15 +493,17 @@ impl SyntaxHighlighter {
 
     /// Builds a StyledLine from QueryCursor for a single line.
     fn build_styled_line_from_query(&self, line_text: &str, line_start: usize, line_end: usize) -> StyledLine {
-        let captures = self.collect_captures_in_range(line_start, line_end);
+        // Collect captures into the reusable buffer
+        self.collect_captures_in_range(line_start, line_end);
+        let captures = self.captures_buffer.borrow();
 
         let mut spans = Vec::new();
         let mut covered_until = line_start;
 
-        for (cap_start, cap_end, cap_name) in captures {
+        for (cap_start, cap_end, cap_idx) in captures.iter() {
             // Clamp to line boundaries
-            let actual_start = cap_start.max(line_start);
-            let actual_end = cap_end.min(line_end);
+            let actual_start = (*cap_start).max(line_start);
+            let actual_end = (*cap_end).min(line_end);
 
             // Skip captures that overlap with already-covered bytes
             // (tree-sitter can return multiple captures for the same node)
@@ -494,11 +520,15 @@ impl SyntaxHighlighter {
                 }
             }
 
-            // Add capture with style
+            // Add capture with style (resolve capture name lazily)
             let capture_text = &self.source[actual_start..actual_end];
             if !capture_text.is_empty() {
-                if let Some(style) = self.theme.style_for_capture(&cap_name) {
-                    spans.push(Span::new(capture_text, *style));
+                if let Some(cap_name) = self.query.capture_names().get(*cap_idx as usize) {
+                    if let Some(style) = self.theme.style_for_capture(cap_name) {
+                        spans.push(Span::new(capture_text, *style));
+                    } else {
+                        spans.push(Span::plain(capture_text));
+                    }
                 } else {
                     spans.push(Span::plain(capture_text));
                 }

@@ -1,18 +1,21 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/syntax/src/highlighter.rs
 code_references: []
 narrative: null
 investigation: scroll_perf_deep
 subsystems: []
 friction_entries: []
 bug_type: null
-depends_on: ["highlight_line_offset_index"]
-created_after: ["welcome_screen", "syntax_highlight_perf"]
+depends_on:
+- highlight_line_offset_index
+created_after:
+- welcome_screen
+- syntax_highlight_perf
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
