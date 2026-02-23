@@ -81,7 +81,8 @@ use objc2_foundation::{
     NSRunLoop, NSSize, NSString, NSTimer,
 };
 
-use lite_edit_buffer::TextBuffer;
+// TextBuffer no longer needed in main.rs - EditorState::new_deferred() handles buffer creation
+// use lite_edit_buffer::TextBuffer;
 // Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
 use lite_edit_terminal::{set_global_wakeup_callback, PtyWakeup};
 
@@ -625,8 +626,49 @@ impl AppDelegate {
         unsafe { msg_send![super(this), init] }
     }
 
+    // Chunk: docs/chunks/startup_workspace_dialog - Resolve startup directory from CLI or dialog
+    /// Resolves the startup directory for the initial workspace.
+    ///
+    /// This function implements the startup directory resolution logic:
+    /// 1. If a directory argument is provided on the command line, use it
+    /// 2. Otherwise, show the NSOpenPanel directory picker
+    /// 3. Return None if the user cancels the picker (and no CLI arg was provided)
+    ///
+    /// For CLI argument validation: if a path is provided but doesn't exist or
+    /// isn't a directory, falls back to showing the picker (graceful degradation).
+    fn resolve_startup_directory(&self) -> Option<std::path::PathBuf> {
+        // Check for command-line argument (first arg after program name)
+        if let Some(arg) = std::env::args().nth(1) {
+            let path = std::path::PathBuf::from(&arg);
+            // Validate: must exist and be a directory
+            if path.is_dir() {
+                return Some(path);
+            }
+            // Invalid path, fall through to show picker
+            // (graceful degradation rather than error)
+        }
+
+        // No valid CLI argument, show directory picker
+        dir_picker::pick_directory()
+    }
+
     /// Sets up the main window with Metal rendering
+    // Chunk: docs/chunks/startup_workspace_dialog - Directory selection before window creation
     fn setup_window(&self, mtm: MainThreadMarker) {
+        // Chunk: docs/chunks/startup_workspace_dialog - Resolve directory before creating window
+        // Resolve the startup directory BEFORE creating any window/view/resources.
+        // This prevents the FileIndex from ever being initialized with `/` or any
+        // unexpectedly broad directory when launched from Finder/Spotlight.
+        let startup_dir = match self.resolve_startup_directory() {
+            Some(dir) => dir,
+            None => {
+                // User cancelled the directory picker, terminate gracefully
+                let app = NSApplication::sharedApplication(mtm);
+                app.terminate(None);
+                return;
+            }
+        };
+
         // Create window with standard editor dimensions
         let content_rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1000.0, 700.0));
 
@@ -669,12 +711,11 @@ impl AppDelegate {
         // Get font metrics from the renderer
         let font_metrics = renderer.font_metrics();
 
-        // Chunk: docs/chunks/welcome_screen_startup - Initialize with empty buffer
-        // Create an empty buffer to show welcome screen on startup
-        let buffer = TextBuffer::new();
-
-        // Create the editor state with font metrics
-        let mut state = EditorState::new(buffer, font_metrics);
+        // Chunk: docs/chunks/startup_workspace_dialog - Deferred editor state creation
+        // Create the editor state with deferred initialization (no workspace yet),
+        // then add the startup workspace with the user-selected directory.
+        let mut state = EditorState::new_deferred(font_metrics);
+        state.add_startup_workspace(startup_dir);
 
         // Update viewport size based on window dimensions
         let frame = metal_view.frame();
