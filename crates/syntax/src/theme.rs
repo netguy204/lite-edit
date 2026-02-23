@@ -292,6 +292,50 @@ impl SyntaxTheme {
             },
         );
 
+        // Markdown-specific captures
+        // Headings - Mauve (bold)
+        styles.insert(
+            "text.title",
+            Style {
+                fg: catppuccin::MAUVE,
+                bold: true,
+                ..Style::default()
+            },
+        );
+        // Inline code - Green
+        styles.insert(
+            "text.literal",
+            Style {
+                fg: catppuccin::GREEN,
+                ..Style::default()
+            },
+        );
+        // URIs / links - Blue with underline
+        styles.insert(
+            "text.uri",
+            Style {
+                fg: catppuccin::BLUE,
+                underline: lite_edit_buffer::UnderlineStyle::Single,
+                ..Style::default()
+            },
+        );
+        // Link references - Lavender
+        styles.insert(
+            "text.reference",
+            Style {
+                fg: catppuccin::LAVENDER,
+                ..Style::default()
+            },
+        );
+        // Markdown punctuation (# for headings, ``` for code fences, etc.) - Subtext0
+        styles.insert(
+            "punctuation.special",
+            Style {
+                fg: catppuccin::SUBTEXT0,
+                ..Style::default()
+            },
+        );
+
         // Build the ordered capture names list
         // This order matters for tree-sitter-highlight - more specific names first
         let capture_names = vec![
@@ -312,7 +356,12 @@ impl SyntaxTheme {
             "property",
             "punctuation.bracket",
             "punctuation.delimiter",
+            "punctuation.special",
             "string",
+            "text.literal",
+            "text.reference",
+            "text.title",
+            "text.uri",
             "type.builtin",
             "type",
             "variable.builtin",
