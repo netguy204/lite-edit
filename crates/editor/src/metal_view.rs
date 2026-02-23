@@ -527,10 +527,16 @@ impl MetalView {
         })
     }
 
+    /// Default line height for mouse wheel scroll conversion.
+    /// Mouse wheel events report line-based deltas; we convert to pixels
+    /// using this constant. Matches typical editor line heights.
+    const DEFAULT_LINE_HEIGHT_PX: f64 = 20.0;
+
     /// Converts an NSEvent scroll wheel event to our ScrollDelta type
     ///
     // Chunk: docs/chunks/viewport_scrolling - NSEvent to ScrollDelta conversion
     // Chunk: docs/chunks/pane_hover_scroll - Extract mouse position for hover-scroll targeting
+    // Chunk: docs/chunks/scroll_wheel_speed - Mouse wheel vs trackpad delta handling
     /// macOS scroll wheel events provide delta values in points. For trackpads
     /// with "natural scrolling" enabled (the default), scrolling down (content
     /// moves up) produces positive deltaY values.
@@ -541,12 +547,37 @@ impl MetalView {
     ///
     /// The mouse position at the time of the scroll event is also captured to
     /// enable hover-scroll behavior in multi-pane layouts.
+    ///
+    /// ## Device-specific handling
+    ///
+    /// macOS distinguishes between precise (trackpad) and non-precise (mouse wheel)
+    /// scroll events via `hasPreciseScrollingDeltas()`:
+    /// - **Trackpad**: Returns `true`, deltas are pixel-level (e.g., 15.3, -8.7)
+    /// - **Mouse wheel**: Returns `false`, deltas are line-based (e.g., 1.0, -3.0)
+    ///
+    /// For mouse wheel events, we multiply by `DEFAULT_LINE_HEIGHT_PX` to convert
+    /// line-based deltas to pixel-based deltas, matching typical editor behavior
+    /// (approximately one line of text per tick).
     fn convert_scroll_event(&self, event: &NSEvent) -> Option<ScrollDelta> {
         // NSEvent scrolling delta methods
         // scrollingDeltaX/Y return CGFloat (f64 on 64-bit)
         // These are "precise" deltas that work with trackpads and mice
-        let dx = event.scrollingDeltaX();
-        let dy = event.scrollingDeltaY();
+        let raw_dx = event.scrollingDeltaX();
+        let raw_dy = event.scrollingDeltaY();
+
+        // Check if this is a precise (trackpad) or non-precise (mouse wheel) event
+        // For mouse wheel events, multiply by line height to convert from line-based
+        // to pixel-based deltas
+        let (dx, dy) = if event.hasPreciseScrollingDeltas() {
+            // Trackpad: use deltas as-is (already in pixels)
+            (raw_dx, raw_dy)
+        } else {
+            // Mouse wheel: convert line-based deltas to pixels
+            (
+                raw_dx * Self::DEFAULT_LINE_HEIGHT_PX,
+                raw_dy * Self::DEFAULT_LINE_HEIGHT_PX,
+            )
+        };
 
         // Skip events with no scroll delta
         if dx == 0.0 && dy == 0.0 {

@@ -1,177 +1,103 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk fixes slow mouse wheel scrolling by distinguishing between trackpad (precise, pixel-level) and mouse wheel (line-based) scroll deltas in `convert_scroll_event()`. The fix is localized to `metal_view.rs`, keeping all downstream scroll handlers device-agnostic.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Strategy:**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+The root cause is that `convert_scroll_event()` uses the raw `scrollingDeltaX()`/`scrollingDeltaY()` values for all input devices. These methods return:
+- **Trackpad**: Precise pixel deltas (e.g., 15.3, -8.7) — already in the units scroll consumers expect
+- **Mouse wheel**: Line-based deltas (e.g., 1.0, -3.0) — need conversion to pixel deltas
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/scroll_wheel_speed/GOAL.md)
-with references to the files that you expect to touch.
--->
+The fix checks `NSEvent::hasPreciseScrollingDeltas()`:
+- When `true` (trackpad): Use deltas as-is (current behavior preserved)
+- When `false` (mouse wheel): Multiply deltas by a line height constant to convert line-counts to pixels
+
+This is the same approach used by other macOS editors (VS Code, Sublime Text, etc.) and follows [Apple's documentation](https://developer.apple.com/documentation/appkit/nsevent/hasprecisescrollingdeltas) which explicitly describes this pattern.
+
+**Line height constant:**
+
+The `MetalView` doesn't have access to font metrics. Rather than adding complexity to pass metrics through, we use a constant `DEFAULT_LINE_HEIGHT_PX = 20.0`. This matches the project's typical line height (tests use 16.0, production fonts are slightly larger) and provides ~1 line of scroll per mouse wheel tick, matching typical editor behavior.
+
+**Testing approach per TESTING_PHILOSOPHY.md:**
+
+The `convert_scroll_event()` method is platform code that operates on `NSEvent` objects, which cannot be easily constructed in tests. Per the testing philosophy, we:
+1. Keep the logic simple and self-evidently correct (a single conditional with multiplication)
+2. Verify behavior through manual testing with both mouse and trackpad
+3. Document the visual verification in the plan
+
+This follows the "humble view" principle — the platform integration is thin, and the scroll arithmetic is already well-tested in `RowScroller`.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+- **docs/subsystems/viewport_scroll** (DOCUMENTED): This chunk USES the viewport scroll subsystem. The `ScrollDelta` type and scroll consumers (`set_scroll_offset_px`, etc.) are part of this subsystem. This chunk does not modify subsystem code — it only ensures that `ScrollDelta.dy` values arriving from mouse wheel events are in the correct units (pixels) that the subsystem expects.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/0001-validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/0002-error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/0001-validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No deviations discovered. The change is fully compatible with the subsystem's contract that scroll deltas are in pixels.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add hasPreciseScrollingDeltas check in convert_scroll_event
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Modify `convert_scroll_event()` in `crates/editor/src/metal_view.rs` to:
 
-Example:
+1. Call `event.hasPreciseScrollingDeltas()` to distinguish input device type
+2. When `false` (mouse wheel), multiply `dx` and `dy` by `DEFAULT_LINE_HEIGHT_PX` (20.0)
+3. When `true` (trackpad), use deltas unchanged (current behavior)
 
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+Add a constant at the top of the impl block:
+```rust
+/// Default line height for mouse wheel scroll conversion.
+/// Mouse wheel events report line-based deltas; we convert to pixels
+/// using this constant. Matches typical editor line heights.
+const DEFAULT_LINE_HEIGHT_PX: f64 = 20.0;
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Add a chunk backreference to the modified method:
+```rust
+// Chunk: docs/chunks/scroll_wheel_speed - Mouse wheel vs trackpad delta handling
+```
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+**Location:** `crates/editor/src/metal_view.rs#MetalView::convert_scroll_event`
 
-## Dependencies
+### Step 2: Update GOAL.md code_paths
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+Add `crates/editor/src/metal_view.rs` to the `code_paths` field in GOAL.md.
 
-If there are no dependencies, delete this section.
--->
+**Location:** `docs/chunks/scroll_wheel_speed/GOAL.md`
+
+### Step 3: Visual verification
+
+Verify the fix manually with both input devices:
+
+1. **Mouse wheel test:**
+   - Open the editor with a long file (100+ lines)
+   - Scroll using a mouse wheel
+   - Verify: Each tick scrolls approximately one line (not 1-3 pixels as before)
+   - Verify: Scrolling feels responsive, similar to VS Code/Sublime Text
+
+2. **Trackpad test:**
+   - Scroll using trackpad with natural scrolling enabled
+   - Verify: Smooth, pixel-precise scrolling unchanged from previous behavior
+   - Verify: Momentum scrolling works naturally
+
+3. **Mixed usage test:**
+   - Alternate between mouse wheel and trackpad
+   - Verify: Both devices work correctly without confusion or state leakage
+
+4. **Selector/picker test:**
+   - Open the file picker (Cmd-P)
+   - Scroll the results list with mouse wheel and trackpad
+   - Verify: Both input devices work correctly
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Line height mismatch**: Using a fixed 20.0px constant may feel slightly off if the user has configured a different font size. This is an acceptable tradeoff — the scroll experience will be "approximately right" rather than pixel-perfect, and 20px is a reasonable default. A future enhancement could pass actual line height to the view layer if needed.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Mouse DPI variance**: Different mice have different scroll wheel sensitivities at the hardware level. macOS normalizes this somewhat, but very high-DPI mice might scroll faster. The 1-line-per-tick target is a reasonable baseline.
+
+3. **Horizontal scrolling**: The fix also applies to `dx` for horizontal scrolling. This is correct behavior — horizontal scrolling with a mouse tilt-wheel should also be scaled. However, most text editors don't support horizontal scrolling, so this code path may not be exercised.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- POPULATE DURING IMPLEMENTATION -->
