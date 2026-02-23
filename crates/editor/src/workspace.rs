@@ -12,6 +12,7 @@
 
 use std::path::PathBuf;
 
+use crate::pane_layout::{gen_pane_id, Pane, PaneId, PaneLayoutNode};
 use crate::viewport::Viewport;
 use lite_edit_buffer::{BufferView, TextBuffer};
 use lite_edit_syntax::{LanguageRegistry, SyntaxHighlighter, SyntaxTheme};
@@ -445,10 +446,15 @@ impl std::fmt::Debug for Tab {
 // =============================================================================
 
 // Chunk: docs/chunks/content_tab_bar - Owns tab list and tab_bar_view_offset for horizontal scroll
-/// A workspace containing multiple tabs.
+// Chunk: docs/chunks/tiling_workspace_integration - Pane tree integration
+/// A workspace containing panes with tabs.
 ///
 /// Each workspace represents an independent working context (e.g., a worktree,
 /// an agent session, or a standalone editing environment).
+///
+/// The workspace uses a binary pane layout tree to organize tabs. With a single pane
+/// (no splits), the editor behaves identically to a flat tab list. Splits create
+/// additional panes for tiling window manager-style layouts.
 pub struct Workspace {
     /// Unique identifier for this workspace
     pub id: WorkspaceId,
@@ -456,10 +462,17 @@ pub struct Workspace {
     pub label: String,
     /// The root path for this workspace (typically the worktree root)
     pub root_path: PathBuf,
-    /// The tabs in this workspace
-    pub tabs: Vec<Tab>,
-    /// Index of the currently active tab
-    pub active_tab: usize,
+    /// The pane layout tree containing all panes and tabs.
+    ///
+    /// Initially a single `Leaf` node. Splits create `Split` nodes that
+    /// divide space between two children.
+    pub pane_root: PaneLayoutNode,
+    /// The ID of the currently active pane.
+    ///
+    /// All tab operations delegate to this pane.
+    pub active_pane_id: PaneId,
+    /// Counter for generating unique pane IDs within this workspace.
+    next_pane_id: u64,
     /// Status indicator for the left rail
     pub status: WorkspaceStatus,
     /// The agent running in this workspace (if any).
@@ -467,98 +480,149 @@ pub struct Workspace {
     /// When an agent is attached, its terminal is accessible via `agent_terminal()`.
     /// The first tab is typically an `AgentTerminal` placeholder that renders from here.
     pub agent: Option<AgentHandle>,
-    // Chunk: docs/chunks/content_tab_bar - Tab bar scrolling
-    /// Horizontal scroll offset for tab bar overflow (in pixels)
-    pub tab_bar_view_offset: f32,
 }
 
 impl Workspace {
     /// Creates a new workspace with no tabs.
+    ///
+    /// The workspace is initialized with a single empty pane (a `Leaf` node).
     pub fn new(id: WorkspaceId, label: String, root_path: PathBuf) -> Self {
+        let mut next_pane_id = 0u64;
+        let pane_id = gen_pane_id(&mut next_pane_id);
+        let pane = Pane::new(pane_id, id);
+
         Self {
             id,
             label,
             root_path,
-            tabs: Vec::new(),
-            active_tab: 0,
+            pane_root: PaneLayoutNode::single_pane(pane),
+            active_pane_id: pane_id,
+            next_pane_id,
             status: WorkspaceStatus::Idle,
             agent: None,
-            tab_bar_view_offset: 0.0,
         }
     }
 
     /// Creates a new workspace with a single empty tab.
+    ///
+    /// The workspace is initialized with a single pane containing one empty file tab.
     pub fn with_empty_tab(id: WorkspaceId, tab_id: TabId, label: String, root_path: PathBuf, line_height: f32) -> Self {
+        let mut ws = Self::new(id, label, root_path);
         let tab = Tab::empty_file(tab_id, line_height);
-        Self {
-            id,
-            label,
-            root_path,
-            tabs: vec![tab],
-            active_tab: 0,
-            status: WorkspaceStatus::Idle,
-            agent: None,
-            tab_bar_view_offset: 0.0,
+        // Add to the active pane
+        if let Some(pane) = ws.pane_root.get_pane_mut(ws.active_pane_id) {
+            pane.add_tab(tab);
+        }
+        ws
+    }
+
+    /// Generates a new unique pane ID.
+    pub fn gen_pane_id(&mut self) -> PaneId {
+        gen_pane_id(&mut self.next_pane_id)
+    }
+
+    // =========================================================================
+    // Pane accessors (Chunk: docs/chunks/tiling_workspace_integration)
+    // =========================================================================
+
+    /// Returns a reference to the active pane.
+    pub fn active_pane(&self) -> Option<&Pane> {
+        self.pane_root.get_pane(self.active_pane_id)
+    }
+
+    /// Returns a mutable reference to the active pane.
+    pub fn active_pane_mut(&mut self) -> Option<&mut Pane> {
+        self.pane_root.get_pane_mut(self.active_pane_id)
+    }
+
+    /// Returns a flat list of all panes in this workspace.
+    pub fn all_panes(&self) -> Vec<&Pane> {
+        self.pane_root.all_panes()
+    }
+
+    /// Returns a flat list of mutable references to all panes in this workspace.
+    pub fn all_panes_mut(&mut self) -> Vec<&mut Pane> {
+        self.pane_root.all_panes_mut()
+    }
+
+    // =========================================================================
+    // Tab operations - delegate to active pane
+    // =========================================================================
+
+    /// Adds a tab to the active pane.
+    pub fn add_tab(&mut self, tab: Tab) {
+        if let Some(pane) = self.active_pane_mut() {
+            pane.add_tab(tab);
         }
     }
 
-    /// Adds a tab to the workspace.
-    pub fn add_tab(&mut self, tab: Tab) {
-        self.tabs.push(tab);
-        // Optionally switch to the new tab
-        self.active_tab = self.tabs.len() - 1;
-    }
-
-    /// Closes a tab at the given index, returning the removed tab.
+    /// Closes a tab at the given index in the active pane, returning the removed tab.
     ///
     /// Returns `None` if the index is out of bounds.
     /// After closing, the active tab is adjusted to remain valid.
     pub fn close_tab(&mut self, index: usize) -> Option<Tab> {
-        if index >= self.tabs.len() {
-            return None;
-        }
-
-        let removed = self.tabs.remove(index);
-
-        // Adjust active_tab to remain valid
-        if !self.tabs.is_empty() {
-            if self.active_tab >= self.tabs.len() {
-                self.active_tab = self.tabs.len() - 1;
-            } else if self.active_tab > index {
-                self.active_tab = self.active_tab.saturating_sub(1);
-            }
-        } else {
-            self.active_tab = 0;
-        }
-
-        Some(removed)
+        self.active_pane_mut()?.close_tab(index)
     }
 
-    /// Returns a reference to the active tab, if any.
+    /// Returns a reference to the active tab in the active pane, if any.
     pub fn active_tab(&self) -> Option<&Tab> {
-        self.tabs.get(self.active_tab)
+        self.active_pane()?.active_tab()
     }
 
-    /// Returns a mutable reference to the active tab, if any.
+    /// Returns a mutable reference to the active tab in the active pane, if any.
     pub fn active_tab_mut(&mut self) -> Option<&mut Tab> {
-        self.tabs.get_mut(self.active_tab)
+        self.active_pane_mut()?.active_tab_mut()
     }
 
-    /// Switches to the tab at the given index.
+    /// Switches to the tab at the given index in the active pane.
     ///
     /// Does nothing if the index is out of bounds. When switching to a new tab,
     /// clears its unread state.
     pub fn switch_tab(&mut self, index: usize) {
-        if index < self.tabs.len() {
-            self.active_tab = index;
-            // Chunk: docs/chunks/content_tab_bar - Clear unread when switching tabs
-            self.tabs[index].clear_unread();
+        if let Some(pane) = self.active_pane_mut() {
+            pane.switch_tab(index);
         }
     }
 
-    /// Returns the number of tabs in this workspace.
+    /// Returns the number of tabs in the active pane.
+    ///
+    /// For the total tab count across all panes, use `total_tab_count()`.
     pub fn tab_count(&self) -> usize {
-        self.tabs.len()
+        self.active_pane().map(|p| p.tab_count()).unwrap_or(0)
+    }
+
+    /// Returns the total number of tabs across all panes in this workspace.
+    pub fn total_tab_count(&self) -> usize {
+        self.pane_root.all_panes().iter().map(|p| p.tab_count()).sum()
+    }
+
+    /// Returns the tabs in the active pane.
+    ///
+    /// This provides compatibility with code that expects a flat tab list.
+    /// For multi-pane access, use `active_pane()` or `all_panes()`.
+    pub fn tabs(&self) -> &[Tab] {
+        self.active_pane().map(|p| p.tabs.as_slice()).unwrap_or(&[])
+    }
+
+    /// Returns the active tab index in the active pane.
+    ///
+    /// This provides compatibility with code that expects a flat tab list.
+    pub fn active_tab_index(&self) -> usize {
+        self.active_pane().map(|p| p.active_tab).unwrap_or(0)
+    }
+
+    /// Returns the tab bar view offset for the active pane.
+    ///
+    /// This provides compatibility with code that uses workspace-level tab bar offset.
+    pub fn tab_bar_view_offset(&self) -> f32 {
+        self.active_pane().map(|p| p.tab_bar_view_offset).unwrap_or(0.0)
+    }
+
+    /// Sets the tab bar view offset for the active pane.
+    pub fn set_tab_bar_view_offset(&mut self, offset: f32) {
+        if let Some(pane) = self.active_pane_mut() {
+            pane.tab_bar_view_offset = offset;
+        }
     }
 
     // =========================================================================
@@ -599,8 +663,8 @@ impl Workspace {
 
     /// Launches an agent in this workspace.
     ///
-    /// Creates an `AgentHandle` and adds an `AgentTerminal` tab as the first tab.
-    /// The agent terminal is pinned (always at index 0).
+    /// Creates an `AgentHandle` and adds an `AgentTerminal` tab as the first tab
+    /// in the active pane. The agent terminal is pinned (always at index 0).
     ///
     /// # Arguments
     ///
@@ -634,16 +698,16 @@ impl Workspace {
         // Create the agent tab
         let agent_tab = Tab::new_agent(tab_id, "Agent".to_string(), line_height);
 
-        // Insert at the beginning (pinned position)
-        self.tabs.insert(0, agent_tab);
-
-        // Adjust active_tab index if needed
-        if !self.tabs.is_empty() && self.active_tab > 0 {
-            self.active_tab += 1;
+        // Insert at the beginning (pinned position) in the active pane
+        if let Some(pane) = self.active_pane_mut() {
+            // Adjust active_tab index if needed
+            if !pane.tabs.is_empty() && pane.active_tab > 0 {
+                pane.active_tab += 1;
+            }
+            pane.tabs.insert(0, agent_tab);
+            // Switch to the agent tab
+            pane.active_tab = 0;
         }
-
-        // Switch to the agent tab
-        self.active_tab = 0;
 
         // Store the agent handle
         self.agent = Some(agent);
@@ -703,7 +767,8 @@ impl Workspace {
 
     // Chunk: docs/chunks/terminal_tab_spawn - Poll standalone terminals
     // Chunk: docs/chunks/terminal_scrollback_viewport - Auto-follow on new output
-    /// Polls PTY events for all standalone terminal tabs.
+    // Chunk: docs/chunks/tiling_workspace_integration - Iterate all panes
+    /// Polls PTY events for all standalone terminal tabs across all panes.
     ///
     /// This method also handles auto-follow behavior: when the viewport is at
     /// the bottom before polling, new output will advance the viewport to keep
@@ -714,26 +779,28 @@ impl Workspace {
         use lite_edit_buffer::BufferView;
 
         let mut had_events = false;
-        for tab in &mut self.tabs {
-            if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
-                // Track if we're at bottom before polling (for auto-follow)
-                // Also track if we're in alt screen (no auto-follow in alt screen)
-                let was_at_bottom = viewport.is_at_bottom(terminal.line_count());
-                let was_alt_screen = terminal.is_alt_screen();
+        for pane in self.pane_root.all_panes_mut() {
+            for tab in &mut pane.tabs {
+                if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
+                    // Track if we're at bottom before polling (for auto-follow)
+                    // Also track if we're in alt screen (no auto-follow in alt screen)
+                    let was_at_bottom = viewport.is_at_bottom(terminal.line_count());
+                    let was_alt_screen = terminal.is_alt_screen();
 
-                if terminal.poll_events() {
-                    had_events = true;
+                    if terminal.poll_events() {
+                        had_events = true;
 
-                    // Auto-follow behavior: if we were at bottom and in primary screen,
-                    // advance the viewport to show new content
-                    let now_alt_screen = terminal.is_alt_screen();
+                        // Auto-follow behavior: if we were at bottom and in primary screen,
+                        // advance the viewport to show new content
+                        let now_alt_screen = terminal.is_alt_screen();
 
-                    // Handle mode transition: alt -> primary means snap to bottom
-                    if was_alt_screen && !now_alt_screen {
-                        viewport.scroll_to_bottom(terminal.line_count());
-                    } else if !now_alt_screen && was_at_bottom {
-                        // Primary screen auto-follow
-                        viewport.scroll_to_bottom(terminal.line_count());
+                        // Handle mode transition: alt -> primary means snap to bottom
+                        if was_alt_screen && !now_alt_screen {
+                            viewport.scroll_to_bottom(terminal.line_count());
+                        } else if !now_alt_screen && was_at_bottom {
+                            // Primary screen auto-follow
+                            viewport.scroll_to_bottom(terminal.line_count());
+                        }
                     }
                 }
             }
@@ -748,8 +815,8 @@ impl std::fmt::Debug for Workspace {
             .field("id", &self.id)
             .field("label", &self.label)
             .field("root_path", &self.root_path)
-            .field("tabs", &self.tabs)
-            .field("active_tab", &self.active_tab)
+            .field("pane_count", &self.pane_root.pane_count())
+            .field("active_pane_id", &self.active_pane_id)
             .field("status", &self.status)
             .field("agent", &self.agent.as_ref().map(|a| a.state()))
             .finish()
@@ -1021,7 +1088,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Workspace Tests
+    // Workspace Tests (Chunk: docs/chunks/tiling_workspace_integration)
     // =========================================================================
 
     #[test]
@@ -1031,7 +1098,9 @@ mod tests {
         assert_eq!(ws.id, 1);
         assert_eq!(ws.label, "test");
         assert_eq!(ws.root_path, PathBuf::from("/test"));
-        assert!(ws.tabs.is_empty());
+        // Empty pane has no tabs, but pane exists
+        assert_eq!(ws.pane_root.pane_count(), 1);
+        assert_eq!(ws.tab_count(), 0);
         assert_eq!(ws.status, WorkspaceStatus::Idle);
     }
 
@@ -1039,8 +1108,8 @@ mod tests {
     fn test_workspace_with_empty_tab() {
         let ws = Workspace::with_empty_tab(1, 1, "test".to_string(), PathBuf::from("/test"), TEST_LINE_HEIGHT);
 
-        assert_eq!(ws.tabs.len(), 1);
-        assert_eq!(ws.active_tab, 0);
+        assert_eq!(ws.tab_count(), 1);
+        assert_eq!(ws.active_tab_index(), 0);
         assert!(ws.active_tab().is_some());
     }
 
@@ -1051,8 +1120,8 @@ mod tests {
 
         ws.add_tab(tab);
 
-        assert_eq!(ws.tabs.len(), 1);
-        assert_eq!(ws.active_tab, 0);
+        assert_eq!(ws.tab_count(), 1);
+        assert_eq!(ws.active_tab_index(), 0);
     }
 
     #[test]
@@ -1061,13 +1130,13 @@ mod tests {
         let tab2 = Tab::empty_file(2, TEST_LINE_HEIGHT);
         ws.add_tab(tab2);
 
-        assert_eq!(ws.tabs.len(), 2);
-        assert_eq!(ws.active_tab, 1); // add_tab switches to new tab
+        assert_eq!(ws.tab_count(), 2);
+        assert_eq!(ws.active_tab_index(), 1); // add_tab switches to new tab
 
         let removed = ws.close_tab(1);
         assert!(removed.is_some());
-        assert_eq!(ws.tabs.len(), 1);
-        assert_eq!(ws.active_tab, 0);
+        assert_eq!(ws.tab_count(), 1);
+        assert_eq!(ws.active_tab_index(), 0);
     }
 
     #[test]
@@ -1080,7 +1149,7 @@ mod tests {
         // Close the second tab (index 1)
         ws.close_tab(1);
         // Active should still point to the last tab (now index 1)
-        assert_eq!(ws.active_tab, 1);
+        assert_eq!(ws.active_tab_index(), 1);
     }
 
     #[test]
@@ -1089,7 +1158,7 @@ mod tests {
         ws.add_tab(Tab::empty_file(2, TEST_LINE_HEIGHT));
         ws.switch_tab(0);
 
-        assert_eq!(ws.active_tab, 0);
+        assert_eq!(ws.active_tab_index(), 0);
     }
 
     #[test]
@@ -1097,7 +1166,7 @@ mod tests {
         let mut ws = Workspace::with_empty_tab(1, 1, "test".to_string(), PathBuf::from("/test"), TEST_LINE_HEIGHT);
         ws.switch_tab(10); // Out of bounds
 
-        assert_eq!(ws.active_tab, 0); // Unchanged
+        assert_eq!(ws.active_tab_index(), 0); // Unchanged
     }
 
     // =========================================================================
@@ -1119,7 +1188,7 @@ mod tests {
         let ws = editor.active_workspace().unwrap();
 
         assert_eq!(ws.label, "untitled");
-        assert_eq!(ws.tabs.len(), 1);
+        assert_eq!(ws.tab_count(), 1);
     }
 
     #[test]
@@ -1246,8 +1315,8 @@ mod tests {
         ws.switch_tab(0);
 
         // Now switch to the second tab - its unread state should clear
-        assert!(ws.tabs[1].unread); // Still unread before switch
+        assert!(ws.tabs()[1].unread); // Still unread before switch
         ws.switch_tab(1);
-        assert!(!ws.tabs[1].unread); // Cleared after switch
+        assert!(!ws.tabs()[1].unread); // Cleared after switch
     }
 }

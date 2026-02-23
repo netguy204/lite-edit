@@ -1600,7 +1600,7 @@ impl Renderer {
             None => return,
         };
 
-        if workspace.tabs.is_empty() {
+        if workspace.tab_count() == 0 {
             return;
         }
 
@@ -1614,7 +1614,7 @@ impl Renderer {
         let tabs = tabs_from_workspace(workspace);
 
         // Calculate tab bar geometry with scroll offset
-        let geometry = calculate_tab_bar_geometry(view_width, &tabs, glyph_width, workspace.tab_bar_view_offset);
+        let geometry = calculate_tab_bar_geometry(view_width, &tabs, glyph_width, workspace.tab_bar_view_offset());
 
         // Ensure tab bar buffer is initialized
         if self.tab_bar_buffer.is_none() {

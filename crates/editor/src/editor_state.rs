@@ -127,16 +127,21 @@ pub struct EditorState {
 // Delegate accessors for backward compatibility
 // =============================================================================
 
+// Chunk: docs/chunks/tiling_workspace_integration - Resolve through pane tree
 impl EditorState {
     /// Returns a reference to the active tab's buffer.
     ///
+    /// The resolution chain is: active_workspace → active_pane → active_tab → buffer.
+    ///
     /// # Panics
-    /// Panics if there is no active workspace or active tab (should never happen
-    /// as EditorState always creates at least one workspace with one tab).
+    /// Panics if there is no active workspace, active pane, or active tab (should never happen
+    /// as EditorState always creates at least one workspace with one pane and one tab).
     pub fn buffer(&self) -> &TextBuffer {
         self.editor
             .active_workspace()
             .expect("no active workspace")
+            .active_pane()
+            .expect("no active pane")
             .active_tab()
             .expect("no active tab")
             .as_text_buffer()
@@ -146,11 +151,13 @@ impl EditorState {
     /// Returns a mutable reference to the active tab's buffer.
     ///
     /// # Panics
-    /// Panics if there is no active workspace or active tab.
+    /// Panics if there is no active workspace, active pane, or active tab.
     pub fn buffer_mut(&mut self) -> &mut TextBuffer {
         self.editor
             .active_workspace_mut()
             .expect("no active workspace")
+            .active_pane_mut()
+            .expect("no active pane")
             .active_tab_mut()
             .expect("no active tab")
             .as_text_buffer_mut()
@@ -165,7 +172,8 @@ impl EditorState {
     pub fn try_buffer(&self) -> Option<&TextBuffer> {
         self.editor
             .active_workspace()
-            .and_then(|ws| ws.active_tab())
+            .and_then(|ws| ws.active_pane())
+            .and_then(|pane| pane.active_tab())
             .and_then(|tab| tab.as_text_buffer())
     }
 
@@ -176,7 +184,8 @@ impl EditorState {
     pub fn try_buffer_mut(&mut self) -> Option<&mut TextBuffer> {
         self.editor
             .active_workspace_mut()
-            .and_then(|ws| ws.active_tab_mut())
+            .and_then(|ws| ws.active_pane_mut())
+            .and_then(|pane| pane.active_tab_mut())
             .and_then(|tab| tab.as_text_buffer_mut())
     }
 
@@ -191,11 +200,13 @@ impl EditorState {
     /// Returns a reference to the active tab's viewport.
     ///
     /// # Panics
-    /// Panics if there is no active workspace or active tab.
+    /// Panics if there is no active workspace, active pane, or active tab.
     pub fn viewport(&self) -> &Viewport {
         &self.editor
             .active_workspace()
             .expect("no active workspace")
+            .active_pane()
+            .expect("no active pane")
             .active_tab()
             .expect("no active tab")
             .viewport
@@ -204,11 +215,13 @@ impl EditorState {
     /// Returns a mutable reference to the active tab's viewport.
     ///
     /// # Panics
-    /// Panics if there is no active workspace or active tab.
+    /// Panics if there is no active workspace, active pane, or active tab.
     pub fn viewport_mut(&mut self) -> &mut Viewport {
         &mut self.editor
             .active_workspace_mut()
             .expect("no active workspace")
+            .active_pane_mut()
+            .expect("no active pane")
             .active_tab_mut()
             .expect("no active tab")
             .viewport
@@ -218,17 +231,19 @@ impl EditorState {
     pub fn associated_file(&self) -> Option<&PathBuf> {
         self.editor
             .active_workspace()
-            .and_then(|ws| ws.active_tab())
+            .and_then(|ws| ws.active_pane())
+            .and_then(|pane| pane.active_tab())
             .and_then(|tab| tab.associated_file.as_ref())
     }
 
     /// Sets the associated file for the active tab.
     fn set_associated_file(&mut self, path: Option<PathBuf>) {
-        if let Some(tab) = self.editor
-            .active_workspace_mut()
-            .and_then(|ws| ws.active_tab_mut())
-        {
-            tab.associated_file = path;
+        if let Some(ws) = self.editor.active_workspace_mut() {
+            if let Some(pane) = ws.active_pane_mut() {
+                if let Some(tab) = pane.active_tab_mut() {
+                    tab.associated_file = path;
+                }
+            }
         }
     }
 }
@@ -371,6 +386,7 @@ impl EditorState {
     /// Skips syncing for non-file tabs (e.g., terminals) which don't have
     /// a `TextBuffer` and use a different rendering path.
     // Chunk: docs/chunks/tab_click_cursor_placement - Viewport sync on tab activation
+    // Chunk: docs/chunks/tiling_workspace_integration - Resolve through pane tree
     fn sync_active_tab_viewport(&mut self) {
         // Skip if view_height hasn't been set yet (initial state before first resize)
         let view_height = self.view_height;
@@ -381,7 +397,8 @@ impl EditorState {
         // Get the line count from the active tab's text buffer, if it exists.
         // Terminal tabs don't have a TextBuffer, so we skip viewport sync for them.
         let line_count = match self.editor.active_workspace()
-            .and_then(|ws| ws.active_tab())
+            .and_then(|ws| ws.active_pane())
+            .and_then(|pane| pane.active_tab())
             .and_then(|tab| tab.as_text_buffer())
         {
             Some(buf) => buf.line_count(),
@@ -2005,21 +2022,23 @@ impl EditorState {
     // Tab Management (Chunk: docs/chunks/content_tab_bar)
     // =========================================================================
 
-    /// Switches to the tab at the given index in the active workspace.
+    /// Switches to the tab at the given index in the active pane.
     ///
     /// Does nothing if the index is out of bounds or if it's the current tab.
     // Chunk: docs/chunks/content_tab_bar - Switch active tab; clears unread badge
     // Chunk: docs/chunks/tab_bar_interaction - Click-to-switch tab activation
     // Chunk: docs/chunks/tab_click_cursor_placement - Sync viewport on tab switch
+    // Chunk: docs/chunks/tiling_workspace_integration - Resolve through pane tree
     pub fn switch_tab(&mut self, index: usize) {
         let switched = if let Some(workspace) = self.editor.active_workspace_mut() {
-            if index < workspace.tabs.len() && index != workspace.active_tab {
-                workspace.switch_tab(index);
-                // Clear unread badge when switching to a tab
-                if let Some(tab) = workspace.tabs.get_mut(index) {
-                    tab.unread = false;
+            if let Some(pane) = workspace.active_pane_mut() {
+                if index < pane.tabs.len() && index != pane.active_tab {
+                    pane.switch_tab(index);
+                    // switch_tab already clears unread badge
+                    true
+                } else {
+                    false
                 }
-                true
             } else {
                 false
             }
@@ -2029,74 +2048,92 @@ impl EditorState {
 
         if switched {
             // Sync viewport to ensure dirty region calculations work correctly
-            // (must be done after workspace.switch_tab so active_tab is updated)
+            // (must be done after pane.switch_tab so active_tab is updated)
             self.sync_active_tab_viewport();
             self.dirty_region.merge(DirtyRegion::FullViewport);
         }
     }
 
-    /// Closes the tab at the given index in the active workspace.
+    /// Closes the tab at the given index in the active pane.
     ///
-    /// If this is the last tab, creates a new empty tab instead of closing.
+    /// If this is the last tab in the last pane, creates a new empty tab instead of closing.
     // Chunk: docs/chunks/content_tab_bar - Close tab with dirty-buffer guard (Cmd+W)
+    // Chunk: docs/chunks/tiling_workspace_integration - Resolve through pane tree
     pub fn close_tab(&mut self, index: usize) {
+        // Pre-compute values needed for fallback before borrowing workspace mutably
+        let tab_id = self.editor.gen_tab_id();
+        let line_height = self.editor.line_height();
+
         if let Some(workspace) = self.editor.active_workspace_mut() {
-            // Guard: don't close dirty tabs (confirmation UI is future work)
-            if let Some(tab) = workspace.tabs.get(index) {
-                if tab.dirty {
-                    return;
+            let pane_count = workspace.pane_root.pane_count();
+
+            if let Some(pane) = workspace.active_pane_mut() {
+                // Guard: don't close dirty tabs (confirmation UI is future work)
+                if let Some(tab) = pane.tabs.get(index) {
+                    if tab.dirty {
+                        return;
+                    }
                 }
-            }
-            if workspace.tabs.len() > 1 {
-                workspace.close_tab(index);
-            } else {
-                // Create a new empty tab and close the old one
-                let tab_id = self.editor.gen_tab_id();
-                let line_height = self.editor.line_height();
-                let new_tab = crate::workspace::Tab::empty_file(tab_id, line_height);
-                if let Some(workspace) = self.editor.active_workspace_mut() {
-                    workspace.tabs[0] = new_tab;
-                    workspace.active_tab = 0;
+
+                if pane.tabs.len() > 1 || pane_count > 1 {
+                    // Close the tab normally
+                    pane.close_tab(index);
+                    // TODO: If pane is now empty and there are multiple panes,
+                    // cleanup empty panes. For now, leave empty panes.
+                } else {
+                    // Single tab in single pane: replace with empty tab
+                    let new_tab = crate::workspace::Tab::empty_file(tab_id, line_height);
+                    pane.tabs[0] = new_tab;
+                    pane.active_tab = 0;
                 }
             }
             self.dirty_region.merge(DirtyRegion::FullViewport);
         }
     }
 
-    /// Closes the active tab in the active workspace.
+    /// Closes the active tab in the active pane.
+    // Chunk: docs/chunks/tiling_workspace_integration - Resolve through pane tree
     pub fn close_active_tab(&mut self) {
-        if let Some(workspace) = self.editor.active_workspace() {
-            let active = workspace.active_tab;
-            self.close_tab(active);
-        }
+        let active_tab_index = self.editor
+            .active_workspace()
+            .and_then(|ws| ws.active_pane())
+            .map(|pane| pane.active_tab)
+            .unwrap_or(0);
+        self.close_tab(active_tab_index);
     }
 
-    /// Cycles to the next tab in the active workspace.
+    /// Cycles to the next tab in the active pane.
     ///
     /// Wraps around from the last tab to the first.
     /// Does nothing if there's only one tab.
+    // Chunk: docs/chunks/tiling_workspace_integration - Resolve through pane tree
     pub fn next_tab(&mut self) {
         if let Some(workspace) = self.editor.active_workspace() {
-            if workspace.tabs.len() > 1 {
-                let next = (workspace.active_tab + 1) % workspace.tabs.len();
-                self.switch_tab(next);
+            if let Some(pane) = workspace.active_pane() {
+                if pane.tabs.len() > 1 {
+                    let next = (pane.active_tab + 1) % pane.tabs.len();
+                    self.switch_tab(next);
+                }
             }
         }
     }
 
-    /// Cycles to the previous tab in the active workspace.
+    /// Cycles to the previous tab in the active pane.
     ///
     /// Wraps around from the first tab to the last.
     /// Does nothing if there's only one tab.
+    // Chunk: docs/chunks/tiling_workspace_integration - Resolve through pane tree
     pub fn prev_tab(&mut self) {
         if let Some(workspace) = self.editor.active_workspace() {
-            if workspace.tabs.len() > 1 {
-                let prev = if workspace.active_tab == 0 {
-                    workspace.tabs.len() - 1
-                } else {
-                    workspace.active_tab - 1
-                };
-                self.switch_tab(prev);
+            if let Some(pane) = workspace.active_pane() {
+                if pane.tabs.len() > 1 {
+                    let prev = if pane.active_tab == 0 {
+                        pane.tabs.len() - 1
+                    } else {
+                        pane.active_tab - 1
+                    };
+                    self.switch_tab(prev);
+                }
             }
         }
     }
@@ -2125,15 +2162,22 @@ impl EditorState {
     }
 
     // Chunk: docs/chunks/terminal_tab_spawn - Cmd+Shift+T terminal spawning
+    // Chunk: docs/chunks/tiling_workspace_integration - Count terminals across all panes
 
-    /// Counts existing terminal tabs in the active workspace.
+    /// Counts existing terminal tabs in the active workspace (across all panes).
     ///
     /// Returns 0 if no workspace is active.
     fn terminal_tab_count(&self) -> usize {
         use crate::workspace::TabKind;
         self.editor
             .active_workspace()
-            .map(|ws| ws.tabs.iter().filter(|t| t.kind == TabKind::Terminal).count())
+            .map(|ws| {
+                ws.all_panes()
+                    .iter()
+                    .flat_map(|pane| pane.tabs.iter())
+                    .filter(|t| t.kind == TabKind::Terminal)
+                    .count()
+            })
             .unwrap_or(0)
     }
 
@@ -2239,13 +2283,12 @@ impl EditorState {
     /// Positive delta scrolls right (reveals more tabs to the right),
     /// negative delta scrolls left (reveals more tabs to the left).
     // Chunk: docs/chunks/content_tab_bar - Horizontal tab bar scroll and auto-scroll to active tab
+    // Chunk: docs/chunks/tiling_workspace_integration - Use pane's tab_bar_view_offset
     pub fn scroll_tab_bar(&mut self, delta: f32) {
         if let Some(workspace) = self.editor.active_workspace_mut() {
-            workspace.tab_bar_view_offset += delta;
-            // Clamp to valid range (minimum 0)
-            if workspace.tab_bar_view_offset < 0.0 {
-                workspace.tab_bar_view_offset = 0.0;
-            }
+            let current_offset = workspace.tab_bar_view_offset();
+            let new_offset = (current_offset + delta).max(0.0);
+            workspace.set_tab_bar_view_offset(new_offset);
             self.dirty_region.merge(DirtyRegion::FullViewport);
         }
     }
@@ -2254,19 +2297,22 @@ impl EditorState {
     ///
     /// If the active tab is scrolled out of view, adjusts the scroll offset
     /// to bring it into view.
+    // Chunk: docs/chunks/tiling_workspace_integration - Use pane's tab_bar_view_offset
     pub fn ensure_active_tab_visible(&mut self) {
         if let Some(workspace) = self.editor.active_workspace() {
             let tabs = tabs_from_workspace(workspace);
             let glyph_width = self.font_metrics.advance_width as f32;
+            let tab_bar_offset = workspace.tab_bar_view_offset();
+            let active_tab_index = workspace.active_tab_index();
             let geometry = calculate_tab_bar_geometry(
                 self.view_width,
                 &tabs,
                 glyph_width,
-                workspace.tab_bar_view_offset,
+                tab_bar_offset,
             );
 
             // Check if active tab is visible
-            if let Some(active_rect) = geometry.tab_rects.get(workspace.active_tab) {
+            if let Some(active_rect) = geometry.tab_rects.get(active_tab_index) {
                 let visible_start = RAIL_WIDTH;
                 let visible_end = self.view_width;
 
@@ -2274,10 +2320,8 @@ impl EditorState {
                 if active_rect.x < visible_start {
                     let scroll_amount = visible_start - active_rect.x;
                     if let Some(workspace) = self.editor.active_workspace_mut() {
-                        workspace.tab_bar_view_offset -= scroll_amount;
-                        if workspace.tab_bar_view_offset < 0.0 {
-                            workspace.tab_bar_view_offset = 0.0;
-                        }
+                        let new_offset = (workspace.tab_bar_view_offset() - scroll_amount).max(0.0);
+                        workspace.set_tab_bar_view_offset(new_offset);
                     }
                 }
 
@@ -2286,7 +2330,8 @@ impl EditorState {
                 if tab_right > visible_end {
                     let scroll_amount = tab_right - visible_end;
                     if let Some(workspace) = self.editor.active_workspace_mut() {
-                        workspace.tab_bar_view_offset += scroll_amount;
+                        let new_offset = workspace.tab_bar_view_offset() + scroll_amount;
+                        workspace.set_tab_bar_view_offset(new_offset);
                     }
                 }
             }
@@ -2297,6 +2342,7 @@ impl EditorState {
     ///
     // Chunk: docs/chunks/content_tab_bar - Click-to-switch and close-button hit testing
     // Chunk: docs/chunks/tab_bar_interaction - Tab click coordinate transformation
+    // Chunk: docs/chunks/tiling_workspace_integration - Use pane's tab_bar_view_offset
     /// Determines which tab was clicked and switches to it, or handles
     /// close button clicks.
     ///
@@ -2311,7 +2357,7 @@ impl EditorState {
                 self.view_width,
                 &tabs,
                 glyph_width,
-                workspace.tab_bar_view_offset,
+                workspace.tab_bar_view_offset(),
             );
 
             // Transform y from NSView coords to tab bar local coords
@@ -4375,12 +4421,12 @@ mod tests {
         }
 
         // Should have 2 tabs, active_tab is 1 (switched to new tab on add)
-        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 2);
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 1);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 2);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 1);
 
         // Switch to first tab
         state.switch_tab(0);
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 0);
         assert!(state.is_dirty());
     }
 
@@ -4390,14 +4436,14 @@ mod tests {
         state.update_viewport_size(160.0);
 
         // Only 1 tab exists
-        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 1);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 0);
 
         // Try to switch to invalid index
         let _ = state.take_dirty_region();
         state.switch_tab(5);
 
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 0);
         assert!(!state.is_dirty()); // No change, no dirty
     }
 
@@ -4413,12 +4459,12 @@ mod tests {
             let tab = crate::workspace::Tab::empty_file(tab_id, line_height);
             state.editor.active_workspace_mut().unwrap().add_tab(tab);
         }
-        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 2);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 2);
 
         // Close the first tab
         state.close_tab(0);
 
-        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 1);
         assert!(state.is_dirty());
     }
 
@@ -4428,14 +4474,14 @@ mod tests {
         state.update_viewport_size(160.0);
 
         // Only 1 tab exists
-        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 1);
 
         // Close the only tab - should create a new empty one
         state.close_tab(0);
 
         // Should still have 1 tab (new empty one)
-        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 1);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 0);
     }
 
     #[test]
@@ -4451,22 +4497,22 @@ mod tests {
             state.editor.active_workspace_mut().unwrap().add_tab(tab);
         }
         // Now have 3 tabs, active is 2 (last added)
-        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 3);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 3);
 
         // Switch to first tab
         state.switch_tab(0);
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 0);
 
         // Next tab
         state.next_tab();
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 1);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 1);
 
         state.next_tab();
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 2);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 2);
 
         // Wrap around
         state.next_tab();
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 0);
     }
 
     #[test]
@@ -4482,19 +4528,19 @@ mod tests {
             state.editor.active_workspace_mut().unwrap().add_tab(tab);
         }
         // Now have 3 tabs, active is 2 (last added)
-        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 3);
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 2);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 3);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 2);
 
         // Previous tab
         state.prev_tab();
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 1);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 1);
 
         state.prev_tab();
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 0);
 
         // Wrap around
         state.prev_tab();
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 2);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 2);
     }
 
     #[test]
@@ -4503,14 +4549,14 @@ mod tests {
         state.update_viewport_size(160.0);
 
         // Only 1 tab
-        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 1);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 0);
 
         let _ = state.take_dirty_region();
         state.next_tab();
 
         // Should remain unchanged
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 0);
         assert!(!state.is_dirty());
     }
 
@@ -4526,7 +4572,7 @@ mod tests {
             let tab = crate::workspace::Tab::empty_file(tab_id, line_height);
             state.editor.active_workspace_mut().unwrap().add_tab(tab);
         }
-        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 2);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 2);
 
         // Cmd+W closes the active tab
         let cmd_w = KeyEvent::new(
@@ -4538,7 +4584,7 @@ mod tests {
         );
         state.handle_key(cmd_w);
 
-        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 1);
     }
 
     #[test]
@@ -4555,7 +4601,7 @@ mod tests {
         }
         // Switch to first tab
         state.switch_tab(0);
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 0);
 
         // Cmd+Shift+] cycles to next tab
         let cmd_shift_bracket = KeyEvent::new(
@@ -4568,7 +4614,7 @@ mod tests {
         );
         state.handle_key(cmd_shift_bracket);
 
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 1);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 1);
     }
 
     #[test]
@@ -4584,7 +4630,7 @@ mod tests {
             state.editor.active_workspace_mut().unwrap().add_tab(tab);
         }
         // Active tab is 1 (new tab)
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 1);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 1);
 
         // Cmd+Shift+[ cycles to previous tab
         let cmd_shift_bracket = KeyEvent::new(
@@ -4597,7 +4643,7 @@ mod tests {
         );
         state.handle_key(cmd_shift_bracket);
 
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 0);
     }
 
     #[test]
@@ -4612,14 +4658,14 @@ mod tests {
             let tab = crate::workspace::Tab::empty_file(tab_id, line_height);
             state.editor.active_workspace_mut().unwrap().add_tab(tab);
         }
-        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 2);
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 1);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 2);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 1);
 
         // Close active tab
         state.close_active_tab();
 
-        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 1);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 0);
     }
 
     // =========================================================================
@@ -4632,8 +4678,8 @@ mod tests {
         state.update_viewport_size(160.0);
 
         // Initially one tab
-        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 1);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 0);
 
         // Cmd+T creates a new tab
         let cmd_t = KeyEvent::new(
@@ -4646,8 +4692,8 @@ mod tests {
         state.handle_key(cmd_t);
 
         // Should have 2 tabs, active tab is 1 (switched to new tab)
-        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 2);
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 1);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 2);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 1);
     }
 
     #[test]
@@ -4673,6 +4719,7 @@ mod tests {
     // Cmd+Shift+T Terminal Tab Tests (Chunk: docs/chunks/terminal_tab_spawn)
     // =========================================================================
 
+    // Chunk: docs/chunks/tiling_workspace_integration - Use pane API
     #[test]
     fn test_cmd_shift_t_creates_terminal_tab() {
         use crate::workspace::TabKind;
@@ -4685,7 +4732,7 @@ mod tests {
 
         // Initially one tab (the empty file tab)
         let workspace = state.editor.active_workspace().unwrap();
-        assert_eq!(workspace.tabs.len(), 1);
+        assert_eq!(workspace.tab_count(), 1);
 
         // Cmd+Shift+T should create a new terminal tab
         let cmd_shift_t = KeyEvent::new(
@@ -4700,10 +4747,10 @@ mod tests {
 
         // Should now have 2 tabs
         let workspace = state.editor.active_workspace().unwrap();
-        assert_eq!(workspace.tabs.len(), 2);
+        assert_eq!(workspace.tab_count(), 2);
 
         // The active tab should be the new terminal tab (index 1)
-        assert_eq!(workspace.active_tab, 1);
+        assert_eq!(workspace.active_tab_index(), 1);
 
         // The new tab should be a Terminal type
         let active_tab = workspace.active_tab().unwrap();
@@ -4722,7 +4769,7 @@ mod tests {
         state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
 
         // Initially one tab
-        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 1);
 
         let cmd_shift_t = KeyEvent::new(
             Key::Char('t'),
@@ -4739,11 +4786,11 @@ mod tests {
 
         // Should have 3 tabs (1 file + 2 terminals)
         let workspace = state.editor.active_workspace().unwrap();
-        assert_eq!(workspace.tabs.len(), 3);
+        assert_eq!(workspace.tab_count(), 3);
 
         // Find the terminal tabs and check their labels
         let terminal_tabs: Vec<_> = workspace
-            .tabs
+            .tabs()
             .iter()
             .filter(|t| t.kind == TabKind::Terminal)
             .collect();
@@ -4777,7 +4824,7 @@ mod tests {
         // The original file tab's buffer should still be empty
         // (Note: active tab is now the terminal, so we need to check the first tab)
         let workspace = state.editor.active_workspace().unwrap();
-        let file_tab = &workspace.tabs[0];
+        let file_tab = &workspace.tabs()[0];
         let buffer = file_tab.as_text_buffer().unwrap();
         assert!(buffer.is_empty());
     }
@@ -4787,12 +4834,12 @@ mod tests {
         let mut state = EditorState::empty(test_font_metrics());
         state.update_viewport_size(160.0);
 
-        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 1);
 
         state.new_tab();
 
-        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 2);
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 1);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 2);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 1);
     }
 
     #[test]
@@ -4952,8 +4999,8 @@ mod tests {
         }
 
         // Should have 2 tabs, active_tab is 1 (switched to new tab on add)
-        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 2);
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 1);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 2);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 1);
 
         // Clear dirty state
         let _ = state.take_dirty_region();
@@ -4977,7 +5024,7 @@ mod tests {
 
         // Should have switched to tab 0
         assert_eq!(
-            state.editor.active_workspace().unwrap().active_tab,
+            state.editor.active_workspace().unwrap().active_tab_index(),
             0,
             "Clicking on first tab should switch to tab 0"
         );
@@ -4995,8 +5042,8 @@ mod tests {
         state.update_viewport_size(320.0);
 
         // Only 1 tab exists, and it's active
-        assert_eq!(state.editor.active_workspace().unwrap().tabs.len(), 1);
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 1);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 0);
 
         // Clear dirty state
         let _ = state.take_dirty_region();
@@ -5014,7 +5061,7 @@ mod tests {
         state.handle_mouse(click_event);
 
         // Should still be on tab 0
-        assert_eq!(state.editor.active_workspace().unwrap().active_tab, 0);
+        assert_eq!(state.editor.active_workspace().unwrap().active_tab_index(), 0);
         // Switching to the same tab shouldn't mark dirty
         assert!(!state.is_dirty(), "Clicking active tab should not mark dirty");
     }
@@ -5042,7 +5089,7 @@ mod tests {
             state.view_width,
             &tabs,
             glyph_width,
-            workspace.tab_bar_view_offset,
+            workspace.tab_bar_view_offset(),
         );
 
         // Each tab_rect.tab_index should match its position
