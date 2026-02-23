@@ -9,8 +9,7 @@ investigation: null
 subsystems: []
 friction_entries: []
 bug_type: null
-depends_on:
-- clipboard_operations
+depends_on: []
 created_after: ["pty_wakeup_reentrant", "terminal_shell_env"]
 ---
 
