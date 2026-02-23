@@ -8,170 +8,254 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The current architecture uses `Rc<RefCell<EditorController>>` shared across 5 event sources (key, mouse, scroll, PTY wakeup, blink timer), each holding a clone and calling `borrow_mut()` independently. This creates reentrant borrow panics when `dispatch_async` delivers PTY wakeup callbacks while the controller is already borrowed (e.g., during workspace open which triggers modal dialogs).
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The solution is to replace the callback-borrows-controller pattern with a **unified event queue** and a **CFRunLoopSource** drain mechanism:
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. **Introduce `EditorEvent` enum** — all event types (`Key`, `Mouse`, `Scroll`, `PtyWakeup`, `CursorBlink`, `Resize`) flow through a single channel
+2. **Single ownership of `EditorController`** — the drain callback owns the controller directly (plain struct, no `Rc`, no `RefCell`), processing events one at a time
+3. **CFRunLoopSource for event delivery** — when events arrive (from any source), signal the source to wake the run loop and drain the channel
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/pty_wakeup_reentrant/GOAL.md)
-with references to the files that you expect to touch.
--->
+This eliminates `RefCell` entirely by ensuring the controller is only accessed from one code path: the drain loop. The `mpsc` channel is the synchronization boundary — background threads (PTY reader) send events, and the main thread drains them in the single run loop callback.
+
+### Key Design Decisions
+
+- **Use `std::sync::mpsc` channel**: The PTY reader thread is the only background producer. `mpsc::Sender` is `Send` but `mpsc::Receiver` is not — this is exactly what we want. The receiver stays on the main thread.
+- **CFRunLoopSource instead of dispatch_async**: The current PTY wakeup uses `dispatch_async(main_queue, callback)`, which delivers callbacks via a separate code path that races with event handlers. `CFRunLoopSource` integrates with `NSRunLoop` more cleanly — we signal the source and the run loop wakes and calls our drain callback, which has exclusive access to the controller.
+- **Debouncing preserved**: Multiple rapid PTY outputs coalesce naturally because we drain the entire channel before rendering once. No need for explicit debounce logic.
+
+### Pattern Alignment
+
+This follows the drain-all-then-render pattern documented in the `editor_core_architecture` investigation:
+
+```
+loop {
+    // Drain all events from the channel
+    while let Ok(event) = channel.try_recv() {
+        process_event(event, &mut controller);
+    }
+    // Render once if dirty
+    if controller.state.is_dirty() {
+        controller.render_if_dirty();
+    }
+    // NSRunLoop sleeps until next event or timer
+}
+```
+
+The difference from the current architecture is that **all** event sources now use this pattern, not just keyboard events. The blink timer, PTY wakeup, and resize events all send to the channel rather than calling `borrow_mut()` directly.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/0001-validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/0002-error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/0001-validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems are directly relevant to this refactoring. The `viewport_scroll` subsystem (`docs/subsystems/viewport_scroll`) is touched by this chunk in that scroll events flow through the new channel, but the scroll handling logic itself doesn't change — only the delivery mechanism does.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Define the EditorEvent enum
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create a new file `crates/editor/src/editor_event.rs` with:
 
-Example:
-
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+pub enum EditorEvent {
+    Key(KeyEvent),
+    Mouse(MouseEvent),
+    Scroll(ScrollDelta),
+    PtyWakeup,
+    CursorBlink,
+    Resize,
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+This is the unified event type that all sources will send.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+**Location**: `crates/editor/src/editor_event.rs` (new file)
+
+### Step 2: Create the event channel module
+
+Create `crates/editor/src/event_channel.rs` with:
+
+- `EventSender` — a wrapper around `mpsc::Sender<EditorEvent>` that is `Clone + Send`
+- `EventReceiver` — a wrapper around `mpsc::Receiver<EditorEvent>` that is `!Send` (main thread only)
+- `create_event_channel()` function that returns `(EventSender, EventReceiver)`
+
+The sender wrapper should provide typed convenience methods: `send_key(KeyEvent)`, `send_mouse(MouseEvent)`, `send_pty_wakeup()`, etc.
+
+**Location**: `crates/editor/src/event_channel.rs` (new file)
+
+### Step 3: Implement CFRunLoopSource wrapper
+
+Create `crates/editor/src/runloop_source.rs` with:
+
+- `RunLoopSource` struct wrapping a `CFRunLoopSourceRef`
+- Constructor that takes a callback closure
+- `signal()` method that calls `CFRunLoopSourceSignal` + `CFRunLoopWakeUp`
+- Proper `Drop` implementation to invalidate and release the source
+
+The callback will be invoked by the run loop when signaled. It should drain the event channel and process events.
+
+Note: Use `objc2-core-foundation` bindings for `CFRunLoopSourceRef`, `CFRunLoopGetCurrent`, `CFRunLoopAddSource`, `CFRunLoopSourceSignal`, `CFRunLoopWakeUp`.
+
+**Location**: `crates/editor/src/runloop_source.rs` (new file)
+
+### Step 4: Create EventDrainLoop structure
+
+Create `crates/editor/src/drain_loop.rs` with:
+
+- `EventDrainLoop` struct that owns:
+  - `EditorController` (directly, no Rc/RefCell)
+  - `EventReceiver`
+  - `RunLoopSource`
+- `process_pending_events(&mut self)` method that drains the channel and processes each event
+- Methods to handle each event type (delegating to controller methods)
+
+This is the single point of access to the controller. No other code will touch it directly.
+
+**Location**: `crates/editor/src/drain_loop.rs` (new file)
+
+### Step 5: Update MetalView to use EventSender
+
+Modify `crates/editor/src/metal_view.rs`:
+
+- Replace `key_handler: RefCell<Option<Box<dyn Fn(KeyEvent)>>>` with `key_sender: RefCell<Option<EventSender>>`
+- Same for `mouse_handler` and `scroll_handler`
+- The `set_key_handler` method becomes `set_event_sender`
+- NSView callbacks (`keyDown`, `mouseDown`, `scrollWheel`) now call `sender.send_key(event)` etc.
+
+This eliminates the closure-holds-Rc pattern from the view.
+
+**Location**: `crates/editor/src/metal_view.rs`
+
+### Step 6: Update PtyWakeup to use EventSender
+
+Modify `crates/terminal/src/pty_wakeup.rs`:
+
+- Change `PtyWakeup` to hold an `EventSender` (or a trait object for cross-crate use)
+- The `signal()` method now calls `sender.send_pty_wakeup()` instead of `dispatch_async`
+- Remove the global callback pattern (`WAKEUP_CALLBACK` static, `set_global_wakeup_callback`)
+
+This requires updating the PTY spawning path to pass an `EventSender` instead of registering a global callback.
+
+**Location**: `crates/terminal/src/pty_wakeup.rs`, `crates/terminal/src/lib.rs`
+
+### Step 7: Update blink timer to use EventSender
+
+Modify `crates/editor/src/main.rs`:
+
+- The blink timer callback now calls `sender.send_blink()` instead of `controller.borrow_mut().toggle_cursor_blink()`
+- The timer holds an `EventSender`, not an `Rc<RefCell<EditorController>>`
+
+**Location**: `crates/editor/src/main.rs`
+
+### Step 8: Update window delegate to use EventSender
+
+Modify `crates/editor/src/main.rs`:
+
+- `windowDidResize:` and `windowDidChangeBackingProperties:` now call `sender.send_resize()` instead of `controller.try_borrow_mut().handle_resize()`
+- The delegate holds an `EventSender`, not a reference to the controller
+
+**Location**: `crates/editor/src/main.rs`
+
+### Step 9: Refactor AppDelegate and main() to use EventDrainLoop
+
+Major refactoring of `crates/editor/src/main.rs`:
+
+1. Create the event channel in `setup_window`
+2. Create `EditorController` directly (not wrapped in Rc/RefCell)
+3. Create `EventDrainLoop` owning the controller and receiver
+4. Create `RunLoopSource` with callback that calls `drain_loop.process_pending_events()`
+5. Store `EventSender` in `AppDelegateIvars` for use by window delegate methods
+6. Pass `EventSender` clone to MetalView, blink timer, and PTY wakeup factory
+
+Remove:
+- `PTY_WAKEUP_CONTROLLER` thread local
+- `handle_pty_wakeup_global` function
+- All `Rc<RefCell<EditorController>>` usage
+- All `borrow_mut()` and `try_borrow_mut()` calls on the controller
+
+**Location**: `crates/editor/src/main.rs`
+
+### Step 10: Update EditorState PTY wakeup factory
+
+Modify `crates/editor/src/editor_state.rs`:
+
+- Change `pty_wakeup_factory` from `Option<Arc<dyn Fn() -> PtyWakeup + Send + Sync>>` to `Option<EventSender>`
+- `create_pty_wakeup()` now creates a `PtyWakeup` from the stored sender
+- Update terminal spawning to use the new pattern
+
+**Location**: `crates/editor/src/editor_state.rs`
+
+### Step 11: Write integration tests for the event flow
+
+Create tests that verify:
+1. Key events sent via `EventSender` are received and processed
+2. PTY wakeup events trigger `poll_agents` and render
+3. Multiple rapid events are batched (drain-all-then-render)
+4. Concurrent PTY output and keyboard input don't cause panics
+
+These tests will need to mock or stub the MetalView/renderer since they require a window.
+
+**Location**: `crates/editor/tests/event_channel_integration.rs` (new file)
+
+### Step 12: Clean up and remove dead code
+
+- Remove `crates/terminal/src/pty_wakeup.rs` global callback infrastructure
+- Remove `set_global_wakeup_callback` from public API
+- Update `crates/terminal/tests/wakeup_integration.rs` to use new pattern
+- Update any documentation that references the old pattern
+
+**Location**: Multiple files
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+### External Libraries
 
-If there are no dependencies, delete this section.
--->
+May need to add or verify:
+- `objc2-core-foundation` — for CFRunLoopSource APIs
+
+Check `crates/editor/Cargo.toml` for existing CF bindings. The project already uses `objc2-foundation` which may include some CF types.
+
+### Internal Dependencies
+
+- Parent chunk `terminal_pty_wakeup` — this chunk supersedes its implementation but keeps its concept (PTY reader signals main thread)
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+### CFRunLoopSource callback lifetime
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+The drain callback needs to reference the `EventDrainLoop` which owns the controller. We'll likely need to store the drain loop in a `Box::leak` or use raw pointers since CFRunLoopSource callbacks use void* context. Careful about lifetimes.
+
+**Mitigation**: The drain loop lives for the application lifetime. We can use `Box::leak` to get a `'static` reference, or use a global (the drain loop is fundamentally a singleton anyway).
+
+### Cross-crate EventSender
+
+`PtyWakeup` is in `crates/terminal/` but needs to send events to the channel in `crates/editor/`. We need either:
+1. A trait in a shared crate (like `lite-edit-input`) that abstracts over the sender
+2. Move `EventSender` to a shared crate
+3. Have `PtyWakeup` accept a callback/closure instead of a sender directly
+
+**Preferred**: Option 1 — define a `WakeupSignal` trait in `lite-edit-input` that `EventSender` implements. This maintains clean crate boundaries.
+
+### Thread safety of EventSender
+
+`mpsc::Sender` is `Send` but uses `Arc` internally. Verify this is acceptable for the PTY reader thread use case. Alternatively, use `crossbeam-channel` which is already a dependency of `crates/terminal/`.
+
+**Mitigation**: The existing code uses `crossbeam_channel` for PTY events within the terminal crate. We could use the same channel type for the editor event queue for consistency.
+
+### Timer vs CFRunLoopSource for blink
+
+The current blink timer uses `NSTimer::scheduledTimerWithTimeInterval_repeats_block`. This already integrates with NSRunLoop. We could either:
+1. Keep the timer but have it send to the channel
+2. Replace with CFRunLoopTimer
+
+**Preferred**: Option 1 — keep NSTimer, have callback send to channel. This is the minimal change.
+
+### Resize event ordering
+
+Resize events currently call `handle_resize()` directly. Sending them through the channel adds latency (they queue behind other events). Verify this doesn't cause visual glitches during window resize.
+
+**Mitigation**: Resize events are relatively rare and the channel is drained immediately. Should be fine.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

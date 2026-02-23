@@ -12,7 +12,7 @@ code_references:
     implements: "Keystroke timestamp tracking for overlay cursor blink reset"
   - ref: crates/editor/src/editor_state.rs#EditorState::toggle_cursor_blink
     implements: "Focus-aware cursor blink toggle - only toggles cursor for focused area"
-  - ref: crates/editor/src/main.rs#EditorController::render_if_dirty
+  - ref: crates/editor/src/drain_loop.rs#EventDrainLoop::render_if_dirty
     implements: "Focus-aware cursor visibility passing to renderer"
 narrative: null
 investigation: null

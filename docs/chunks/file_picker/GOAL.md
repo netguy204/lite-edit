@@ -5,6 +5,7 @@ parent_chunk: null
 code_paths:
   - crates/editor/src/editor_state.rs
   - crates/editor/src/main.rs
+  - crates/editor/src/drain_loop.rs
 code_references:
   - ref: crates/editor/src/editor_state.rs#EditorFocus
     implements: "Focus mode enum distinguishing Buffer vs Selector editing mode"
@@ -32,9 +33,9 @@ code_references:
     implements: "Scroll event routing to selector widget when selector is open"
   - ref: crates/editor/src/editor_state.rs#EditorState::tick_picker
     implements: "Streaming refresh mechanism for background file index updates"
-  - ref: crates/editor/src/main.rs#EditorController::toggle_cursor_blink
+  - ref: crates/editor/src/drain_loop.rs#EventDrainLoop::handle_cursor_blink
     implements: "Integration of tick_picker into timer-driven refresh loop"
-  - ref: crates/editor/src/main.rs#EditorController::render_if_dirty
+  - ref: crates/editor/src/drain_loop.rs#EventDrainLoop::render_if_dirty
     implements: "Conditional render_with_selector when focus is Selector"
 narrative: file_buffer_association
 investigation: null

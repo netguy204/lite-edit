@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 // Chunk: docs/chunks/terminal_input_encoding - Terminal input encoding
+// Chunk: docs/chunks/pty_wakeup_reentrant - Unified event queue architecture
 //!
 //! lite-edit library interface.
 //!
@@ -11,6 +12,12 @@
 
 // Re-export the input module for backwards compatibility
 pub mod input;
+
+// Chunk: docs/chunks/pty_wakeup_reentrant - Unified event queue types
+/// Event types for the unified event queue architecture.
+pub mod editor_event;
+/// Event channel for sending/receiving editor events.
+pub mod event_channel;
 
 // Chunk: docs/chunks/row_scroller_extract - Reusable scroll arithmetic
 pub mod row_scroller;

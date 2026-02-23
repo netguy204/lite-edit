@@ -11,6 +11,7 @@ code_paths:
   - crates/editor/src/main.rs
   - crates/editor/src/editor_state.rs
   - crates/editor/src/workspace.rs
+  - crates/editor/src/drain_loop.rs
   - crates/terminal/tests/wakeup_integration.rs
 code_references:
   - ref: crates/terminal/src/pty_wakeup.rs#PtyWakeup
@@ -18,21 +19,19 @@ code_references:
   - ref: crates/terminal/src/pty_wakeup.rs#PtyWakeup::signal
     implements: "Dispatches callback to main queue via GCD when PTY data arrives"
   - ref: crates/terminal/src/pty_wakeup.rs#set_global_wakeup_callback
-    implements: "Global callback registration for PTY wakeup (called once at app startup)"
+    implements: "Global callback registration for PTY wakeup (legacy mechanism, superseded by WakeupSignal)"
   - ref: crates/terminal/src/pty.rs#PtyHandle::spawn_with_wakeup
     implements: "PTY spawn variant that signals wakeup on data arrival"
   - ref: crates/terminal/src/terminal_buffer.rs#TerminalBuffer::spawn_shell_with_wakeup
     implements: "Shell spawn with wakeup support"
   - ref: crates/terminal/src/terminal_buffer.rs#TerminalBuffer::spawn_command_with_wakeup
     implements: "Command spawn with wakeup support"
-  - ref: crates/editor/src/editor_state.rs#EditorState::set_pty_wakeup_factory
-    implements: "Factory registration for creating PtyWakeup handles"
+  - ref: crates/editor/src/editor_state.rs#EditorState::set_event_sender
+    implements: "EventSender registration for creating PtyWakeup handles (refactored from set_pty_wakeup_factory)"
   - ref: crates/editor/src/editor_state.rs#EditorState::create_pty_wakeup
-    implements: "Creates PtyWakeup handle from registered factory"
-  - ref: crates/editor/src/main.rs#handle_pty_wakeup_global
-    implements: "Global callback that triggers poll_agents and render on PTY data"
-  - ref: crates/editor/src/main.rs#EditorController::handle_pty_wakeup
-    implements: "Instance method that polls agents and renders when PTY data arrives"
+    implements: "Creates PtyWakeup handle from registered EventSender"
+  - ref: crates/editor/src/drain_loop.rs#EventDrainLoop::handle_pty_wakeup
+    implements: "Handler that polls agents when PTY data arrives (moved from main.rs EditorController)"
 narrative: null
 investigation: null
 subsystems: []
