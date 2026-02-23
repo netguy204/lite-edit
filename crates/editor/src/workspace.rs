@@ -858,6 +858,7 @@ impl Workspace {
     // Chunk: docs/chunks/terminal_tab_spawn - Poll standalone terminals
     // Chunk: docs/chunks/terminal_scrollback_viewport - Auto-follow on new output
     // Chunk: docs/chunks/tiling_workspace_integration - Iterate all panes
+    // Chunk: docs/chunks/terminal_tab_spawn - Polls PTY events for all standalone terminal tabs
     /// Polls PTY events for all standalone terminal tabs across all panes.
     ///
     /// This method also handles auto-follow behavior: when the viewport is at

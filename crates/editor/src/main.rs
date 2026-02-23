@@ -657,19 +657,14 @@ impl AppDelegate {
     /// Sets up the main window with Metal rendering
     // Chunk: docs/chunks/startup_workspace_dialog - Directory selection before window creation
     fn setup_window(&self, mtm: MainThreadMarker) {
-        // Chunk: docs/chunks/startup_workspace_dialog - Resolve directory before creating window
-        // Resolve the startup directory BEFORE creating any window/view/resources.
-        // This prevents the FileIndex from ever being initialized with `/` or any
-        // unexpectedly broad directory when launched from Finder/Spotlight.
-        let startup_dir = match self.resolve_startup_directory() {
-            Some(dir) => dir,
-            None => {
-                // User cancelled the directory picker, terminate gracefully
-                let app = NSApplication::sharedApplication(mtm);
-                app.terminate(None);
-                return;
-            }
-        };
+        // Activate the application and create the window BEFORE showing the
+        // directory picker. This ensures the app has a visible presence on the
+        // current macOS space/desktop so the NSOpenPanel modal dialog appears
+        // in front rather than on a hidden desktop (which looks like a hang,
+        // especially when launching from a full-screen terminal).
+        let app = NSApplication::sharedApplication(mtm);
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
 
         // Create window with standard editor dimensions
         let content_rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1000.0, 700.0));
@@ -693,19 +688,31 @@ impl AppDelegate {
         window.setTitle(ns_string!("lite-edit"));
         window.center();
 
-        // Create the Metal-backed view
+        // Create the Metal-backed view and attach it to the window.
         let metal_view = MetalView::new(mtm, content_rect);
+        window.setContentView(Some(&metal_view));
+        metal_view.sync_backing_properties();
 
-        // Attach the view to the window BEFORE creating the renderer.
+        // Make the window visible now so the app owns a space on the current
+        // desktop. The directory picker modal will then appear on top of it.
+        window.makeKeyAndOrderFront(None);
+
+        // Chunk: docs/chunks/startup_workspace_dialog - Resolve directory before initializing editor
+        // Resolve the startup directory after the window is visible so that the
+        // NSOpenPanel appears on the same space as the app window.
+        let startup_dir = match self.resolve_startup_directory() {
+            Some(dir) => dir,
+            None => {
+                // User cancelled the directory picker, terminate gracefully
+                app.terminate(None);
+                return;
+            }
+        };
+
         // The renderer needs the correct scale factor to rasterize the font
         // and glyph atlas at native resolution (e.g., 2x on Retina).
-        window.setContentView(Some(&metal_view));
-
         // viewDidChangeBackingProperties may not fire synchronously during
-        // setContentView. Explicitly sync the scale factor, contentsScale,
-        // and drawable size from the window so the renderer sees the correct
-        // values when it creates the font and atlas.
-        metal_view.sync_backing_properties();
+        // setContentView. sync_backing_properties above already handled this.
 
         // Create the renderer
         let mut renderer = Renderer::new(&metal_view);
@@ -789,16 +796,6 @@ impl AppDelegate {
         *self.ivars().window.borrow_mut() = Some(window.clone());
         *self.ivars().controller.borrow_mut() = Some(controller);
         *self.ivars().blink_timer.borrow_mut() = Some(blink_timer);
-
-        // Make window visible and key
-        window.makeKeyAndOrderFront(None);
-
-        // Activate the application (bring to front)
-        // activateIgnoringOtherApps is deprecated but required when launching
-        // unbundled (i.e., from cargo run / terminal without an app bundle).
-        let app = NSApplication::sharedApplication(mtm);
-        #[allow(deprecated)]
-        app.activateIgnoringOtherApps(true);
     }
 
     /// Sets up the cursor blink timer

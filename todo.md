@@ -1,1 +1,5 @@
-- [ ] document viewport_scroll subsystem
+- [ ] closing last tab in a pane crashes
+- [ ] panes should scroll independenrtly of each other
+- [ ] cmd - arrow should move focus between panes
+- [ ] cursor should blink only in the focused pane
+- [ ] warn on close unsaved tab
