@@ -1,10 +1,8 @@
 ---
-status: IMPLEMENTING
+status: FUTURE
 ticket: null
 parent_chunk: null
-code_paths:
-- crates/editor/src/tab_bar.rs
-- crates/editor/src/editor_state.rs
+code_paths: []
 code_references: []
 narrative: null
 investigation: null
@@ -12,11 +10,9 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after:
-- tiling_workspace_integration
-- workspace_dir_picker
-- workspace_identicon
+created_after: ["tiling_focus_keybindings", "tiling_multi_pane_render", "startup_workspace_dialog"]
 ---
+
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
@@ -234,25 +230,14 @@ VALIDATION:
 
 ## Minor Goal
 
-When an editor buffer tab has unsaved changes, its background color should be tinted with a very dim red to provide an at-a-glance visual cue that the buffer is dirty.
+In a multi-pane tiling layout, the blinking cursor should only appear in the pane that currently has focus. Unfocused panes should display a static (non-blinking) cursor or no cursor at all, providing clear visual feedback about which pane is receiving input.
 
-**Current state:** The `Tab` struct in `workspace.rs` has a `dirty: bool` field, and the tab bar rendering in `tab_bar.rs` reads `is_dirty` to show a yellow indicator dot (`DIRTY_INDICATOR_COLOR`). However, **no production code ever sets `tab.dirty = true`** — the flag is initialized to `false` and never flipped when the user edits a buffer. The underlying buffer (`lite-edit-buffer` crate) also does not track a "modified since last save" state. This means the entire dirty-indicator system is dead code.
-
-This chunk needs to:
-
-1. **Wire up the dirty flag:** After any mutation in `handle_key_buffer` (character insert, delete, paste, etc.), set the active tab's `dirty` flag to `true`. Clear it back to `false` on successful save.
-2. **Add dim red background tint:** When `is_dirty` is true, render the tab background with a very dim red tint instead of the normal background color — for both active and inactive tab states.
-3. **Keep the existing yellow indicator dot** as an additional signal (it will now actually appear since the flag is wired up).
-
-This supports the project goal of a responsive, native editing experience by giving users immediate visual feedback about buffer state.
+The existing `cursor_blink_focus` chunk solved this for overlay mini-buffers vs the main edit buffer. This chunk extends that concept to the tiling/multi-pane workspace: when multiple panes are visible, only the focused pane's cursor blinks. This supports the project's goal of low-latency, responsive native editing by giving immediate visual feedback about input focus across split views.
 
 ## Success Criteria
 
-- Editing a file buffer sets `tab.dirty = true` on the active tab
-- Saving a file clears `tab.dirty` back to `false`
-- Dirty tabs render with a very dim red background tint, distinct from clean tabs
-- Both active and inactive dirty tabs have appropriate tinted variants (active still distinguishable from inactive)
-- The red tint is subtle/dim — noticeable but not distracting, consistent with the Catppuccin Mocha dark theme
-- Clean tabs continue to render with their existing background colors unchanged
-- The existing yellow dirty indicator dot now appears correctly alongside the tinted background
-- Unit tests verify: dirty flag is set on edit, cleared on save, and dirty tabs use tinted background colors
+- When multiple panes are visible, only the focused pane has a blinking cursor
+- Unfocused panes display a static cursor (visible but not blinking)
+- Switching focus between panes (via keybinding) immediately starts the cursor blinking in the newly focused pane and stops it in the previously focused one
+- No visual glitches during focus transitions (no frame where both cursors blink or neither blinks)
+- Overlay cursor blink behavior (from `cursor_blink_focus`) continues to work correctly within the focused pane

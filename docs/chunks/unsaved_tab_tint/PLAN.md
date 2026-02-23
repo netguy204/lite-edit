@@ -8,153 +8,124 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk requires two parallel pieces of work:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Wiring up the dirty flag**: The `Tab` struct already has a `dirty: bool` field, but no code sets it to `true`. We need to set `tab.dirty = true` after any buffer mutation in `handle_key_buffer` (character insert, delete, paste, etc.) and clear it back to `false` on successful save in `save_file()`.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **Adding dim red background tint**: When `is_dirty` is true, the tab bar should render with a very dim red tint instead of the normal `TAB_INACTIVE_COLOR` or `TAB_ACTIVE_COLOR`. This requires adding new color constants and modifying the tab bar rendering logic.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/unsaved_tab_tint/GOAL.md)
-with references to the files that you expect to touch.
--->
+The key insight from codebase exploration:
+- **Buffer mutations** flow through `BufferFocusTarget::execute_command()` in `buffer_target.rs`, which calls methods like `ctx.buffer.insert_char()`. These mutations return `DirtyLines` which is passed to `ctx.mark_dirty()`.
+- **The EditorContext** only has access to the raw `TextBuffer`, not the `Tab` that owns it. So we cannot set `tab.dirty` from within `execute_command()`.
+- **Instead**, we need to set the dirty flag at the `EditorState` level after `handle_key()` processes a key event that caused buffer mutations. The `EditorState` has access to both the `Editor` model (which contains tabs) and the `dirty_region`. If `dirty_region` indicates content changed (not just cursor movement), we mark the active tab dirty.
 
-## Subsystem Considerations
+For the save path, `EditorState::save_file()` already writes the buffer content to disk. We simply add `tab.dirty = false` after a successful save.
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Following TESTING_PHILOSOPHY.md's Humble View Architecture: the dirty flag logic and color selection are testable state transformations. The actual Metal rendering is the humble view and not unit-tested.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add dirty tab background color constants
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add new color constants to `tab_bar.rs` for dirty tab backgrounds:
+- `TAB_DIRTY_INACTIVE_COLOR`: Very dim red tint for inactive dirty tabs
+- `TAB_DIRTY_ACTIVE_COLOR`: Very dim red tint for active dirty tabs
 
-Example:
+The tint should be subtle and consistent with the Catppuccin Mocha dark theme. Use the Catppuccin "red" color (#f38ba8) at very low opacity blended with the existing tab colors.
 
-### Step 1: Define the SegmentHeader struct
+Location: `crates/editor/src/tab_bar.rs`
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Modify tab bar rendering to use dirty colors
 
-Location: src/segment/format.rs
+Update `TabBarGlyphBuffer::update()` to select the appropriate background color based on both active state and dirty state:
+- Active + clean → `TAB_ACTIVE_COLOR`
+- Active + dirty → `TAB_DIRTY_ACTIVE_COLOR`
+- Inactive + clean → `TAB_INACTIVE_COLOR`
+- Inactive + dirty → `TAB_DIRTY_INACTIVE_COLOR`
 
-### Step 2: Implement header serialization
+The existing yellow indicator dot logic (`DIRTY_INDICATOR_COLOR`) remains unchanged—it will now correctly appear since the flag will be wired up.
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Location: `crates/editor/src/tab_bar.rs`
 
-### Step 3: ...
+### Step 3: Set dirty flag after buffer mutations in EditorState
 
----
+Modify `EditorState::handle_key()` to mark the active tab dirty after forwarding to the focus target, if the dirty_region indicates content changed (i.e., not `DirtyRegion::None` and not just a cursor line change from movement).
 
-**BACKREFERENCE COMMENTS**
+The logic:
+1. Before calling `focus_target.handle_key()`, save a snapshot of `self.dirty_region`
+2. After the call, check if `dirty_region` advanced (merged with new dirty lines)
+3. If content was dirtied and the active tab is a file tab, set `tab.dirty = true`
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+To keep this simple and robust: check if `dirty_region != DirtyRegion::None` after the key is processed. This is a conservative heuristic that may over-mark (e.g., marking dirty on selection-only changes like Cmd+A). However, the success criteria only require that edits set dirty=true, which this achieves.
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+A more precise approach would be to track whether any mutating command was executed (InsertChar, DeleteBackward, Paste, etc.), but the dirty_region check is simpler and sufficient for this chunk.
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+Location: `crates/editor/src/editor_state.rs`
 
-Format (place immediately before the symbol):
+### Step 4: Clear dirty flag on save
+
+Modify `EditorState::save_file()` to clear `tab.dirty = false` after successfully writing to disk.
+
+Currently:
+```rust
+fn save_file(&mut self) {
+    // ... validation ...
+    let content = self.buffer().content();
+    let _ = std::fs::write(&path, content.as_bytes());
+    // Silently ignore write errors
+}
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+
+Update to:
+```rust
+fn save_file(&mut self) {
+    // ... validation ...
+    let content = self.buffer().content();
+    if std::fs::write(&path, content.as_bytes()).is_ok() {
+        // Clear dirty flag on successful save
+        if let Some(ws) = self.editor.active_workspace_mut() {
+            if let Some(pane) = ws.active_pane_mut() {
+                if let Some(tab) = pane.active_tab_mut() {
+                    tab.dirty = false;
+                }
+            }
+        }
+    }
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `crates/editor/src/editor_state.rs`
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 5: Write unit tests for dirty flag behavior
 
-## Dependencies
+Add tests verifying:
+1. Editing a file buffer sets `tab.dirty = true` on the active tab
+2. Saving a file clears `tab.dirty` back to `false`
+3. Dirty tabs use the correct tinted background colors
+4. Clean tabs continue to use their existing background colors
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+Per TESTING_PHILOSOPHY.md, focus on semantic assertions about the state:
+- Test that inserting a character sets dirty=true
+- Test that save clears dirty=false
+- Test color selection logic in isolation
 
-If there are no dependencies, delete this section.
--->
+Location: `crates/editor/src/editor_state.rs` (dirty flag tests), `crates/editor/src/tab_bar.rs` (color tests)
+
+### Step 6: Update GOAL.md code_paths
+
+Add the touched files to the chunk's code_paths frontmatter:
+- `crates/editor/src/tab_bar.rs`
+- `crates/editor/src/editor_state.rs`
+
+Location: `docs/chunks/unsaved_tab_tint/GOAL.md`
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Over-marking dirty**: Using `dirty_region != None` as the heuristic may mark tabs dirty for non-content changes (like Cmd+A select-all which doesn't modify content). This is a conservative approach that errs on the side of showing the dirty indicator. The alternative—tracking specific mutating commands—adds complexity. Given the goal is "visual cue for unsaved changes," over-marking is acceptable.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Red tint subtlety**: The exact RGB values for the dim red tint need visual tuning. Initial values will blend Catppuccin red (#f38ba8) at ~5-10% with the existing tab colors. May need adjustment after visual testing.
+
+3. **Terminal tabs**: Terminal tabs don't have a "dirty" concept (they don't save to files). The existing code already skips setting dirty for non-file tabs (the mutation path is different). No additional work needed.
 
 ## Deviations
 
@@ -165,13 +136,4 @@ When reality diverges from the plan, document it here:
 - What changed?
 - Why?
 - What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->
