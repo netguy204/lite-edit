@@ -8,170 +8,177 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The current startup flow in `main.rs` creates an `EditorState::new()` with an empty buffer, which internally creates an `Editor::new()`. `Editor::new()` unconditionally calls `std::env::current_dir()` to set the initial workspace's `root_path`. When launched from Finder or Spotlight, `current_dir()` resolves to `/`, causing the `FileIndex` to crawl the entire filesystem.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Solution**: Introduce an `Editor::new_deferred()` constructor that creates an editor with no workspaces initially. The main entry point (`setup_window` in `main.rs`) will show the NSOpenPanel directory picker *before* creating the initial workspace. Based on the result:
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. **User selects a directory**: Create a workspace rooted at the selected directory.
+2. **User cancels**: The application exits gracefully (no workspace, no window, no FileIndex crawling).
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/startup_workspace_dialog/GOAL.md)
-with references to the files that you expect to touch.
--->
+This follows the **humble object** pattern — the macOS-specific dialog call lives at the platform boundary (`main.rs`), while the workspace logic remains testable in isolation.
 
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+**Command-line argument handling**: For terminal usage, we check `std::env::args()` for a directory argument. If provided, we skip the dialog and use that path directly. This enables `lite-edit /some/path` to open directly.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add `Editor::new_deferred()` constructor
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create a new constructor in `workspace.rs` that initializes the `Editor` struct without creating any initial workspace. This allows the startup flow to defer workspace creation until after the directory picker runs.
 
-Example:
+**Location**: `crates/editor/src/workspace.rs`
 
-### Step 1: Define the SegmentHeader struct
+**Changes**:
+- Add `Editor::new_deferred(line_height: f32) -> Self` that creates an empty workspaces vec
+- Existing `Editor::new()` can be retained for compatibility (creates workspace with `current_dir()` as before)
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+**Tests**:
+- `test_editor_new_deferred_has_no_workspaces` — verifies empty workspace list
+- `test_editor_new_deferred_can_add_workspace` — verifies `new_workspace()` works after deferred init
 
-Location: src/segment/format.rs
+### Step 2: Add `EditorState::empty()` constructor or modify `new()`
 
-### Step 2: Implement header serialization
+The public `EditorState::new()` currently takes a buffer and creates the editor. We need a way to create an `EditorState` where no workspace exists yet. There are two options:
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+**Option A** (preferred): Add `EditorState::new_deferred(font_metrics: FontMetrics) -> Self` that uses `Editor::new_deferred()` internally. This keeps the API explicit.
 
-### Step 3: ...
+**Option B**: Modify the test helper `EditorState::empty()` if it already exists and make it public.
 
----
+After reviewing the code, `EditorState::empty()` exists as a test helper. We'll add a new `EditorState::new_deferred()` for production use that's similar but appropriate for the startup flow.
 
-**BACKREFERENCE COMMENTS**
+**Location**: `crates/editor/src/editor_state.rs`
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+**Changes**:
+- Add `EditorState::new_deferred(font_metrics: FontMetrics) -> Self`
+- This creates an EditorState with `Editor::new_deferred()`
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+**Tests**:
+- Tests will verify that the deferred state has no active workspace initially
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+### Step 3: Implement startup directory resolution in `main.rs`
 
-Format (place immediately before the symbol):
+Modify `setup_window()` in `main.rs` to:
+
+1. Parse command-line arguments for a directory path
+2. If argument provided and valid directory: use it directly
+3. If no argument: show `pick_directory()` dialog
+4. If user selects directory: create workspace with that root
+5. If user cancels (and no CLI arg): terminate the application gracefully
+
+**Location**: `crates/editor/src/main.rs`
+
+**Changes**:
+- Add a helper function `resolve_startup_directory() -> Option<PathBuf>` that:
+  - Checks `std::env::args().nth(1)` for a directory argument
+  - Returns `Some(path)` if valid directory argument provided
+  - Calls `pick_directory()` and returns the result if no argument
+- Modify `setup_window()` to:
+  - Call `resolve_startup_directory()`
+  - If `None`, call `app.terminate(None)` to exit
+  - If `Some(path)`, create the EditorState with that workspace root
+
+**No tests**: This is platform boundary code (NSOpenPanel, NSApplication termination). Per testing philosophy, this is "humble object" code that is not unit-tested. We verify behavior manually.
+
+### Step 4: Create the initial workspace with selected directory
+
+After getting the directory from Step 3, `setup_window()` creates the workspace:
+
+1. Create `EditorState::new_deferred(font_metrics)`
+2. Call `editor.new_workspace(label, path)` where label is derived from directory name
+3. Add an empty tab to the workspace (to match current startup behavior with welcome screen)
+
+**Location**: `crates/editor/src/main.rs`
+
+**Changes**:
+- After directory resolution, create workspace with the selected path
+- The workspace label is derived from the directory's last path component (same pattern as `new_workspace()` in `editor_state.rs`)
+
+### Step 5: Handle graceful exit on cancel
+
+If the user cancels the directory picker and no CLI argument was provided, terminate the application before creating any window/view/resources.
+
+**Location**: `crates/editor/src/main.rs`
+
+**Changes**:
+- Move directory resolution to happen *before* creating the Metal view and renderer
+- If resolution returns `None`, call `NSApplication::terminate(None)` and return early
+- This prevents any window from appearing if the user immediately cancels
+
+### Step 6: Unit tests for Editor and EditorState deferred constructors
+
+Add tests in the respective modules to verify the deferred initialization works correctly.
+
+**Location**: `crates/editor/src/workspace.rs` (test module)
+
+**Tests**:
+```rust
+#[test]
+fn test_editor_new_deferred_has_no_workspaces() {
+    let editor = Editor::new_deferred(16.0);
+    assert_eq!(editor.workspace_count(), 0);
+    assert!(editor.active_workspace().is_none());
+}
+
+#[test]
+fn test_editor_new_deferred_can_add_workspace() {
+    let mut editor = Editor::new_deferred(16.0);
+    editor.new_workspace("test".to_string(), PathBuf::from("/test"));
+    assert_eq!(editor.workspace_count(), 1);
+    assert!(editor.active_workspace().is_some());
+}
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+
+**Location**: `crates/editor/src/editor_state.rs` (test module)
+
+**Tests**:
+```rust
+#[test]
+fn test_editor_state_new_deferred_has_no_workspace() {
+    let state = EditorState::new_deferred(test_font_metrics());
+    assert_eq!(state.editor.workspace_count(), 0);
+}
+
+#[test]
+fn test_editor_state_new_deferred_can_create_workspace() {
+    let mut state = EditorState::new_deferred(test_font_metrics());
+    dir_picker::mock_set_next_directory(Some(PathBuf::from("/test")));
+    state.new_workspace();
+    assert_eq!(state.editor.workspace_count(), 1);
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+### Step 7: Verify FileIndex never crawls root
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+The core invariant we're protecting: the `FileIndex` should never be initialized with `/` or any unexpectedly broad directory.
+
+**Verification approach**:
+1. The `Workspace::new()` constructor receives `root_path` and passes it to `FileIndex::start()`
+2. With our changes, `root_path` only comes from:
+   - User selection via directory picker
+   - Explicit CLI argument
+3. Neither path can produce `/` unless the user explicitly chooses it
+
+**No additional code changes needed** — the invariant is enforced by the startup flow design.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **workspace_dir_picker chunk**: Already complete (ACTIVE). Provides `dir_picker::pick_directory()` and the per-workspace FileIndex infrastructure.
+- **tiling_workspace_integration chunk**: Already complete (ACTIVE). Provides the `Workspace` and `Editor` models we're extending.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Timing of NSOpenPanel**: The panel must run on the main thread. In `setup_window()`, we're already on the main thread (called from `applicationDidFinishLaunching`), so this is safe. However, we need to ensure we don't create any views/windows before the dialog runs, or the dialog might appear behind them.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Empty state handling**: After creating a deferred editor with no workspaces, callers of `active_workspace()` will get `None`. The code must handle this gracefully. Reviewing the codebase, most access goes through `active_workspace().unwrap()` or `?` operators. We need to ensure no panics occur in the brief period between `EditorState::new_deferred()` and `new_workspace()`.
+
+3. **Application exit timing**: Calling `NSApplication::terminate()` from within `applicationDidFinishLaunching` might have unusual behavior. Testing will confirm this works correctly.
+
+4. **CLI argument validation**: If a path is provided but doesn't exist or isn't a directory, we could either:
+   - Show the picker as fallback
+   - Show an error and exit
+   - We'll choose: show the picker as fallback (graceful degradation)
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->
