@@ -1,177 +1,293 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk implements the foundational data model for tiling pane layout — a binary tree structure where:
+- **Leaf nodes** are `Pane` values, each owning a `Vec<Tab>` and tab-management state
+- **Internal nodes** are `Split` values with a direction (Horizontal/Vertical), a ratio, and two children
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The design follows the binary space partitioning model used by bspwm, as validated in the `tiling_pane_layout` investigation. The key insight is that binary trees give unambiguous directional targeting: "move right" means "go to the other child of the nearest horizontal-split ancestor."
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+### Strategy
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/tiling_tree_model/GOAL.md)
-with references to the files that you expect to touch.
--->
+1. **Pure data model first**: Define all types (`PaneId`, `SplitDirection`, `Direction`, `MoveTarget`, `Pane`, `PaneRect`, `PaneLayoutNode`) as plain Rust structs/enums with no platform dependencies.
+
+2. **Test-driven development**: Write failing tests for layout calculation and tree traversal before implementing the logic. The testing philosophy emphasizes semantic assertions — we test that layout produces correct rectangles, not that structs exist.
+
+3. **Pane mirrors Workspace tab API**: The `Pane` struct's tab management methods (`add_tab`, `close_tab`, `switch_tab`, etc.) deliberately mirror the existing `Workspace` API to ease the integration chunk.
+
+4. **Separate module**: Create a new `pane_layout.rs` module in `crates/editor/src/` to keep the data model cleanly separated from the existing workspace code.
+
+### Patterns Used
+
+- **Recursive enum with Box**: `PaneLayoutNode` is `Leaf(Pane) | Split { ... Box<PaneLayoutNode> ... }`, standard Rust tree pattern.
+- **ID-based lookup**: Panes are identified by `PaneId` for safe cross-references without lifetime complexity.
+- **Trait-free design**: No traits or generics — plain structs for simplicity and debuggability.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+- **docs/subsystems/viewport_scroll** (DOCUMENTED): The `Pane` struct will eventually hold a `Viewport`, but this chunk does not touch viewport scroll logic. The next chunk (`tiling_workspace_integration`) will add the viewport field and use the subsystem's patterns.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystem work is needed for this chunk — it's a self-contained data model.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Create the pane_layout module with ID types and enums
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create `crates/editor/src/pane_layout.rs` with:
+- `PaneId` type alias (u64)
+- `SplitDirection` enum: `Horizontal`, `Vertical`
+- `Direction` enum: `Left`, `Right`, `Up`, `Down`
+- `MoveTarget` enum: `ExistingPane(PaneId)` | `SplitPane(PaneId, Direction)`
 
-Example:
+Add helper methods:
+- `SplitDirection::is_compatible(direction: Direction) -> bool` — Horizontal is compatible with Left/Right, Vertical with Up/Down
+- `Direction::is_toward_second() -> bool` — Right/Down go toward the second child
+- `Direction::opposite() -> Direction`
+- `Direction::to_split_direction() -> SplitDirection`
 
-### Step 1: Define the SegmentHeader struct
+Export the module from `crates/editor/src/lib.rs`.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Location: `crates/editor/src/pane_layout.rs`, `crates/editor/src/lib.rs`
 
-Location: src/segment/format.rs
+### Step 2: Define the Pane struct with tab management
 
-### Step 2: Implement header serialization
+Add the `Pane` struct with fields:
+- `id: PaneId`
+- `workspace_id: WorkspaceId` (imported from `workspace` module)
+- `tabs: Vec<Tab>` (imported from `workspace` module)
+- `active_tab: usize`
+- `tab_bar_view_offset: f32`
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Implement tab management methods that mirror `Workspace`:
+- `add_tab(&mut self, tab: Tab)` — adds tab and sets it active
+- `close_tab(&mut self, index: usize) -> Option<Tab>` — removes tab, adjusts active_tab
+- `switch_tab(&mut self, index: usize)` — switches active tab, clears unread
+- `active_tab(&self) -> Option<&Tab>`
+- `active_tab_mut(&mut self) -> Option<&mut Tab>`
+- `tab_count(&self) -> usize`
+- `is_empty(&self) -> bool` — returns `tabs.is_empty()`
 
-### Step 3: ...
+Add constructor:
+- `Pane::new(id: PaneId, workspace_id: WorkspaceId) -> Self` — empty pane
 
----
+Location: `crates/editor/src/pane_layout.rs`
 
-**BACKREFERENCE COMMENTS**
+### Step 3: Define PaneRect for layout output
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+Add the `PaneRect` struct:
+- `x: f32`
+- `y: f32`
+- `width: f32`
+- `height: f32`
+- `pane_id: PaneId`
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+Add helper method:
+- `PaneRect::contains(&self, x: f32, y: f32) -> bool` — point-in-rect test for hit-testing
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+Location: `crates/editor/src/pane_layout.rs`
 
-Format (place immediately before the symbol):
+### Step 4: Define PaneLayoutNode enum
+
+Add the `PaneLayoutNode` enum:
+```rust
+pub enum PaneLayoutNode {
+    Leaf(Pane),
+    Split {
+        direction: SplitDirection,
+        ratio: f32,
+        first: Box<PaneLayoutNode>,
+        second: Box<PaneLayoutNode>,
+    },
+}
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+
+Add constructor helper:
+- `PaneLayoutNode::single_pane(pane: Pane) -> Self` — wraps a pane in a Leaf
+
+Location: `crates/editor/src/pane_layout.rs`
+
+### Step 5: Write failing tests for layout calculation
+
+Before implementing `calculate_pane_rects`, write tests that will initially fail:
+1. Single pane fills entire bounds
+2. Horizontal split divides width by ratio (default 0.5 → equal halves)
+3. Vertical split divides height by ratio
+4. Nested splits (HSplit containing VSplit) produce correct rectangles
+5. Non-default ratios (e.g., 0.3/0.7) work correctly
+
+Location: `crates/editor/src/pane_layout.rs` (in `#[cfg(test)]` module)
+
+### Step 6: Implement calculate_pane_rects
+
+Add the layout calculation function:
+```rust
+pub fn calculate_pane_rects(
+    bounds: (f32, f32, f32, f32), // (x, y, width, height)
+    node: &PaneLayoutNode,
+) -> Vec<PaneRect>
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Recursive algorithm:
+- For `Leaf(pane)`: return `vec![PaneRect { x, y, width, height, pane_id: pane.id }]`
+- For `Split`: split the bounds according to direction and ratio, recurse on both children, concatenate results
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Horizontal splits divide width: first gets `(x, y, width * ratio, height)`, second gets `(x + width * ratio, y, width * (1 - ratio), height)`.
+
+Vertical splits divide height: first gets `(x, y, width, height * ratio)`, second gets `(x, y + height * ratio, width, height * (1 - ratio))`.
+
+Run the failing tests from Step 5 — they should now pass.
+
+Location: `crates/editor/src/pane_layout.rs`
+
+### Step 7: Write failing tests for tree traversal helpers
+
+Before implementing traversal, write tests for:
+1. `pane_count` returns correct leaf count
+2. `all_panes` returns flat list of all panes
+3. `all_panes_mut` returns mutable references
+4. `get_pane(pane_id)` finds the correct pane
+5. `get_pane_mut(pane_id)` returns mutable reference
+
+Location: `crates/editor/src/pane_layout.rs` (in `#[cfg(test)]` module)
+
+### Step 8: Implement basic tree traversal methods
+
+Add methods to `PaneLayoutNode`:
+- `pane_count(&self) -> usize` — recursive leaf count
+- `all_panes(&self) -> Vec<&Pane>` — collect all leaves
+- `all_panes_mut(&mut self) -> Vec<&mut Pane>` — collect mutable references
+- `get_pane(&self, pane_id: PaneId) -> Option<&Pane>` — find by ID
+- `get_pane_mut(&mut self, pane_id: PaneId) -> Option<&mut Pane>` — mutable find
+
+Run the tests from Step 7 — they should now pass.
+
+Location: `crates/editor/src/pane_layout.rs`
+
+### Step 9: Write failing tests for find_target_in_direction
+
+Write comprehensive tests for directional target finding using the investigation's example tree:
+```
+HSplit(Pane[A], VSplit(Pane[B], Pane[C]))
+```
+
+Test cases:
+1. Moving left from C → finds A (crosses the HSplit boundary)
+2. Moving right from A → finds B (leftmost leaf of VSplit)
+3. Moving down from B → finds C (same VSplit, toward second)
+4. Moving up from C → finds B (same VSplit, toward first)
+5. Moving right from C → returns `SplitPane(C, Right)` (no target exists)
+6. Moving left from A → returns `SplitPane(A, Left)` (no target exists)
+
+Location: `crates/editor/src/pane_layout.rs` (in `#[cfg(test)]` module)
+
+### Step 10: Implement find_target_in_direction
+
+Add method to `PaneLayoutNode`:
+```rust
+pub fn find_target_in_direction(
+    &self,
+    pane_id: PaneId,
+    direction: Direction,
+) -> MoveTarget
+```
+
+Algorithm (from investigation):
+1. Build the path from root to the target pane as a list of (node, child_position) pairs
+2. Walk up from the pane looking for a compatible split ancestor (direction matches split direction)
+3. For a compatible split:
+   - If pane is in First and direction is toward Second → target is Second's nearest leaf
+   - If pane is in Second and direction is toward First → target is First's nearest leaf
+   - Otherwise continue walking up
+4. If no compatible ancestor found → return `SplitPane(pane_id, direction)`
+
+This requires helper methods:
+- `path_to_pane(&self, pane_id: PaneId) -> Option<Vec<PathSegment>>` — returns path from root to pane
+- `contains_pane(&self, pane_id: PaneId) -> bool` — checks if pane is in subtree
+
+Run the tests from Step 9 — they should now pass.
+
+Location: `crates/editor/src/pane_layout.rs`
+
+### Step 11: Write failing tests for nearest_leaf_toward
+
+Write tests for finding the nearest leaf in a direction within a subtree:
+1. For a single pane, `nearest_leaf_toward(any_direction)` returns that pane
+2. For `VSplit(A, B)`, `nearest_leaf_toward(Up)` returns A (topmost)
+3. For `VSplit(A, B)`, `nearest_leaf_toward(Down)` returns B (bottommost)
+4. For `HSplit(A, B)`, `nearest_leaf_toward(Left)` returns A (leftmost)
+5. For `HSplit(A, B)`, `nearest_leaf_toward(Right)` returns B (rightmost)
+6. For nested tree, correctly traverses to the edge leaf
+
+Location: `crates/editor/src/pane_layout.rs` (in `#[cfg(test)]` module)
+
+### Step 12: Implement nearest_leaf_toward
+
+Add method to `PaneLayoutNode`:
+```rust
+pub fn nearest_leaf_toward(&self, direction: Direction) -> PaneId
+```
+
+Algorithm:
+- For `Leaf(pane)`: return `pane.id`
+- For `Split`: if direction is toward First, recurse on first child; if toward Second, recurse on second
+
+"Toward First" means Left for Horizontal splits, Up for Vertical splits.
+
+Run the tests from Step 11 — they should now pass.
+
+Location: `crates/editor/src/pane_layout.rs`
+
+### Step 13: Write failing tests for Pane tab management
+
+Write tests for `Pane`'s tab management methods:
+1. `add_tab` adds to the end and sets active
+2. `close_tab` removes correctly and adjusts active_tab
+3. `close_tab` on last tab leaves pane empty (is_empty returns true)
+4. `switch_tab` changes active and clears unread
+5. `active_tab` returns None for empty pane
+6. Multiple adds and closes maintain correct active_tab invariants
+
+Location: `crates/editor/src/pane_layout.rs` (in `#[cfg(test)]` module)
+
+### Step 14: Add gen_pane_id utility
+
+Add a utility function for generating unique pane IDs:
+```rust
+pub fn gen_pane_id(next_id: &mut u64) -> PaneId {
+    let id = *next_id;
+    *next_id += 1;
+    id
+}
+```
+
+This matches the pattern used in `Editor::gen_tab_id()`.
+
+Location: `crates/editor/src/pane_layout.rs`
+
+### Step 15: Final verification and documentation
+
+1. Run `cargo test -p lite-edit-editor` to verify all tests pass
+2. Run `cargo clippy -p lite-edit-editor` to check for warnings
+3. Add module-level doc comment explaining the binary pane tree model
+4. Add backreference comment at module level: `// Chunk: docs/chunks/tiling_tree_model`
+
+Location: `crates/editor/src/pane_layout.rs`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+No external dependencies. This chunk only depends on:
+- The existing `Tab` type from `crates/editor/src/workspace.rs`
+- The existing `WorkspaceId` type from `crates/editor/src/workspace.rs`
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Tab ownership transfer**: When the `tiling_tab_movement` chunk moves tabs between panes, it will need to handle ownership transfer. This chunk's `close_tab` returns `Option<Tab>` and `add_tab` takes `Tab` by value, which should work, but the interaction wasn't fully tested across panes.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Mutable reference collection**: `all_panes_mut` returns `Vec<&mut Pane>`, which works in Rust but may be awkward to use. An alternative iterator-based approach could be added if needed.
+
+3. **Path representation**: The `path_to_pane` helper builds a vector of path segments. For very deep trees this could be slow, but in practice pane trees are expected to be shallow (< 10 levels).
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- To be populated during implementation -->

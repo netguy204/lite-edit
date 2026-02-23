@@ -10,3 +10,24 @@
 
 // Re-export the input module for backwards compatibility
 pub mod input;
+
+// Chunk: docs/chunks/row_scroller_extract - Reusable scroll arithmetic
+pub mod row_scroller;
+
+// Chunk: docs/chunks/dirty_region - Dirty region tracking
+mod dirty_region;
+
+// Chunk: docs/chunks/wrap_layout - Word wrapping layout
+mod wrap_layout;
+
+// Chunk: docs/chunks/font_metrics - Font metrics
+mod font;
+
+// Chunk: docs/chunks/workspace_model - Workspace model for the editor
+pub mod workspace;
+
+// Chunk: docs/chunks/viewport_scrolling - Viewport scroll state
+pub mod viewport;
+
+// Chunk: docs/chunks/tiling_tree_model - Binary pane layout tree data model
+pub mod pane_layout;
