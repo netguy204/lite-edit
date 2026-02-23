@@ -218,6 +218,7 @@ impl TabRect {
     }
 }
 
+// Chunk: docs/chunks/content_tab_bar - Layout geometry for all tabs including scroll offset
 /// Computed geometry for the tab bar.
 ///
 /// All values are in screen coordinates (pixels).
@@ -239,6 +240,7 @@ pub struct TabBarGeometry {
     pub total_tabs_width: f32,
 }
 
+// Chunk: docs/chunks/content_tab_bar - Tab metadata (label, kind, dirty, unread) used for rendering
 /// Information about a tab for rendering.
 #[derive(Debug, Clone)]
 pub struct TabInfo {
@@ -313,6 +315,7 @@ pub fn calculate_tab_width(label: &str, glyph_width: f32) -> f32 {
 ///
 /// # Returns
 /// A `TabBarGeometry` struct with all layout measurements
+// Chunk: docs/chunks/content_tab_bar - Tab width/position computation with horizontal scroll support
 pub fn calculate_tab_bar_geometry(
     view_width: f32,
     tabs: &[TabInfo],
@@ -517,6 +520,7 @@ fn disambiguate_labels(tabs: &mut [TabInfo], workspace_tabs: &[Tab]) {
 // TabBarGlyphBuffer
 // =============================================================================
 
+// Chunk: docs/chunks/content_tab_bar - Glyph-level rendering of the tab bar strip
 /// Manages vertex and index buffers for rendering the tab bar.
 ///
 /// This is analogous to `LeftRailGlyphBuffer` but specialized for the
