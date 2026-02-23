@@ -1,10 +1,28 @@
 ---
-status: IMPLEMENTING
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
   - crates/editor/src/pane_layout.rs
-code_references: []
+code_references:
+  - ref: crates/editor/src/pane_layout.rs#MoveResult
+    implements: "Result type capturing tab move outcomes (moved to existing, moved to new, rejected, source not found)"
+  - ref: crates/editor/src/pane_layout.rs#CleanupResult
+    implements: "Result type for empty pane cleanup operations"
+  - ref: crates/editor/src/pane_layout.rs#Pane::remove_active_tab
+    implements: "Removes and returns the active tab for move operations"
+  - ref: crates/editor/src/pane_layout.rs#move_tab
+    implements: "Main entry point for directional tab movement with automatic cleanup"
+  - ref: crates/editor/src/pane_layout.rs#move_tab_to_existing
+    implements: "Moves a tab to an existing neighbor pane"
+  - ref: crates/editor/src/pane_layout.rs#move_tab_to_new_split
+    implements: "Moves a tab to a newly created pane via split"
+  - ref: crates/editor/src/pane_layout.rs#PaneLayoutNode::replace_pane_with_split
+    implements: "Tree surgery to replace a leaf with a split node containing original and new pane"
+  - ref: crates/editor/src/pane_layout.rs#cleanup_empty_panes
+    implements: "Collapses empty panes by promoting siblings"
+  - ref: crates/editor/src/pane_layout.rs#cleanup_empty_panes_impl
+    implements: "Recursive implementation of empty pane cleanup with sibling promotion"
 narrative: null
 investigation: tiling_pane_layout
 subsystems: []
