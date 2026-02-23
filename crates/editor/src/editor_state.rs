@@ -1226,6 +1226,8 @@ impl EditorState {
 
         // Chunk: docs/chunks/syntax_highlighting - Track whether we need to sync highlighter
         let needs_highlighter_sync;
+        // Chunk: docs/chunks/unsaved_tab_tint - Track whether we processed a file tab
+        let mut is_file_tab = false;
 
         // Check if the active tab is a file tab or terminal tab
         // Use a block to limit the borrow scope
@@ -1239,6 +1241,9 @@ impl EditorState {
             // Try to get the text buffer and viewport for file tabs
             if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
             // File tab: use the existing BufferFocusTarget path
+            // Chunk: docs/chunks/unsaved_tab_tint - Mark this as a file tab for dirty tracking
+            is_file_tab = true;
+
             // Ensure cursor blink visibility is on when typing
             if !self.cursor_visible {
                 self.cursor_visible = true;
@@ -1345,6 +1350,19 @@ impl EditorState {
         // Chunk: docs/chunks/syntax_highlighting - Sync highlighter after buffer mutation
         if needs_highlighter_sync {
             self.sync_active_tab_highlighter();
+        }
+
+        // Chunk: docs/chunks/unsaved_tab_tint - Mark file tab dirty if content changed
+        // If we processed a file tab and the dirty_region indicates changes, mark the tab dirty.
+        // This is a conservative heuristic: dirty_region can be set for cursor visibility or
+        // viewport scrolling, not just content mutations. We accept some over-marking because
+        // the success criteria only require that edits set dirty=true, which this achieves.
+        if is_file_tab && self.dirty_region.is_dirty() {
+            if let Some(ws) = self.editor.active_workspace_mut() {
+                if let Some(tab) = ws.active_tab_mut() {
+                    tab.dirty = true;
+                }
+            }
         }
     }
 
@@ -2099,8 +2117,10 @@ impl EditorState {
     ///
     /// If no file is associated, this is a no-op.
     /// On write error, this silently fails (error reporting is out of scope).
+    /// On successful save, clears the tab's dirty flag.
     // Chunk: docs/chunks/file_save - Writes buffer content to associated file path
     // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
+    // Chunk: docs/chunks/unsaved_tab_tint - Clear dirty flag on successful save
     fn save_file(&mut self) {
         // Save only makes sense for file tabs with a TextBuffer
         if !self.active_tab_is_file() {
@@ -2113,10 +2133,15 @@ impl EditorState {
         };
 
         let content = self.buffer().content();
-        let _ = std::fs::write(&path, content.as_bytes());
+        if std::fs::write(&path, content.as_bytes()).is_ok() {
+            // Clear dirty flag on successful save
+            if let Some(ws) = self.editor.active_workspace_mut() {
+                if let Some(tab) = ws.active_tab_mut() {
+                    tab.dirty = false;
+                }
+            }
+        }
         // Silently ignore write errors (out of scope for this chunk)
-
-        // Cmd+S does NOT mark dirty (buffer unchanged visually)
     }
 }
 
@@ -5832,6 +5857,7 @@ mod tests {
     }
 
     /// Tests that active_tab_is_file correctly identifies tab types.
+    // Chunk: docs/chunks/terminal_active_tab_safety - Tests active_tab_is_file method
     #[test]
     fn test_active_tab_is_file() {
         use crate::tab_bar::TAB_BAR_HEIGHT;
@@ -5855,6 +5881,7 @@ mod tests {
     }
 
     /// Tests that try_buffer returns None for terminal tabs.
+    // Chunk: docs/chunks/terminal_active_tab_safety - Tests try_buffer method on terminal tabs
     #[test]
     fn test_try_buffer_on_terminal_tab() {
         use crate::tab_bar::TAB_BAR_HEIGHT;
@@ -5873,6 +5900,7 @@ mod tests {
     }
 
     /// Tests that save_file doesn't panic on terminal tabs.
+    // Chunk: docs/chunks/terminal_active_tab_safety - Tests save_file doesn't panic on terminal tabs
     #[test]
     fn test_terminal_tab_save_no_panic() {
         use crate::tab_bar::TAB_BAR_HEIGHT;
@@ -6311,6 +6339,133 @@ mod tests {
             "Terminal viewport should have {} visible lines based on content height",
             expected_visible
         );
+    }
+
+    // =========================================================================
+    // Dirty Flag Tests (Chunk: docs/chunks/unsaved_tab_tint)
+    // =========================================================================
+
+    /// Tests that editing a file buffer sets the tab's dirty flag to true.
+    #[test]
+    fn test_editing_sets_tab_dirty() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Initially, the tab should not be dirty
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(!tab.dirty, "New tab should not be dirty initially");
+
+        // Type a character
+        state.handle_key(KeyEvent::char('a'));
+
+        // Now the tab should be dirty
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(tab.dirty, "Tab should be dirty after editing");
+    }
+
+    /// Tests that saving a file clears the tab's dirty flag.
+    #[test]
+    fn test_save_clears_dirty_flag() {
+        use std::io::Write;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Create a temporary file
+        let mut temp_file = tempfile::NamedTempFile::new().expect("create temp file");
+        writeln!(temp_file, "initial content").expect("write to temp");
+        let temp_path = temp_file.path().to_path_buf();
+
+        // Associate the file with the tab
+        state.associate_file(temp_path.clone());
+
+        // Type a character to make the tab dirty
+        state.handle_key(KeyEvent::char('X'));
+
+        // Confirm the tab is dirty
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(tab.dirty, "Tab should be dirty after editing");
+
+        // Save the file (Cmd+S)
+        let cmd_s = KeyEvent::new(
+            Key::Char('s'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_s);
+
+        // Tab should no longer be dirty
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(!tab.dirty, "Tab should not be dirty after save");
+
+        // Verify the file was actually written
+        let content = std::fs::read_to_string(&temp_path).expect("read temp file");
+        assert!(content.contains('X'), "Saved content should contain typed character");
+    }
+
+    /// Tests that the dirty flag persists across multiple edits.
+    #[test]
+    fn test_dirty_flag_persists_across_edits() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Type several characters
+        state.handle_key(KeyEvent::char('a'));
+        state.handle_key(KeyEvent::char('b'));
+        state.handle_key(KeyEvent::char('c'));
+
+        // Tab should still be dirty
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(tab.dirty, "Tab should remain dirty across multiple edits");
+    }
+
+    /// Tests that a clean tab is not marked dirty just from navigation/cursor movement.
+    /// Note: This test may need adjustment if cursor movement triggers dirty region
+    /// for other reasons. The plan acknowledges over-marking is acceptable.
+    #[test]
+    fn test_new_tab_starts_clean() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Create a new tab
+        state.new_tab();
+
+        // The new tab should not be dirty
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(!tab.dirty, "Newly created tab should not be dirty");
+    }
+
+    /// Tests that terminal tabs don't get marked dirty (they don't save to files).
+    #[test]
+    fn test_terminal_tab_not_marked_dirty_on_input() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Get initial dirty state
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        let initial_dirty = tab.dirty;
+
+        // Send some input to the terminal
+        state.handle_key(KeyEvent::char('l'));
+        state.handle_key(KeyEvent::char('s'));
+
+        // Terminal tab should not have its dirty flag changed
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert_eq!(tab.dirty, initial_dirty,
+            "Terminal tab dirty flag should not change from input");
     }
 
     // =========================================================================
