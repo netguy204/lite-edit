@@ -1230,22 +1230,35 @@ impl EditorState {
     /// Mouse clicks in the tab bar switch tabs.
     // Chunk: docs/chunks/mouse_click_cursor - Mouse event routing from controller to focus target via EditorContext
     /// Chunk: docs/chunks/file_picker - Focus-based mouse routing (selector vs buffer)
+    // Chunk: docs/chunks/tiling_workspace_integration - Coordinate handling: flip y once at entry
     pub fn handle_mouse(&mut self, event: MouseEvent) {
         use crate::input::MouseEventKind;
 
-        // Check if click is in left rail region
-        let (mouse_x, mouse_y) = event.position;
-        if mouse_x < RAIL_WIDTH as f64 {
-            if let MouseEventKind::Down = event.kind {
+        // Step 1: Flip y-coordinate ONCE at entry
+        // NSView uses bottom-left origin (y=0 at bottom)
+        // We convert to screen space (y=0 at top) for all downstream code
+        let (nsview_x, nsview_y) = event.position;
+        let screen_x = nsview_x;
+        let screen_y = (self.view_height as f64) - nsview_y;
+
+        // Create screen-space event for downstream handlers
+        let screen_event = MouseEvent {
+            kind: event.kind,
+            position: (screen_x, screen_y),
+            modifiers: event.modifiers,
+            click_count: event.click_count,
+        };
+
+        // Step 2: Hit-test against UI regions in screen space (y=0 at top)
+
+        // Check if click is in left rail region (x < RAIL_WIDTH)
+        if screen_x < RAIL_WIDTH as f64 {
+            if let MouseEventKind::Down = screen_event.kind {
                 // Calculate which workspace was clicked
                 let geometry = calculate_left_rail_geometry(self.view_height, self.editor.workspace_count());
-                // Chunk: docs/chunks/workspace_switching - Y-coordinate flip for left rail hit-testing
-                // Flip y-coordinate: macOS NSView uses bottom-left origin (y=0 at bottom),
-                // but calculate_left_rail_geometry produces tile rects in top-down screen space
-                // (y=0 at top, tiles start at TOP_MARGIN and increase downward).
-                let flipped_y = self.view_height - mouse_y as f32;
+                // geometry.tile_rects are already in screen space (y=0 at top)
                 for (idx, tile_rect) in geometry.tile_rects.iter().enumerate() {
-                    if tile_rect.contains(mouse_x as f32, flipped_y) {
+                    if tile_rect.contains(screen_x as f32, screen_y as f32) {
                         self.switch_workspace(idx);
                         return;
                     }
@@ -1255,32 +1268,32 @@ impl EditorState {
             return;
         }
 
-        // Chunk: docs/chunks/content_tab_bar - Tab bar click handling
-        // Check if click is in tab bar region (top of content area)
-        // NSView uses bottom-left origin, so tab bar is at y >= (view_height - TAB_BAR_HEIGHT)
-        if mouse_y >= (self.view_height - TAB_BAR_HEIGHT) as f64 {
-            if let MouseEventKind::Down = event.kind {
-                self.handle_tab_bar_click(mouse_x as f32, mouse_y as f32);
+        // Check if click is in tab bar region (y < TAB_BAR_HEIGHT in screen space)
+        // In screen space: tab bar is at y ∈ [0, TAB_BAR_HEIGHT)
+        if screen_y < TAB_BAR_HEIGHT as f64 {
+            if let MouseEventKind::Down = screen_event.kind {
+                self.handle_tab_bar_click(screen_x as f32, screen_y as f32);
             }
             // Don't forward tab bar clicks to buffer
             return;
         }
 
-        // Route based on current focus
+        // Step 3: Route to appropriate handler with screen-space coordinates
         match self.focus {
             EditorFocus::Selector => {
-                self.handle_mouse_selector(event);
+                self.handle_mouse_selector(screen_event);
             }
             EditorFocus::Buffer | EditorFocus::FindInFile => {
                 // In FindInFile mode, mouse events still go to the buffer
                 // so the user can scroll/click while searching
-                self.handle_mouse_buffer(event);
+                self.handle_mouse_buffer(screen_event);
             }
         }
     }
 
     /// Handles a mouse event when the selector is focused.
     /// Chunk: docs/chunks/file_picker - Mouse forwarding to SelectorWidget with overlay geometry
+    // Chunk: docs/chunks/tiling_workspace_integration - Receives screen-space coordinates (y=0 at top)
     fn handle_mouse_selector(&mut self, event: MouseEvent) {
         let selector = match self.active_selector.as_mut() {
             Some(s) => s,
@@ -1301,16 +1314,10 @@ impl EditorState {
         // Update visible size on the selector (for consistency with scroll/key handling)
         selector.update_visible_size(geometry.visible_items as f32 * geometry.item_height);
 
-        // Chunk: docs/chunks/selector_coord_flip - Y-coordinate flip for macOS mouse events
-        // Flip y-coordinate: macOS uses bottom-left origin (y=0 at bottom),
-        // but overlay geometry uses top-left origin (y=0 at top).
-        // This matches the pattern in buffer_target.rs for buffer hit-testing.
-        let flipped_y = (self.view_height as f64) - event.position.1;
-        let flipped_position = (event.position.0, flipped_y);
-
-        // Forward to selector widget with flipped coordinates
+        // event.position is already in screen space (y=0 at top), no flip needed
+        // Overlay geometry also uses screen space (y=0 at top)
         let outcome = selector.handle_mouse(
-            flipped_position,
+            event.position,
             event.kind,
             geometry.item_height as f64,
             geometry.list_origin_y as f64,
@@ -1332,6 +1339,7 @@ impl EditorState {
 
     /// Handles a mouse event when the buffer is focused.
     // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
+    // Chunk: docs/chunks/tiling_workspace_integration - Receives screen-space coordinates (y=0 at top)
     fn handle_mouse_buffer(&mut self, event: MouseEvent) {
         // Record event time for cursor blink reset (same as keystroke)
         self.last_keystroke = Instant::now();
@@ -1339,6 +1347,16 @@ impl EditorState {
         // Check if the active tab is a file tab or terminal tab
         let ws = self.editor.active_workspace_mut().expect("no active workspace");
         let tab = ws.active_tab_mut().expect("no active tab");
+
+        // event.position is in screen space (y=0 at top of window)
+        // Content area starts at y=TAB_BAR_HEIGHT and x=RAIL_WIDTH
+        let (screen_x, screen_y) = event.position;
+
+        // Transform to content-local coordinates:
+        // - Subtract RAIL_WIDTH from x
+        // - Subtract TAB_BAR_HEIGHT from y (since content starts below tab bar in screen space)
+        let content_x = (screen_x - RAIL_WIDTH as f64).max(0.0);
+        let content_y = (screen_y - TAB_BAR_HEIGHT as f64).max(0.0);
 
         // Try to get the text buffer and viewport for file tabs
         if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
@@ -1356,32 +1374,16 @@ impl EditorState {
                 self.dirty_region.merge(dirty);
             }
 
-            // Chunk: docs/chunks/content_tab_bar - Coordinate transformation for content area
-            // Transform mouse coordinates from full window space to content area space:
-            // - X offset: subtract RAIL_WIDTH (content starts after left rail)
-            // - Y offset: adjust for TAB_BAR_HEIGHT (in NSView coords, subtract from view_height)
-            //
-            // NSView uses bottom-left origin, so:
-            // - y=0 is at BOTTOM of view
-            // - y=view_height is at TOP of view (where tab bar is)
-            //
-            // The content area in NSView coords spans y=[0, view_height - TAB_BAR_HEIGHT)
-            // We adjust view_height so the flip calculation maps correctly to content rows.
-            let (original_x, original_y) = event.position;
-            let adjusted_x = original_x - RAIL_WIDTH as f64;
-            // We pass adjusted_y unchanged but use a reduced view_height for the flip calc
-            // This effectively shifts the coordinate system down by TAB_BAR_HEIGHT
-            let adjusted_y = original_y;
-
-            let adjusted_event = MouseEvent {
+            // Create event with content-local coordinates
+            // The y coordinate is already in screen space (y=0 at top), so content_y
+            // is relative to the top of the content area
+            let content_event = MouseEvent {
                 kind: event.kind,
-                position: (adjusted_x, adjusted_y),
+                position: (content_x, content_y),
                 modifiers: event.modifiers,
                 click_count: event.click_count,
             };
 
-            // Adjust view_height for content area (subtract tab bar height)
-            // This makes the y-flip calculation in pixel_to_buffer_position correct
             let content_height = self.view_height - TAB_BAR_HEIGHT;
 
             // Create context and forward to focus target
@@ -1395,7 +1397,7 @@ impl EditorState {
                 content_height,
                 self.view_width - RAIL_WIDTH, // Content width also adjusted
             );
-            self.focus_target.handle_mouse(adjusted_event, &mut ctx);
+            self.focus_target.handle_mouse(content_event, &mut ctx);
         } else if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
             // Chunk: docs/chunks/terminal_mouse_offset - Fixed terminal mouse Y coordinate calculation
             // Chunk: docs/chunks/terminal_clipboard_selection - Terminal mouse selection
@@ -1403,29 +1405,16 @@ impl EditorState {
             let modes = terminal.term_mode();
 
             // Calculate cell position from pixel coordinates
-            // Use the same coordinate transformation pattern as file buffers:
-            // 1. Subtract RAIL_WIDTH from x (content starts after left rail)
-            // 2. Flip y using content_height (NSView y=0 at bottom → content y=0 at top)
-            // 3. Add scroll_fraction_px to compensate for renderer's Y offset
+            // content_x and content_y are already in content-local space (y=0 at top of content)
             let cell_width = self.font_metrics.advance_width;
             let cell_height = self.font_metrics.line_height as f32;
 
-            let (x, y) = event.position;
-
-            // X coordinate: subtract rail width
-            let adjusted_x = (x - RAIL_WIDTH as f64).max(0.0);
-
-            // Y coordinate: flip using content_height (same as file buffer path)
-            // content_height = view_height - TAB_BAR_HEIGHT
-            let content_height = self.view_height as f64 - TAB_BAR_HEIGHT as f64;
-            let flipped_y = content_height - y;
-
-            // Account for scroll_fraction_px, matching pixel_to_buffer_position
+            // Account for scroll_fraction_px
             // The renderer translates content by -scroll_fraction_px, so we add it back
             let scroll_fraction_px = viewport.scroll_fraction_px() as f64;
-            let adjusted_y = (flipped_y + scroll_fraction_px).max(0.0);
+            let adjusted_y = (content_y + scroll_fraction_px).max(0.0);
 
-            let col = (adjusted_x / cell_width as f64) as usize;
+            let col = (content_x / cell_width as f64) as usize;
             let row = (adjusted_y / cell_height as f64) as usize;
 
             // Check if any mouse mode is active - forward to PTY
@@ -2358,14 +2347,14 @@ impl EditorState {
     ///
     // Chunk: docs/chunks/content_tab_bar - Click-to-switch and close-button hit testing
     // Chunk: docs/chunks/tab_bar_interaction - Tab click coordinate transformation
-    // Chunk: docs/chunks/tiling_workspace_integration - Use pane's tab_bar_view_offset
+    // Chunk: docs/chunks/tiling_workspace_integration - Receives screen-space coordinates (y=0 at top)
     /// Determines which tab was clicked and switches to it, or handles
     /// close button clicks.
     ///
-    /// The mouse coordinates are in NSView space (origin at bottom-left).
-    /// Tab bar geometry is in a coordinate system with y=0 at the top of the tab bar.
-    /// We need to transform the y-coordinate before checking containment.
-    fn handle_tab_bar_click(&mut self, mouse_x: f32, mouse_y: f32) {
+    /// The mouse coordinates are in screen space (y=0 at top of window).
+    /// Tab bar geometry uses y=0 at the top of the tab bar.
+    /// Since the tab bar is at the top of the window, screen_y maps directly to tab_bar_y.
+    fn handle_tab_bar_click(&mut self, screen_x: f32, screen_y: f32) {
         if let Some(workspace) = self.editor.active_workspace() {
             let tabs = tabs_from_workspace(workspace);
             let glyph_width = self.font_metrics.advance_width as f32;
@@ -2376,19 +2365,16 @@ impl EditorState {
                 workspace.tab_bar_view_offset(),
             );
 
-            // Transform y from NSView coords to tab bar local coords
-            // NSView: y=0 is at bottom, y=view_height is at top
-            // Tab bar: y=0 is at top of tab bar, y=TAB_BAR_HEIGHT is at bottom
-            // The tab bar occupies NSView y ∈ [view_height - TAB_BAR_HEIGHT, view_height]
-            // So: tab_bar_y = view_height - mouse_y (which gives 0 at top of window)
-            //     But tab bar starts at top, so: tab_bar_y = view_height - mouse_y
-            let tab_bar_y = self.view_height - mouse_y;
+            // Tab rects from calculate_tab_bar_geometry already use window x-coordinates
+            // (starting at RAIL_WIDTH), so no adjustment needed for x.
+            // screen_y is already relative to top of window (y=0 at top).
+            // Tab bar occupies y ∈ [0, TAB_BAR_HEIGHT), so screen_y is directly usable.
 
             // Check each tab rect
             for (idx, tab_rect) in geometry.tab_rects.iter().enumerate() {
-                if tab_rect.contains(mouse_x, tab_bar_y) {
+                if tab_rect.contains(screen_x, screen_y) {
                     // Check if close button was clicked (close button is part of TabRect)
-                    if tab_rect.is_close_button(mouse_x, tab_bar_y) {
+                    if tab_rect.is_close_button(screen_x, screen_y) {
                         self.close_tab(idx);
                         return;
                     }
@@ -4996,6 +4982,7 @@ mod tests {
     // =========================================================================
 
     #[test]
+    // Chunk: docs/chunks/tiling_workspace_integration - Tests use screen-space coordinates (y=0 at top)
     fn test_click_tab_switches_to_that_tab() {
         use crate::left_rail::RAIL_WIDTH;
         use crate::tab_bar::TAB_BAR_HEIGHT;
@@ -5022,17 +5009,17 @@ mod tests {
         let _ = state.take_dirty_region();
 
         // Click on the first tab (tab index 0)
-        // Tab bar Y is at the TOP of the view (flipped coordinates mean high y values)
-        // In macOS NSView coords (origin at bottom-left):
-        // - Tab bar is at y = view_height - TAB_BAR_HEIGHT to y = view_height
-        // - Clicking at y = view_height - TAB_BAR_HEIGHT/2 should be in the tab bar
-        let tab_bar_y = (320.0 - TAB_BAR_HEIGHT / 2.0) as f64;
+        // In NSView coords (origin at bottom-left), we send the click position.
+        // handle_mouse will flip to screen space.
+        // Tab bar in NSView coords: y ∈ [view_height - TAB_BAR_HEIGHT, view_height)
+        // So clicking at y = view_height - TAB_BAR_HEIGHT/2 is in the tab bar
+        let nsview_tab_bar_y = (320.0 - TAB_BAR_HEIGHT / 2.0) as f64;
         // First tab starts at RAIL_WIDTH
         let first_tab_x = (RAIL_WIDTH + 20.0) as f64;
 
         let click_event = MouseEvent {
             kind: MouseEventKind::Down,
-            position: (first_tab_x, tab_bar_y),
+            position: (first_tab_x, nsview_tab_bar_y),
             modifiers: Modifiers::default(),
             click_count: 1,
         };

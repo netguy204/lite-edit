@@ -1,19 +1,19 @@
 # Review Feedback
 
-**Iteration:** 1
+**Iteration:** 2
 **Decision:** FEEDBACK
 
 ## Summary
 
-Pane tree integration is complete with one significant gap: mouse coordinate refactoring was NOT implemented — the old ad-hoc coordinate pipeline remains in handle_mouse().
+Mouse coordinate refactoring (criteria 14-19) remains unimplemented from iteration 1 feedback; all other criteria satisfied.
 
 ## Issues to Address
 
-### Issue 1: crates/editor/src/editor_state.rs:1233-1280, crates/editor/src/buffer_target.rs:579-619
+### Issue 1: crates/editor/src/editor_state.rs:1233-1280, crates/editor/src/buffer_target.rs:579-632
 
-**Concern:** The GOAL.md explicitly requires refactoring mouse coordinate handling to flip y once at entry and use PaneRect for hit-testing. This was NOT implemented. The old ad-hoc coordinate pipeline remains.
+**Concern:** The GOAL.md explicitly requires refactoring mouse coordinate handling to 'flip y once at entry' and use PaneRect for hit-testing. This was flagged in iteration 1 and has NOT been addressed. The old ad-hoc coordinate pipeline remains unchanged: each handler does its own y-flip, RAIL_WIDTH subtraction, etc. This blocks multi-pane mouse support and perpetuates the fragile coordinate transform patterns that the investigation documented (7+ bug-fix chunks from ad-hoc transforms).
 
-**Suggestion:** Implement coordinate refactoring as specified in PLAN.md Steps 11-15: (1) Flip y at entry of handle_mouse(), (2) Use PaneRect for hit-testing, (3) Compute pane-local coords at dispatch, (4) Remove internal y-flip from pixel_to_buffer_position.
+**Suggestion:** Implement the coordinate refactoring as specified in PLAN.md Steps 11-15: (1) Flip y at entry point of handle_mouse(), (2) Use PaneRect for hit-testing, (3) Compute pane-local coordinates at dispatch point, (4) Remove internal y-flip from pixel_to_buffer_position and pixel_to_buffer_position_wrapped.
 
 
 ---
