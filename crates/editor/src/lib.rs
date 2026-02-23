@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // Chunk: docs/chunks/terminal_input_encoding - Terminal input encoding
 //!
 //! lite-edit library interface.
