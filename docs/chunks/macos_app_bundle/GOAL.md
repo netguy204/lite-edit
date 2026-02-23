@@ -1,8 +1,16 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- Makefile
+- resources/Info.plist
+- resources/LiteEdit.entitlements
+- scripts/make-icns.sh
+- scripts/bundle-app.sh
+- scripts/codesign-app.sh
+- scripts/notarize-app.sh
+- scripts/make-dmg.sh
 code_references: []
 narrative: null
 investigation: null
@@ -10,9 +18,10 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["tiling_tab_movement", "tiling_tree_model"]
+created_after:
+- tiling_tab_movement
+- tiling_tree_model
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
