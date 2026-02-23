@@ -1,12 +1,12 @@
 ---
-status: IMPLEMENTING
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
 - crates/editor/src/main.rs
 code_references:
-  - ref: crates/editor/src/main.rs#setup_window
-    implements: Initialize editor state with TextBuffer::new() instead of demo content
+- ref: crates/editor/src/main.rs#setup_window
+  implements: Initialize editor state with TextBuffer::new() instead of demo content
 narrative: null
 investigation: null
 subsystems: []
