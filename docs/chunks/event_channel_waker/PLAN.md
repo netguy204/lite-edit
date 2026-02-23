@@ -8,170 +8,84 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This is a targeted bug fix that adds missing `run_loop_waker` calls to non-PTY event senders in `EventSender`. The fix follows the existing pattern established by `send_pty_wakeup()`: after enqueueing an event to the mpsc channel, call `(self.inner.run_loop_waker)()` to signal the CFRunLoopSource so the drain loop processes the event.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Key insight**: The parent chunk `pty_wakeup_reentrant` correctly identified that PTY wakeup needs the waker (since it arrives from a background thread), but the main-thread events (key, mouse, scroll, cursor blink, resize) were left without waker calls under the assumption that "the run loop is already awake." This assumption is flawed — while the run loop *might* be processing a timer or other source, the CFRunLoopSource that drains our event queue only fires when it is explicitly signaled. Without the signal, events accumulate but are never processed until the next incidental wakeup (e.g., next PTY output).
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+**Fix strategy**: Add `(self.inner.run_loop_waker)()` calls to all non-PTY send methods. This is safe to call redundantly — multiple signals collapse into a single callback invocation when the run loop drains its sources.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/event_channel_waker/GOAL.md)
-with references to the files that you expect to touch.
--->
-
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/0001-validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/0002-error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/0001-validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+**Testing strategy**: Following `docs/trunk/TESTING_PHILOSOPHY.md`, we'll add unit tests that verify the waker callback is invoked for each event type. The existing `test_send_key_event` test provides a pattern but doesn't actually check whether the waker was called — it only verifies the event was received. We'll add explicit waker invocation assertions.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing tests for waker calls
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add unit tests to `crates/editor/src/event_channel.rs` that verify the `run_loop_waker` callback is invoked when sending each event type:
+- `test_send_key_calls_waker`
+- `test_send_mouse_calls_waker`
+- `test_send_scroll_calls_waker`
+- `test_send_cursor_blink_calls_waker`
+- `test_send_resize_calls_waker`
 
-Example:
+Each test creates a channel with a waker callback that increments an `AtomicUsize`, sends one event of the relevant type, and asserts `waker_called.load() == 1`.
 
-### Step 1: Define the SegmentHeader struct
+Location: `crates/editor/src/event_channel.rs` (in the existing `#[cfg(test)] mod tests` block)
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Add waker calls to send methods
 
-Location: src/segment/format.rs
+Modify each send method in `EventSender` to call the waker after sending:
 
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+pub fn send_key(&self, event: KeyEvent) -> Result<(), SendError<EditorEvent>> {
+    let result = self.inner.sender.send(EditorEvent::Key(event));
+    (self.inner.run_loop_waker)();
+    result
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Repeat for:
+- `send_key`
+- `send_mouse`
+- `send_scroll`
+- `send_cursor_blink`
+- `send_resize`
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Note: `send_pty_wakeup` already calls the waker, so no change is needed there.
 
-## Dependencies
+Location: `crates/editor/src/event_channel.rs`
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+### Step 3: Verify tests pass
 
-If there are no dependencies, delete this section.
--->
+Run the test suite to confirm:
+1. The new waker tests pass
+2. Existing tests still pass
+3. No regressions in the broader editor test suite
+
+Commands:
+```bash
+cargo test -p lite-edit --lib event_channel
+cargo test -p lite-edit
+```
+
+### Step 4: Manual verification (optional but recommended)
+
+Build and run the editor to verify:
+- Hotkeys (Cmd+P, Cmd+S, etc.) respond immediately
+- Mouse clicks register
+- Scroll events work
+- Cursor blink visibly toggles
+- Window resize triggers relayout
+
+This manual step confirms end-to-end behavior that unit tests cannot fully capture.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Redundant waker calls from main thread**: Events like key/mouse/scroll originate from NSView callbacks, which fire when the run loop is already awake. Calling the waker is harmless (CFRunLoopSourceSignal + CFRunLoopWakeUp are cheap and collapse), but it adds minor overhead. This is the conservative choice — correctness over micro-optimization. If profiling shows this is a bottleneck, a future chunk could add a flag to skip the waker when already on the main thread.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Ordering with debounced PTY wakeup**: `send_pty_wakeup` has debouncing logic (the `wakeup_pending` flag). The other send methods do not need this because they're not called from a tight background loop. Each keypress or mouse event is discrete and should be processed.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

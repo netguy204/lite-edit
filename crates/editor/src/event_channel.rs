@@ -86,17 +86,23 @@ pub fn create_event_channel(run_loop_waker: impl Fn() + Send + Sync + 'static) -
 impl EventSender {
     /// Sends a key event to the channel.
     pub fn send_key(&self, event: KeyEvent) -> Result<(), SendError<EditorEvent>> {
-        self.inner.sender.send(EditorEvent::Key(event))
+        let result = self.inner.sender.send(EditorEvent::Key(event));
+        (self.inner.run_loop_waker)();
+        result
     }
 
     /// Sends a mouse event to the channel.
     pub fn send_mouse(&self, event: MouseEvent) -> Result<(), SendError<EditorEvent>> {
-        self.inner.sender.send(EditorEvent::Mouse(event))
+        let result = self.inner.sender.send(EditorEvent::Mouse(event));
+        (self.inner.run_loop_waker)();
+        result
     }
 
     /// Sends a scroll event to the channel.
     pub fn send_scroll(&self, delta: ScrollDelta) -> Result<(), SendError<EditorEvent>> {
-        self.inner.sender.send(EditorEvent::Scroll(delta))
+        let result = self.inner.sender.send(EditorEvent::Scroll(delta));
+        (self.inner.run_loop_waker)();
+        result
     }
 
     /// Sends a PTY wakeup event to the channel and wakes the run loop.
@@ -128,12 +134,16 @@ impl EventSender {
 
     /// Sends a cursor blink event to the channel.
     pub fn send_cursor_blink(&self) -> Result<(), SendError<EditorEvent>> {
-        self.inner.sender.send(EditorEvent::CursorBlink)
+        let result = self.inner.sender.send(EditorEvent::CursorBlink);
+        (self.inner.run_loop_waker)();
+        result
     }
 
     /// Sends a resize event to the channel.
     pub fn send_resize(&self) -> Result<(), SendError<EditorEvent>> {
-        self.inner.sender.send(EditorEvent::Resize)
+        let result = self.inner.sender.send(EditorEvent::Resize);
+        (self.inner.run_loop_waker)();
+        result
     }
 }
 
@@ -250,5 +260,83 @@ mod tests {
 
         let event = receiver.try_recv().unwrap();
         assert!(matches!(event, EditorEvent::PtyWakeup));
+    }
+
+    #[test]
+    fn test_send_key_calls_waker() {
+        let waker_called = Arc::new(AtomicUsize::new(0));
+        let waker_called_clone = waker_called.clone();
+
+        let (sender, _receiver) = create_event_channel(move || {
+            waker_called_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        sender.send_key(KeyEvent::char('a')).unwrap();
+
+        assert_eq!(waker_called.load(Ordering::SeqCst), 1, "Waker should be called after send_key");
+    }
+
+    #[test]
+    fn test_send_mouse_calls_waker() {
+        use lite_edit_input::{MouseEventKind, Modifiers};
+
+        let waker_called = Arc::new(AtomicUsize::new(0));
+        let waker_called_clone = waker_called.clone();
+
+        let (sender, _receiver) = create_event_channel(move || {
+            waker_called_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let event = MouseEvent {
+            kind: MouseEventKind::Moved,
+            position: (10.0, 20.0),
+            modifiers: Modifiers { shift: false, command: false, option: false, control: false },
+            click_count: 0,
+        };
+        sender.send_mouse(event).unwrap();
+
+        assert_eq!(waker_called.load(Ordering::SeqCst), 1, "Waker should be called after send_mouse");
+    }
+
+    #[test]
+    fn test_send_scroll_calls_waker() {
+        let waker_called = Arc::new(AtomicUsize::new(0));
+        let waker_called_clone = waker_called.clone();
+
+        let (sender, _receiver) = create_event_channel(move || {
+            waker_called_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        sender.send_scroll(ScrollDelta { dx: 0.0, dy: 10.0, mouse_position: None }).unwrap();
+
+        assert_eq!(waker_called.load(Ordering::SeqCst), 1, "Waker should be called after send_scroll");
+    }
+
+    #[test]
+    fn test_send_cursor_blink_calls_waker() {
+        let waker_called = Arc::new(AtomicUsize::new(0));
+        let waker_called_clone = waker_called.clone();
+
+        let (sender, _receiver) = create_event_channel(move || {
+            waker_called_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        sender.send_cursor_blink().unwrap();
+
+        assert_eq!(waker_called.load(Ordering::SeqCst), 1, "Waker should be called after send_cursor_blink");
+    }
+
+    #[test]
+    fn test_send_resize_calls_waker() {
+        let waker_called = Arc::new(AtomicUsize::new(0));
+        let waker_called_clone = waker_called.clone();
+
+        let (sender, _receiver) = create_event_channel(move || {
+            waker_called_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        sender.send_resize().unwrap();
+
+        assert_eq!(waker_called.load(Ordering::SeqCst), 1, "Waker should be called after send_resize");
     }
 }
