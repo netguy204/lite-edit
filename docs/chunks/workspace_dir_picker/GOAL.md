@@ -10,9 +10,10 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["tiling_tab_movement", "tiling_tree_model"]
+created_after:
+- tiling_tab_movement
+- tiling_tree_model
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
