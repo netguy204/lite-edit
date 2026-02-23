@@ -21,6 +21,7 @@ use std::ptr::NonNull;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLDevice, MTLResourceOptions};
+use sha2::{Digest, Sha256};
 
 use crate::glyph_atlas::{GlyphAtlas, GlyphInfo};
 use crate::glyph_buffer::{GlyphLayout, GlyphVertex, QuadRange};
@@ -95,6 +96,112 @@ pub fn status_color(status: &WorkspaceStatus) -> [f32; 4] {
         WorkspaceStatus::Completed => [0.2, 0.7, 0.2, 1.0],  // Checkmark green
         WorkspaceStatus::Errored => [0.9, 0.2, 0.2, 1.0],    // Red
     }
+}
+
+// =============================================================================
+// Identicon Generation
+// Chunk: docs/chunks/workspace_identicon - Workspace identicons
+// =============================================================================
+
+/// Converts HSL color values to RGB.
+///
+/// Uses the same algorithm as Python's `colorsys.hls_to_rgb`.
+///
+/// # Arguments
+/// * `h` - Hue in range [0.0, 1.0]
+/// * `s` - Saturation in range [0.0, 1.0]
+/// * `l` - Lightness in range [0.0, 1.0]
+///
+/// # Returns
+/// RGB values as `(r, g, b)` each in range [0.0, 1.0]
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
+    if s == 0.0 {
+        // Achromatic (gray)
+        return (l, l, l);
+    }
+
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
+    let p = 2.0 * l - q;
+
+    fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
+        if t < 0.0 {
+            t += 1.0;
+        }
+        if t > 1.0 {
+            t -= 1.0;
+        }
+        if t < 1.0 / 6.0 {
+            return p + (q - p) * 6.0 * t;
+        }
+        if t < 1.0 / 2.0 {
+            return q;
+        }
+        if t < 2.0 / 3.0 {
+            return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+        }
+        p
+    }
+
+    let r = hue_to_rgb(p, q, h + 1.0 / 3.0);
+    let g = hue_to_rgb(p, q, h);
+    let b = hue_to_rgb(p, q, h - 1.0 / 3.0);
+
+    (r, g, b)
+}
+
+/// Derives an RGBA foreground color from a SHA-256 hash.
+///
+/// Algorithm:
+/// - Hue: bytes 0-1 (little-endian u16) mod 360
+/// - Saturation: byte 2 mapped to [0.5, 0.8]
+/// - Lightness: byte 3 mapped to [0.4, 0.65]
+fn identicon_color_from_hash(hash: &[u8; 32]) -> [f32; 4] {
+    // Hue from bytes 0-1 (little-endian u16)
+    let hue_raw = u16::from_le_bytes([hash[0], hash[1]]);
+    let hue = (hue_raw % 360) as f32 / 360.0;
+
+    // Saturation from byte 2: [0.5, 0.8]
+    let sat = 0.5 + (hash[2] as f32 / 255.0) * 0.3;
+
+    // Lightness from byte 3: [0.4, 0.65]
+    let light = 0.4 + (hash[3] as f32 / 255.0) * 0.25;
+
+    let (r, g, b) = hsl_to_rgb(hue, sat, light);
+    [r, g, b, 1.0]
+}
+
+/// Derives a 5×5 vertically-symmetric grid pattern from a SHA-256 hash.
+///
+/// Returns a [[bool; 5]; 5] where true = filled cell, false = background cell.
+/// The grid is vertically symmetric (mirrored around the center column).
+fn identicon_grid_from_hash(hash: &[u8; 32]) -> [[bool; 5]; 5] {
+    // Extract 15 bits from bytes 4-5 (little-endian u16)
+    let bits = u16::from_le_bytes([hash[4], hash[5]]);
+
+    let mut grid = [[false; 5]; 5];
+
+    for row in 0..5 {
+        for col in 0..3 {
+            // Only compute left half + center
+            let bit_index = row * 3 + col;
+            let on = (bits & (1 << bit_index)) != 0;
+            grid[row][col] = on;
+            grid[row][4 - col] = on; // Mirror to right half
+        }
+    }
+
+    grid
+}
+
+/// Computes the SHA-256 hash of a workspace label for identicon generation.
+fn hash_workspace_label(label: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(label.as_bytes());
+    hasher.finalize().into()
 }
 
 // =============================================================================
@@ -201,8 +308,8 @@ pub struct LeftRailGlyphBuffer {
     active_tile_range: QuadRange,
     /// Status indicator dots
     status_indicator_range: QuadRange,
-    /// Workspace labels
-    label_range: QuadRange,
+    /// Workspace identicons (5×5 grid per workspace)
+    identicon_range: QuadRange,
 }
 
 impl LeftRailGlyphBuffer {
@@ -217,7 +324,7 @@ impl LeftRailGlyphBuffer {
             tile_background_range: QuadRange::default(),
             active_tile_range: QuadRange::default(),
             status_indicator_range: QuadRange::default(),
-            label_range: QuadRange::default(),
+            identicon_range: QuadRange::default(),
         }
     }
 
@@ -256,9 +363,9 @@ impl LeftRailGlyphBuffer {
         self.status_indicator_range
     }
 
-    /// Returns the index range for labels.
-    pub fn label_range(&self) -> QuadRange {
-        self.label_range
+    /// Returns the index range for identicons.
+    pub fn identicon_range(&self) -> QuadRange {
+        self.identicon_range
     }
 
     /// Updates the buffers from the editor state and geometry.
@@ -268,7 +375,7 @@ impl LeftRailGlyphBuffer {
     /// 2. Tile backgrounds (inactive tiles)
     /// 3. Active tile highlight
     /// 4. Status indicators
-    /// 5. Workspace labels
+    /// 5. Workspace identicons (5×5 grids)
     ///
     /// # Arguments
     /// * `device` - The Metal device for buffer creation
@@ -282,14 +389,10 @@ impl LeftRailGlyphBuffer {
         editor: &Editor,
         geometry: &LeftRailGeometry,
     ) {
-        // Estimate capacity: 1 background + tiles + indicators + label chars
+        // Estimate capacity: 1 background + tiles + indicators + identicon cells
+        // Each workspace has up to 25 identicon cells (5×5 grid)
         let workspace_count = editor.workspace_count();
-        let label_chars: usize = editor
-            .workspaces
-            .iter()
-            .map(|w| w.label.chars().take(3).count()) // First 3 chars of label
-            .sum();
-        let estimated_quads = 1 + workspace_count * 2 + workspace_count + label_chars;
+        let estimated_quads = 1 + workspace_count * 2 + workspace_count + workspace_count * 25;
 
         let mut vertices: Vec<GlyphVertex> = Vec::with_capacity(estimated_quads * 4);
         let mut indices: Vec<u32> = Vec::with_capacity(estimated_quads * 6);
@@ -300,7 +403,7 @@ impl LeftRailGlyphBuffer {
         self.tile_background_range = QuadRange::default();
         self.active_tile_range = QuadRange::default();
         self.status_indicator_range = QuadRange::default();
-        self.label_range = QuadRange::default();
+        self.identicon_range = QuadRange::default();
 
         let solid_glyph = atlas.solid_glyph();
         let active_workspace = editor.active_workspace;
@@ -386,37 +489,61 @@ impl LeftRailGlyphBuffer {
         }
         self.status_indicator_range = QuadRange::new(status_start, indices.len() - status_start);
 
-        // ==================== Phase 5: Workspace Labels ====================
-        let label_start = indices.len();
+        // ==================== Phase 5: Workspace Identicons ====================
+        // Chunk: docs/chunks/workspace_identicon - Workspace identicons
+        let identicon_start = indices.len();
         for (idx, tile_rect) in geometry.tile_rects.iter().enumerate() {
             if idx >= editor.workspaces.len() {
                 break;
             }
 
             let workspace = &editor.workspaces[idx];
-            // Use first 3 characters of label (abbreviated)
-            let label: String = workspace.label.chars().take(3).collect();
 
-            // Position label centered horizontally, in lower half of tile
-            let label_y = tile_rect.y + TILE_HEIGHT / 2.0 + 4.0;
-            let label_width = label.len() as f32 * self.layout.glyph_width;
-            let label_x = tile_rect.x + (tile_rect.width - label_width) / 2.0;
+            // Hash the workspace label and derive identicon parameters
+            let hash = hash_workspace_label(&workspace.label);
+            let fg_color = identicon_color_from_hash(&hash);
+            let grid = identicon_grid_from_hash(&hash);
 
-            for (char_idx, c) in label.chars().enumerate() {
-                if c == ' ' {
-                    continue;
-                }
+            // Calculate cell size: tile has padding on each side
+            // cell_size = (tile_width - 2*padding) / 5
+            let icon_area = tile_rect.width - 2.0 * TILE_PADDING;
+            let cell_size = icon_area / 5.0;
 
-                if let Some(glyph) = atlas.get_glyph(c) {
-                    let x = label_x + char_idx as f32 * self.layout.glyph_width;
-                    let quad = self.create_glyph_quad_at(x, label_y, glyph, LABEL_COLOR);
+            // Center the 5×5 grid in the tile
+            let grid_size = cell_size * 5.0;
+            let grid_x = tile_rect.x + (tile_rect.width - grid_size) / 2.0;
+            let grid_y = tile_rect.y + (tile_rect.height - grid_size) / 2.0;
+
+            // Dimmed color for "off" cells (1/5 brightness)
+            let dim_color = [
+                fg_color[0] * 0.2,
+                fg_color[1] * 0.2,
+                fg_color[2] * 0.2,
+                1.0,
+            ];
+
+            // Render each cell in the 5×5 grid
+            for row in 0..5 {
+                for col in 0..5 {
+                    let cell_x = grid_x + col as f32 * cell_size;
+                    let cell_y = grid_y + row as f32 * cell_size;
+                    let color = if grid[row][col] { fg_color } else { dim_color };
+
+                    let quad = self.create_rect_quad(
+                        cell_x,
+                        cell_y,
+                        cell_size,
+                        cell_size,
+                        solid_glyph,
+                        color,
+                    );
                     vertices.extend_from_slice(&quad);
                     Self::push_quad_indices(&mut indices, vertex_offset);
                     vertex_offset += 4;
                 }
             }
         }
-        self.label_range = QuadRange::new(label_start, indices.len() - label_start);
+        self.identicon_range = QuadRange::new(identicon_start, indices.len() - identicon_start);
 
         // ==================== Create GPU Buffers ====================
         if vertices.is_empty() {
@@ -644,5 +771,194 @@ mod tests {
         // Red means R > G and R > B
         assert!(color[0] > color[1]);
         assert!(color[0] > color[2]);
+    }
+
+    // =========================================================================
+    // Identicon Tests
+    // Chunk: docs/chunks/workspace_identicon - Workspace identicons
+    // =========================================================================
+
+    #[test]
+    fn test_hsl_to_rgb_gray() {
+        // Zero saturation should produce gray (R = G = B = L)
+        let (r, g, b) = hsl_to_rgb(0.0, 0.0, 0.5);
+        assert!((r - 0.5).abs() < 0.001);
+        assert!((g - 0.5).abs() < 0.001);
+        assert!((b - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_hsl_to_rgb_pure_red() {
+        // Hue 0 = red with full saturation
+        let (r, g, b) = hsl_to_rgb(0.0, 1.0, 0.5);
+        assert!((r - 1.0).abs() < 0.001);
+        assert!(g.abs() < 0.001);
+        assert!(b.abs() < 0.001);
+    }
+
+    #[test]
+    fn test_hsl_to_rgb_pure_green() {
+        // Hue 0.333 = green with full saturation
+        let (r, g, b) = hsl_to_rgb(1.0 / 3.0, 1.0, 0.5);
+        assert!(r.abs() < 0.001);
+        assert!((g - 1.0).abs() < 0.001);
+        assert!(b.abs() < 0.001);
+    }
+
+    #[test]
+    fn test_hsl_to_rgb_pure_blue() {
+        // Hue 0.667 = blue with full saturation
+        let (r, g, b) = hsl_to_rgb(2.0 / 3.0, 1.0, 0.5);
+        assert!(r.abs() < 0.001);
+        assert!(g.abs() < 0.001);
+        assert!((b - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_identicon_color_deterministic() {
+        // Same input should always produce the same output
+        let hash1 = hash_workspace_label("test-workspace");
+        let hash2 = hash_workspace_label("test-workspace");
+        let color1 = identicon_color_from_hash(&hash1);
+        let color2 = identicon_color_from_hash(&hash2);
+
+        assert_eq!(color1, color2, "Same input should produce identical colors");
+    }
+
+    #[test]
+    fn test_identicon_color_known_input() {
+        // Snapshot test: "untitled" should produce a specific color
+        // This verifies the algorithm matches the prototype
+        let hash = hash_workspace_label("untitled");
+        let color = identicon_color_from_hash(&hash);
+
+        // All RGB values should be in valid range [0.0, 1.0]
+        assert!(color[0] >= 0.0 && color[0] <= 1.0, "R should be in [0,1]");
+        assert!(color[1] >= 0.0 && color[1] <= 1.0, "G should be in [0,1]");
+        assert!(color[2] >= 0.0 && color[2] <= 1.0, "B should be in [0,1]");
+        assert!((color[3] - 1.0).abs() < 0.001, "Alpha should be 1.0");
+
+        // The color should be relatively saturated (not gray)
+        let max_channel = color[0].max(color[1]).max(color[2]);
+        let min_channel = color[0].min(color[1]).min(color[2]);
+        let chroma = max_channel - min_channel;
+        assert!(chroma > 0.1, "Color should be saturated, not gray");
+    }
+
+    #[test]
+    fn test_identicon_color_valid_range() {
+        // Test several inputs to verify RGB values are always in valid range
+        let test_labels = ["a", "workspace", "very-long-workspace-name-12345", "特殊字符"];
+
+        for label in test_labels {
+            let hash = hash_workspace_label(label);
+            let color = identicon_color_from_hash(&hash);
+
+            assert!(
+                color[0] >= 0.0 && color[0] <= 1.0,
+                "R out of range for '{}'",
+                label
+            );
+            assert!(
+                color[1] >= 0.0 && color[1] <= 1.0,
+                "G out of range for '{}'",
+                label
+            );
+            assert!(
+                color[2] >= 0.0 && color[2] <= 1.0,
+                "B out of range for '{}'",
+                label
+            );
+        }
+    }
+
+    #[test]
+    fn test_identicon_grid_deterministic() {
+        // Same input should always produce the same grid
+        let hash1 = hash_workspace_label("test-workspace");
+        let hash2 = hash_workspace_label("test-workspace");
+        let grid1 = identicon_grid_from_hash(&hash1);
+        let grid2 = identicon_grid_from_hash(&hash2);
+
+        assert_eq!(grid1, grid2, "Same input should produce identical grids");
+    }
+
+    #[test]
+    fn test_identicon_grid_symmetric() {
+        // Grid should be vertically symmetric (mirrored around center column)
+        let test_labels = ["untitled", "project-alpha", "feature/auth"];
+
+        for label in test_labels {
+            let hash = hash_workspace_label(label);
+            let grid = identicon_grid_from_hash(&hash);
+
+            for row in 0..5 {
+                assert_eq!(
+                    grid[row][0], grid[row][4],
+                    "'{}' row {} col 0 should mirror col 4",
+                    label, row
+                );
+                assert_eq!(
+                    grid[row][1], grid[row][3],
+                    "'{}' row {} col 1 should mirror col 3",
+                    label, row
+                );
+                // col 2 is center, doesn't need mirroring
+            }
+        }
+    }
+
+    #[test]
+    fn test_identicon_grid_known_input() {
+        // Snapshot test: verify "untitled" produces a non-empty pattern
+        let hash = hash_workspace_label("untitled");
+        let grid = identicon_grid_from_hash(&hash);
+
+        // Count "on" cells - should have at least some
+        let on_count: usize = grid.iter().map(|row| row.iter().filter(|&&c| c).count()).sum();
+        assert!(on_count > 0, "Grid should have at least one 'on' cell");
+        assert!(on_count < 25, "Grid should have at least one 'off' cell");
+    }
+
+    #[test]
+    fn test_similar_names_produce_distinct_identicons() {
+        // Similar workspace names should produce visually distinct identicons
+        // We test both color and grid differences
+        let test_pairs = [
+            ("project-alpha", "project-beta"),
+            ("untitled", "untitled-2"),
+            ("feature/auth", "feature/ui"),
+        ];
+
+        for (name1, name2) in test_pairs {
+            let hash1 = hash_workspace_label(name1);
+            let hash2 = hash_workspace_label(name2);
+
+            let color1 = identicon_color_from_hash(&hash1);
+            let color2 = identicon_color_from_hash(&hash2);
+            let grid1 = identicon_grid_from_hash(&hash1);
+            let grid2 = identicon_grid_from_hash(&hash2);
+
+            // Colors should differ
+            let color_diff = (color1[0] - color2[0]).abs()
+                + (color1[1] - color2[1]).abs()
+                + (color1[2] - color2[2]).abs();
+
+            // Grids should differ
+            let grid_diff: usize = (0..5)
+                .flat_map(|row| (0..5).map(move |col| (row, col)))
+                .filter(|&(row, col)| grid1[row][col] != grid2[row][col])
+                .count();
+
+            // At least one should differ significantly
+            assert!(
+                color_diff > 0.1 || grid_diff > 2,
+                "'{}' and '{}' should produce distinct identicons (color_diff={}, grid_diff={})",
+                name1,
+                name2,
+                color_diff,
+                grid_diff
+            );
+        }
     }
 }

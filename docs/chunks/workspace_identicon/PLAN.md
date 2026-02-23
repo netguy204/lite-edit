@@ -8,170 +8,174 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+Replace the Phase 5 label rendering in `LeftRailGlyphBuffer::update()` with identicon grid generation. The identicon algorithm hashes the workspace label with SHA-256 and derives:
+1. A foreground color (HSL from bytes 0-3, converted to RGB)
+2. A 5×5 vertically-symmetric grid pattern (from bytes 4-5)
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+Each identicon cell is rendered as a colored rectangle quad using the existing `create_rect_quad()` infrastructure. "On" cells use the derived foreground color; "off" cells use 1/5 brightness for a cohesive background. The status indicator dot continues to overlay the identicon as it does today.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+The algorithm is taken directly from the validated prototype in `docs/investigations/workspace_identity/prototypes/identicon_gen.py` and transliterated to Rust.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/workspace_identicon/GOAL.md)
-with references to the files that you expect to touch.
--->
-
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+**Testing approach (per TESTING_PHILOSOPHY.md):**
+- The hash→color and hash→grid derivation functions are pure and fully testable without Metal
+- Unit tests verify deterministic output for known inputs (e.g., "untitled" always produces the same color and pattern)
+- Unit tests verify that similar workspace names produce visually distinct identicons
+- Existing geometry tests continue to pass unchanged
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add SHA-256 dependency
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add the `sha2` crate to `crates/editor/Cargo.toml` for SHA-256 hashing.
 
-Example:
+**Location:** `crates/editor/Cargo.toml`
 
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```toml
+sha2 = "0.10"
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+### Step 2: Implement identicon color derivation
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Create a pure function that takes a SHA-256 digest and returns an RGBA color array.
+
+Algorithm (from prototype):
+- Hue: bytes 0-1 combined as u16, mod 360
+- Saturation: byte 2 mapped to range [0.5, 0.8]
+- Lightness: byte 3 mapped to range [0.4, 0.65]
+- Convert HSL to RGB
+
+**Location:** `crates/editor/src/left_rail.rs` — add new function `identicon_color_from_hash`
+
+```rust
+/// Derives an RGBA foreground color from a SHA-256 hash.
+///
+/// Algorithm:
+/// - Hue: bytes 0-1 (little-endian u16) mod 360
+/// - Saturation: byte 2 mapped to [0.5, 0.8]
+/// - Lightness: byte 3 mapped to [0.4, 0.65]
+fn identicon_color_from_hash(hash: &[u8; 32]) -> [f32; 4] {
+    // ...
+}
+```
+
+Also implement an HSL-to-RGB helper function (colorsys equivalent).
+
+### Step 3: Implement identicon grid derivation
+
+Create a pure function that takes a SHA-256 digest and returns a 5×5 boolean grid representing the pattern.
+
+Algorithm (from prototype):
+- Extract 15 bits from bytes 4-5 (little-endian u16)
+- For each row 0..5 and column 0..3:
+  - Bit index = row * 3 + col
+  - Cell is "on" if bit is set
+  - Mirror: grid[row][4-col] = grid[row][col]
+
+**Location:** `crates/editor/src/left_rail.rs` — add new function `identicon_grid_from_hash`
+
+```rust
+/// Derives a 5×5 vertically-symmetric grid pattern from a SHA-256 hash.
+///
+/// Returns a [[bool; 5]; 5] where true = filled cell, false = background cell.
+fn identicon_grid_from_hash(hash: &[u8; 32]) -> [[bool; 5]; 5] {
+    // ...
+}
+```
+
+### Step 4: Replace Phase 5 label rendering with identicon quads
+
+Modify the Phase 5 section of `LeftRailGlyphBuffer::update()` to:
+1. Hash each workspace label with SHA-256
+2. Derive the foreground color and grid pattern
+3. Calculate cell size: `cell_size = (tile_width - padding) / 5`
+4. For each cell in the 5×5 grid:
+   - Compute cell position within the tile
+   - If cell is "on": use foreground color
+   - If cell is "off": use dimmed color (1/5 brightness)
+   - Generate a quad via `create_rect_quad()`
+
+Update capacity estimation: each workspace now generates up to 25 quads (instead of 3 label glyphs).
+
+Rename `label_range` to `identicon_range` throughout the struct and its accessors for clarity.
+
+**Location:** `crates/editor/src/left_rail.rs`, lines 389-419 (Phase 5 section)
+
+### Step 5: Add unit tests for hash→color derivation
+
+Write tests verifying:
+1. Determinism: same input always produces same output
+2. Known values: "untitled" produces a specific expected color (snapshot test)
+3. Range validity: output RGB values are in [0.0, 1.0]
+
+**Location:** `crates/editor/src/left_rail.rs`, in `#[cfg(test)] mod tests`
+
+```rust
+#[test]
+fn test_identicon_color_deterministic() { ... }
+
+#[test]
+fn test_identicon_color_known_input() { ... }
+
+#[test]
+fn test_identicon_color_valid_range() { ... }
+```
+
+### Step 6: Add unit tests for hash→grid derivation
+
+Write tests verifying:
+1. Determinism: same input always produces same grid
+2. Vertical symmetry: grid[row][col] == grid[row][4-col] for all rows
+3. Known values: "untitled" produces a specific expected pattern (snapshot test)
+
+**Location:** `crates/editor/src/left_rail.rs`, in `#[cfg(test)] mod tests`
+
+```rust
+#[test]
+fn test_identicon_grid_deterministic() { ... }
+
+#[test]
+fn test_identicon_grid_symmetric() { ... }
+
+#[test]
+fn test_identicon_grid_known_input() { ... }
+```
+
+### Step 7: Add unit tests for similar-name differentiation
+
+Write tests verifying that similar workspace names produce visually distinct identicons:
+- "project-alpha" vs "project-beta" (same prefix)
+- "untitled" vs "untitled-2" (sequential)
+- "feature/auth" vs "feature/ui" (same path prefix)
+
+**Location:** `crates/editor/src/left_rail.rs`, in `#[cfg(test)] mod tests`
+
+```rust
+#[test]
+fn test_similar_names_produce_distinct_identicons() { ... }
+```
+
+### Step 8: Run existing tests and verify no regressions
+
+Run `cargo test` to ensure:
+- All geometry tests pass unchanged
+- All status color tests pass unchanged
+- New identicon tests pass
+
+**Command:** `cargo test -p lite-edit`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- `sha2` crate (version 0.10) for SHA-256 hashing
+- No chunk dependencies — this chunk modifies existing infrastructure in place
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
-
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **HSL to RGB conversion accuracy:** The prototype uses Python's `colorsys.hls_to_rgb`. Need to verify Rust implementation matches. Mitigated by snapshot tests with known inputs.
+- **Cell size at non-retina:** At 48px tile with 4px padding per side, cells are ~8px. This is fine on retina but may look blocky on non-retina. The investigation deemed this acceptable, but visual verification is warranted.
+- **Performance:** 25 quads per workspace (vs ~3 previously) increases vertex count. With typical workspace counts (3-10), this adds 60-220 vertices — negligible for GPU rendering. No optimization needed.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

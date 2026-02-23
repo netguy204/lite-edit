@@ -1,8 +1,10 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/editor/src/left_rail.rs
+  - crates/editor/Cargo.toml
 code_references: []
 narrative: null
 investigation: workspace_identity
@@ -10,9 +12,10 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["dirty_region_wrap_aware", "macos_app_bundle"]
+created_after:
+- dirty_region_wrap_aware
+- macos_app_bundle
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
