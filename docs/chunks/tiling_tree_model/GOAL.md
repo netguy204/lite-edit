@@ -1,11 +1,73 @@
 ---
-status: IMPLEMENTING
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
 - crates/editor/src/pane_layout.rs
 - crates/editor/src/lib.rs
-code_references: []
+code_references:
+  - ref: crates/editor/src/pane_layout.rs#PaneId
+    implements: "Unique identifier type for panes in the layout tree"
+  - ref: crates/editor/src/pane_layout.rs#gen_pane_id
+    implements: "Utility function for generating unique pane IDs"
+  - ref: crates/editor/src/pane_layout.rs#SplitDirection
+    implements: "Direction enum for splits (Horizontal/Vertical)"
+  - ref: crates/editor/src/pane_layout.rs#SplitDirection::is_compatible
+    implements: "Checks if a movement direction aligns with split axis"
+  - ref: crates/editor/src/pane_layout.rs#Direction
+    implements: "Cardinal direction enum for pane navigation (Left/Right/Up/Down)"
+  - ref: crates/editor/src/pane_layout.rs#Direction::is_toward_second
+    implements: "Determines if direction goes toward second child"
+  - ref: crates/editor/src/pane_layout.rs#Direction::opposite
+    implements: "Returns the opposite direction"
+  - ref: crates/editor/src/pane_layout.rs#Direction::to_split_direction
+    implements: "Maps movement direction to compatible split direction"
+  - ref: crates/editor/src/pane_layout.rs#MoveTarget
+    implements: "Result enum for directional target search (ExistingPane/SplitPane)"
+  - ref: crates/editor/src/pane_layout.rs#Pane
+    implements: "Leaf node containing tabs with management API mirroring Workspace"
+  - ref: crates/editor/src/pane_layout.rs#Pane::new
+    implements: "Creates a new empty pane"
+  - ref: crates/editor/src/pane_layout.rs#Pane::add_tab
+    implements: "Adds a tab and makes it active"
+  - ref: crates/editor/src/pane_layout.rs#Pane::close_tab
+    implements: "Closes a tab and adjusts active_tab index"
+  - ref: crates/editor/src/pane_layout.rs#Pane::switch_tab
+    implements: "Switches active tab and clears unread state"
+  - ref: crates/editor/src/pane_layout.rs#Pane::active_tab
+    implements: "Returns reference to active tab"
+  - ref: crates/editor/src/pane_layout.rs#Pane::active_tab_mut
+    implements: "Returns mutable reference to active tab"
+  - ref: crates/editor/src/pane_layout.rs#Pane::tab_count
+    implements: "Returns number of tabs in pane"
+  - ref: crates/editor/src/pane_layout.rs#Pane::is_empty
+    implements: "Checks if pane has no tabs"
+  - ref: crates/editor/src/pane_layout.rs#PaneRect
+    implements: "Screen rectangle for layout output with hit-testing"
+  - ref: crates/editor/src/pane_layout.rs#PaneRect::contains
+    implements: "Point-in-rect test for hit-testing"
+  - ref: crates/editor/src/pane_layout.rs#PaneLayoutNode
+    implements: "Binary tree enum with Leaf(Pane) and Split variants"
+  - ref: crates/editor/src/pane_layout.rs#PaneLayoutNode::single_pane
+    implements: "Constructor for leaf node"
+  - ref: crates/editor/src/pane_layout.rs#PaneLayoutNode::pane_count
+    implements: "Returns total leaf count"
+  - ref: crates/editor/src/pane_layout.rs#PaneLayoutNode::all_panes
+    implements: "Returns flat list of all panes"
+  - ref: crates/editor/src/pane_layout.rs#PaneLayoutNode::all_panes_mut
+    implements: "Returns mutable references to all panes"
+  - ref: crates/editor/src/pane_layout.rs#PaneLayoutNode::get_pane
+    implements: "Lookup pane by ID"
+  - ref: crates/editor/src/pane_layout.rs#PaneLayoutNode::get_pane_mut
+    implements: "Mutable lookup pane by ID"
+  - ref: crates/editor/src/pane_layout.rs#PaneLayoutNode::contains_pane
+    implements: "Check if pane exists in subtree"
+  - ref: crates/editor/src/pane_layout.rs#PaneLayoutNode::nearest_leaf_toward
+    implements: "Finds nearest leaf in direction within subtree"
+  - ref: crates/editor/src/pane_layout.rs#PaneLayoutNode::find_target_in_direction
+    implements: "Walks up tree to find target pane or determine split needed"
+  - ref: crates/editor/src/pane_layout.rs#calculate_pane_rects
+    implements: "Recursive layout calculation producing screen rectangles"
 narrative: null
 investigation: tiling_pane_layout
 subsystems: []
