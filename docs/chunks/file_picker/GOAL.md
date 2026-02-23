@@ -9,7 +9,7 @@ code_references:
   - ref: crates/editor/src/editor_state.rs#EditorFocus
     implements: "Focus mode enum distinguishing Buffer vs Selector editing mode"
   - ref: crates/editor/src/editor_state.rs#EditorState
-    implements: "File picker state fields (focus, active_selector, file_index, last_cache_version, resolved_path)"
+    implements: "File picker state fields (focus, active_selector, resolved_path)"
   - ref: crates/editor/src/editor_state.rs#EditorState::handle_key
     implements: "Cmd+P interception and focus-based key routing"
   - ref: crates/editor/src/editor_state.rs#EditorState::handle_cmd_p
