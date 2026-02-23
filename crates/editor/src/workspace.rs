@@ -592,6 +592,32 @@ impl Workspace {
         }
     }
 
+    // Chunk: docs/chunks/pane_close_last_tab - Cleanup empty panes on last tab close
+    /// Finds a pane to focus after the current active pane is removed.
+    ///
+    /// Searches for an adjacent pane in direction order: Right, Left, Down, Up.
+    /// Returns the ID of the first existing pane found in any direction.
+    ///
+    /// # Returns
+    ///
+    /// `Some(PaneId)` if an adjacent pane exists, `None` if the active pane is
+    /// the only pane in the tree.
+    pub fn find_fallback_focus(&self) -> Option<PaneId> {
+        use crate::pane_layout::{Direction, MoveTarget};
+
+        // Search in direction order: Right, Left, Down, Up
+        // This prefers horizontal neighbors first, then vertical
+        for direction in [Direction::Right, Direction::Left, Direction::Down, Direction::Up] {
+            let target = self.pane_root.find_target_in_direction(self.active_pane_id, direction);
+            if let MoveTarget::ExistingPane(target_id) = target {
+                return Some(target_id);
+            }
+        }
+
+        // No adjacent pane found - the active pane is the only one
+        None
+    }
+
     /// Moves the active tab of the focused pane in the given direction.
     ///
     /// Uses `move_tab` from `pane_layout` to:
@@ -1705,5 +1731,70 @@ mod tests {
         // Since pane 2 is now empty, it should be cleaned up
         // The tree should collapse back to a single pane
         assert_eq!(ws.pane_root.pane_count(), 1);
+    }
+
+    // =========================================================================
+    // find_fallback_focus Tests (Chunk: docs/chunks/pane_close_last_tab)
+    // =========================================================================
+
+    #[test]
+    fn test_find_fallback_focus_single_pane_returns_none() {
+        let ws = Workspace::with_empty_tab(1, 1, "test".to_string(), PathBuf::from("/test"), TEST_LINE_HEIGHT);
+        // Single pane has no fallback
+        assert_eq!(ws.find_fallback_focus(), None);
+    }
+
+    #[test]
+    fn test_find_fallback_focus_hsplit_prefers_right() {
+        let ws = create_hsplit_workspace();
+        // Active is pane 1 (left), should find pane 2 (right) as fallback
+        // because Right is checked before Left
+        let fallback = ws.find_fallback_focus();
+        assert_eq!(fallback, Some(2));
+    }
+
+    #[test]
+    fn test_find_fallback_focus_from_right_pane() {
+        let mut ws = create_hsplit_workspace();
+        ws.active_pane_id = 2; // Switch to right pane
+        // Active is pane 2 (right), should find pane 1 (left) as fallback
+        let fallback = ws.find_fallback_focus();
+        assert_eq!(fallback, Some(1));
+    }
+
+    #[test]
+    fn test_find_fallback_focus_nested_layout() {
+        let mut ws = Workspace::new(1, "test".to_string(), PathBuf::from("/test"));
+
+        // Create HSplit(Pane[A], VSplit(Pane[B], Pane[C]))
+        let mut pane_a = Pane::new(1, 1);
+        pane_a.add_tab(Tab::empty_file(1, TEST_LINE_HEIGHT));
+
+        let mut pane_b = Pane::new(2, 1);
+        pane_b.add_tab(Tab::empty_file(2, TEST_LINE_HEIGHT));
+
+        let mut pane_c = Pane::new(3, 1);
+        pane_c.add_tab(Tab::empty_file(3, TEST_LINE_HEIGHT));
+
+        ws.pane_root = PaneLayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(PaneLayoutNode::Leaf(pane_a)),
+            second: Box::new(PaneLayoutNode::Split {
+                direction: SplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(PaneLayoutNode::Leaf(pane_b)),
+                second: Box::new(PaneLayoutNode::Leaf(pane_c)),
+            }),
+        };
+        ws.active_pane_id = 2; // Focus on pane B
+
+        // From B, should find an adjacent pane (A or C)
+        let fallback = ws.find_fallback_focus();
+        assert!(fallback.is_some());
+        // Direction order is Right, Left, Down, Up
+        // From B: Right is no pane (edge), Left is A, Down is C
+        // So should find A (Left is checked before Down)
+        assert_eq!(fallback, Some(1)); // Pane A
     }
 }

@@ -8,153 +8,102 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The fix leverages the existing `cleanup_empty_panes` function in `pane_layout.rs` which already handles collapsing empty panes and promoting their siblings. The missing piece is:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Detection**: After closing a tab in `EditorState::close_tab`, check if the pane is now empty when `pane_count > 1`.
+2. **Cleanup**: Call `cleanup_empty_panes` on the workspace's `pane_root` to collapse the empty pane.
+3. **Focus transfer**: Before cleanup, determine which adjacent pane should receive focus. After cleanup, update `active_pane_id` to that pane.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+The approach follows the Humble View Architecture from TESTING_PHILOSOPHY.md — all logic is testable as pure state manipulation without platform dependencies.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/pane_close_last_tab/GOAL.md)
-with references to the files that you expect to touch.
--->
-
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+**Key insight**: The `cleanup_empty_panes` function returns a `CleanupResult` indicating what happened (NoChange, Collapsed, RootEmpty). Since we only call it when `pane_count > 1` and we just emptied a pane, we expect `Collapsed`. However, we must handle `RootEmpty` gracefully (though it shouldn't occur with `pane_count > 1`).
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing test for the crash scenario
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add a test to `editor_state.rs` that reproduces the crash:
+1. Create an EditorState with a workspace containing two panes (horizontal split)
+2. Each pane has exactly one tab
+3. Close the tab in the active pane via `close_tab(0)`
+4. Assert: No panic occurs
+5. Assert: Tree is now a single pane (the other pane)
+6. Assert: `active_pane_id` points to the remaining pane
 
-Example:
+Location: `crates/editor/src/editor_state.rs` (tests module)
 
-### Step 1: Define the SegmentHeader struct
+### Step 2: Add helper to find adjacent pane for focus transfer
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Before emptying a pane, we need to know which pane will receive focus. Add a method to `Workspace`:
 
-Location: src/segment/format.rs
+```rust
+/// Finds a pane to focus after the current active pane is removed.
+/// Returns the ID of an adjacent pane, preferring the direction order: Right, Left, Down, Up.
+pub fn find_fallback_focus(&self) -> Option<PaneId>
+```
 
-### Step 2: Implement header serialization
+This uses `find_target_in_direction` to search in each direction until an existing pane is found.
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Location: `crates/editor/src/workspace.rs`
 
-### Step 3: ...
+### Step 3: Modify `EditorState::close_tab` to handle empty panes
+
+Update the `close_tab` method in `EditorState` to:
+
+1. After `pane.close_tab(index)`, check if the pane is now empty (`pane.is_empty()`)
+2. If empty and `pane_count > 1`:
+   a. Find fallback focus pane via `workspace.find_fallback_focus()`
+   b. Call `cleanup_empty_panes(&mut workspace.pane_root)`
+   c. Update `workspace.active_pane_id` to the fallback pane
+
+The existing TODO comment at line ~2278 explicitly notes this gap: "TODO: If pane is now empty and there are multiple panes, cleanup empty panes."
+
+Location: `crates/editor/src/editor_state.rs`
+
+### Step 4: Write additional edge case tests
+
+Add tests for:
+
+1. **Three-pane layout**: HSplit(Pane[A], VSplit(Pane[B], Pane[C])), close last tab in B → tree becomes HSplit(Pane[A], Pane[C])
+2. **Focus direction preference**: Verify focus moves to the expected adjacent pane based on layout
+3. **Single-pane single-tab unchanged**: Closing the last tab in a single-pane layout still creates an empty tab (existing behavior)
+4. **Multi-tab pane unchanged**: Closing a non-last tab in a pane doesn't trigger cleanup (no empty pane)
+
+Location: `crates/editor/src/editor_state.rs` (tests module)
+
+### Step 5: Verify existing tests pass
+
+Run `cargo test -p lite-edit-editor` to ensure:
+- All existing pane_layout tests pass (cleanup_empty_panes, move_tab, etc.)
+- All existing editor_state tests pass
+- No regressions in tab management behavior
 
 ---
 
 **BACKREFERENCE COMMENTS**
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+Add the following backreference where the fix is implemented:
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
+```rust
+// Chunk: docs/chunks/pane_close_last_tab - Cleanup empty panes on last tab close
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
-
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
-
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+This chunk depends on completed work from:
+- `tiling_multi_pane_render` (multi-pane layouts exist)
+- `tiling_focus_keybindings` (focus switching infrastructure)
+- `tiling_workspace_integration` (workspace pane tree integration)
 
-If there are no dependencies, delete this section.
--->
+All dependencies are ACTIVE (per GOAL.md frontmatter `created_after`), so implementation can proceed.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Focus direction preference**: The current plan prefers Right → Left → Down → Up. This is a reasonable default but may not match user expectations in all layouts. If feedback suggests a different order, the `find_fallback_focus` method can be adjusted.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Borrow checker complexity**: The cleanup operation requires mutable access to `workspace.pane_root` while also reading `workspace.active_pane_id`. This should work since we pre-compute the fallback focus before mutating, but the exact borrow sequence needs care.
+
+3. **Active pane becomes invalid**: After `cleanup_empty_panes`, the old `active_pane_id` no longer exists in the tree. We must update it *before* any code tries to use it (like `sync_active_tab_viewport`). The sequence in close_tab must be: close tab → find fallback → cleanup → update active_pane_id → mark dirty.
 
 ## Deviations
 
@@ -169,9 +118,4 @@ When reality diverges from the plan, document it here:
 Minor deviations (renamed a function, used a different helper) don't need
 documentation. Significant deviations (changed the approach, skipped a step,
 added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->
