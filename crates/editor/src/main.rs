@@ -110,106 +110,6 @@ fn handle_pty_wakeup_global() {
 }
 
 // =============================================================================
-// Demo Text Generation
-// =============================================================================
-
-/// Generates a demo buffer with 100+ lines of content to demonstrate
-/// viewport-based rendering.
-fn generate_demo_content() -> String {
-    let mut content = String::new();
-
-    // Header section
-    content.push_str("// lite-edit: A lightweight, GPU-accelerated text editor\n");
-    content.push_str("// Powered by Rust + Metal on macOS\n");
-    content.push_str("// \n");
-    content.push_str("// TYPE HERE! This is now an interactive editor.\n");
-    content.push_str("// Try: typing, backspace, arrow keys, Enter\n");
-    content.push_str("\n");
-
-    // Main function
-    content.push_str("fn main() {\n");
-    content.push_str("    println!(\"Hello, lite-edit!\");\n");
-    content.push_str("    \n");
-    content.push_str("    // This text is rendered using:\n");
-    content.push_str("    // - Core Text for glyph rasterization\n");
-    content.push_str("    // - A texture atlas for glyph caching\n");
-    content.push_str("    // - Metal shaders for textured quad rendering\n");
-    content.push_str("    // - Monospace layout (x = col * width, y = row * height)\n");
-    content.push_str("    // - Viewport-based rendering (only visible lines are drawn)\n");
-    content.push_str("    \n");
-    content.push_str("    let editor = LiteEdit::new();\n");
-    content.push_str("    editor.open(\"src/main.rs\");\n");
-    content.push_str("    editor.run();\n");
-    content.push_str("}\n");
-    content.push_str("\n");
-
-    // Character test section
-    content.push_str("// The quick brown fox jumps over the lazy dog.\n");
-    content.push_str("// ABCDEFGHIJKLMNOPQRSTUVWXYZ\n");
-    content.push_str("// abcdefghijklmnopqrstuvwxyz\n");
-    content.push_str("// 0123456789 !@#$%^&*()_+-=[]{}|;':\",./<>?\n");
-    content.push_str("\n");
-
-    // LiteEdit struct
-    content.push_str("struct LiteEdit {\n");
-    content.push_str("    buffer: TextBuffer,\n");
-    content.push_str("    viewport: Viewport,\n");
-    content.push_str("    renderer: Renderer,\n");
-    content.push_str("}\n");
-    content.push_str("\n");
-
-    // Implementation block
-    content.push_str("impl LiteEdit {\n");
-    content.push_str("    pub fn new() -> Self {\n");
-    content.push_str("        Self {\n");
-    content.push_str("            buffer: TextBuffer::new(),\n");
-    content.push_str("            viewport: Viewport::new(16.0),\n");
-    content.push_str("            renderer: Renderer::new(),\n");
-    content.push_str("        }\n");
-    content.push_str("    }\n");
-    content.push_str("\n");
-    content.push_str("    pub fn open(&mut self, path: &str) {\n");
-    content.push_str("        // Load file contents into buffer\n");
-    content.push_str("        let contents = std::fs::read_to_string(path).unwrap();\n");
-    content.push_str("        self.buffer = TextBuffer::from_str(&contents);\n");
-    content.push_str("    }\n");
-    content.push_str("\n");
-    content.push_str("    pub fn run(&mut self) {\n");
-    content.push_str("        // Main event loop\n");
-    content.push_str("        loop {\n");
-    content.push_str("            self.handle_events();\n");
-    content.push_str("            self.render();\n");
-    content.push_str("        }\n");
-    content.push_str("    }\n");
-    content.push_str("\n");
-    content.push_str("    fn handle_events(&mut self) {\n");
-    content.push_str("        // Process keyboard and mouse events\n");
-    content.push_str("    }\n");
-    content.push_str("\n");
-    content.push_str("    fn render(&mut self) {\n");
-    content.push_str("        // Render visible portion of buffer\n");
-    content.push_str("        self.renderer.render(&self.buffer, &self.viewport);\n");
-    content.push_str("    }\n");
-    content.push_str("}\n");
-    content.push_str("\n");
-
-    // Add numbered lines to reach 100+ total
-    for i in 1..=50 {
-        content.push_str(&format!(
-            "// Line {}: This is a demonstration line for viewport scrolling\n",
-            70 + i
-        ));
-    }
-
-    content.push_str("\n");
-    content.push_str("// End of demo buffer\n");
-    content.push_str("// Total lines: 120+\n");
-    content.push_str("// Try scrolling programmatically to see different slices!\n");
-
-    content
-}
-
-// =============================================================================
 // Shared Editor Controller
 // =============================================================================
 
@@ -756,9 +656,9 @@ impl AppDelegate {
         // Get font metrics from the renderer
         let font_metrics = renderer.font_metrics();
 
-        // Create a TextBuffer with demo content
-        let demo_content = generate_demo_content();
-        let buffer = TextBuffer::from_str(&demo_content);
+        // Chunk: docs/chunks/welcome_screen_startup - Initialize with empty buffer
+        // Create an empty buffer to show welcome screen on startup
+        let buffer = TextBuffer::new();
 
         // Create the editor state with font metrics
         let mut state = EditorState::new(buffer, font_metrics);
@@ -773,7 +673,7 @@ impl AppDelegate {
 
         // Chunk: docs/chunks/renderer_polymorphic_buffer - No longer setting buffer on renderer
         // The renderer reads from Editor.active_buffer_view() at render time instead of
-        // owning a buffer copy. The demo content is already in EditorState.
+        // owning a buffer copy. The buffer content is managed by EditorState.
 
         // Create the shared controller
         let controller = Rc::new(RefCell::new(EditorController::new(

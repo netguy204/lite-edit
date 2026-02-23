@@ -1,12 +1,12 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
 code_paths:
 - crates/editor/src/main.rs
 code_references:
   - ref: crates/editor/src/main.rs#setup_window
-    implements: "Initialize editor state with empty buffer to trigger welcome screen"
+    implements: Initialize editor state with TextBuffer::new() instead of demo content
 narrative: null
 investigation: null
 subsystems: []
@@ -14,9 +14,11 @@ friction_entries: []
 bug_type: null
 depends_on:
 - welcome_screen
-created_after: ["glyph_single_styled_line", "highlight_capture_alloc", "highlight_line_offset_index"]
+created_after:
+- glyph_single_styled_line
+- highlight_capture_alloc
+- highlight_line_offset_index
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
