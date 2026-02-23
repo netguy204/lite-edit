@@ -54,6 +54,9 @@ use crate::tab_bar::{
 use crate::viewport::Viewport;
 use crate::workspace::Editor;
 use crate::wrap_layout::WrapLayout;
+// Chunk: docs/chunks/tiling_multi_pane_render - Pane layout rendering
+use crate::pane_layout::{calculate_pane_rects, PaneId, PaneRect};
+use crate::pane_frame_buffer::PaneFrameBuffer;
 // Chunk: docs/chunks/renderer_polymorphic_buffer - Import BufferView for polymorphic rendering
 use lite_edit_buffer::{BufferView, DirtyLines};
 // Chunk: docs/chunks/syntax_highlighting - Highlighted buffer view for syntax coloring
@@ -95,6 +98,25 @@ const SELECTION_COLOR: [f32; 4] = [
 /// The border color for continuation rows: black (solid)
 /// This provides a subtle visual indicator that a line has wrapped.
 const BORDER_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+// Chunk: docs/chunks/tiling_multi_pane_render - Pane divider and focus border colors
+/// Pane divider color: #313244 (Catppuccin Mocha surface0)
+/// A subtle line between adjacent panes.
+const PANE_DIVIDER_COLOR: [f32; 4] = [
+    0.192, // 0x31 / 255
+    0.196, // 0x32 / 255
+    0.267, // 0x44 / 255
+    1.0,
+];
+
+/// Focused pane border color: #89b4fa at 60% (Catppuccin Mocha blue)
+/// A colored border to indicate which pane is active.
+const FOCUSED_PANE_BORDER_COLOR: [f32; 4] = [
+    0.537, // 0x89 / 255
+    0.706, // 0xb4 / 255
+    0.980, // 0xfa / 255
+    0.6,   // 60% opacity
+];
 
 // =============================================================================
 // Uniforms
@@ -172,6 +194,49 @@ fn buffer_content_scissor_rect(
     }
 }
 
+// Chunk: docs/chunks/tiling_multi_pane_render - Pane clipping helpers
+/// Creates a scissor rect for clipping a pane's content.
+///
+/// The rect covers the pane's bounds, constrained to the viewport.
+fn pane_scissor_rect(
+    pane_rect: &PaneRect,
+    view_width: f32,
+    view_height: f32,
+) -> MTLScissorRect {
+    // Clamp to viewport bounds
+    let x = (pane_rect.x as usize).min(view_width as usize);
+    let y = (pane_rect.y as usize).min(view_height as usize);
+    let right = ((pane_rect.x + pane_rect.width) as usize).min(view_width as usize);
+    let bottom = ((pane_rect.y + pane_rect.height) as usize).min(view_height as usize);
+
+    MTLScissorRect {
+        x,
+        y,
+        width: right.saturating_sub(x),
+        height: bottom.saturating_sub(y),
+    }
+}
+
+/// Creates a scissor rect for a pane's content area (below its tab bar).
+fn pane_content_scissor_rect(
+    pane_rect: &PaneRect,
+    tab_bar_height: f32,
+    view_width: f32,
+    view_height: f32,
+) -> MTLScissorRect {
+    let x = (pane_rect.x as usize).min(view_width as usize);
+    let y = ((pane_rect.y + tab_bar_height) as usize).min(view_height as usize);
+    let right = ((pane_rect.x + pane_rect.width) as usize).min(view_width as usize);
+    let bottom = ((pane_rect.y + pane_rect.height) as usize).min(view_height as usize);
+
+    MTLScissorRect {
+        x,
+        y,
+        width: right.saturating_sub(x),
+        height: bottom.saturating_sub(y),
+    }
+}
+
 // =============================================================================
 // Renderer
 // =============================================================================
@@ -209,6 +274,9 @@ pub struct Renderer {
     // Chunk: docs/chunks/welcome_screen - Welcome screen rendering
     /// The glyph buffer for welcome screen rendering (lazy-initialized)
     welcome_screen_buffer: Option<crate::welcome_screen::WelcomeScreenGlyphBuffer>,
+    // Chunk: docs/chunks/tiling_multi_pane_render - Pane frame rendering
+    /// The buffer for pane dividers and focus borders (lazy-initialized)
+    pane_frame_buffer: Option<crate::pane_frame_buffer::PaneFrameBuffer>,
     /// Current viewport width in pixels (for wrap layout calculation)
     viewport_width_px: f32,
     // Chunk: docs/chunks/wrap_click_offset - Content width for consistent wrap calculation
@@ -281,6 +349,7 @@ impl Renderer {
             tab_bar_buffer: None,
             find_strip_buffer: None,
             welcome_screen_buffer: None,
+            pane_frame_buffer: None,
             viewport_width_px,
             content_width_px,
         }
@@ -1072,25 +1141,59 @@ impl Renderer {
         // Render left rail first (background layer)
         self.draw_left_rail(&encoder, view, editor);
 
-        // Chunk: docs/chunks/content_tab_bar - Draw tab bar after left rail
-        // Render tab bar at top of content area
-        self.draw_tab_bar(&encoder, view, editor);
-
-        // Chunk: docs/chunks/tab_bar_content_clip - Clip buffer content to area below tab bar
-        // Apply scissor rect to prevent buffer text from bleeding into tab bar region.
-        let content_scissor = buffer_content_scissor_rect(TAB_BAR_HEIGHT, view_width, view_height);
-        encoder.setScissorRect(content_scissor);
-
-        // Chunk: docs/chunks/welcome_screen - Welcome screen or normal buffer rendering
-        // Check if welcome screen should be shown (empty file tab)
-        if editor.should_show_welcome_screen() {
-            // Render welcome screen instead of buffer content
-            self.draw_welcome_screen(&encoder, view);
+        // Chunk: docs/chunks/tiling_multi_pane_render - Calculate pane rects for multi-pane rendering
+        // Calculate pane rectangles for the active workspace
+        let pane_rects: Vec<PaneRect>;
+        let focused_pane_id: PaneId;
+        if let Some(ws) = editor.active_workspace() {
+            // Bounds for the pane area: starts after left rail
+            // Note: For multi-pane, each pane has its own tab bar, so y=0
+            let bounds = (
+                RAIL_WIDTH,               // x: after left rail
+                0.0,                      // y: top of window
+                view_width - RAIL_WIDTH,  // width: remaining horizontal space
+                view_height,              // height: full height
+            );
+            pane_rects = calculate_pane_rects(bounds, &ws.pane_root);
+            focused_pane_id = ws.active_pane_id;
         } else {
-            // Render editor text content (offset by RAIL_WIDTH and TAB_BAR_HEIGHT)
-            if self.glyph_buffer.index_count() > 0 {
-                self.render_text(&encoder, view);
+            pane_rects = Vec::new();
+            focused_pane_id = 0;
+        }
+
+        // Chunk: docs/chunks/tiling_multi_pane_render - Multi-pane or single-pane rendering
+        if pane_rects.len() <= 1 {
+            // Single-pane case: render as before (global tab bar, no dividers)
+            // Chunk: docs/chunks/content_tab_bar - Draw tab bar after left rail
+            self.draw_tab_bar(&encoder, view, editor);
+
+            // Chunk: docs/chunks/tab_bar_content_clip - Clip buffer content to area below tab bar
+            let content_scissor = buffer_content_scissor_rect(TAB_BAR_HEIGHT, view_width, view_height);
+            encoder.setScissorRect(content_scissor);
+
+            // Chunk: docs/chunks/welcome_screen - Welcome screen or normal buffer rendering
+            if editor.should_show_welcome_screen() {
+                self.draw_welcome_screen(&encoder, view);
+            } else {
+                // Render editor text content (offset by RAIL_WIDTH and TAB_BAR_HEIGHT)
+                if self.glyph_buffer.index_count() > 0 {
+                    self.render_text(&encoder, view);
+                }
             }
+        } else {
+            // Multi-pane case: render each pane independently
+            if let Some(ws) = editor.active_workspace() {
+                for pane_rect in &pane_rects {
+                    self.render_pane(&encoder, view, ws, pane_rect, view_width, view_height);
+                }
+            }
+
+            // Reset scissor to full viewport before drawing frames on top
+            let full_scissor = full_viewport_scissor_rect(view_width, view_height);
+            encoder.setScissorRect(full_scissor);
+
+            // Draw pane dividers and focus border
+            self.draw_pane_frames(&encoder, view, &pane_rects, focused_pane_id);
         }
 
         // Chunk: docs/chunks/tab_bar_content_clip - Reset scissor for selector overlay
@@ -1300,6 +1403,489 @@ impl Renderer {
     /// active workspace has tabs.
     pub fn tab_bar_height(&self) -> f32 {
         TAB_BAR_HEIGHT
+    }
+
+    // =========================================================================
+    // Pane Frame Rendering (Chunk: docs/chunks/tiling_multi_pane_render)
+    // =========================================================================
+
+    /// Draws pane divider lines and focus border.
+    ///
+    /// Divider lines appear between adjacent panes (1px).
+    /// A focus border appears around the active pane when multiple panes exist (2px).
+    ///
+    /// # Arguments
+    /// * `encoder` - The active render command encoder
+    /// * `view` - The Metal view (for viewport dimensions)
+    /// * `pane_rects` - The computed pane rectangles
+    /// * `focused_pane_id` - The ID of the currently focused pane
+    fn draw_pane_frames(
+        &mut self,
+        encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        view: &MetalView,
+        pane_rects: &[PaneRect],
+        focused_pane_id: PaneId,
+    ) {
+        // Skip if only one pane (no dividers or focus border needed)
+        if pane_rects.len() <= 1 {
+            return;
+        }
+
+        let frame = view.frame();
+        let scale = view.scale_factor();
+        let view_width = (frame.size.width * scale) as f32;
+        let view_height = (frame.size.height * scale) as f32;
+
+        // Ensure pane frame buffer is initialized
+        if self.pane_frame_buffer.is_none() {
+            self.pane_frame_buffer = Some(PaneFrameBuffer::new());
+        }
+
+        // Update the pane frame buffer
+        let pane_frame_buffer = self.pane_frame_buffer.as_mut().unwrap();
+        pane_frame_buffer.update(
+            &self.device,
+            pane_rects,
+            focused_pane_id,
+            &self.atlas,
+            PANE_DIVIDER_COLOR,
+            FOCUSED_PANE_BORDER_COLOR,
+        );
+
+        // Get buffers
+        let vertex_buffer = match pane_frame_buffer.vertex_buffer() {
+            Some(b) => b,
+            None => return,
+        };
+        let index_buffer = match pane_frame_buffer.index_buffer() {
+            Some(b) => b,
+            None => return,
+        };
+
+        // Set the render pipeline state
+        encoder.setRenderPipelineState(self.pipeline.pipeline_state());
+
+        // Set the vertex buffer
+        unsafe {
+            encoder.setVertexBuffer_offset_atIndex(Some(vertex_buffer), 0, 0);
+        }
+
+        // Set uniforms (viewport size)
+        let uniforms = Uniforms {
+            viewport_size: [view_width, view_height],
+        };
+        let uniforms_ptr =
+            NonNull::new(&uniforms as *const Uniforms as *mut std::ffi::c_void).unwrap();
+        unsafe {
+            encoder.setVertexBytes_length_atIndex(
+                uniforms_ptr,
+                std::mem::size_of::<Uniforms>(),
+                1,
+            );
+        }
+
+        // Set the atlas texture
+        unsafe {
+            encoder.setFragmentTexture_atIndex(Some(self.atlas.texture()), 0);
+        }
+
+        // Draw divider lines (colors are baked into vertices)
+        let divider_range = pane_frame_buffer.divider_range();
+        if !divider_range.is_empty() {
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    divider_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    divider_range.start * std::mem::size_of::<u32>(),
+                );
+            }
+        }
+
+        // Draw focus border (colors are baked into vertices)
+        let focus_range = pane_frame_buffer.focus_border_range();
+        if !focus_range.is_empty() {
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    focus_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    focus_range.start * std::mem::size_of::<u32>(),
+                );
+            }
+        }
+    }
+
+    /// Renders a single pane's content.
+    ///
+    /// This method handles:
+    /// 1. Drawing the pane's tab bar at the top of the pane rect
+    /// 2. Applying content scissor (below tab bar)
+    /// 3. Drawing the pane's buffer content with correct offsets
+    ///
+    /// # Arguments
+    /// * `encoder` - The active render command encoder
+    /// * `view` - The Metal view (for viewport dimensions)
+    /// * `workspace` - The workspace containing the pane
+    /// * `pane_rect` - The rectangle for this pane
+    /// * `view_width` - The viewport width
+    /// * `view_height` - The viewport height
+    fn render_pane(
+        &mut self,
+        encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        view: &MetalView,
+        workspace: &crate::workspace::Workspace,
+        pane_rect: &PaneRect,
+        view_width: f32,
+        view_height: f32,
+    ) {
+        // Get the pane
+        let pane = match workspace.pane_root.get_pane(pane_rect.pane_id) {
+            Some(p) => p,
+            None => return,
+        };
+
+        // Skip empty panes
+        if pane.tab_count() == 0 {
+            return;
+        }
+
+        // Apply scissor for entire pane
+        let pane_scissor = pane_scissor_rect(pane_rect, view_width, view_height);
+        encoder.setScissorRect(pane_scissor);
+
+        // Draw this pane's tab bar
+        self.draw_pane_tab_bar(encoder, view, pane, pane_rect, view_width, view_height);
+
+        // Apply content scissor (below tab bar)
+        let content_scissor = pane_content_scissor_rect(pane_rect, TAB_BAR_HEIGHT, view_width, view_height);
+        encoder.setScissorRect(content_scissor);
+
+        // Get the active tab
+        let tab = match pane.active_tab() {
+            Some(t) => t,
+            None => return,
+        };
+
+        // Check if welcome screen should be shown for this pane
+        let is_focused = pane_rect.pane_id == workspace.active_pane_id;
+        let should_show_welcome = is_focused
+            && tab.kind == crate::workspace::TabKind::File
+            && tab.as_text_buffer().map(|b| b.is_empty()).unwrap_or(false);
+
+        if should_show_welcome {
+            // Render welcome screen within pane bounds
+            self.draw_welcome_screen_in_pane(encoder, view, pane_rect);
+        } else {
+            // Set content offsets for this pane
+            self.set_content_x_offset(pane_rect.x);
+            self.set_content_y_offset(pane_rect.y + TAB_BAR_HEIGHT);
+
+            // Update glyph buffer with pane-local content width
+            let pane_content_width = pane_rect.width;
+            self.content_width_px = pane_content_width;
+
+            // Update glyph buffer from tab's buffer
+            if tab.is_agent_tab() {
+                if let Some(terminal) = workspace.agent_terminal() {
+                    self.update_glyph_buffer(terminal);
+                }
+            } else if let Some(text_buffer) = tab.as_text_buffer() {
+                let highlighted_view = HighlightedBufferView::new(
+                    text_buffer,
+                    tab.highlighter(),
+                );
+                self.update_glyph_buffer(&highlighted_view);
+            } else {
+                self.update_glyph_buffer(tab.buffer());
+            }
+
+            // Render text
+            if self.glyph_buffer.index_count() > 0 {
+                self.render_text(encoder, view);
+            }
+        }
+    }
+
+    /// Draws a pane's tab bar at the specified position.
+    ///
+    /// # Arguments
+    /// * `encoder` - The active render command encoder
+    /// * `view` - The Metal view (for viewport dimensions)
+    /// * `pane` - The pane whose tabs to render
+    /// * `pane_rect` - The rectangle for this pane
+    /// * `view_width` - The viewport width
+    /// * `view_height` - The viewport height
+    fn draw_pane_tab_bar(
+        &mut self,
+        encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        _view: &MetalView,
+        pane: &crate::pane_layout::Pane,
+        pane_rect: &PaneRect,
+        view_width: f32,
+        view_height: f32,
+    ) {
+        use crate::tab_bar::{
+            calculate_pane_tab_bar_geometry, tabs_from_pane,
+            CLOSE_BUTTON_COLOR, TAB_ACTIVE_COLOR,
+            TAB_BAR_BACKGROUND_COLOR, TAB_INACTIVE_COLOR, TAB_LABEL_COLOR,
+        };
+
+        if pane.tab_count() == 0 {
+            return;
+        }
+
+        let glyph_width = self.font.metrics.advance_width as f32;
+
+        // Get tab info from pane
+        let tabs = tabs_from_pane(pane);
+
+        // Calculate geometry for this pane's tab bar
+        let geometry = calculate_pane_tab_bar_geometry(
+            pane_rect.x,
+            pane_rect.y,
+            pane_rect.width,
+            &tabs,
+            glyph_width,
+            pane.tab_bar_view_offset,
+        );
+
+        // Ensure tab bar buffer is initialized
+        if self.tab_bar_buffer.is_none() {
+            let layout = GlyphLayout::from_metrics(&self.font.metrics);
+            self.tab_bar_buffer = Some(TabBarGlyphBuffer::new(layout));
+        }
+
+        // Update the tab bar buffer
+        let tab_bar_buffer = self.tab_bar_buffer.as_mut().unwrap();
+        tab_bar_buffer.update(&self.device, &self.atlas, &tabs, &geometry);
+
+        // Get buffers
+        let vertex_buffer = match tab_bar_buffer.vertex_buffer() {
+            Some(b) => b,
+            None => return,
+        };
+        let index_buffer = match tab_bar_buffer.index_buffer() {
+            Some(b) => b,
+            None => return,
+        };
+
+        // Set the render pipeline state
+        encoder.setRenderPipelineState(self.pipeline.pipeline_state());
+
+        // Set the vertex buffer
+        unsafe {
+            encoder.setVertexBuffer_offset_atIndex(Some(vertex_buffer), 0, 0);
+        }
+
+        // Set uniforms (viewport size)
+        let uniforms = Uniforms {
+            viewport_size: [view_width, view_height],
+        };
+        let uniforms_ptr =
+            NonNull::new(&uniforms as *const Uniforms as *mut std::ffi::c_void).unwrap();
+        unsafe {
+            encoder.setVertexBytes_length_atIndex(
+                uniforms_ptr,
+                std::mem::size_of::<Uniforms>(),
+                1,
+            );
+        }
+
+        // Set the atlas texture
+        unsafe {
+            encoder.setFragmentTexture_atIndex(Some(self.atlas.texture()), 0);
+        }
+
+        // Draw background
+        let bg_range = tab_bar_buffer.background_range();
+        if !bg_range.is_empty() {
+            let color_ptr = NonNull::new(TAB_BAR_BACKGROUND_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(color_ptr, std::mem::size_of::<[f32; 4]>(), 0);
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    bg_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    bg_range.start * std::mem::size_of::<u32>(),
+                );
+            }
+        }
+
+        // Draw inactive tab backgrounds
+        let tab_bg_range = tab_bar_buffer.tab_background_range();
+        if !tab_bg_range.is_empty() {
+            let color_ptr = NonNull::new(TAB_INACTIVE_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(color_ptr, std::mem::size_of::<[f32; 4]>(), 0);
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    tab_bg_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    tab_bg_range.start * std::mem::size_of::<u32>(),
+                );
+            }
+        }
+
+        // Draw active tab highlight
+        let active_range = tab_bar_buffer.active_tab_range();
+        if !active_range.is_empty() {
+            let color_ptr = NonNull::new(TAB_ACTIVE_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(color_ptr, std::mem::size_of::<[f32; 4]>(), 0);
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    active_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    active_range.start * std::mem::size_of::<u32>(),
+                );
+            }
+        }
+
+        // Draw indicator dots
+        let indicator_range = tab_bar_buffer.indicator_range();
+        if !indicator_range.is_empty() {
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    indicator_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    indicator_range.start * std::mem::size_of::<u32>(),
+                );
+            }
+        }
+
+        // Draw close buttons
+        let close_range = tab_bar_buffer.close_button_range();
+        if !close_range.is_empty() {
+            let color_ptr = NonNull::new(CLOSE_BUTTON_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(color_ptr, std::mem::size_of::<[f32; 4]>(), 0);
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    close_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    close_range.start * std::mem::size_of::<u32>(),
+                );
+            }
+        }
+
+        // Draw labels
+        let label_range = tab_bar_buffer.label_range();
+        if !label_range.is_empty() {
+            let color_ptr = NonNull::new(TAB_LABEL_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(color_ptr, std::mem::size_of::<[f32; 4]>(), 0);
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    label_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    label_range.start * std::mem::size_of::<u32>(),
+                );
+            }
+        }
+    }
+
+    /// Draws the welcome screen within a pane's bounds.
+    ///
+    /// This is similar to `draw_welcome_screen` but positions the content
+    /// within the specified pane rectangle.
+    fn draw_welcome_screen_in_pane(
+        &mut self,
+        encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        view: &MetalView,
+        pane_rect: &PaneRect,
+    ) {
+        use crate::welcome_screen::{calculate_welcome_geometry, WelcomeScreenGlyphBuffer};
+
+        let frame = view.frame();
+        let scale = view.scale_factor();
+        let view_width = (frame.size.width * scale) as f32;
+        let view_height = (frame.size.height * scale) as f32;
+        let glyph_width = self.font.metrics.advance_width as f32;
+        let line_height = self.font.metrics.line_height as f32;
+
+        // Calculate content area within pane (excluding pane's tab bar)
+        let content_width = pane_rect.width;
+        let content_height = pane_rect.height - TAB_BAR_HEIGHT;
+
+        // Calculate geometry centered in pane
+        let mut geometry = calculate_welcome_geometry(
+            content_width,
+            content_height,
+            glyph_width,
+            line_height,
+        );
+
+        // Offset to pane position
+        geometry.content_x += pane_rect.x;
+        geometry.content_y += pane_rect.y + TAB_BAR_HEIGHT;
+
+        // Ensure welcome screen buffer is initialized
+        if self.welcome_screen_buffer.is_none() {
+            let layout = GlyphLayout::from_metrics(&self.font.metrics);
+            self.welcome_screen_buffer = Some(WelcomeScreenGlyphBuffer::new(layout));
+        }
+
+        // Update and render the welcome screen
+        let welcome_buffer = self.welcome_screen_buffer.as_mut().unwrap();
+        welcome_buffer.update(&self.device, &self.atlas, &geometry);
+
+        // Get buffers
+        let vertex_buffer = match welcome_buffer.vertex_buffer() {
+            Some(b) => b,
+            None => return,
+        };
+        let index_buffer = match welcome_buffer.index_buffer() {
+            Some(b) => b,
+            None => return,
+        };
+
+        // Set render state and draw
+        encoder.setRenderPipelineState(self.pipeline.pipeline_state());
+        unsafe {
+            encoder.setVertexBuffer_offset_atIndex(Some(vertex_buffer), 0, 0);
+        }
+
+        let uniforms = Uniforms {
+            viewport_size: [view_width, view_height],
+        };
+        let uniforms_ptr =
+            NonNull::new(&uniforms as *const Uniforms as *mut std::ffi::c_void).unwrap();
+        unsafe {
+            encoder.setVertexBytes_length_atIndex(
+                uniforms_ptr,
+                std::mem::size_of::<Uniforms>(),
+                1,
+            );
+        }
+
+        unsafe {
+            encoder.setFragmentTexture_atIndex(Some(self.atlas.texture()), 0);
+        }
+
+        // Draw all welcome screen content in a single pass
+        // (per-vertex colors are embedded in the vertex data)
+        let total_indices = welcome_buffer.index_count();
+        if total_indices > 0 {
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    total_indices,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    0,
+                );
+            }
+        }
     }
 
     // =========================================================================
