@@ -1131,7 +1131,7 @@ impl Renderer {
         editor: &Editor,
     ) {
         use crate::left_rail::{
-            LABEL_COLOR, RAIL_BACKGROUND_COLOR, TILE_ACTIVE_COLOR, TILE_BACKGROUND_COLOR,
+            RAIL_BACKGROUND_COLOR, TILE_ACTIVE_COLOR, TILE_BACKGROUND_COLOR,
         };
 
         let frame = view.frame();
@@ -1268,20 +1268,17 @@ impl Renderer {
             }
         }
 
-        // Draw labels
-        let label_range = left_rail_buffer.label_range();
-        if !label_range.is_empty() {
-            let color_ptr = NonNull::new(LABEL_COLOR.as_ptr() as *mut std::ffi::c_void).unwrap();
-            unsafe {
-                encoder.setFragmentBytes_length_atIndex(color_ptr, std::mem::size_of::<[f32; 4]>(), 0);
-            }
+        // Draw identicons (colors are per-vertex, no fragment uniform needed)
+        // Chunk: docs/chunks/workspace_identicon - Workspace identicons
+        let identicon_range = left_rail_buffer.identicon_range();
+        if !identicon_range.is_empty() {
             unsafe {
                 encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
                     MTLPrimitiveType::Triangle,
-                    label_range.count,
+                    identicon_range.count,
                     MTLIndexType::UInt32,
                     index_buffer,
-                    label_range.start * std::mem::size_of::<u32>(),
+                    identicon_range.start * std::mem::size_of::<u32>(),
                 );
             }
         }

@@ -42,6 +42,9 @@ objc2-core-graphics = "0.3"
 objc2-core-foundation = "0.3"
 # Filesystem watching (FSEvents on macOS)
 notify = "6"
+# SHA-256 hashing for identicon generation
+# Chunk: docs/chunks/workspace_identicon - Workspace identicons
+sha2 = "0.10"
 
 [dev-dependencies]
 # Temporary directories for testing
