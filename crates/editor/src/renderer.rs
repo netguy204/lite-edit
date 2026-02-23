@@ -1527,6 +1527,7 @@ impl Renderer {
         }
     }
 
+    // Chunk: docs/chunks/tiling_multi_pane_render - Per-pane rendering
     /// Renders a single pane's content.
     ///
     /// This method handles:
@@ -1623,6 +1624,7 @@ impl Renderer {
         }
     }
 
+    // Chunk: docs/chunks/tiling_multi_pane_render - Pane tab bar rendering
     /// Draws a pane's tab bar at the specified position.
     ///
     /// # Arguments
@@ -1808,6 +1810,7 @@ impl Renderer {
         }
     }
 
+    // Chunk: docs/chunks/tiling_multi_pane_render - Pane-local welcome screen
     /// Draws the welcome screen within a pane's bounds.
     ///
     /// This is similar to `draw_welcome_screen` but positions the content
