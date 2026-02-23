@@ -151,6 +151,7 @@ impl Font {
     }
 
     /// Maps a character to its glyph ID
+    // Chunk: docs/chunks/terminal_background_box_drawing - BMP character-to-glyph mapping for on-demand glyph addition
     pub fn glyph_for_char(&self, c: char) -> Option<u16> {
         // Handle BMP characters (most common case)
         if (c as u32) <= 0xFFFF {

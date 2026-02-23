@@ -8,153 +8,160 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The optimization targets two functions in `crates/editor/src/glyph_buffer.rs`:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **`update_from_buffer_with_cursor`** — The non-wrap rendering path
+2. **`update_from_buffer_with_wrap`** — The wrap-enabled rendering path
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+Both functions currently call `view.styled_line(buffer_line)` multiple times per visible buffer line (3× in the non-wrap path, 3× in the wrap path), once in each rendering phase that needs styled content:
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/glyph_single_styled_line/GOAL.md)
-with references to the files that you expect to touch.
--->
+- Phase 1: Background quads (checks for non-default background colors)
+- Phase 3: Glyph quads (renders actual text with per-span foreground colors)
+- Phase 4: Underline quads (renders underlines for underlined spans)
+
+Each call returns a `StyledLine` struct containing a `Vec<Span>` where each `Span` owns a `String`. The `styled_line()` method clones this data from the buffer's internal representation (or highlight cache for `HighlightedBufferView`).
+
+**Strategy**: Pre-collect `StyledLine` results once per visible buffer line into a temporary `Vec<Option<StyledLine>>` at the start of each rendering function, then reference this collection in each phase instead of calling `view.styled_line()` again.
+
+**Why `Vec<Option<StyledLine>>` instead of borrowing**: The `BufferView` trait returns `Option<StyledLine>` by value (owned), not by reference. We cannot change the trait signature without breaking all implementors. Pre-collecting into a `Vec` trades one upfront allocation (the `Vec` itself) for eliminating 2 redundant `StyledLine` clones per line per frame.
+
+**Testing approach**: Since this is a refactoring that should produce identical output, the primary verification is:
+1. All existing tests pass (no behavioral change)
+2. Visual verification that rendered output is unchanged
+
+This is an optimization refactoring, not new functionality, so per TESTING_PHILOSOPHY.md we verify via existing tests rather than adding new unit tests for the optimization itself. The goal is behavior preservation, which is confirmed by test suite continuity.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems are directly relevant to this change. The `viewport_scroll` subsystem is not touched—this chunk only optimizes how `GlyphBuffer` consumes data from `BufferView.styled_line()`, which is an internal rendering implementation detail unrelated to scroll coordinate mapping.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Refactor `update_from_buffer_with_cursor` to pre-collect styled lines
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Location: `crates/editor/src/glyph_buffer.rs`, function `update_from_buffer_with_cursor`
 
-Example:
+**Current pattern** (lines 559-563, 604-633, 689-741, 750-787):
+```rust
+// Estimation loop (OK - just for capacity)
+for line in visible_range.clone() {
+    if let Some(styled_line) = view.styled_line(line) { ... }
+}
+// Phase 1: Background quads
+for buffer_line in visible_range.clone() {
+    if let Some(styled_line) = view.styled_line(buffer_line) { ... }  // Call #1
+}
+// Phase 3: Glyph quads
+for buffer_line in visible_range.clone() {
+    if let Some(styled_line) = view.styled_line(buffer_line) { ... }  // Call #2
+}
+// Phase 4: Underline quads
+for buffer_line in visible_range.clone() {
+    if let Some(styled_line) = view.styled_line(buffer_line) { ... }  // Call #3
+}
+```
 
-### Step 1: Define the SegmentHeader struct
+**New pattern**:
+```rust
+// Pre-collect styled lines once (combines estimation and collection)
+let styled_lines: Vec<Option<StyledLine>> = visible_range.clone()
+    .map(|line| view.styled_line(line))
+    .collect();
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+// Use styled_lines[i] where i is the index into visible_range
+// Phase 1, 3, 4 reference the pre-collected data
+```
 
-Location: src/segment/format.rs
+The key change: iterate once, store results, reference by index in each phase.
 
-### Step 2: Implement header serialization
+**Index calculation**: For `buffer_line` in `visible_range`, the index into `styled_lines` is:
+```rust
+let idx = buffer_line - viewport.first_visible_line();
+```
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+### Step 2: Refactor `update_from_buffer_with_wrap` to pre-collect styled lines
 
-### Step 3: ...
+Location: `crates/editor/src/glyph_buffer.rs`, function `update_from_buffer_with_wrap`
+
+This function is more complex because it iterates buffer lines starting from `first_visible_buffer_line` (not `visible_range`), and tracks `cumulative_screen_row` to know when to stop.
+
+**Current pattern**:
+- Phase 1 (lines 1209-1290): Calls `view.styled_line(buffer_line)` in loop
+- Phase 3 (lines 1439-1539): Calls `view.styled_line(buffer_line)` via `if let Some(sl)`
+- Phase 4 (lines 1548-1635): Calls `view.styled_line(buffer_line)` in loop
+
+**New pattern**:
+
+Pre-collect styled lines for all buffer lines that will be rendered:
+```rust
+// Determine which buffer lines will be rendered (before phases begin)
+let mut rendered_buffer_lines: Vec<usize> = Vec::new();
+{
+    let mut cumulative_screen_row: usize = 0;
+    let mut is_first_buffer_line = true;
+    for buffer_line in first_visible_buffer_line..line_count {
+        if cumulative_screen_row >= max_screen_rows {
+            break;
+        }
+        rendered_buffer_lines.push(buffer_line);
+        let line_len = view.line_len(buffer_line);
+        let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
+        let start_row_offset = if is_first_buffer_line { screen_row_offset_in_line } else { 0 };
+        is_first_buffer_line = false;
+        cumulative_screen_row += rows_for_line - start_row_offset;
+    }
+}
+
+// Pre-collect styled lines for these buffer lines
+let styled_lines: Vec<Option<StyledLine>> = rendered_buffer_lines.iter()
+    .map(|&line| view.styled_line(line))
+    .collect();
+
+// Then in each phase, iterate rendered_buffer_lines.iter().zip(styled_lines.iter())
+```
+
+Alternatively, use a `HashMap<usize, StyledLine>` keyed by buffer line, but since buffer lines are contiguous starting from `first_visible_buffer_line`, a `Vec` indexed by `buffer_line - first_visible_buffer_line` is simpler.
+
+### Step 3: Verify all tests pass
+
+Run:
+```bash
+cargo test -p lite-edit
+cargo test -p lite-edit-buffer
+```
+
+This confirms the refactoring preserves existing behavior. All existing `glyph_buffer` tests should pass unchanged.
+
+### Step 4: Manual visual verification
+
+Build and run the editor, verify:
+- Syntax-highlighted file displays correctly
+- Scrolling renders correctly
+- Selection highlighting works
+- Underlines (if any) render correctly
+
+This is important because the rendering code has no functional tests beyond the unit tests—visual correctness is the ultimate arbiter.
 
 ---
 
 **BACKREFERENCE COMMENTS**
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
+Add a chunk backreference at the top of the modified section in `glyph_buffer.rs`:
+```rust
+// Chunk: docs/chunks/glyph_single_styled_line - Pre-collect styled lines to avoid redundant calls
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
-
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
-
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+No dependencies. This chunk modifies only `glyph_buffer.rs` and relies only on existing types (`StyledLine`, `BufferView`).
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Memory overhead of pre-collection**: Pre-collecting `styled_lines` adds a `Vec` allocation per frame. However, this is offset by avoiding 2 redundant `StyledLine` clones per line. Net memory should be lower since we allocate the same `StyledLine` data once instead of 3×.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Phase iteration divergence**: The wrap-enabled path has complex iteration logic tracking `cumulative_screen_row`, `start_row_offset`, etc. We must ensure all phases still iterate in the same order and with the same bounds. Using `.iter().zip()` or indexed access should maintain consistency.
+
+3. **Edge case: empty visible range**: If `visible_range` is empty or no buffer lines are rendered, the `styled_lines` Vec will be empty. Phases should handle this gracefully (empty loops produce no quads, which is correct).
 
 ## Deviations
 
