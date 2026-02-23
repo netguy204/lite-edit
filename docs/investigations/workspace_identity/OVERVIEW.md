@@ -3,7 +3,7 @@ status: SOLVED
 trigger: "All workspaces currently display as 'unt' — no way to distinguish one from another in the sidebar"
 proposed_chunks:
   - prompt: "Implement workspace identicon rendering in the left rail. Hash workspace labels with SHA-256 to derive a foreground color (hue from bytes 0-1, saturation from byte 2, lightness from byte 3) and a 5×5 vertically-symmetric grid pattern (from bytes 4-5). Replace the current 3-char label rendering in LeftRailGlyphBuffer::update() with identicon quad generation using the existing create_rect_quad infrastructure. Include dimmed off-cells (1/5 foreground brightness) for a cohesive tile background. Keep the status indicator dot overlay. See docs/investigations/workspace_identity/prototypes/identicon_gen.py for the exact algorithm."
-    chunk_directory: null
+    chunk_directory: workspace_identicon
     depends_on: []
 created_after: ["tiling_pane_layout"]
 ---
