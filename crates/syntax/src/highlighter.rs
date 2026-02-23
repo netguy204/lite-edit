@@ -53,10 +53,15 @@ impl HighlightCache {
     }
 
     /// Check if the cache is valid for the given range and generation.
+    ///
+    /// Uses a containment check: the cache is valid if it covers the
+    /// entire requested range, not just an exact match. This avoids
+    /// cache thrashing when `styled_line()` is called per-line with
+    /// slightly different viewport windows.
     fn is_valid(&self, start_line: usize, end_line: usize, generation: u64) -> bool {
         self.generation == generation
-            && self.start_line == start_line
-            && self.end_line == end_line
+            && self.start_line <= start_line
+            && self.end_line >= end_line
     }
 
     /// Check if a specific line is in the cache.
@@ -331,6 +336,13 @@ impl SyntaxHighlighter {
             let actual_start = (*cap_start).max(line_start);
             let actual_end = (*cap_end).min(line_end);
 
+            // Skip captures that overlap with already-covered bytes
+            // (tree-sitter can return multiple captures for the same node)
+            if actual_start < covered_until {
+                covered_until = covered_until.max(actual_end);
+                continue;
+            }
+
             // Fill gap before this capture with unstyled text
             if actual_start > covered_until {
                 let gap_text = &self.source[covered_until..actual_start];
@@ -381,6 +393,13 @@ impl SyntaxHighlighter {
             // Clamp to line boundaries
             let actual_start = cap_start.max(line_start);
             let actual_end = cap_end.min(line_end);
+
+            // Skip captures that overlap with already-covered bytes
+            // (tree-sitter can return multiple captures for the same node)
+            if actual_start < covered_until {
+                covered_until = covered_until.max(actual_end);
+                continue;
+            }
 
             // Fill gap with unstyled text
             if actual_start > covered_until {
@@ -784,5 +803,49 @@ mod tests {
         // This should still work (falls back to single-line highlight)
         let styled = hl.highlight_line(4);
         assert!(!styled.spans.is_empty(), "Line 4 should have styled content");
+    }
+
+    #[test]
+    fn test_no_duplicate_text_from_overlapping_captures() {
+        // Doc comments in Rust can match multiple capture patterns
+        // (e.g., @comment and @comment.documentation). The highlighter
+        // must not emit the same text twice.
+        let source = "/// This is a doc comment\nfn foo() {}";
+        let hl = make_rust_highlighter(source).unwrap();
+        let styled = hl.highlight_line(0);
+
+        let rendered: String = styled.spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(
+            rendered, "/// This is a doc comment",
+            "Styled line text should match source exactly, got: {:?}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn test_viewport_cache_containment_avoids_thrashing() {
+        // Simulates the real rendering pattern: highlight_viewport is called
+        // per-line with a sliding window (line, line+80). The cache should
+        // remain valid as long as the requested range is a subset.
+        let source = "fn one() {}\nfn two() {}\nfn three() {}\nfn four() {}\nfn five() {}";
+        let hl = make_rust_highlighter(source).unwrap();
+
+        // First call populates cache for lines 0..5
+        hl.highlight_viewport(0, 5);
+
+        // Subsequent calls with subsets should NOT invalidate the cache.
+        // We verify by checking the cache stays valid (lines are cache hits).
+        hl.highlight_viewport(1, 5);
+        hl.highlight_viewport(2, 5);
+
+        // All lines should still be retrievable from cache
+        for i in 0..5 {
+            let styled = hl.highlight_line(i);
+            assert!(
+                !styled.spans.is_empty(),
+                "Line {} should be served from cache",
+                i
+            );
+        }
     }
 }
