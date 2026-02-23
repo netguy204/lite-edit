@@ -128,6 +128,53 @@ pub enum MoveTarget {
 }
 
 // =============================================================================
+// MoveResult
+// =============================================================================
+
+// Chunk: docs/chunks/tiling_tab_movement - Directional tab movement operations
+
+/// The result of a tab move operation.
+///
+/// Provides information about what happened during the move, allowing callers
+/// to update focus state appropriately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveResult {
+    /// Tab moved to an existing pane.
+    MovedToExisting {
+        /// The pane the tab was moved from.
+        source_pane_id: PaneId,
+        /// The pane the tab was moved to (now focused).
+        target_pane_id: PaneId,
+    },
+    /// Tab moved to a newly created pane via split.
+    MovedToNew {
+        /// The pane the tab was moved from.
+        source_pane_id: PaneId,
+        /// The newly created pane (now focused).
+        new_pane_id: PaneId,
+    },
+    /// Move was rejected (single-tab pane with no existing target).
+    Rejected,
+    /// Source pane not found in tree.
+    SourceNotFound,
+}
+
+// =============================================================================
+// CleanupResult
+// =============================================================================
+
+/// The result of empty pane cleanup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupResult {
+    /// No changes made.
+    NoChange,
+    /// Empty panes were collapsed.
+    Collapsed,
+    /// Root pane is empty (caller must handle).
+    RootEmpty,
+}
+
+// =============================================================================
 // Pane
 // =============================================================================
 
@@ -221,6 +268,18 @@ impl Pane {
     /// Returns true if this pane has no tabs.
     pub fn is_empty(&self) -> bool {
         self.tabs.is_empty()
+    }
+
+    /// Removes and returns the active tab, if any.
+    ///
+    /// After removal, the active_tab index is adjusted to remain valid.
+    /// This is a convenience wrapper around `close_tab(self.active_tab)`.
+    pub fn remove_active_tab(&mut self) -> Option<Tab> {
+        if self.tabs.is_empty() {
+            None
+        } else {
+            self.close_tab(self.active_tab)
+        }
     }
 }
 
@@ -573,6 +632,308 @@ pub fn calculate_pane_rects(
             let mut rects = calculate_pane_rects(first_bounds, first);
             rects.extend(calculate_pane_rects(second_bounds, second));
             rects
+        }
+    }
+}
+
+// =============================================================================
+// Tab Movement Operations
+// =============================================================================
+
+// Chunk: docs/chunks/tiling_tab_movement - Directional tab movement operations
+
+/// Moves the active tab from a source pane in the given direction.
+///
+/// This function:
+/// 1. Uses `find_target_in_direction` to determine the move target.
+/// 2. For `ExistingPane(target_id)`: removes the active tab from the source pane
+///    and adds it to the target pane.
+/// 3. For `SplitPane(pane_id, direction)`: removes the active tab from the source
+///    pane, creates a new pane containing that tab, and replaces the source pane's
+///    leaf node with a split node.
+/// 4. Rejects the move if the source pane has only one tab and no existing target
+///    exists (splitting a single-tab pane is a no-op).
+/// 5. Automatically calls `cleanup_empty_panes` at the end.
+///
+/// # Arguments
+///
+/// * `root` - The root of the pane layout tree.
+/// * `source_pane_id` - The ID of the pane containing the tab to move.
+/// * `direction` - The direction to move the tab.
+/// * `new_pane_id_fn` - A closure that generates new pane IDs.
+///
+/// # Returns
+///
+/// A `MoveResult` indicating what happened.
+pub fn move_tab(
+    root: &mut PaneLayoutNode,
+    source_pane_id: PaneId,
+    direction: Direction,
+    mut new_pane_id_fn: impl FnMut() -> PaneId,
+) -> MoveResult {
+    // Step 1: Find the target
+    let target = root.find_target_in_direction(source_pane_id, direction);
+
+    // Step 2: Check preconditions
+    let source_pane = match root.get_pane(source_pane_id) {
+        Some(p) => p,
+        None => return MoveResult::SourceNotFound,
+    };
+
+    // Source must have at least one tab
+    if source_pane.tabs.is_empty() {
+        return MoveResult::SourceNotFound;
+    }
+
+    // If source has only one tab and target is SplitPane, reject
+    // (splitting a single-tab pane creates an empty sibling that collapses - a no-op)
+    let source_tab_count = source_pane.tab_count();
+    if source_tab_count == 1 {
+        if let MoveTarget::SplitPane(_, _) = target {
+            return MoveResult::Rejected;
+        }
+    }
+
+    // Step 3: Execute move based on target type
+    let result = match target {
+        MoveTarget::ExistingPane(target_pane_id) => {
+            // Move to existing pane
+            move_tab_to_existing(root, source_pane_id, target_pane_id)
+        }
+        MoveTarget::SplitPane(pane_id, dir) => {
+            // Create a new pane via split
+            let new_pane_id = new_pane_id_fn();
+            let workspace_id = root.get_pane(pane_id).map(|p| p.workspace_id).unwrap_or(0);
+            move_tab_to_new_split(root, pane_id, dir, new_pane_id, workspace_id)
+        }
+    };
+
+    // Step 4: Cleanup empty panes
+    cleanup_empty_panes(root);
+
+    result
+}
+
+/// Moves the active tab from source pane to an existing target pane.
+fn move_tab_to_existing(
+    root: &mut PaneLayoutNode,
+    source_pane_id: PaneId,
+    target_pane_id: PaneId,
+) -> MoveResult {
+    // Remove tab from source
+    let tab = {
+        let source = match root.get_pane_mut(source_pane_id) {
+            Some(p) => p,
+            None => return MoveResult::SourceNotFound,
+        };
+        match source.remove_active_tab() {
+            Some(t) => t,
+            None => return MoveResult::SourceNotFound,
+        }
+    };
+
+    // Add to target
+    let target = match root.get_pane_mut(target_pane_id) {
+        Some(p) => p,
+        None => {
+            // Put the tab back in the source
+            if let Some(source) = root.get_pane_mut(source_pane_id) {
+                source.add_tab(tab);
+            }
+            return MoveResult::SourceNotFound;
+        }
+    };
+    target.add_tab(tab);
+
+    MoveResult::MovedToExisting {
+        source_pane_id,
+        target_pane_id,
+    }
+}
+
+/// Moves the active tab from source pane to a new pane via split.
+fn move_tab_to_new_split(
+    root: &mut PaneLayoutNode,
+    source_pane_id: PaneId,
+    direction: Direction,
+    new_pane_id: PaneId,
+    workspace_id: WorkspaceId,
+) -> MoveResult {
+    // Remove tab from source
+    let tab = {
+        let source = match root.get_pane_mut(source_pane_id) {
+            Some(p) => p,
+            None => return MoveResult::SourceNotFound,
+        };
+        match source.remove_active_tab() {
+            Some(t) => t,
+            None => return MoveResult::SourceNotFound,
+        }
+    };
+
+    // Create new pane with the tab
+    let mut new_pane = Pane::new(new_pane_id, workspace_id);
+    new_pane.add_tab(tab);
+
+    // Replace the source pane with a split containing both
+    let success = root.replace_pane_with_split(source_pane_id, new_pane, direction);
+
+    if success {
+        MoveResult::MovedToNew {
+            source_pane_id,
+            new_pane_id,
+        }
+    } else {
+        // This shouldn't happen if source_pane_id was valid, but handle it
+        MoveResult::SourceNotFound
+    }
+}
+
+impl PaneLayoutNode {
+    /// Replaces a leaf pane with a split containing that pane and a new pane.
+    ///
+    /// Returns `true` if the replacement was made, `false` if the pane wasn't found.
+    ///
+    /// The split direction is determined by `direction.to_split_direction()`, and
+    /// child ordering is determined by `direction.is_toward_second()`:
+    /// - Right/Down: original pane is First, new pane is Second
+    /// - Left/Up: new pane is First, original pane is Second
+    fn replace_pane_with_split(
+        &mut self,
+        pane_id: PaneId,
+        new_pane: Pane,
+        direction: Direction,
+    ) -> bool {
+        match self {
+            PaneLayoutNode::Leaf(pane) => {
+                if pane.id == pane_id {
+                    // Take ownership of the original pane
+                    let original_pane =
+                        std::mem::replace(pane, Pane::new(0, 0)); // Placeholder
+
+                    // Build the split node
+                    let split_direction = direction.to_split_direction();
+                    let new_is_second = direction.is_toward_second();
+
+                    let (first, second) = if new_is_second {
+                        (
+                            Box::new(PaneLayoutNode::Leaf(original_pane)),
+                            Box::new(PaneLayoutNode::Leaf(new_pane)),
+                        )
+                    } else {
+                        (
+                            Box::new(PaneLayoutNode::Leaf(new_pane)),
+                            Box::new(PaneLayoutNode::Leaf(original_pane)),
+                        )
+                    };
+
+                    // Replace self with the split
+                    *self = PaneLayoutNode::Split {
+                        direction: split_direction,
+                        ratio: 0.5,
+                        first,
+                        second,
+                    };
+
+                    true
+                } else {
+                    false
+                }
+            }
+            PaneLayoutNode::Split { first, second, .. } => {
+                // Check which subtree contains the pane to avoid unnecessary cloning
+                if first.contains_pane(pane_id) {
+                    first.replace_pane_with_split(pane_id, new_pane, direction)
+                } else if second.contains_pane(pane_id) {
+                    second.replace_pane_with_split(pane_id, new_pane, direction)
+                } else {
+                    false
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Empty Pane Cleanup
+// =============================================================================
+
+// Chunk: docs/chunks/tiling_tab_movement - Directional tab movement operations
+
+/// Cleans up empty panes by collapsing them and promoting their siblings.
+///
+/// After any operation that might leave a pane empty (like moving a tab out),
+/// this function should be called to maintain tree invariants.
+///
+/// # Algorithm
+///
+/// - If root is a `Leaf` with empty pane → return `RootEmpty`.
+/// - If root is a `Split`, recursively cleanup children.
+/// - After recursing, if either child is a `Leaf` with empty pane,
+///   replace this `Split` with the non-empty sibling.
+///
+/// # Returns
+///
+/// A `CleanupResult` indicating what happened.
+pub fn cleanup_empty_panes(root: &mut PaneLayoutNode) -> CleanupResult {
+    cleanup_empty_panes_impl(root, true)
+}
+
+fn cleanup_empty_panes_impl(node: &mut PaneLayoutNode, is_root: bool) -> CleanupResult {
+    match node {
+        PaneLayoutNode::Leaf(pane) => {
+            if pane.is_empty() {
+                if is_root {
+                    CleanupResult::RootEmpty
+                } else {
+                    // Parent will handle collapsing
+                    CleanupResult::NoChange
+                }
+            } else {
+                CleanupResult::NoChange
+            }
+        }
+        PaneLayoutNode::Split { first, second, .. } => {
+            // Recursively cleanup children - track if any nested cleanup happened
+            let first_result = cleanup_empty_panes_impl(first, false);
+            let second_result = cleanup_empty_panes_impl(second, false);
+            let nested_collapsed = matches!(first_result, CleanupResult::Collapsed)
+                || matches!(second_result, CleanupResult::Collapsed);
+
+            // Check if either child is an empty leaf
+            let first_empty = matches!(first.as_ref(), PaneLayoutNode::Leaf(p) if p.is_empty());
+            let second_empty = matches!(second.as_ref(), PaneLayoutNode::Leaf(p) if p.is_empty());
+
+            if first_empty && second_empty {
+                // Both children are empty - this shouldn't happen in normal operation,
+                // but handle it by keeping the structure
+                if is_root {
+                    CleanupResult::RootEmpty
+                } else {
+                    CleanupResult::NoChange
+                }
+            } else if first_empty {
+                // Promote second child
+                let second_node = std::mem::replace(
+                    second.as_mut(),
+                    PaneLayoutNode::Leaf(Pane::new(0, 0)),
+                );
+                *node = second_node;
+                CleanupResult::Collapsed
+            } else if second_empty {
+                // Promote first child
+                let first_node = std::mem::replace(
+                    first.as_mut(),
+                    PaneLayoutNode::Leaf(Pane::new(0, 0)),
+                );
+                *node = first_node;
+                CleanupResult::Collapsed
+            } else if nested_collapsed {
+                // No direct collapse at this level, but a nested collapse happened
+                CleanupResult::Collapsed
+            } else {
+                CleanupResult::NoChange
+            }
         }
     }
 }
@@ -1305,5 +1666,555 @@ mod tests {
         assert_eq!(id2, 1);
         assert_eq!(id3, 2);
         assert_eq!(next_id, 3);
+    }
+
+    // =========================================================================
+    // move_tab Tests
+    // =========================================================================
+
+    #[test]
+    fn test_move_tab_split_creation() {
+        // Two tabs in a single pane, move one right → HSplit with two panes
+        let mut pane = test_pane(1);
+        pane.add_tab(test_tab(1)); // Tab A
+        pane.add_tab(test_tab(2)); // Tab B (active)
+
+        let mut tree = PaneLayoutNode::single_pane(pane);
+        let mut next_pane_id = 2u64;
+
+        let result = move_tab(&mut tree, 1, Direction::Right, || {
+            let id = next_pane_id;
+            next_pane_id += 1;
+            id
+        });
+
+        // Should create a new pane
+        assert!(matches!(result, MoveResult::MovedToNew { source_pane_id: 1, new_pane_id: 2 }));
+
+        // Tree should now be a horizontal split
+        assert_eq!(tree.pane_count(), 2);
+
+        // Source pane (id=1) should have one tab
+        let source = tree.get_pane(1).unwrap();
+        assert_eq!(source.tab_count(), 1);
+
+        // New pane (id=2) should have one tab (the moved tab)
+        let new_pane = tree.get_pane(2).unwrap();
+        assert_eq!(new_pane.tab_count(), 1);
+        assert_eq!(new_pane.tabs[0].id, 2); // Tab B
+    }
+
+    #[test]
+    fn test_move_tab_to_existing_neighbor() {
+        // HSplit(Pane[A, B], Pane[C]), move B right → B joins Pane[C]
+        let mut pane1 = test_pane(1);
+        pane1.add_tab(test_tab(1)); // Tab A
+        pane1.add_tab(test_tab(2)); // Tab B (active)
+
+        let mut pane2 = test_pane(2);
+        pane2.add_tab(test_tab(3)); // Tab C
+
+        let mut tree = PaneLayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(PaneLayoutNode::Leaf(pane1)),
+            second: Box::new(PaneLayoutNode::Leaf(pane2)),
+        };
+
+        let result = move_tab(&mut tree, 1, Direction::Right, || panic!("Should not create new pane"));
+
+        // Should move to existing pane
+        assert!(matches!(result, MoveResult::MovedToExisting { source_pane_id: 1, target_pane_id: 2 }));
+
+        // Source pane should have one tab (A)
+        let source = tree.get_pane(1).unwrap();
+        assert_eq!(source.tab_count(), 1);
+        assert_eq!(source.tabs[0].id, 1);
+
+        // Target pane should have two tabs (C, B) - B is now active (last added)
+        let target = tree.get_pane(2).unwrap();
+        assert_eq!(target.tab_count(), 2);
+        assert_eq!(target.active_tab, 1); // B is active
+    }
+
+    #[test]
+    fn test_move_tab_single_tab_rejected() {
+        // Pane with one tab, no existing target → move rejected
+        let mut pane = test_pane(1);
+        pane.add_tab(test_tab(1));
+
+        let mut tree = PaneLayoutNode::single_pane(pane);
+
+        let result = move_tab(&mut tree, 1, Direction::Right, || panic!("Should not create new pane"));
+
+        // Should be rejected
+        assert_eq!(result, MoveResult::Rejected);
+
+        // Tree unchanged
+        assert_eq!(tree.pane_count(), 1);
+        let pane = tree.get_pane(1).unwrap();
+        assert_eq!(pane.tab_count(), 1);
+    }
+
+    #[test]
+    fn test_move_tab_single_tab_transfer() {
+        // Pane with one tab, existing target → tab moves, source empties, tree collapses
+        let mut pane1 = test_pane(1);
+        pane1.add_tab(test_tab(1)); // Only one tab
+
+        let mut pane2 = test_pane(2);
+        pane2.add_tab(test_tab(2));
+
+        let mut tree = PaneLayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(PaneLayoutNode::Leaf(pane1)),
+            second: Box::new(PaneLayoutNode::Leaf(pane2)),
+        };
+
+        let result = move_tab(&mut tree, 1, Direction::Right, || panic!("Should not create new pane"));
+
+        // Should move to existing
+        assert!(matches!(result, MoveResult::MovedToExisting { source_pane_id: 1, target_pane_id: 2 }));
+
+        // Tree should collapse to single pane (pane 2 with both tabs)
+        assert_eq!(tree.pane_count(), 1);
+
+        // Target pane should have both tabs
+        let target = tree.get_pane(2).unwrap();
+        assert_eq!(target.tab_count(), 2);
+    }
+
+    #[test]
+    fn test_move_tab_source_not_found() {
+        let mut pane = test_pane(1);
+        pane.add_tab(test_tab(1));
+
+        let mut tree = PaneLayoutNode::single_pane(pane);
+
+        let result = move_tab(&mut tree, 999, Direction::Right, || panic!("Should not create new pane"));
+
+        assert_eq!(result, MoveResult::SourceNotFound);
+    }
+
+    #[test]
+    fn test_move_tab_direction_ordering_right() {
+        // Move right creates new pane as Second child
+        let mut pane = test_pane(1);
+        pane.add_tab(test_tab(1));
+        pane.add_tab(test_tab(2));
+
+        let mut tree = PaneLayoutNode::single_pane(pane);
+        let mut next_pane_id = 2u64;
+
+        move_tab(&mut tree, 1, Direction::Right, || {
+            let id = next_pane_id;
+            next_pane_id += 1;
+            id
+        });
+
+        // Verify layout: source should be on the left, new pane on the right
+        let rects = calculate_pane_rects((0.0, 0.0, 800.0, 600.0), &tree);
+        let source_rect = rects.iter().find(|r| r.pane_id == 1).unwrap();
+        let new_rect = rects.iter().find(|r| r.pane_id == 2).unwrap();
+
+        // Source pane should be on the left (smaller x)
+        assert!(source_rect.x < new_rect.x);
+    }
+
+    #[test]
+    fn test_move_tab_direction_ordering_left() {
+        // Move left creates new pane as First child
+        let mut pane = test_pane(1);
+        pane.add_tab(test_tab(1));
+        pane.add_tab(test_tab(2));
+
+        let mut tree = PaneLayoutNode::single_pane(pane);
+        let mut next_pane_id = 2u64;
+
+        move_tab(&mut tree, 1, Direction::Left, || {
+            let id = next_pane_id;
+            next_pane_id += 1;
+            id
+        });
+
+        // Verify layout: new pane should be on the left, source on the right
+        let rects = calculate_pane_rects((0.0, 0.0, 800.0, 600.0), &tree);
+        let source_rect = rects.iter().find(|r| r.pane_id == 1).unwrap();
+        let new_rect = rects.iter().find(|r| r.pane_id == 2).unwrap();
+
+        // New pane should be on the left (smaller x)
+        assert!(new_rect.x < source_rect.x);
+    }
+
+    #[test]
+    fn test_move_tab_direction_ordering_down() {
+        // Move down creates new pane as Second child (vertical split)
+        let mut pane = test_pane(1);
+        pane.add_tab(test_tab(1));
+        pane.add_tab(test_tab(2));
+
+        let mut tree = PaneLayoutNode::single_pane(pane);
+        let mut next_pane_id = 2u64;
+
+        move_tab(&mut tree, 1, Direction::Down, || {
+            let id = next_pane_id;
+            next_pane_id += 1;
+            id
+        });
+
+        // Verify layout: source should be on top, new pane on bottom
+        let rects = calculate_pane_rects((0.0, 0.0, 800.0, 600.0), &tree);
+        let source_rect = rects.iter().find(|r| r.pane_id == 1).unwrap();
+        let new_rect = rects.iter().find(|r| r.pane_id == 2).unwrap();
+
+        // Source pane should be on top (smaller y)
+        assert!(source_rect.y < new_rect.y);
+    }
+
+    #[test]
+    fn test_move_tab_direction_ordering_up() {
+        // Move up creates new pane as First child (vertical split)
+        let mut pane = test_pane(1);
+        pane.add_tab(test_tab(1));
+        pane.add_tab(test_tab(2));
+
+        let mut tree = PaneLayoutNode::single_pane(pane);
+        let mut next_pane_id = 2u64;
+
+        move_tab(&mut tree, 1, Direction::Up, || {
+            let id = next_pane_id;
+            next_pane_id += 1;
+            id
+        });
+
+        // Verify layout: new pane should be on top, source on bottom
+        let rects = calculate_pane_rects((0.0, 0.0, 800.0, 600.0), &tree);
+        let source_rect = rects.iter().find(|r| r.pane_id == 1).unwrap();
+        let new_rect = rects.iter().find(|r| r.pane_id == 2).unwrap();
+
+        // New pane should be on top (smaller y)
+        assert!(new_rect.y < source_rect.y);
+    }
+
+    // =========================================================================
+    // remove_active_tab Tests
+    // =========================================================================
+
+    #[test]
+    fn test_remove_active_tab_basic() {
+        let mut pane = test_pane(1);
+        pane.add_tab(test_tab(1));
+        pane.add_tab(test_tab(2));
+        pane.add_tab(test_tab(3));
+        // active_tab = 2 (third tab)
+
+        let removed = pane.remove_active_tab();
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().id, 3);
+        assert_eq!(pane.tab_count(), 2);
+        assert_eq!(pane.active_tab, 1); // Adjusted to last tab
+    }
+
+    #[test]
+    fn test_remove_active_tab_from_empty() {
+        let mut pane = test_pane(1);
+        let removed = pane.remove_active_tab();
+        assert!(removed.is_none());
+    }
+
+    #[test]
+    fn test_remove_active_tab_last_tab() {
+        let mut pane = test_pane(1);
+        pane.add_tab(test_tab(1));
+
+        let removed = pane.remove_active_tab();
+        assert!(removed.is_some());
+        assert!(pane.is_empty());
+    }
+
+    // =========================================================================
+    // cleanup_empty_panes Tests
+    // =========================================================================
+
+    #[test]
+    fn test_cleanup_no_empty_panes() {
+        // Tree with no empty panes should be unchanged
+        let mut pane = test_pane(1);
+        pane.add_tab(test_tab(1));
+
+        let mut tree = PaneLayoutNode::single_pane(pane);
+
+        let result = cleanup_empty_panes(&mut tree);
+        assert_eq!(result, CleanupResult::NoChange);
+        assert_eq!(tree.pane_count(), 1);
+    }
+
+    #[test]
+    fn test_cleanup_single_split_with_empty_leaf() {
+        // HSplit(Pane[], Pane[A]) → Pane[A]
+        let empty_pane = test_pane(1);
+        let mut full_pane = test_pane(2);
+        full_pane.add_tab(test_tab(1));
+
+        let mut tree = PaneLayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(PaneLayoutNode::Leaf(empty_pane)),
+            second: Box::new(PaneLayoutNode::Leaf(full_pane)),
+        };
+
+        let result = cleanup_empty_panes(&mut tree);
+        assert_eq!(result, CleanupResult::Collapsed);
+
+        // Tree should collapse to single pane
+        assert_eq!(tree.pane_count(), 1);
+        assert!(tree.get_pane(2).is_some());
+    }
+
+    #[test]
+    fn test_cleanup_nested_tree_collapse() {
+        // HSplit(Pane[A], VSplit(Pane[], Pane[B])) → HSplit(Pane[A], Pane[B])
+        let mut pane_a = test_pane(1);
+        pane_a.add_tab(test_tab(1));
+
+        let empty_pane = test_pane(2);
+
+        let mut pane_b = test_pane(3);
+        pane_b.add_tab(test_tab(2));
+
+        let mut tree = PaneLayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(PaneLayoutNode::Leaf(pane_a)),
+            second: Box::new(PaneLayoutNode::Split {
+                direction: SplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(PaneLayoutNode::Leaf(empty_pane)),
+                second: Box::new(PaneLayoutNode::Leaf(pane_b)),
+            }),
+        };
+
+        let result = cleanup_empty_panes(&mut tree);
+        assert_eq!(result, CleanupResult::Collapsed);
+
+        // Tree should now be HSplit(Pane[A], Pane[B])
+        assert_eq!(tree.pane_count(), 2);
+        assert!(tree.get_pane(1).is_some());
+        assert!(tree.get_pane(3).is_some());
+    }
+
+    #[test]
+    fn test_cleanup_root_empty_pane() {
+        // Single empty pane at root
+        let mut tree = PaneLayoutNode::single_pane(test_pane(1));
+
+        let result = cleanup_empty_panes(&mut tree);
+        assert_eq!(result, CleanupResult::RootEmpty);
+    }
+
+    #[test]
+    fn test_cleanup_promote_second_sibling() {
+        // HSplit(Pane[A], Pane[]) → Pane[A]
+        let mut pane_a = test_pane(1);
+        pane_a.add_tab(test_tab(1));
+
+        let empty_pane = test_pane(2);
+
+        let mut tree = PaneLayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(PaneLayoutNode::Leaf(pane_a)),
+            second: Box::new(PaneLayoutNode::Leaf(empty_pane)),
+        };
+
+        let result = cleanup_empty_panes(&mut tree);
+        assert_eq!(result, CleanupResult::Collapsed);
+
+        // Tree should collapse to pane A
+        assert_eq!(tree.pane_count(), 1);
+        assert!(tree.get_pane(1).is_some());
+    }
+
+    // =========================================================================
+    // Integration Tests: Move + Cleanup Scenarios
+    // =========================================================================
+
+    #[test]
+    fn test_integration_split_creation_structure() {
+        // Start with Pane[A, B], move B right → HSplit(Pane[A], Pane[B])
+        let mut pane = test_pane(1);
+        pane.add_tab(test_tab(1)); // Tab A
+        pane.add_tab(test_tab(2)); // Tab B (active)
+
+        let mut tree = PaneLayoutNode::single_pane(pane);
+        let mut next_pane_id = 2u64;
+
+        let result = move_tab(&mut tree, 1, Direction::Right, || {
+            let id = next_pane_id;
+            next_pane_id += 1;
+            id
+        });
+
+        assert!(matches!(result, MoveResult::MovedToNew { .. }));
+
+        // Verify structure is HSplit
+        match &tree {
+            PaneLayoutNode::Split { direction, .. } => {
+                assert_eq!(*direction, SplitDirection::Horizontal);
+            }
+            _ => panic!("Expected a split"),
+        }
+
+        // Verify tab distribution
+        let pane1 = tree.get_pane(1).unwrap();
+        assert_eq!(pane1.tab_count(), 1);
+        assert_eq!(pane1.tabs[0].id, 1); // Tab A
+
+        let pane2 = tree.get_pane(2).unwrap();
+        assert_eq!(pane2.tab_count(), 1);
+        assert_eq!(pane2.tabs[0].id, 2); // Tab B
+    }
+
+    #[test]
+    fn test_integration_nested_tree_navigation() {
+        // HSplit(Pane[A], VSplit(Pane[B], Pane[C, D]))
+        // Move D left → D joins Pane A
+        // Pane C doesn't empty, so VSplit remains
+        let mut pane_a = test_pane(1);
+        pane_a.add_tab(test_tab(1)); // Tab A
+
+        let mut pane_b = test_pane(2);
+        pane_b.add_tab(test_tab(2)); // Tab B
+
+        let mut pane_c = test_pane(3);
+        pane_c.add_tab(test_tab(3)); // Tab C
+        pane_c.add_tab(test_tab(4)); // Tab D (active)
+
+        let mut tree = PaneLayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(PaneLayoutNode::Leaf(pane_a)),
+            second: Box::new(PaneLayoutNode::Split {
+                direction: SplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(PaneLayoutNode::Leaf(pane_b)),
+                second: Box::new(PaneLayoutNode::Leaf(pane_c)),
+            }),
+        };
+
+        let result = move_tab(&mut tree, 3, Direction::Left, || panic!("Should not create new pane"));
+
+        assert!(matches!(result, MoveResult::MovedToExisting { source_pane_id: 3, target_pane_id: 1 }));
+
+        // Pane A should now have 2 tabs (A and D)
+        let pane_a = tree.get_pane(1).unwrap();
+        assert_eq!(pane_a.tab_count(), 2);
+
+        // Pane C should have 1 tab (C only)
+        let pane_c = tree.get_pane(3).unwrap();
+        assert_eq!(pane_c.tab_count(), 1);
+
+        // Tree structure should be unchanged (no collapse needed)
+        assert_eq!(tree.pane_count(), 3);
+    }
+
+    #[test]
+    fn test_integration_nested_tree_collapse() {
+        // HSplit(Pane[A], VSplit(Pane[B], Pane[C]))
+        // Move C left → C joins Pane A, Pane C empties, VSplit collapses
+        // Result: HSplit(Pane[A, C], Pane[B])
+        let mut pane_a = test_pane(1);
+        pane_a.add_tab(test_tab(1)); // Tab A
+
+        let mut pane_b = test_pane(2);
+        pane_b.add_tab(test_tab(2)); // Tab B
+
+        let mut pane_c = test_pane(3);
+        pane_c.add_tab(test_tab(3)); // Tab C (only tab, active)
+
+        let mut tree = PaneLayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(PaneLayoutNode::Leaf(pane_a)),
+            second: Box::new(PaneLayoutNode::Split {
+                direction: SplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(PaneLayoutNode::Leaf(pane_b)),
+                second: Box::new(PaneLayoutNode::Leaf(pane_c)),
+            }),
+        };
+
+        let result = move_tab(&mut tree, 3, Direction::Left, || panic!("Should not create new pane"));
+
+        assert!(matches!(result, MoveResult::MovedToExisting { source_pane_id: 3, target_pane_id: 1 }));
+
+        // Tree should now be HSplit(Pane[A, C], Pane[B])
+        assert_eq!(tree.pane_count(), 2);
+
+        // Pane A should have tabs A and C
+        let pane_a = tree.get_pane(1).unwrap();
+        assert_eq!(pane_a.tab_count(), 2);
+
+        // Pane B should still exist
+        let pane_b = tree.get_pane(2).unwrap();
+        assert_eq!(pane_b.tab_count(), 1);
+    }
+
+    #[test]
+    fn test_integration_deep_tree_collapse_to_single() {
+        // Progressively move all tabs to one pane, collapsing tree back to single pane
+        // Start: HSplit(Pane[A], Pane[B])
+        let mut pane_a = test_pane(1);
+        pane_a.add_tab(test_tab(1)); // Tab A
+
+        let mut pane_b = test_pane(2);
+        pane_b.add_tab(test_tab(2)); // Tab B
+
+        let mut tree = PaneLayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(PaneLayoutNode::Leaf(pane_a)),
+            second: Box::new(PaneLayoutNode::Leaf(pane_b)),
+        };
+
+        // Move B left → B joins A, tree collapses to single pane
+        let result = move_tab(&mut tree, 2, Direction::Left, || panic!("Should not create new pane"));
+
+        assert!(matches!(result, MoveResult::MovedToExisting { source_pane_id: 2, target_pane_id: 1 }));
+
+        // Tree should collapse to single pane
+        assert_eq!(tree.pane_count(), 1);
+
+        // Single pane should have both tabs
+        let pane = tree.get_pane(1).unwrap();
+        assert_eq!(pane.tab_count(), 2);
+    }
+
+    // =========================================================================
+    // workspace_id Preservation Tests
+    // =========================================================================
+
+    #[test]
+    fn test_move_tab_preserves_workspace_id() {
+        // When a new pane is created during a split, it should inherit workspace_id
+        let workspace_id = 42u64;
+
+        let mut pane = Pane::new(1, workspace_id);
+        pane.add_tab(test_tab(1));
+        pane.add_tab(test_tab(2));
+
+        let mut tree = PaneLayoutNode::single_pane(pane);
+        let mut next_pane_id = 2u64;
+
+        move_tab(&mut tree, 1, Direction::Right, || {
+            let id = next_pane_id;
+            next_pane_id += 1;
+            id
+        });
+
+        // Verify new pane has the same workspace_id
+        let new_pane = tree.get_pane(2).unwrap();
+        assert_eq!(new_pane.workspace_id, workspace_id);
     }
 }

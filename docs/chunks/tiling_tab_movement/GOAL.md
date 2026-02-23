@@ -1,18 +1,20 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/editor/src/pane_layout.rs
 code_references: []
 narrative: null
 investigation: tiling_pane_layout
 subsystems: []
 friction_entries: []
 bug_type: null
-depends_on: ["tiling_tree_model"]
-created_after: ["welcome_screen_startup"]
+depends_on:
+- tiling_tree_model
+created_after:
+- welcome_screen_startup
 ---
-
 # Chunk Goal
 
 ## Minor Goal
