@@ -42,8 +42,6 @@ code_references:
     implements: "Converts DirtyLines to DirtyRegion for incremental rendering"
   - ref: crates/editor/src/renderer.rs#Renderer::render_dirty
     implements: "Renders based on dirty region (triggers full redraw if dirty)"
-  - ref: crates/editor/src/main.rs#generate_demo_content
-    implements: "Generates 100+ line demo buffer for testing viewport"
   - ref: crates/editor/src/main.rs#AppDelegate::setup_window
     implements: "Connects TextBuffer to Renderer with viewport size initialization"
 narrative: null

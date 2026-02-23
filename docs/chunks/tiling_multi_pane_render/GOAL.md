@@ -1,5 +1,5 @@
 ---
-status: IMPLEMENTING
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
@@ -8,7 +8,31 @@ code_paths:
 - crates/editor/src/pane_layout.rs
 - crates/editor/src/tab_bar.rs
 - crates/editor/src/main.rs
-code_references: []
+code_references:
+  - ref: crates/editor/src/pane_frame_buffer.rs
+    implements: "Core pane frame rendering module: divider line and focus border calculation/rendering"
+  - ref: crates/editor/src/pane_frame_buffer.rs#PaneFrameBuffer
+    implements: "GPU buffer management for pane dividers and focus borders"
+  - ref: crates/editor/src/pane_frame_buffer.rs#calculate_divider_lines
+    implements: "Pure function to compute divider lines between adjacent panes"
+  - ref: crates/editor/src/pane_frame_buffer.rs#calculate_focus_border
+    implements: "Pure function to compute focus border segments for active pane"
+  - ref: crates/editor/src/renderer.rs#Renderer::render_pane
+    implements: "Per-pane rendering: tab bar, content, and welcome screen within pane bounds"
+  - ref: crates/editor/src/renderer.rs#Renderer::draw_pane_frames
+    implements: "Draws pane divider lines and focus border after all pane content"
+  - ref: crates/editor/src/renderer.rs#Renderer::draw_pane_tab_bar
+    implements: "Renders a pane's tab bar at specified position"
+  - ref: crates/editor/src/renderer.rs#Renderer::draw_welcome_screen_in_pane
+    implements: "Renders welcome screen centered within a specific pane"
+  - ref: crates/editor/src/renderer.rs#pane_scissor_rect
+    implements: "Creates Metal scissor rect to clip pane content to pane bounds"
+  - ref: crates/editor/src/renderer.rs#pane_content_scissor_rect
+    implements: "Creates scissor rect for pane content area (below tab bar)"
+  - ref: crates/editor/src/tab_bar.rs#calculate_pane_tab_bar_geometry
+    implements: "Tab bar geometry calculation for panes at arbitrary positions"
+  - ref: crates/editor/src/tab_bar.rs#tabs_from_pane
+    implements: "Extracts tab info from a specific pane for multi-pane rendering"
 narrative: null
 investigation: tiling_pane_layout
 subsystems: []
