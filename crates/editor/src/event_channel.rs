@@ -145,6 +145,16 @@ impl EventSender {
         (self.inner.run_loop_waker)();
         result
     }
+
+    /// Sends a file drop event to the channel.
+    ///
+    /// This is called when files are dropped onto the view via drag-and-drop.
+    // Chunk: docs/chunks/dragdrop_file_paste - File drop event sender
+    pub fn send_file_drop(&self, paths: Vec<String>) -> Result<(), SendError<EditorEvent>> {
+        let result = self.inner.sender.send(EditorEvent::FileDrop(paths));
+        (self.inner.run_loop_waker)();
+        result
+    }
 }
 
 // Implement WakeupSignal so EventSender can be used by the terminal crate
@@ -338,5 +348,28 @@ mod tests {
         sender.send_resize().unwrap();
 
         assert_eq!(waker_called.load(Ordering::SeqCst), 1, "Waker should be called after send_resize");
+    }
+
+    #[test]
+    fn test_send_file_drop() {
+        let waker_called = Arc::new(AtomicUsize::new(0));
+        let waker_called_clone = waker_called.clone();
+
+        let (sender, receiver) = create_event_channel(move || {
+            waker_called_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let paths = vec!["/path/to/file.txt".to_string(), "/another/path.txt".to_string()];
+        sender.send_file_drop(paths.clone()).unwrap();
+
+        assert_eq!(waker_called.load(Ordering::SeqCst), 1, "Waker should be called after send_file_drop");
+
+        let event = receiver.try_recv().unwrap();
+        match event {
+            EditorEvent::FileDrop(received_paths) => {
+                assert_eq!(received_paths, paths);
+            }
+            _ => panic!("Expected FileDrop event"),
+        }
     }
 }

@@ -40,14 +40,27 @@ pub enum EditorEvent {
     ///
     /// This covers both `windowDidResize:` and `windowDidChangeBackingProperties:`.
     Resize,
+
+    /// Files were dropped onto the view
+    ///
+    /// Contains the list of file paths (as UTF-8 strings) that were dropped.
+    /// The paths are absolute and need shell escaping before insertion.
+    // Chunk: docs/chunks/dragdrop_file_paste - File drop event for drag-and-drop
+    FileDrop(Vec<String>),
 }
 
 impl EditorEvent {
-    /// Returns true if this is a user input event (key, mouse, scroll).
+    /// Returns true if this is a user input event (key, mouse, scroll, file drop).
     ///
     /// Used for resetting cursor blink state on user activity.
     pub fn is_user_input(&self) -> bool {
-        matches!(self, EditorEvent::Key(_) | EditorEvent::Mouse(_) | EditorEvent::Scroll(_))
+        matches!(
+            self,
+            EditorEvent::Key(_)
+                | EditorEvent::Mouse(_)
+                | EditorEvent::Scroll(_)
+                | EditorEvent::FileDrop(_)
+        )
     }
 
     /// Returns true if this is a key event.

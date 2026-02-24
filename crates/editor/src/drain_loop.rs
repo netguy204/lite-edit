@@ -142,6 +142,10 @@ impl EventDrainLoop {
                 EditorEvent::Resize => {
                     self.handle_resize();
                 }
+                // Chunk: docs/chunks/dragdrop_file_paste - File drop handling
+                EditorEvent::FileDrop(paths) => {
+                    self.handle_file_drop(paths);
+                }
             }
         }
 
@@ -223,6 +227,13 @@ impl EventDrainLoop {
 
         // Mark full viewport dirty
         self.state.mark_full_dirty();
+    }
+
+    // Chunk: docs/chunks/dragdrop_file_paste - File drop handling
+    /// Handles file drop events by forwarding to the editor state.
+    fn handle_file_drop(&mut self, paths: Vec<String>) {
+        self.state.handle_file_drop(paths);
+        self.poll_after_input();
     }
 
     /// Polls PTY and picker after user input for responsive feedback.
