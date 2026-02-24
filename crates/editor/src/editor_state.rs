@@ -8,6 +8,7 @@
 // Chunk: docs/chunks/tab_bar_interaction - Click coordinate transformation for tab switching
 // Chunk: docs/chunks/workspace_dir_picker - Directory picker for new workspaces
 // Chunk: docs/chunks/pty_wakeup_reentrant - EventSender for PTY wakeup
+// Chunk: docs/chunks/split_tab_click - Multi-pane tab bar click routing
 //!
 //! Editor state container.
 //!
@@ -36,7 +37,11 @@ use crate::left_rail::{calculate_left_rail_geometry, RAIL_WIDTH};
 use crate::mini_buffer::MiniBuffer;
 use crate::pane_layout::PaneId;
 // Chunk: docs/chunks/content_tab_bar - Tab bar click handling
-use crate::tab_bar::{calculate_tab_bar_geometry, tabs_from_workspace, TAB_BAR_HEIGHT};
+// Chunk: docs/chunks/split_tab_click - Multi-pane tab bar click routing
+use crate::tab_bar::{
+    calculate_pane_tab_bar_geometry, calculate_tab_bar_geometry, tabs_from_pane,
+    tabs_from_workspace, TAB_BAR_HEIGHT,
+};
 use crate::selector::{SelectorOutcome, SelectorWidget};
 use crate::selector_overlay::calculate_overlay_geometry;
 use crate::viewport::Viewport;
@@ -3060,40 +3065,100 @@ impl EditorState {
     // Chunk: docs/chunks/content_tab_bar - Click-to-switch and close-button hit testing
     // Chunk: docs/chunks/tab_bar_interaction - Tab click coordinate transformation
     // Chunk: docs/chunks/tiling_workspace_integration - Receives screen-space coordinates (y=0 at top)
+    // Chunk: docs/chunks/split_tab_click - Multi-pane tab bar click routing
     /// Determines which tab was clicked and switches to it, or handles
     /// close button clicks.
     ///
+    /// In multi-pane layouts, each pane has its own tab bar at its top edge.
+    /// This function determines which pane's tab bar was clicked, switches
+    /// focus to that pane if necessary, and then activates the clicked tab.
+    ///
     /// The mouse coordinates are in screen space (y=0 at top of window).
-    /// Tab bar geometry uses y=0 at the top of the tab bar.
-    /// Since the tab bar is at the top of the window, screen_y maps directly to tab_bar_y.
     fn handle_tab_bar_click(&mut self, screen_x: f32, screen_y: f32) {
-        if let Some(workspace) = self.editor.active_workspace() {
-            let tabs = tabs_from_workspace(workspace);
-            let glyph_width = self.font_metrics.advance_width as f32;
-            let geometry = calculate_tab_bar_geometry(
-                self.view_width,
-                &tabs,
-                glyph_width,
-                workspace.tab_bar_view_offset(),
+        use crate::pane_layout::calculate_pane_rects;
+
+        // Find which pane's tab bar was clicked and get the tab information
+        let click_result = {
+            let workspace = match self.editor.active_workspace() {
+                Some(ws) => ws,
+                None => return,
+            };
+
+            // Calculate pane rects in renderer space (starting at RAIL_WIDTH, 0)
+            // This matches how the renderer calculates pane positions
+            let bounds = (
+                RAIL_WIDTH,
+                0.0,
+                self.view_width - RAIL_WIDTH,
+                self.view_height,
             );
+            let pane_rects = calculate_pane_rects(bounds, &workspace.pane_root);
 
-            // Tab rects from calculate_tab_bar_geometry already use window x-coordinates
-            // (starting at RAIL_WIDTH), so no adjustment needed for x.
-            // screen_y is already relative to top of window (y=0 at top).
-            // Tab bar occupies y ∈ [0, TAB_BAR_HEIGHT), so screen_y is directly usable.
+            let glyph_width = self.font_metrics.advance_width as f32;
 
-            // Check each tab rect
-            for (idx, tab_rect) in geometry.tab_rects.iter().enumerate() {
-                if tab_rect.contains(screen_x, screen_y) {
-                    // Check if close button was clicked (close button is part of TabRect)
-                    if tab_rect.is_close_button(screen_x, screen_y) {
-                        self.close_tab(idx);
-                        return;
+            // Find which pane's tab bar was clicked
+            let mut result: Option<(PaneId, usize, bool)> = None; // (pane_id, tab_index, is_close_button)
+
+            for pane_rect in &pane_rects {
+                // Each pane's tab bar is at y ∈ [pane_rect.y, pane_rect.y + TAB_BAR_HEIGHT)
+                let tab_bar_y_start = pane_rect.y;
+                let tab_bar_y_end = pane_rect.y + TAB_BAR_HEIGHT;
+
+                // Check if the click is within this pane's tab bar region
+                if screen_x >= pane_rect.x
+                    && screen_x < pane_rect.x + pane_rect.width
+                    && screen_y >= tab_bar_y_start
+                    && screen_y < tab_bar_y_end
+                {
+                    // Found the pane - get its tabs and calculate geometry
+                    if let Some(pane) = workspace.pane_root.get_pane(pane_rect.pane_id) {
+                        let tabs = tabs_from_pane(pane);
+                        let geometry = calculate_pane_tab_bar_geometry(
+                            pane_rect.x,
+                            pane_rect.y,
+                            pane_rect.width,
+                            &tabs,
+                            glyph_width,
+                            pane.tab_bar_view_offset,
+                        );
+
+                        // Check each tab rect
+                        for tab_rect in &geometry.tab_rects {
+                            if tab_rect.contains(screen_x, screen_y) {
+                                let is_close = tab_rect.is_close_button(screen_x, screen_y);
+                                result = Some((pane_rect.pane_id, tab_rect.tab_index, is_close));
+                                break;
+                            }
+                        }
                     }
-                    // Otherwise, switch to the tab
-                    self.switch_tab(idx);
-                    return;
+                    break;
                 }
+            }
+
+            result
+        };
+
+        // Apply the click result (mutable operations)
+        if let Some((pane_id, tab_index, is_close_button)) = click_result {
+            // Switch focus to the clicked pane if it's not already active
+            let current_pane_id = self
+                .editor
+                .active_workspace()
+                .map(|ws| ws.active_pane_id)
+                .unwrap_or(0);
+
+            if pane_id != current_pane_id {
+                if let Some(ws) = self.editor.active_workspace_mut() {
+                    ws.active_pane_id = pane_id;
+                }
+                self.dirty_region.merge(DirtyRegion::FullViewport);
+            }
+
+            // Now handle the tab click (close or switch)
+            if is_close_button {
+                self.close_tab(tab_index);
+            } else {
+                self.switch_tab(tab_index);
             }
         }
     }
@@ -8342,5 +8407,342 @@ mod tests {
             .unwrap()
             .welcome_scroll_offset_px();
         assert!((offset - 0.0).abs() < 0.001, "welcome offset should remain 0 for non-welcome tab");
+    }
+
+    // =========================================================================
+    // Multi-Pane Tab Click Routing Tests (Chunk: docs/chunks/split_tab_click)
+    // =========================================================================
+
+    /// Helper to create a multi-pane EditorState with a vertical split (top/bottom).
+    ///
+    /// Layout:
+    /// ```text
+    /// +---------------+
+    /// |   Top Pane    |  (pane_id=1, tabs: "top1.rs", "top2.rs")
+    /// +---------------+
+    /// |  Bottom Pane  |  (pane_id=2, tabs: "bottom1.rs", "bottom2.rs")
+    /// +---------------+
+    /// ```
+    fn create_vertical_split_state() -> EditorState {
+        use crate::pane_layout::{Pane, PaneLayoutNode, SplitDirection};
+        use crate::workspace::Tab;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        let line_height = test_font_metrics().line_height as f32;
+        let pane1_id = 1u64;
+        let pane2_id = 2u64;
+
+        // Top pane with 2 tabs
+        let mut pane1 = Pane::new(pane1_id, 1);
+        pane1.add_tab(Tab::new_file(
+            100,
+            lite_edit_buffer::TextBuffer::from_str("top1 content"),
+            "top1.rs".to_string(),
+            None,
+            line_height,
+        ));
+        pane1.add_tab(Tab::new_file(
+            101,
+            lite_edit_buffer::TextBuffer::from_str("top2 content"),
+            "top2.rs".to_string(),
+            None,
+            line_height,
+        ));
+        pane1.switch_tab(0); // Make first tab active
+
+        // Bottom pane with 2 tabs
+        let mut pane2 = Pane::new(pane2_id, 1);
+        pane2.add_tab(Tab::new_file(
+            102,
+            lite_edit_buffer::TextBuffer::from_str("bottom1 content"),
+            "bottom1.rs".to_string(),
+            None,
+            line_height,
+        ));
+        pane2.add_tab(Tab::new_file(
+            103,
+            lite_edit_buffer::TextBuffer::from_str("bottom2 content"),
+            "bottom2.rs".to_string(),
+            None,
+            line_height,
+        ));
+        pane2.switch_tab(0); // Make first tab active
+
+        // Create vertical split layout (top | bottom)
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.pane_root = PaneLayoutNode::Split {
+                direction: SplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(PaneLayoutNode::Leaf(pane1)),
+                second: Box::new(PaneLayoutNode::Leaf(pane2)),
+            };
+            ws.active_pane_id = pane1_id; // Focus on top pane
+        }
+
+        state
+    }
+
+    /// Helper to create a multi-pane EditorState with a horizontal split (left/right).
+    ///
+    /// Layout:
+    /// ```text
+    /// +-------+-------+
+    /// | Left  | Right |
+    /// | Pane  | Pane  |
+    /// +-------+-------+
+    /// ```
+    fn create_horizontal_split_state() -> EditorState {
+        use crate::pane_layout::{Pane, PaneLayoutNode, SplitDirection};
+        use crate::workspace::Tab;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        let line_height = test_font_metrics().line_height as f32;
+        let pane1_id = 1u64;
+        let pane2_id = 2u64;
+
+        // Left pane with 2 tabs
+        let mut pane1 = Pane::new(pane1_id, 1);
+        pane1.add_tab(Tab::new_file(
+            100,
+            lite_edit_buffer::TextBuffer::from_str("left1 content"),
+            "left1.rs".to_string(),
+            None,
+            line_height,
+        ));
+        pane1.add_tab(Tab::new_file(
+            101,
+            lite_edit_buffer::TextBuffer::from_str("left2 content"),
+            "left2.rs".to_string(),
+            None,
+            line_height,
+        ));
+        pane1.switch_tab(0);
+
+        // Right pane with 2 tabs
+        let mut pane2 = Pane::new(pane2_id, 1);
+        pane2.add_tab(Tab::new_file(
+            102,
+            lite_edit_buffer::TextBuffer::from_str("right1 content"),
+            "right1.rs".to_string(),
+            None,
+            line_height,
+        ));
+        pane2.add_tab(Tab::new_file(
+            103,
+            lite_edit_buffer::TextBuffer::from_str("right2 content"),
+            "right2.rs".to_string(),
+            None,
+            line_height,
+        ));
+        pane2.switch_tab(0);
+
+        // Create horizontal split layout (left | right)
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.pane_root = PaneLayoutNode::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: 0.5,
+                first: Box::new(PaneLayoutNode::Leaf(pane1)),
+                second: Box::new(PaneLayoutNode::Leaf(pane2)),
+            };
+            ws.active_pane_id = pane1_id; // Focus on left pane
+        }
+
+        state
+    }
+
+    #[test]
+    fn test_tab_click_vertical_split_top_pane() {
+        // Clicking a tab in the top pane should activate that tab in the top pane only
+        let mut state = create_vertical_split_state();
+
+        // Layout: 800x600 window, RAIL_WIDTH=56, TAB_BAR_HEIGHT=32
+        // Pane bounds: (56, 0, 744, 600)
+        // Vertical split at 0.5 ratio:
+        // - Top pane: x=56, y=0, width=744, height=300
+        // - Bottom pane: x=56, y=300, width=744, height=300
+        //
+        // Tab geometry (calculated via calculate_pane_tab_bar_geometry):
+        // Tab width for "top1.rs" = 118 px
+        // First tab: x=[56, 174)
+        // Second tab: x=[175, 293) (with 1px spacing)
+
+        // Click on the second tab in the TOP pane (tab index 1)
+        let click_x = 200.0; // Well inside second tab [175, 293)
+        let click_y = 16.0;  // Middle of top pane's tab bar [0, 32)
+
+        state.handle_tab_bar_click(click_x, click_y);
+
+        // Verify: top pane should now have tab index 1 active
+        let ws = state.editor.active_workspace().unwrap();
+        let top_pane = ws.pane_root.get_pane(1).unwrap();
+        assert_eq!(top_pane.active_tab, 1, "Top pane should have second tab (index 1) active");
+
+        // Verify: bottom pane should still have tab index 0 active
+        let bottom_pane = ws.pane_root.get_pane(2).unwrap();
+        assert_eq!(bottom_pane.active_tab, 0, "Bottom pane should still have first tab (index 0) active");
+    }
+
+    #[test]
+    fn test_tab_click_vertical_split_bottom_pane() {
+        // Clicking a tab in the bottom pane should activate that tab in the bottom pane only
+        // and switch focus to the bottom pane
+        let mut state = create_vertical_split_state();
+
+        // Layout: 800x600 window
+        // Vertical split at 0.5 ratio with bounds (32, 0, 768, 600):
+        // - Top pane: x=32, y=0, width=768, height=300
+        // - Bottom pane: x=32, y=300, width=768, height=300
+        //
+        // Bottom pane's tab bar is at y ∈ [300, 332)
+        // Tab width for "bottom1.rs" (10 chars): 12+6+4+80+4+16+12 = 134 (using char_width*10=80)
+        // First tab: x ∈ [32, 166)
+        // Second tab starts at: 32 + 134 + 1 = 167
+
+        // Click on the second tab in the BOTTOM pane (tab index 1)
+        let click_x = 185.0; // Well inside second tab
+        let click_y = 316.0; // Middle of bottom pane's tab bar (y=300 + 16)
+
+        state.handle_tab_bar_click(click_x, click_y);
+
+        // Verify: focus should have switched to bottom pane
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.active_pane_id, 2, "Focus should have switched to bottom pane");
+
+        // Verify: bottom pane should now have tab index 1 active
+        let bottom_pane = ws.pane_root.get_pane(2).unwrap();
+        assert_eq!(bottom_pane.active_tab, 1, "Bottom pane should have second tab (index 1) active");
+
+        // Verify: top pane should still have tab index 0 active
+        let top_pane = ws.pane_root.get_pane(1).unwrap();
+        assert_eq!(top_pane.active_tab, 0, "Top pane should still have first tab (index 0) active");
+    }
+
+    #[test]
+    fn test_tab_click_horizontal_split_left_pane() {
+        // Clicking a tab in the left pane should activate that tab in the left pane only
+        let mut state = create_horizontal_split_state();
+
+        // Layout: 800x600 window, RAIL_WIDTH=56
+        // Horizontal split at 0.5 ratio with bounds (56, 0, 744, 600):
+        // - Left pane: x=56, y=0, width=372, height=600
+        // - Right pane: x=428, y=0, width=372, height=600
+        //
+        // Tab width for "left1.rs" (8 chars) = 118
+        // First tab: x=[56, 174)
+        // Second tab: x=[175, 293)
+
+        // Click on the second tab in the LEFT pane (tab index 1)
+        let click_x = 200.0; // Well inside second tab [175, 293)
+        let click_y = 16.0;  // Middle of left pane's tab bar
+
+        state.handle_tab_bar_click(click_x, click_y);
+
+        // Verify: left pane should now have tab index 1 active
+        let ws = state.editor.active_workspace().unwrap();
+        let left_pane = ws.pane_root.get_pane(1).unwrap();
+        assert_eq!(left_pane.active_tab, 1, "Left pane should have second tab (index 1) active");
+
+        // Verify: right pane should still have tab index 0 active
+        let right_pane = ws.pane_root.get_pane(2).unwrap();
+        assert_eq!(right_pane.active_tab, 0, "Right pane should still have first tab (index 0) active");
+    }
+
+    #[test]
+    fn test_tab_click_horizontal_split_right_pane() {
+        // Clicking a tab in the right pane should activate that tab in the right pane only
+        // and switch focus to the right pane
+        let mut state = create_horizontal_split_state();
+
+        // Layout: 800x600 window
+        // Horizontal split at 0.5 ratio with bounds (32, 0, 768, 600):
+        // - Left pane: x=32, width=384, so right edge at 416
+        // - Right pane: x=416, width=384
+        //
+        // Tab width for "right1.rs" (9 chars): 12+6+4+72+4+16+12 = 126
+        // First tab in right pane: x ∈ [416, 542)
+        // Second tab starts at: 416 + 126 + 1 = 543
+
+        // Click on the second tab in the RIGHT pane (tab index 1)
+        let click_x = 560.0; // Well inside second tab (543 + ~17)
+        let click_y = 16.0;  // Middle of right pane's tab bar
+
+        state.handle_tab_bar_click(click_x, click_y);
+
+        // Verify: focus should have switched to right pane
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.active_pane_id, 2, "Focus should have switched to right pane");
+
+        // Verify: right pane should now have tab index 1 active
+        let right_pane = ws.pane_root.get_pane(2).unwrap();
+        assert_eq!(right_pane.active_tab, 1, "Right pane should have second tab (index 1) active");
+
+        // Verify: left pane should still have tab index 0 active
+        let left_pane = ws.pane_root.get_pane(1).unwrap();
+        assert_eq!(left_pane.active_tab, 0, "Left pane should still have first tab (index 0) active");
+    }
+
+    #[test]
+    fn test_tab_click_inactive_pane_switches_focus() {
+        // Clicking a tab in an inactive pane should switch focus to that pane
+        let mut state = create_horizontal_split_state();
+
+        // Initially, left pane (id=1) is focused
+        assert_eq!(
+            state.editor.active_workspace().unwrap().active_pane_id,
+            1,
+            "Initially left pane should be focused"
+        );
+
+        // Click on the first tab in the RIGHT pane (inactive)
+        // Right pane starts at x=416, first tab is x ∈ [416, 542)
+        let click_x = 480.0; // Inside right pane's first tab
+        let click_y = 16.0;  // Middle of tab bar
+
+        state.handle_tab_bar_click(click_x, click_y);
+
+        // Verify: focus should have switched to right pane
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.active_pane_id, 2, "Focus should have switched to right pane");
+    }
+
+    #[test]
+    fn test_single_pane_tab_click_still_works() {
+        // Regression test: single-pane layout should continue to work
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Add a second tab to the default single pane
+        let tab2 = crate::workspace::Tab::new_file(
+            200,
+            lite_edit_buffer::TextBuffer::from_str("second tab"),
+            "second.rs".to_string(),
+            None,
+            test_font_metrics().line_height as f32,
+        );
+
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            if let Some(pane) = ws.active_pane_mut() {
+                pane.add_tab(tab2);
+                pane.switch_tab(0); // Start with first tab active
+            }
+        }
+
+        // Click on the second tab
+        // Single pane bounds: (RAIL_WIDTH=56, 0, 744, 600)
+        // First tab is the default "untitled" tab (8 chars) = width 118, x=[56, 174)
+        // Second tab "second.rs" (9 chars) = width 126, x=[175, 301)
+        let click_x = 200.0; // Inside second tab [175, 301)
+        let click_y = 16.0;  // Middle of tab bar [0, 32)
+
+        state.handle_tab_bar_click(click_x, click_y);
+
+        // Verify: second tab should be active
+        let ws = state.editor.active_workspace().unwrap();
+        let pane = ws.active_pane().unwrap();
+        assert_eq!(pane.active_tab, 1, "Second tab should be active");
     }
 }
