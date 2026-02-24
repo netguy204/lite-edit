@@ -8,170 +8,85 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+Extend the existing `update_cursor_regions` function in `drain_loop.rs` to handle
+the `EditorFocus::ConfirmDialog` case. When a confirm dialog is active, compute
+its geometry using the existing `calculate_confirm_dialog_geometry` function and
+register pointer-cursor `CursorRect` regions for each button.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The implementation follows the established pattern from `docs/chunks/cursor_pointer_ui_hints`:
+1. The `update_cursor_regions` function already handles multiple UI states (rail, tab bar, selector overlay, buffer content)
+2. Each interactive region calls `regions.add_pointer()` with a `CursorRect`
+3. Dialog geometry is already computed by `calculate_confirm_dialog_geometry` in `confirm_dialog.rs`
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+This is a small, focused change to a single function that adds cursor region
+computation for a new UI element type.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/dialog_pointer_cursor/GOAL.md)
-with references to the files that you expect to touch.
--->
-
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Per `docs/trunk/TESTING_PHILOSOPHY.md`, cursor region registration is "humble"
+platform code that projects state onto the OS cursor system. The geometry
+calculation functions (`calculate_confirm_dialog_geometry`, `is_cancel_button`,
+`is_confirm_button`) are already unit-tested in `confirm_dialog.rs`. This chunk
+adds integration of those tested functions into the cursor region system.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add ConfirmDialog case to update_cursor_regions
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+In `crates/editor/src/drain_loop.rs`, inside the `update_cursor_regions` method,
+add a new block that handles `EditorFocus::ConfirmDialog`. When this focus mode
+is active:
 
-Example:
+1. Check if `self.state.confirm_dialog` is `Some`
+2. Compute the dialog geometry using `calculate_confirm_dialog_geometry`
+3. Register a pointer cursor region for the Cancel button
+4. Register a pointer cursor region for the Confirm/Abandon button
 
-### Step 1: Define the SegmentHeader struct
+**Location**: `crates/editor/src/drain_loop.rs#update_cursor_regions`
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+**Implementation details**:
+- Import `calculate_confirm_dialog_geometry` from `confirm_dialog` module
+- Use the same coordinate transform pattern as the selector overlay (`px_to_pt`)
+- Button regions are defined by `geometry.cancel_button_x`, `geometry.abandon_button_x`,
+  `geometry.buttons_y`, `geometry.button_width`, and `geometry.button_height`
 
-Location: src/segment/format.rs
+**Pattern to follow**: The selector overlay case (lines 381-414) shows how to:
+- Match on `EditorFocus` variant
+- Access overlay state with `if let Some(ref ...) = self.state.xxx`
+- Compute geometry using helper function
+- Convert pixel coordinates to point coordinates with `px_to_pt`
+- Call `regions.add_pointer()` for clickable areas
 
-### Step 2: Implement header serialization
+### Step 2: Manual verification
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
-
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
-
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Verify the implementation by:
+1. Opening a dirty file (make an edit, don't save)
+2. Closing the tab (Cmd+W) to trigger the confirm dialog
+3. Hovering over each button - cursor should change to pointer
+4. Hovering over the dialog background (between buttons, on prompt) - cursor should NOT be pointer
+5. Moving mouse off the dialog to buffer area - cursor should revert to I-beam
+6. Verify existing cursor behavior for rail, tab bar, and selector overlay is unchanged
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+The following are already implemented and available:
+- `calculate_confirm_dialog_geometry` function in `confirm_dialog.rs`
+- `CursorRect`, `CursorRegions`, `add_pointer` API in `metal_view.rs`
+- `EditorFocus::ConfirmDialog` variant in `editor_state.rs`
+- `confirm_dialog` field on `EditorState`
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Coordinate system alignment**: The geometry is computed in pixels (as used by
+  the renderer) but cursor regions are specified in points (macOS coordinate system).
+  The existing `px_to_pt` helper in `update_cursor_regions` handles this conversion.
+  Need to ensure the button coordinates transform correctly through this conversion.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Focus state consistency**: The code must check both `EditorFocus::ConfirmDialog`
+  AND `self.state.confirm_dialog.is_some()` to be safe. The goal states that
+  dialog background should NOT show pointer cursor, which is handled implicitly -
+  only button regions are registered as pointer regions.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

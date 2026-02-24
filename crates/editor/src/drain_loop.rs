@@ -34,6 +34,7 @@ use crate::event_channel::{EventReceiver, EventSender};
 use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
 use crate::metal_view::{CursorRect, CursorRegions, MetalView};
 use crate::renderer::Renderer;
+use crate::confirm_dialog::calculate_confirm_dialog_geometry;
 use crate::selector_overlay::calculate_overlay_geometry;
 use crate::left_rail::RAIL_WIDTH;
 use crate::tab_bar::TAB_BAR_HEIGHT;
@@ -410,6 +411,47 @@ impl EventDrainLoop {
                     query_y_pt,
                     query_width_pt,
                     query_height_pt,
+                ));
+            }
+        }
+
+        // Chunk: docs/chunks/dialog_pointer_cursor - Pointer cursor for confirm dialog buttons
+        // Confirm Dialog (Pointer Cursor for Cancel and Confirm buttons)
+        if let EditorFocus::ConfirmDialog = self.state.focus {
+            if let Some(ref dialog) = self.state.confirm_dialog {
+                let font_metrics = self.state.font_metrics();
+                let line_height = font_metrics.line_height as f32;
+                let glyph_width = font_metrics.advance_width as f32;
+
+                let geometry = calculate_confirm_dialog_geometry(
+                    view_width_px,
+                    view_height_px,
+                    line_height,
+                    glyph_width,
+                    dialog,
+                );
+
+                // Cancel button region
+                let cancel_x_pt = geometry.cancel_button_x as f64 / scale;
+                let cancel_y_pt = px_to_pt(geometry.buttons_y, geometry.button_height);
+                let button_width_pt = geometry.button_width as f64 / scale;
+                let button_height_pt = geometry.button_height as f64 / scale;
+
+                regions.add_pointer(CursorRect::new(
+                    cancel_x_pt,
+                    cancel_y_pt,
+                    button_width_pt,
+                    button_height_pt,
+                ));
+
+                // Confirm/Abandon button region
+                let confirm_x_pt = geometry.abandon_button_x as f64 / scale;
+
+                regions.add_pointer(CursorRect::new(
+                    confirm_x_pt,
+                    cancel_y_pt, // Same Y as cancel button
+                    button_width_pt,
+                    button_height_pt,
                 ));
             }
         }
