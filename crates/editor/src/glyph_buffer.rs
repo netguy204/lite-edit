@@ -49,6 +49,8 @@ use crate::wrap_layout::WrapLayout;
 // Chunk: docs/chunks/buffer_view_trait - Use BufferView trait instead of TextBuffer
 // Chunk: docs/chunks/renderer_styled_content - Use Style types for per-span colors
 use lite_edit_buffer::{BufferView, CursorShape, UnderlineStyle};
+// Chunk: docs/chunks/terminal_multibyte_rendering - Wide character width tracking
+use unicode_width::UnicodeWidthChar;
 
 // =============================================================================
 // Vertex Data
@@ -414,10 +416,16 @@ impl GlyphBuffer {
 
         let mut vertex_offset: u32 = 0;
 
+        // Chunk: docs/chunks/terminal_multibyte_rendering - Width-aware column positioning
         for (row, line) in lines.iter().enumerate() {
-            for (col, c) in line.chars().enumerate() {
+            let mut col: usize = 0;
+            for c in line.chars() {
+                // Get character display width (1 for narrow, 2 for wide, 0 for zero-width)
+                let char_width = c.width().unwrap_or(1);
+
                 // Skip spaces (they don't need quads)
                 if c == ' ' {
+                    col += char_width;
                     continue;
                 }
 
@@ -427,6 +435,7 @@ impl GlyphBuffer {
                     Some(g) => g,
                     None => {
                         // Character not in atlas and can't be added, skip it
+                        col += char_width;
                         continue;
                     }
                 };
@@ -446,6 +455,8 @@ impl GlyphBuffer {
                 indices.push(vertex_offset + 3);
 
                 vertex_offset += 4;
+                // Advance by character display width (2 for wide chars like CJK/emoji)
+                col += char_width;
             }
         }
 
@@ -609,6 +620,7 @@ impl GlyphBuffer {
 
         // ==================== Phase 1: Background Quads ====================
         // Chunk: docs/chunks/renderer_styled_content - Background quads for per-span bg colors
+        // Chunk: docs/chunks/terminal_multibyte_rendering - Width-aware column counting for wide characters
         let background_start_index = indices.len();
 
         for (idx, buffer_line) in visible_range.clone().enumerate() {
@@ -617,8 +629,11 @@ impl GlyphBuffer {
             if let Some(styled_line) = &styled_lines[idx] {
                 let mut col: usize = 0;
                 for span in &styled_line.spans {
-                    let span_len = span.text.chars().count();
-                    let end_col = col + span_len;
+                    // Use width-aware counting: sum of display widths for all characters
+                    let span_width: usize = span.text.chars()
+                        .map(|c| c.width().unwrap_or(1))
+                        .sum();
+                    let end_col = col + span_width;
 
                     // Emit background quad if bg is not default, or if inverse
                     // is set (inverse swaps fg↔bg, so default bg becomes fg color)
@@ -697,6 +712,7 @@ impl GlyphBuffer {
 
         // ==================== Phase 3: Glyph Quads ====================
         // Chunk: docs/chunks/renderer_styled_content - Per-span foreground colors
+        // Chunk: docs/chunks/terminal_multibyte_rendering - Width-aware column advancement for wide characters
         let glyph_start_index = indices.len();
 
         for (idx, buffer_line) in visible_range.clone().enumerate() {
@@ -705,9 +721,11 @@ impl GlyphBuffer {
             if let Some(styled_line) = &styled_lines[idx] {
                 let mut col: usize = 0;
                 for span in &styled_line.spans {
-                    // Skip hidden text
+                    // Skip hidden text - use width-aware counting
                     if span.style.hidden {
-                        col += span.text.chars().count();
+                        col += span.text.chars()
+                            .map(|c| c.width().unwrap_or(1))
+                            .sum::<usize>();
                         continue;
                     }
 
@@ -715,9 +733,12 @@ impl GlyphBuffer {
                     let (fg, _) = self.palette.resolve_style_colors(&span.style);
 
                     for c in span.text.chars() {
+                        // Get character display width (1 for narrow, 2 for wide, 0 for zero-width)
+                        let char_width = c.width().unwrap_or(1);
+
                         // Skip spaces (they don't need quads)
                         if c == ' ' {
-                            col += 1;
+                            col += char_width;
                             continue;
                         }
 
@@ -726,7 +747,7 @@ impl GlyphBuffer {
                         let glyph = match atlas.ensure_glyph(font, c) {
                             Some(g) => g,
                             None => {
-                                col += 1;
+                                col += char_width;
                                 continue;
                             }
                         };
@@ -747,7 +768,8 @@ impl GlyphBuffer {
                         indices.push(vertex_offset + 3);
 
                         vertex_offset += 4;
-                        col += 1;
+                        // Advance by character display width (2 for wide chars like CJK/emoji)
+                        col += char_width;
                     }
                 }
             }
@@ -758,6 +780,7 @@ impl GlyphBuffer {
 
         // ==================== Phase 4: Underline Quads ====================
         // Chunk: docs/chunks/renderer_styled_content - Underline rendering
+        // Chunk: docs/chunks/terminal_multibyte_rendering - Width-aware column counting for wide characters
         let underline_start_index = indices.len();
 
         for (idx, buffer_line) in visible_range.clone().enumerate() {
@@ -766,8 +789,11 @@ impl GlyphBuffer {
             if let Some(styled_line) = &styled_lines[idx] {
                 let mut col: usize = 0;
                 for span in &styled_line.spans {
-                    let span_len = span.text.chars().count();
-                    let end_col = col + span_len;
+                    // Use width-aware counting: sum of display widths for all characters
+                    let span_width: usize = span.text.chars()
+                        .map(|c| c.width().unwrap_or(1))
+                        .sum();
+                    let end_col = col + span_width;
 
                     // Emit underline quad if underline style is not None
                     if span.style.underline != UnderlineStyle::None {
@@ -1132,6 +1158,7 @@ impl GlyphBuffer {
     // Chunk: docs/chunks/buffer_view_trait - Accept BufferView trait instead of TextBuffer
     // Chunk: docs/chunks/terminal_background_box_drawing - Mutable atlas for on-demand glyph addition
     // Chunk: docs/chunks/terminal_styling_fidelity - Per-span foreground colors, background quads, and underline quads in wrapped rendering path
+    // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Wrap-aware coordinate conversion for cursor/selection positioning
     pub fn update_from_buffer_with_wrap(
         &mut self,
         device: &ProtocolObject<dyn MTLDevice>,
@@ -1254,11 +1281,15 @@ impl GlyphBuffer {
                 is_first_buffer_line = false;
 
                 // Iterate spans and emit background quads for non-default backgrounds
+                // Chunk: docs/chunks/terminal_multibyte_rendering - Width-aware column counting for wide characters
                 if let Some(styled_line) = &styled_lines[idx] {
                     let mut col: usize = 0;
                     for span in &styled_line.spans {
-                        let span_len = span.text.chars().count();
-                        let end_col = col + span_len;
+                        // Use width-aware counting: sum of display widths for all characters
+                        let span_width: usize = span.text.chars()
+                            .map(|c| c.width().unwrap_or(1))
+                            .sum();
+                        let end_col = col + span_width;
 
                         // Emit background quad if bg is not default, or if inverse
                         // is set (inverse swaps fg↔bg, so default bg becomes fg color)
@@ -1482,8 +1513,12 @@ impl GlyphBuffer {
                     continue;
                 };
 
-                // Calculate line length from spans
-                let line_len: usize = styled_line.spans.iter().map(|s| s.text.chars().count()).sum();
+                // Calculate line length from spans using display widths (wide chars count as 2)
+                // Chunk: docs/chunks/terminal_multibyte_rendering - Width-aware line length calculation
+                let line_len: usize = styled_line.spans.iter()
+                    .flat_map(|s| s.text.chars())
+                    .map(|c| c.width().unwrap_or(1))
+                    .sum();
                 let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
 
                 // Determine the starting row offset within this buffer line
@@ -1498,11 +1533,14 @@ impl GlyphBuffer {
                 let start_col = start_row_offset * cols_per_row;
 
                 // Iterate spans, tracking cumulative column position
+                // Chunk: docs/chunks/terminal_multibyte_rendering - Width-aware column advancement for wide characters
                 let mut col: usize = 0;
                 for span in &styled_line.spans {
-                    // Skip hidden text
+                    // Skip hidden text - use width-aware counting
                     if span.style.hidden {
-                        col += span.text.chars().count();
+                        col += span.text.chars()
+                            .map(|c| c.width().unwrap_or(1))
+                            .sum::<usize>();
                         continue;
                     }
 
@@ -1510,15 +1548,18 @@ impl GlyphBuffer {
                     let (fg, _) = self.palette.resolve_style_colors(&span.style);
 
                     for c in span.text.chars() {
+                        // Get character display width (1 for narrow, 2 for wide, 0 for zero-width)
+                        let char_width = c.width().unwrap_or(1);
+
                         // Skip characters on rows before our starting row
                         if col < start_col {
-                            col += 1;
+                            col += char_width;
                             continue;
                         }
 
                         // Skip spaces (they don't need quads)
                         if c == ' ' {
-                            col += 1;
+                            col += char_width;
                             continue;
                         }
 
@@ -1527,7 +1568,7 @@ impl GlyphBuffer {
                         let glyph = match atlas.ensure_glyph(font, c) {
                             Some(g) => g,
                             None => {
-                                col += 1;
+                                col += char_width;
                                 continue;
                             }
                         };
@@ -1539,7 +1580,7 @@ impl GlyphBuffer {
 
                         if screen_row >= max_screen_rows {
                             // Don't break entirely - there might be more chars on earlier rows
-                            col += 1;
+                            col += char_width;
                             continue;
                         }
 
@@ -1558,7 +1599,8 @@ impl GlyphBuffer {
                         vertices.extend_from_slice(&quad);
                         push_quad_indices(&mut indices, &mut vertex_offset);
 
-                        col += 1;
+                        // Advance by character display width (2 for wide chars like CJK/emoji)
+                        col += char_width;
                     }
                 }
 
@@ -1596,11 +1638,15 @@ impl GlyphBuffer {
                 is_first_buffer_line = false;
 
                 // Iterate spans and emit underline quads for underlined spans
+                // Chunk: docs/chunks/terminal_multibyte_rendering - Width-aware column counting for wide characters
                 if let Some(styled_line) = &styled_lines[idx] {
                     let mut col: usize = 0;
                     for span in &styled_line.spans {
-                        let span_len = span.text.chars().count();
-                        let end_col = col + span_len;
+                        // Use width-aware counting: sum of display widths for all characters
+                        let span_width: usize = span.text.chars()
+                            .map(|c| c.width().unwrap_or(1))
+                            .sum();
+                        let end_col = col + span_width;
 
                         // Emit underline quad if underline style is not None
                         if span.style.underline != UnderlineStyle::None {
@@ -2067,5 +2113,79 @@ mod tests {
         // x = 0 + 56 = 56
         // y = 0 - (0 - 32) = 32
         assert_eq!(quad[0].position, [56.0, 32.0]);    // top-left
+    }
+
+    // ==================== Wide Character Width Tests ====================
+    // Chunk: docs/chunks/terminal_multibyte_rendering - Wide character width handling
+
+    #[test]
+    fn test_unicode_width_cjk_characters() {
+        // Verify that CJK characters have width 2
+        assert_eq!('中'.width(), Some(2)); // U+4E2D Chinese character
+        assert_eq!('日'.width(), Some(2)); // U+65E5 Japanese character
+        assert_eq!('한'.width(), Some(2)); // U+D55C Korean character
+    }
+
+    #[test]
+    fn test_unicode_width_ascii_characters() {
+        // Verify that ASCII characters have width 1
+        assert_eq!('A'.width(), Some(1));
+        assert_eq!('z'.width(), Some(1));
+        assert_eq!(' '.width(), Some(1));
+    }
+
+    #[test]
+    fn test_unicode_width_emoji() {
+        // Some emoji are width 2 in terminal contexts
+        // Note: emoji width behavior can vary by terminal/font
+        let emoji = '😀'; // U+1F600
+        let width = emoji.width();
+        // Most emoji should be width 2 or None (control char)
+        assert!(width.is_none() || width == Some(2), "Emoji width should be 2 or None");
+    }
+
+    #[test]
+    fn test_unicode_width_zero_width_characters() {
+        // Zero-width characters (combining marks, zero-width joiner, etc.)
+        let zwj = '\u{200D}'; // Zero-width joiner
+        assert_eq!(zwj.width(), Some(0));
+    }
+
+    #[test]
+    fn test_span_width_calculation() {
+        // Test the width calculation logic used in glyph phases
+        let text = "A中B"; // 1 + 2 + 1 = 4 columns
+        let total_width: usize = text.chars()
+            .map(|c| c.width().unwrap_or(1))
+            .sum();
+        assert_eq!(total_width, 4);
+    }
+
+    #[test]
+    fn test_span_width_with_mixed_characters() {
+        // Mix of ASCII, CJK, and emoji
+        let text = "Hi中文!"; // H(1) + i(1) + 中(2) + 文(2) + !(1) = 7
+        let total_width: usize = text.chars()
+            .map(|c| c.width().unwrap_or(1))
+            .sum();
+        assert_eq!(total_width, 7);
+    }
+
+    #[test]
+    fn test_column_advancement_simulation() {
+        // Simulate the column advancement logic from update_from_lines
+        let text = "A中B";
+        let mut col: usize = 0;
+        let mut positions: Vec<usize> = Vec::new();
+
+        for c in text.chars() {
+            positions.push(col);
+            col += c.width().unwrap_or(1);
+        }
+
+        // 'A' at col 0, '中' at col 1, 'B' at col 3
+        assert_eq!(positions, vec![0, 1, 3]);
+        // Final column should be 4 (1 + 2 + 1)
+        assert_eq!(col, 4);
     }
 }

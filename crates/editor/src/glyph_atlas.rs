@@ -565,31 +565,50 @@ mod tests {
         }
     }
 
+    // Chunk: docs/chunks/terminal_multibyte_rendering - Non-BMP character rendering support
     #[test]
-    fn test_non_bmp_character_falls_back_to_space() {
+    fn test_non_bmp_character_handling() {
         let device = get_test_device();
         let font = Font::new("Menlo-Regular", 14.0, 1.0);
         let mut atlas = GlyphAtlas::new(&device, &font);
 
-        // Emoji (outside BMP, > U+FFFF) should fall back to space glyph
+        // Emoji (outside BMP, > U+FFFF) - now handled via surrogate pair lookup
         let emoji = '😀'; // U+1F600
         let glyph = atlas.ensure_glyph(&font, emoji);
 
-        // Should return Some (the space glyph fallback)
+        // Should return Some - either the actual glyph (if font has it) or space fallback
         assert!(
             glyph.is_some(),
-            "Non-BMP char should fall back to space glyph"
+            "Non-BMP char should return a glyph (actual or fallback)"
         );
 
         // Copy the glyph data to release the borrow
         let emoji_glyph = glyph.unwrap().clone();
 
-        // The glyph returned should be the space glyph (same UV coordinates)
-        let space_glyph = atlas.get_glyph(' ').unwrap();
-        assert_eq!(
-            space_glyph.uv_min, emoji_glyph.uv_min,
-            "Non-BMP char should get space glyph UV coords"
-        );
+        // Verify the glyph has valid dimensions
+        assert!(emoji_glyph.width > 0.0, "Glyph should have positive width");
+        assert!(emoji_glyph.height > 0.0, "Glyph should have positive height");
+    }
+
+    // Chunk: docs/chunks/terminal_multibyte_rendering - Test non-BMP hieroglyph rendering
+    #[test]
+    fn test_non_bmp_hieroglyphs() {
+        let device = get_test_device();
+        let font = Font::new("Menlo-Regular", 14.0, 1.0);
+        let mut atlas = GlyphAtlas::new(&device, &font);
+
+        // Egyptian hieroglyphs from the GOAL.md
+        let hieroglyphs = ['𓆝', '𓆟', '𓆞']; // U+131DD, U+131DF, U+131DE
+
+        for c in hieroglyphs {
+            let glyph = atlas.ensure_glyph(&font, c);
+            // Should always return Some (actual glyph or space fallback)
+            assert!(
+                glyph.is_some(),
+                "Hieroglyph '{}' (U+{:04X}) should return a glyph",
+                c, c as u32
+            );
+        }
     }
 
     #[test]

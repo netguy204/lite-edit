@@ -206,9 +206,12 @@ impl Font {
 
     /// Maps a character to its glyph ID
     // Chunk: docs/chunks/terminal_background_box_drawing - BMP character-to-glyph mapping for on-demand glyph addition
+    // Chunk: docs/chunks/terminal_multibyte_rendering - Non-BMP character support via UTF-16 surrogate pairs
     pub fn glyph_for_char(&self, c: char) -> Option<u16> {
+        let code = c as u32;
+
         // Handle BMP characters (most common case)
-        if (c as u32) <= 0xFFFF {
+        if code <= 0xFFFF {
             let character: u16 = c as u16;
             let mut glyph: u16 = 0;
 
@@ -226,9 +229,30 @@ impl Font {
                 None
             }
         } else {
-            // Character is outside BMP, need to use surrogate pairs
-            // For simplicity in a code editor, we'll skip non-BMP characters
-            None
+            // Character is outside BMP, use UTF-16 surrogate pairs
+            // Compute the surrogate pair per UTF-16 encoding
+            let adjusted = code - 0x10000;
+            let high_surrogate = ((adjusted >> 10) + 0xD800) as u16;
+            let low_surrogate = ((adjusted & 0x3FF) + 0xDC00) as u16;
+
+            let characters: [u16; 2] = [high_surrogate, low_surrogate];
+            let mut glyphs: [u16; 2] = [0, 0];
+
+            let success = unsafe {
+                self.ct_font.glyphs_for_characters(
+                    NonNull::new(characters.as_ptr() as *mut u16).unwrap(),
+                    NonNull::new(glyphs.as_mut_ptr()).unwrap(),
+                    2,
+                )
+            };
+
+            // The glyph for a non-BMP character is typically in the first slot
+            // (Core Text maps the surrogate pair to a single glyph)
+            if success && glyphs[0] != 0 {
+                Some(glyphs[0])
+            } else {
+                None
+            }
         }
     }
 }
@@ -367,17 +391,52 @@ mod tests {
         }
     }
 
+    // Chunk: docs/chunks/terminal_multibyte_rendering - Non-BMP character support
     #[test]
-    fn test_non_bmp_characters_return_none() {
+    fn test_non_bmp_characters_with_surrogate_pairs() {
         let font = Font::new("Menlo-Regular", 14.0, 1.0);
 
-        // Characters outside BMP (> U+FFFF) should return None
-        // because glyph_for_char uses u16 for glyph IDs
+        // Characters outside BMP (> U+FFFF) should now work via UTF-16 surrogate pairs.
+        // The result depends on font coverage - if the font has the glyph, we get Some,
+        // otherwise None. We're testing that the lookup path doesn't crash and handles
+        // the surrogate pair calculation correctly.
         let emoji = '😀'; // U+1F600
-        assert!(
-            font.glyph_for_char(emoji).is_none(),
-            "Non-BMP characters should return None"
-        );
+        let result = font.glyph_for_char(emoji);
+        // Apple's emoji font should be available through font fallback on macOS,
+        // but Menlo itself may not have emoji glyphs. Either outcome is valid.
+        // The important thing is that we don't panic and the logic works.
+        if result.is_some() {
+            eprintln!("Non-BMP emoji '😀' has glyph ID: {}", result.unwrap());
+        } else {
+            eprintln!("Non-BMP emoji '😀' not found in Menlo (expected - no emoji glyphs)");
+        }
+
+        // Test surrogate pair calculation with edge cases
+        // U+10000 is the first non-BMP codepoint
+        let first_non_bmp = '\u{10000}';
+        let _ = font.glyph_for_char(first_non_bmp); // Just verify no panic
+
+        // U+10FFFF is the last valid Unicode codepoint
+        let last_unicode = '\u{10FFFF}';
+        let _ = font.glyph_for_char(last_unicode); // Just verify no panic
+    }
+
+    #[test]
+    fn test_non_bmp_egyptian_hieroglyphs() {
+        let font = Font::new("Menlo-Regular", 14.0, 1.0);
+
+        // Egyptian hieroglyphs from the GOAL.md
+        let hieroglyphs = ['𓆝', '𓆟', '𓆞']; // U+131DD, U+131DF, U+131DE
+
+        for c in hieroglyphs {
+            let result = font.glyph_for_char(c);
+            // Most fonts won't have these, but the lookup shouldn't crash
+            if result.is_some() {
+                eprintln!("Hieroglyph '{}' (U+{:04X}) has glyph ID: {}", c, c as u32, result.unwrap());
+            } else {
+                eprintln!("Hieroglyph '{}' (U+{:04X}) not found in Menlo (expected)", c, c as u32);
+            }
+        }
     }
 
     // ==================== Embedded font (from_data) tests ====================

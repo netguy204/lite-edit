@@ -8,170 +8,171 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk addresses two distinct but related rendering defects in the terminal pane:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Problem 1: Non-BMP Character Support (U+10000+)**
+The current `font.rs:glyph_for_char()` rejects characters above U+FFFF because Core Text's `glyphs_for_characters` API takes `u16` (UTF-16 code units). Non-BMP characters require surrogate pairs. The fix is to:
+1. Use `CFString` from the character, which handles Unicode correctly
+2. Use `CTFontGetGlyphsForCharacters` via the CFString approach, or
+3. Use `CTFontCreateForString` + `CTFontGetGlyphsForCharacters` pattern for proper fallback
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+However, there's a simpler approach: Core Text's `CTFont::glyphs_for_characters` can accept surrogate pairs when given two `u16` values representing the high and low surrogates. We'll implement this by:
+- Detecting non-BMP characters (`c > '\u{FFFF}'`)
+- Computing the surrogate pair
+- Passing both surrogates to `glyphs_for_characters` with count=2
+- Using the resulting glyph ID
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/terminal_multibyte_rendering/GOAL.md)
-with references to the files that you expect to touch.
--->
+**Problem 2: Wide Character Width Tracking**
+The rendering pipeline assumes all characters occupy 1 cell. The terminal emulator layer (`style_convert.rs`) correctly skips `WIDE_CHAR_SPACER` cells, but this information isn't propagated to the glyph buffer. The fix is to:
+1. Add the `unicode-width` crate to track display widths
+2. Modify `glyph_buffer.rs` to advance column position by character width (1 or 2)
+3. Ensure selection/highlight quads also respect character widths
+
+**Architecture Alignment**
+Both fixes follow the existing humble view architecture:
+- Font/atlas modifications affect glyph rasterization (testable with Metal device)
+- Width tracking affects vertex buffer construction (testable via `GlyphLayout` calculations)
+- Terminal cell processing already handles wide chars; we just need to propagate width info
+
+**Testing Strategy**
+Per TESTING_PHILOSOPHY.md:
+- Unit tests for `glyph_for_char()` with non-BMP characters
+- Unit tests for width calculation in `GlyphLayout`
+- Integration tests verifying correct column advancement for wide characters
+- The actual rendering is humble view code (not unit tested, verified visually)
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+- **docs/subsystems/renderer** (DOCUMENTED): This chunk IMPLEMENTS glyph rendering improvements within the renderer subsystem. Specifically:
+  - `GlyphAtlas` - extends to handle non-BMP characters via surrogate pair support in `Font::glyph_for_char()`
+  - `GlyphBuffer` - adds character width tracking for proper wide character positioning
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/0001-validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/0002-error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/0001-validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+  The work aligns with the subsystem's invariant "Atlas Availability" - we're ensuring non-BMP glyphs can be added to the atlas before rendering. The "Screen-Space Consistency" invariant is maintained by properly tracking character widths in column positioning.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add unicode-width dependency
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add the `unicode-width` crate to `crates/editor/Cargo.toml`. This crate provides `UnicodeWidthChar::width()` for determining display width (0, 1, or 2 cells) of Unicode characters.
 
-Example:
+Location: `crates/editor/Cargo.toml`
 
-### Step 1: Define the SegmentHeader struct
+### Step 2: Implement non-BMP character support in Font
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Extend `Font::glyph_for_char()` to handle characters above U+FFFF using UTF-16 surrogate pairs:
 
-Location: src/segment/format.rs
+1. For `c > '\u{FFFF}'`:
+   - Compute the high surrogate: `((code - 0x10000) >> 10) + 0xD800`
+   - Compute the low surrogate: `((code - 0x10000) & 0x3FF) + 0xDC00`
+   - Pass both surrogates to `glyphs_for_characters` with count=2
+   - Return the glyph ID if successful
 
-### Step 2: Implement header serialization
+2. Update the test `test_non_bmp_characters_return_none` to verify non-BMP characters now return `Some(glyph_id)` when the font supports them, or `None` if the font lacks coverage.
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Location: `crates/editor/src/font.rs`
 
-### Step 3: ...
+### Step 3: Update GlyphAtlas to handle non-BMP glyph IDs
+
+The `add_glyph` and `rasterize_glyph` methods currently take `u16` glyph IDs. For non-BMP characters, Core Graphics `CGGlyph` is still `u16`, so the glyph ID type doesn't need to change. The fix in Step 2 handles the lookup; the rasterization path remains the same.
+
+Verify that the existing `ensure_glyph` flow works correctly with non-BMP characters by testing:
+- Emoji characters (U+1F600 - grinning face)
+- Egyptian hieroglyphs (U+131DD, U+131DF)
+
+Location: `crates/editor/src/glyph_atlas.rs` (add tests, minimal code changes expected)
+
+### Step 4: Add width-aware glyph positioning in GlyphBuffer
+
+Modify the glyph quad emission in `update_from_buffer_with_cursor` to advance column position by character display width:
+
+1. Import `unicode_width::UnicodeWidthChar`
+2. In Phase 3 (Glyph Quads), after emitting a glyph quad:
+   - Use `c.width().unwrap_or(1)` to get the display width
+   - Advance `col` by the width instead of always `1`
+
+This affects:
+- Glyph positioning (characters after wide chars shift right correctly)
+- Background quad positioning (Phase 1)
+- Underline quad positioning (Phase 4)
+
+Location: `crates/editor/src/glyph_buffer.rs`
+
+### Step 5: Update background and underline phases for width tracking
+
+The background (Phase 1) and underline (Phase 4) phases iterate by span, counting `span.text.chars().count()` for column advancement. This needs to use width-aware counting:
+
+1. Replace `span.text.chars().count()` with `span.text.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>()`
+2. This ensures background highlights span the correct number of cells for wide characters
+
+Location: `crates/editor/src/glyph_buffer.rs`
+
+### Step 6: Verify selection quad positioning respects width
+
+Selection rendering (Phase 2) uses `sel_start.col` and `sel_end.col` positions from `BufferView::selection_range()`. The terminal buffer already tracks selection in terminal grid coordinates (which account for wide characters via the spacer cell mechanism).
+
+Verify that selection highlighting works correctly for wide characters:
+- Selection should span 2 cells visually for a wide character
+- The existing `WIDE_CHAR_SPACER` skip in `style_convert.rs` should already handle this
+
+Location: `crates/editor/src/glyph_buffer.rs`, `crates/terminal/src/style_convert.rs` (verification, likely no changes needed)
+
+### Step 7: Identify and document the checkmark character
+
+Investigate the checkmark rendering defect from the screenshot. The narrow ✓ (U+2713) renders fine, so the issue is likely:
+- A different checkmark variant (heavy checkmark ✔ U+2714, ballot box ☑ U+2611, etc.)
+- A non-BMP checkmark or emoji variant (✅ U+2705 is emoji)
+
+If the checkmark is a non-BMP character, Step 2 fixes it. If it's a BMP character with rendering issues, document the finding and verify the fix.
+
+Location: Investigation/documentation in this PLAN.md
+
+### Step 8: Add unit tests for width-aware layout
+
+Add tests to verify:
+1. `glyph_for_char()` returns valid glyph IDs for supported non-BMP characters
+2. `GlyphLayout` positioning calculations account for character widths
+3. Column advancement in `update_from_buffer_with_cursor` is width-aware
+
+Tests should use CJK characters (e.g., '中' U+4E2D, width=2) and emoji where font coverage permits.
+
+Location: `crates/editor/src/font.rs`, `crates/editor/src/glyph_buffer.rs`
+
+### Step 9: Update existing tests
+
+Update or remove tests that assert the old behavior:
+- `test_non_bmp_characters_return_none` - Update to verify non-BMP support
+- `test_non_bmp_character_falls_back_to_space` in `glyph_atlas.rs` - Update to verify proper rendering
+
+Location: `crates/editor/src/font.rs`, `crates/editor/src/glyph_atlas.rs`
 
 ---
 
 **BACKREFERENCE COMMENTS**
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+When implementing code, add backreference comments:
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
+```rust
+// Chunk: docs/chunks/terminal_multibyte_rendering - Non-BMP character glyph lookup
+// Chunk: docs/chunks/terminal_multibyte_rendering - Width-aware column positioning
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
-
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
-
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **External crate**: `unicode-width` - for determining character display widths
+- **Font coverage**: The system font (Menlo, Intel One Mono) must have glyphs for the test characters. Non-BMP characters without font coverage will still fall back to space glyph, but the lookup path will be correct.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Font coverage for non-BMP characters**: Most monospace fonts (Menlo, Intel One Mono) may not include glyphs for Egyptian hieroglyphs or many emoji. The fix ensures the *lookup path* is correct; actual rendering depends on font coverage. Font fallback (using a different font for missing glyphs) is out of scope.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Performance of width lookup**: `UnicodeWidthChar::width()` is a table lookup, so performance impact should be minimal. However, it's called per-character in the hot rendering path. If profiling shows issues, we can cache widths per span.
+
+3. **Surrogate pair handling edge cases**: The surrogate pair calculation must be correct for all valid non-BMP codepoints. The standard formulas are well-established, but careful testing with edge cases (U+10000, U+10FFFF) is needed.
+
+4. **Interaction with terminal WIDE_CHAR_SPACER**: The terminal layer already skips spacer cells. We need to verify that width-aware positioning in the renderer doesn't double-count (once from spacer skip, once from width calculation). The current `row_to_styled_line` skips spacers but produces text with the actual characters, so width calculation should be correct.
+
+5. **Selection behavior on wide characters**: When selecting text containing wide characters, does the selection column index refer to the start of the wide character or the spacer cell? Need to verify behavior matches expectations.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- POPULATE DURING IMPLEMENTATION -->
