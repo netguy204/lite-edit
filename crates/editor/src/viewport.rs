@@ -2335,4 +2335,117 @@ mod tests {
         assert_eq!(renderer_vp.first_visible_line(), 20);
         assert_eq!(renderer_vp.visible_lines(), 5);
     }
+
+    // =========================================================================
+    // Chunk: docs/chunks/split_scroll_viewport - Post-split viewport behavior tests
+    // =========================================================================
+
+    #[test]
+    fn test_update_size_reduces_visible_lines_after_split() {
+        // Test A from plan: After update_size() with reduced height, visible_lines()
+        // returns the smaller value.
+        let mut vp = Viewport::new(16.0);
+
+        // Initial state: full window height = 320px = 20 visible lines
+        vp.update_size(320.0, 100);
+        assert_eq!(vp.visible_lines(), 20);
+
+        // After horizontal split, each pane has half the height = 160px = 10 visible lines
+        vp.update_size(160.0, 100);
+        assert_eq!(vp.visible_lines(), 10);
+    }
+
+    #[test]
+    fn test_scroll_offset_clamped_after_resize() {
+        // Test B from plan: A scroll offset that was valid before resize is clamped
+        // to the new max after resize.
+        let mut vp = Viewport::new(16.0);
+
+        // Initial: 320px = 20 visible lines, 100 line buffer
+        // max offset = (100 - 20) * 16 = 1280 px
+        vp.update_size(320.0, 100);
+        vp.set_scroll_offset_px(1280.0, 100); // Scroll to max (line 80)
+        assert_eq!(vp.first_visible_line(), 80);
+
+        // After resize to 160px = 10 visible lines
+        // new max offset = (100 - 10) * 16 = 1440 px
+        // Old scroll of 1280px is still valid, so no clamping needed
+        vp.update_size(160.0, 100);
+        assert_eq!(vp.first_visible_line(), 80);
+
+        // But if we had been scrolled further (past the old max that's now valid)
+        // the scroll should still work since the new max is higher
+        let mut vp2 = Viewport::new(16.0);
+        vp2.update_size(320.0, 100); // 20 visible lines
+        vp2.set_scroll_offset_px(1440.0, 100); // Would be clamped to 1280
+        assert_eq!(vp2.first_visible_line(), 80); // Clamped to max
+
+        // After shrink, max increases so scroll position stays at 80
+        vp2.update_size(160.0, 100);
+        assert_eq!(vp2.first_visible_line(), 80);
+    }
+
+    #[test]
+    fn test_viewport_at_bottom_becomes_scrollable_after_resize() {
+        // Test C from plan: A tab that was "at bottom" (scroll_offset_px = 0, content
+        // fit in viewport) before resize requires scrolling after resize if content
+        // now exceeds visible_lines.
+        let mut vp = Viewport::new(16.0);
+
+        // Initial: 320px = 20 visible lines, 15 line buffer (fits entirely)
+        vp.update_size(320.0, 15);
+        assert_eq!(vp.visible_lines(), 20);
+        assert_eq!(vp.scroll_offset_px(), 0.0);
+        assert!(vp.is_at_bottom(15)); // All content visible, "at bottom"
+
+        // After horizontal split: 160px = 10 visible lines
+        // Now 15 lines don't fit in 10 visible lines - content is scrollable!
+        vp.update_size(160.0, 15);
+        assert_eq!(vp.visible_lines(), 10);
+
+        // The scroll offset is still 0 (we're at the top)
+        assert_eq!(vp.scroll_offset_px(), 0.0);
+        assert_eq!(vp.first_visible_line(), 0);
+
+        // But now there are lines that require scrolling to see
+        // visible_range should show 0..11 (10 visible + 1 for partial)
+        let range = vp.visible_range(15);
+        assert!(range.end < 15, "Not all content is visible: range={:?}", range);
+
+        // We should be able to scroll to see lines 5-14
+        vp.scroll_to(5, 15);
+        assert_eq!(vp.first_visible_line(), 5);
+
+        // Now we're "at bottom" (can see line 14)
+        assert!(vp.is_at_bottom(15));
+    }
+
+    #[test]
+    fn test_scroll_clamping_on_extreme_resize() {
+        // Extreme case: viewport shrinks so much that previous scroll position
+        // becomes invalid and must be clamped.
+        let mut vp = Viewport::new(16.0);
+
+        // Initial: 800px = 50 visible lines, 100 line buffer
+        vp.update_size(800.0, 100);
+        vp.set_scroll_offset_px(800.0, 100); // Scroll to line 50
+        assert_eq!(vp.first_visible_line(), 50);
+
+        // After extreme shrink: 160px = 10 visible lines
+        // new max offset = (100 - 10) * 16 = 1440 px
+        // Our offset of 800px is still within bounds
+        vp.update_size(160.0, 100);
+        assert_eq!(vp.first_visible_line(), 50);
+
+        // Now test clamping: scroll to near-end, then resize
+        vp.set_scroll_offset_px(1440.0, 100); // Scroll to line 90 (max)
+        assert_eq!(vp.first_visible_line(), 90);
+
+        // Expand viewport dramatically: 1280px = 80 visible lines
+        // new max offset = (100 - 80) * 16 = 320 px
+        // Our offset of 1440px must be clamped to 320px
+        vp.update_size(1280.0, 100);
+        // After update_size, scroll offset should be clamped
+        assert_eq!(vp.first_visible_line(), 20); // 320 / 16 = 20
+    }
 }

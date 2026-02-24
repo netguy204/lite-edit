@@ -8,170 +8,112 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The bug occurs because after a horizontal split (vertical direction), each resulting pane has a reduced content height, but the tab's `Viewport` retains its old `visible_lines` count calculated from the pre-split full window height. The renderer correctly configures its own viewport per-pane at render time via `configure_viewport_for_pane()`, but the **tab's viewport** (which owns the authoritative scroll state) is not updated.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+This causes scroll range clamping to use the wrong `visible_lines` value, making tabs that previously fit entirely in the viewport remain "at bottom" even when they now require scrolling.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+**Fix strategy**: Propagate the per-pane content height to each tab's `Viewport` when pane layout changes. This mirrors the existing `sync_active_tab_viewport()` pattern but extends it to handle all panes in split layouts, not just the active tab in a single-pane layout.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/split_scroll_viewport/GOAL.md)
-with references to the files that you expect to touch.
--->
+Key insight: The `pane_scroll_isolation` chunk already established that each tab owns its own `Viewport` for independent scroll state. This chunk completes that work by ensuring those viewports are updated when the pane geometry changes.
+
+**Testing approach**: Per TESTING_PHILOSOPHY.md, viewport calculations are pure Rust with no platform dependencies — this is testable without mocking. We'll write unit tests that:
+1. Simulate a split by manually adjusting visible_lines
+2. Verify scroll clamping produces correct bounds
+3. Verify tabs that exceed the new visible_lines become scrollable
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/0001-validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/0002-error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/0001-validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+- **docs/subsystems/viewport_scroll** (DOCUMENTED): This chunk IMPLEMENTS per-pane viewport synchronization following the subsystem's patterns. Key invariants to preserve:
+  - `scroll_offset_px` is the single source of truth
+  - Resize re-clamps scroll offset (Invariant #7)
+  - `visible_lines` derivation from height is via `update_size()`
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing tests for post-split viewport behavior
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create tests in `crates/editor/src/viewport.rs` (or `crates/editor/tests/viewport_test.rs`) that verify:
 
-Example:
+1. **Test A**: After `update_size()` with reduced height, `visible_lines()` returns the smaller value
+2. **Test B**: A scroll offset that was valid before resize is clamped to the new max after resize
+3. **Test C**: A tab that was "at bottom" (scroll_offset_px = 0, content fit in viewport) before resize requires scrolling after resize if content now exceeds visible_lines
 
-### Step 1: Define the SegmentHeader struct
+These tests document the expected behavior and will initially fail if the viewport isn't being updated correctly in split scenarios.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Location: `crates/editor/src/viewport.rs` (unit tests module) or `crates/editor/tests/viewport_test.rs`
 
-Location: src/segment/format.rs
+### Step 2: Add `sync_pane_viewports()` method to EditorState
 
-### Step 2: Implement header serialization
+Create a method that iterates over all panes in the active workspace and updates each tab's viewport with the correct pane content height.
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+// Chunk: docs/chunks/split_scroll_viewport - Per-pane viewport synchronization
+fn sync_pane_viewports(&mut self, pane_rects: &[PaneRect]) {
+    // For each pane_rect:
+    //   1. Find the pane by ID
+    //   2. Compute pane_content_height = pane_rect.height - TAB_BAR_HEIGHT
+    //   3. For each tab in the pane:
+    //      - Get the buffer's line count
+    //      - Call tab.viewport.update_size(pane_content_height, line_count)
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+This follows the pattern from `sync_active_tab_viewport()` but applies to all tabs in all panes.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Location: `crates/editor/src/editor_state.rs`
+
+### Step 3: Call `sync_pane_viewports()` after split operations
+
+Find the split pane entry points (likely in `editor_state.rs` or invoked from key handlers) and call `sync_pane_viewports()` after the pane tree is modified.
+
+Split operations to find:
+- `Command::SplitHorizontal` / `Command::SplitVertical` handlers
+- Any workspace method like `split_pane()` or `add_pane()`
+
+The call should occur after the pane tree is mutated and we have the new pane rects.
+
+Location: `crates/editor/src/editor_state.rs` (command handlers) or `crates/editor/src/workspace.rs`
+
+### Step 4: Call `sync_pane_viewports()` on window resize
+
+When the window is resized, all pane geometries change. Update `update_viewport_dimensions()` to call `sync_pane_viewports()` after computing the new pane rects.
+
+This ensures that existing splits react correctly to window resize, not just new splits.
+
+Location: `crates/editor/src/editor_state.rs#update_viewport_dimensions`
+
+### Step 5: Verify tests pass and add integration test
+
+Run the tests from Step 1. If they pass, add an integration test that:
+1. Creates a multi-pane layout (horizontal split)
+2. Adds a buffer with more lines than fit in the split pane's visible_lines
+3. Verifies that scroll input moves the viewport (scrollability)
+4. Verifies that the existing scroll offset is clamped correctly
+
+Location: `crates/editor/tests/viewport_test.rs`
+
+### Step 6: Update GOAL.md code_paths
+
+Add the files touched to the chunk's GOAL.md frontmatter:
+- `crates/editor/src/editor_state.rs`
+- `crates/editor/src/viewport.rs` (if tests added there)
+- `crates/editor/tests/viewport_test.rs`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **pane_scroll_isolation** (ACTIVE): This chunk relies on the per-tab viewport ownership established in that chunk. The `configure_viewport_for_pane()` method and `set_visible_lines()` API exist from that work.
+- **viewport_emacs_navigation** (ACTIVE): Uses `visible_lines()` for Page Up/Down calculations. After this fix, those will use correct per-pane values.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Performance**: Iterating all tabs in all panes on every resize might be noticeable with many tabs. However, tab counts are typically small (<100), and `update_size()` is O(1). Should be fine.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Terminal tabs**: Terminal tabs have their own viewport behavior (auto-follow, scrollback). Need to verify that calling `update_size()` on terminal tab viewports doesn't break auto-follow behavior. The existing `terminal_viewport_init` chunk handles initial setup; we should use the same pattern.
+
+3. **Wrapped mode**: For soft-wrapped content, `visible_lines` is based on screen rows, not buffer lines. The fix should work correctly because `update_size()` computes visible_lines from pixel height, which is independent of wrap state. The scroll clamping will use the appropriate line count.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->
