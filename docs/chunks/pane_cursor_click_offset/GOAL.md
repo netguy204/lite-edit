@@ -1,8 +1,10 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/editor/src/pane_layout.rs
+- crates/editor/src/editor_state.rs
 code_references: []
 narrative: null
 investigation: null
@@ -10,9 +12,12 @@ subsystems: []
 friction_entries: []
 bug_type: semantic
 depends_on: []
-created_after: ["dragdrop_file_paste", "vsplit_scroll", "workspace_initial_terminal", "workspace_session_persistence"]
+created_after:
+- dragdrop_file_paste
+- vsplit_scroll
+- workspace_initial_terminal
+- workspace_session_persistence
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

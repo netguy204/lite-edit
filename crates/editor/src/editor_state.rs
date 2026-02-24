@@ -1778,31 +1778,32 @@ impl EditorState {
             return;
         }
 
-        // Chunk: docs/chunks/pane_tabs_interaction - Check all pane tab bars, not just top-left
+        // Chunk: docs/chunks/pane_cursor_click_offset - Unified pane hit resolution
         // In multi-pane layouts, each pane has its own tab bar at its top edge.
-        // We need to check if the click is within any pane's tab bar region.
+        // We use resolve_pane_hit to consistently detect tab bar clicks.
         {
-            use crate::pane_layout::calculate_pane_rects;
+            use crate::pane_layout::{resolve_pane_hit, HitZone};
 
             let is_tab_bar_click = if let Some(workspace) = self.editor.active_workspace() {
-                // Calculate pane rects in renderer space (starting at RAIL_WIDTH, 0)
+                // Renderer-consistent bounds
                 let bounds = (
                     RAIL_WIDTH,
                     0.0,
                     self.view_width - RAIL_WIDTH,
                     self.view_height,
                 );
-                let pane_rects = calculate_pane_rects(bounds, &workspace.pane_root);
 
-                // Check if click is in any pane's tab bar region
-                pane_rects.iter().any(|pane_rect| {
-                    let tab_bar_y_start = pane_rect.y;
-                    let tab_bar_y_end = pane_rect.y + TAB_BAR_HEIGHT;
-                    screen_x >= pane_rect.x as f64
-                        && screen_x < (pane_rect.x + pane_rect.width) as f64
-                        && screen_y >= tab_bar_y_start as f64
-                        && screen_y < tab_bar_y_end as f64
-                })
+                if let Some(hit) = resolve_pane_hit(
+                    screen_x as f32,
+                    screen_y as f32,
+                    bounds,
+                    &workspace.pane_root,
+                    TAB_BAR_HEIGHT,
+                ) {
+                    hit.zone == HitZone::TabBar
+                } else {
+                    false
+                }
             } else {
                 false
             };
@@ -1927,46 +1928,49 @@ impl EditorState {
     // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
     // Chunk: docs/chunks/tiling_workspace_integration - Receives screen-space coordinates (y=0 at top)
     // Chunk: docs/chunks/tiling_focus_keybindings - Click-to-focus pane switching
+    // Chunk: docs/chunks/pane_cursor_click_offset - Fixed coordinate transformation for non-primary panes
     fn handle_mouse_buffer(&mut self, event: MouseEvent) {
         use crate::input::MouseEventKind;
-        use crate::pane_layout::calculate_pane_rects;
+        use crate::pane_layout::{resolve_pane_hit, HitZone};
 
         // Record event time for cursor blink reset (same as keystroke)
         self.last_keystroke = Instant::now();
 
         // event.position is in screen space (y=0 at top of window)
-        // Content area starts at y=TAB_BAR_HEIGHT and x=RAIL_WIDTH
         let (screen_x, screen_y) = event.position;
 
+        // Chunk: docs/chunks/pane_cursor_click_offset - Unified pane hit resolution
+        // Use renderer-consistent bounds for pane layout
+        let bounds = (
+            RAIL_WIDTH,
+            0.0,
+            self.view_width - RAIL_WIDTH,
+            self.view_height,
+        );
+
+        // Resolve which pane was hit and get pane-local coordinates
+        let hit = if let Some(workspace) = self.editor.active_workspace() {
+            resolve_pane_hit(
+                screen_x as f32,
+                screen_y as f32,
+                bounds,
+                &workspace.pane_root,
+                TAB_BAR_HEIGHT,
+            )
+        } else {
+            None
+        };
+
         // Chunk: docs/chunks/tiling_focus_keybindings - Click-to-focus pane switching
-        // Check which pane was clicked and update focus if different
+        // Check which pane was clicked and update focus if different (on MouseDown in Content zone)
         if let MouseEventKind::Down = event.kind {
-            let content_height = self.view_height - TAB_BAR_HEIGHT;
-            let content_width = self.view_width - RAIL_WIDTH;
-
-            // Calculate pane rects in content-local coordinates
-            // Bounds: (x, y, width, height) where (0,0) is top-left of content area
-            let bounds = (0.0, 0.0, content_width, content_height);
-
-            if let Some(workspace) = self.editor.active_workspace() {
-                let pane_rects = calculate_pane_rects(bounds, &workspace.pane_root);
-                let current_pane_id = workspace.active_pane_id;
-
-                // Convert screen coordinates to content-local coordinates for hit testing
-                let content_x = (screen_x - RAIL_WIDTH as f64).max(0.0) as f32;
-                let content_y = (screen_y - TAB_BAR_HEIGHT as f64).max(0.0) as f32;
-
-                // Find which pane contains the click
-                for pane_rect in &pane_rects {
-                    if pane_rect.contains(content_x, content_y) {
-                        if pane_rect.pane_id != current_pane_id {
-                            // Switch focus to the clicked pane
-                            if let Some(ws) = self.editor.active_workspace_mut() {
-                                ws.active_pane_id = pane_rect.pane_id;
-                            }
+            if let Some(ref hit) = hit {
+                if hit.zone == HitZone::Content {
+                    if let Some(ws) = self.editor.active_workspace_mut() {
+                        if hit.pane_id != ws.active_pane_id {
+                            ws.active_pane_id = hit.pane_id;
                             self.dirty_region.merge(DirtyRegion::FullViewport);
                         }
-                        break;
                     }
                 }
             }
@@ -1976,11 +1980,16 @@ impl EditorState {
         let ws = self.editor.active_workspace_mut().expect("no active workspace");
         let tab = ws.active_tab_mut().expect("no active tab");
 
-        // Transform to content-local coordinates:
-        // - Subtract RAIL_WIDTH from x
-        // - Subtract TAB_BAR_HEIGHT from y (since content starts below tab bar in screen space)
-        let content_x = (screen_x - RAIL_WIDTH as f64).max(0.0);
-        let content_y = (screen_y - TAB_BAR_HEIGHT as f64).max(0.0);
+        // Chunk: docs/chunks/pane_cursor_click_offset - Use pane-local coordinates from hit resolution
+        // These coordinates are already relative to the pane's content origin (after tab bar)
+        let (content_x, content_y) = if let Some(ref hit) = hit {
+            (hit.local_x as f64, hit.local_y as f64)
+        } else {
+            // Fallback for clicks outside panes (shouldn't happen in normal use)
+            let fallback_x = (screen_x - RAIL_WIDTH as f64).max(0.0);
+            let fallback_y = (screen_y - TAB_BAR_HEIGHT as f64).max(0.0);
+            (fallback_x, fallback_y)
+        };
 
         // Try to get the text buffer and viewport for file tabs
         if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
@@ -1998,9 +2007,8 @@ impl EditorState {
                 self.dirty_region.merge(dirty);
             }
 
-            // Create event with content-local coordinates
-            // The y coordinate is already in screen space (y=0 at top), so content_y
-            // is relative to the top of the content area
+            // Create event with pane-local content coordinates
+            // content_x and content_y are already relative to the pane's content origin
             let content_event = MouseEvent {
                 kind: event.kind,
                 position: (content_x, content_y),
@@ -2008,7 +2016,21 @@ impl EditorState {
                 click_count: event.click_count,
             };
 
-            let content_height = self.view_height - TAB_BAR_HEIGHT;
+            // Chunk: docs/chunks/pane_cursor_click_offset - Use pane dimensions for EditorContext
+            // When we have a hit result, use the pane's content dimensions for accuracy
+            let (pane_content_height, pane_content_width) = if let Some(ref hit) = hit {
+                let pane_rect = &hit.pane_rect;
+                (
+                    pane_rect.height - TAB_BAR_HEIGHT,
+                    pane_rect.width,
+                )
+            } else {
+                // Fallback to global content area dimensions
+                (
+                    self.view_height - TAB_BAR_HEIGHT,
+                    self.view_width - RAIL_WIDTH,
+                )
+            };
 
             // Create context and forward to focus target
             let font_metrics = self.font_metrics;
@@ -2018,8 +2040,8 @@ impl EditorState {
                 viewport,
                 &mut self.dirty_region,
                 font_metrics,
-                content_height,
-                self.view_width - RAIL_WIDTH, // Content width also adjusted
+                pane_content_height,
+                pane_content_width,
             );
             self.focus_target.handle_mouse(content_event, &mut ctx);
         } else if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
@@ -9743,5 +9765,210 @@ mod tests {
         let ws = state.editor.active_workspace().unwrap();
         let pane = ws.active_pane().unwrap();
         assert_eq!(pane.active_tab, 1, "Second tab should be active");
+    }
+
+    // =========================================================================
+    // Cursor Positioning in Split Layouts (Chunk: docs/chunks/pane_cursor_click_offset)
+    // =========================================================================
+    //
+    // These tests verify that mouse clicks in non-primary panes result in
+    // correct cursor positioning. The bug was that clicks in the right pane
+    // of a horizontal split would be offset to the right, and clicks in the
+    // bottom pane of a vertical split would be offset downward.
+
+    /// Tests that clicking in the right pane of a horizontal split positions
+    /// the cursor correctly without rightward offset.
+    ///
+    /// The bug: When clicking at the origin of the right pane's content area,
+    /// the cursor would incorrectly land at column 50 instead of column 0.
+    #[test]
+    fn test_cursor_click_right_pane_horizontal_split() {
+        use crate::input::MouseEventKind;
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = create_horizontal_split_state();
+
+        // Layout: 800x600 window, RAIL_WIDTH=56, TAB_BAR_HEIGHT=32
+        // Horizontal split at 0.5 ratio with bounds (56, 0, 744, 600):
+        // - Left pane: x=56, y=0, width=372, height=600, content starts at y=32
+        // - Right pane: x=428, y=0, width=372, height=600, content starts at y=32
+        //
+        // Click at the top-left of the right pane's content area
+        // Screen coords: x=428 (right pane origin), y=32 (below tab bar)
+        // NSView coords: y = view_height - screen_y = 600 - 32 = 568
+
+        // First, switch focus to right pane
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.active_pane_id = 2;
+        }
+
+        // Click at the origin of the right pane's content
+        let click_x = 428.0 + 8.0; // First character position (1 cell width in)
+        let nsview_y = 600.0 - (TAB_BAR_HEIGHT as f64 + 8.0); // Slightly below tab bar
+
+        let click_event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (click_x, nsview_y),
+            modifiers: crate::input::Modifiers::default(),
+            click_count: 1,
+        };
+
+        state.handle_mouse(click_event);
+
+        // Verify: cursor should be near column 0-1, NOT offset by the right pane's x position
+        let ws = state.editor.active_workspace().unwrap();
+        let pane = ws.pane_root.get_pane(2).unwrap();
+        if let Some(tab) = pane.active_tab() {
+            if let Some(buffer) = tab.as_text_buffer() {
+                let cursor = buffer.cursor_position();
+                // With cell width 8.0, click at local_x=8 should give column ~1
+                // The bug would place cursor at a much higher column (e.g., 46+)
+                assert!(
+                    cursor.col < 5,
+                    "Cursor column should be near 0 (got {}), not offset by pane position",
+                    cursor.col
+                );
+            }
+        }
+    }
+
+    /// Tests that clicking in the bottom pane of a vertical split positions
+    /// the cursor correctly without downward offset.
+    ///
+    /// The bug: When clicking at the origin of the bottom pane's content area,
+    /// the cursor would incorrectly land at a line much lower than expected.
+    #[test]
+    fn test_cursor_click_bottom_pane_vertical_split() {
+        use crate::input::MouseEventKind;
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = create_vertical_split_state();
+
+        // Layout: 800x600 window, RAIL_WIDTH=56, TAB_BAR_HEIGHT=32
+        // Vertical split at 0.5 ratio with bounds (56, 0, 744, 600):
+        // - Top pane: x=56, y=0, width=744, height=300, content starts at y=32
+        // - Bottom pane: x=56, y=300, width=744, height=300, content starts at y=332
+        //
+        // Click at the top-left of the bottom pane's content area
+        // Screen coords: x=64 (slightly into content), y=340 (first line of bottom pane content)
+        // NSView coords: y = view_height - screen_y = 600 - 340 = 260
+
+        // First, switch focus to bottom pane
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.active_pane_id = 2;
+        }
+
+        // Click at the origin of the bottom pane's content
+        let click_x = 64.0; // Inside content area
+        let screen_y = 300.0 + TAB_BAR_HEIGHT as f64 + 8.0; // First line of bottom pane
+        let nsview_y = 600.0 - screen_y;
+
+        let click_event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (click_x, nsview_y),
+            modifiers: crate::input::Modifiers::default(),
+            click_count: 1,
+        };
+
+        state.handle_mouse(click_event);
+
+        // Verify: cursor should be on line 0-1, NOT offset by the pane's y position
+        let ws = state.editor.active_workspace().unwrap();
+        let pane = ws.pane_root.get_pane(2).unwrap();
+        if let Some(tab) = pane.active_tab() {
+            if let Some(buffer) = tab.as_text_buffer() {
+                let cursor = buffer.cursor_position();
+                // Click at local_y=8 with line_height=16 should give line ~0
+                // The bug would place cursor at a much higher line
+                assert!(
+                    cursor.line < 3,
+                    "Cursor line should be near 0 (got {}), not offset by pane position",
+                    cursor.line
+                );
+            }
+        }
+    }
+
+    /// Tests that clicking in the top-left (primary) pane still works correctly.
+    /// This is a regression test to ensure the fix doesn't break the working case.
+    #[test]
+    fn test_cursor_click_top_left_pane_no_regression() {
+        use crate::input::MouseEventKind;
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = create_horizontal_split_state();
+
+        // Layout: 800x600 window, RAIL_WIDTH=56
+        // - Left pane: x=56, y=0, width=372, height=600, content starts at y=32
+        //
+        // Click at the origin of the left pane's content
+        let click_x = 64.0; // Slightly into content
+        let screen_y = TAB_BAR_HEIGHT as f64 + 8.0;
+        let nsview_y = 600.0 - screen_y;
+
+        let click_event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (click_x, nsview_y),
+            modifiers: crate::input::Modifiers::default(),
+            click_count: 1,
+        };
+
+        state.handle_mouse(click_event);
+
+        // Verify: cursor should be near origin
+        let ws = state.editor.active_workspace().unwrap();
+        let pane = ws.active_pane().unwrap();
+        if let Some(tab) = pane.active_tab() {
+            if let Some(buffer) = tab.as_text_buffer() {
+                let cursor = buffer.cursor_position();
+                assert!(
+                    cursor.col < 3,
+                    "Left pane cursor column should be near 0 (got {})",
+                    cursor.col
+                );
+                assert!(
+                    cursor.line < 3,
+                    "Left pane cursor line should be near 0 (got {})",
+                    cursor.line
+                );
+            }
+        }
+    }
+
+    /// Tests that clicking in the content area of a non-focused pane
+    /// switches focus to that pane.
+    #[test]
+    fn test_click_switches_focus_to_right_pane() {
+        use crate::input::MouseEventKind;
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = create_horizontal_split_state();
+
+        // Ensure focus is on left pane (pane 1)
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.active_pane_id = 1;
+        }
+
+        // Click in the right pane's content area
+        // Right pane: x=428, content starts at y=32
+        let click_x = 500.0;
+        let screen_y = TAB_BAR_HEIGHT as f64 + 50.0;
+        let nsview_y = 600.0 - screen_y;
+
+        let click_event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (click_x, nsview_y),
+            modifiers: crate::input::Modifiers::default(),
+            click_count: 1,
+        };
+
+        state.handle_mouse(click_event);
+
+        // Verify: focus should have switched to right pane
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(
+            ws.active_pane_id, 2,
+            "Focus should have switched to right pane (pane 2)"
+        );
     }
 }

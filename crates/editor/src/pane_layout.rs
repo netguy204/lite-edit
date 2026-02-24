@@ -284,6 +284,42 @@ impl Pane {
 }
 
 // =============================================================================
+// HitZone and PaneHit (Chunk: docs/chunks/pane_cursor_click_offset)
+// =============================================================================
+
+/// Zone within a pane that was hit.
+///
+/// When resolving a mouse click against the pane layout, this indicates
+/// whether the click was in the tab bar region or the content region.
+// Chunk: docs/chunks/pane_cursor_click_offset - Unified pane hit resolution
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HitZone {
+    /// The tab bar region at the top of the pane
+    TabBar,
+    /// The content region below the tab bar
+    Content,
+}
+
+/// Result of hit-testing a point against the pane layout.
+///
+/// Contains the pane that was hit, which zone within the pane,
+/// and coordinates relative to the pane's content origin.
+// Chunk: docs/chunks/pane_cursor_click_offset - Unified pane hit resolution
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaneHit {
+    /// ID of the pane that was hit
+    pub pane_id: PaneId,
+    /// Which zone within the pane was hit
+    pub zone: HitZone,
+    /// X coordinate relative to the pane's content origin (not screen)
+    pub local_x: f32,
+    /// Y coordinate relative to the pane's content origin (not screen)
+    pub local_y: f32,
+    /// The pane rect that was hit (for access to pane dimensions)
+    pub pane_rect: PaneRect,
+}
+
+// =============================================================================
 // PaneRect
 // =============================================================================
 
@@ -572,6 +608,80 @@ enum PathNode<'a> {
         first: &'a PaneLayoutNode,
         second: &'a PaneLayoutNode,
     },
+}
+
+// =============================================================================
+// Pane Hit Resolution (Chunk: docs/chunks/pane_cursor_click_offset)
+// =============================================================================
+
+/// Resolves a screen-space point to a pane hit.
+///
+/// This function performs hit-testing against the pane layout to determine:
+/// 1. Which pane (if any) contains the click
+/// 2. Whether the click is in the TabBar or Content zone
+/// 3. The coordinates relative to the pane's content origin
+///
+/// # Arguments
+///
+/// * `x` - Screen X coordinate (pixels)
+/// * `y` - Screen Y coordinate (pixels, y=0 at top)
+/// * `bounds` - Renderer-consistent bounds (x, y, width, height) for the pane area
+/// * `pane_root` - Root of the pane layout tree
+/// * `tab_bar_height` - Height of tab bar region in each pane
+///
+/// # Returns
+///
+/// `Some(PaneHit)` if the point is within a pane, `None` otherwise.
+///
+/// The returned `local_x` and `local_y` are relative to the pane's **content** origin,
+/// which is (pane.x, pane.y + tab_bar_height) in screen space. This allows downstream
+/// code to use the coordinates directly for buffer hit-testing.
+///
+/// # Coordinate Spaces
+///
+/// - Input: screen coordinates where (0,0) is top-left of the window
+/// - Bounds: should use renderer-consistent bounds (RAIL_WIDTH, 0, W-RAIL_WIDTH, H)
+/// - Output local_x: relative to pane's left edge
+/// - Output local_y: relative to pane's content top (after tab bar)
+// Chunk: docs/chunks/pane_cursor_click_offset - Unified pane hit resolution
+pub fn resolve_pane_hit(
+    x: f32,
+    y: f32,
+    bounds: (f32, f32, f32, f32),
+    pane_root: &PaneLayoutNode,
+    tab_bar_height: f32,
+) -> Option<PaneHit> {
+    // Calculate pane rectangles using renderer-consistent bounds
+    let pane_rects = calculate_pane_rects(bounds, pane_root);
+
+    // Find which pane contains the point
+    for pane_rect in pane_rects {
+        if pane_rect.contains(x, y) {
+            // Determine if click is in TabBar or Content zone
+            let tab_bar_y_end = pane_rect.y + tab_bar_height;
+            let zone = if y < tab_bar_y_end {
+                HitZone::TabBar
+            } else {
+                HitZone::Content
+            };
+
+            // Compute pane-local coordinates relative to content origin
+            // local_x: relative to pane's left edge
+            // local_y: relative to pane's content top (after tab bar)
+            let local_x = x - pane_rect.x;
+            let local_y = y - pane_rect.y - tab_bar_height;
+
+            return Some(PaneHit {
+                pane_id: pane_rect.pane_id,
+                zone,
+                local_x,
+                local_y,
+                pane_rect,
+            });
+        }
+    }
+
+    None
 }
 
 // =============================================================================
@@ -2216,5 +2326,227 @@ mod tests {
         // Verify new pane has the same workspace_id
         let new_pane = tree.get_pane(2).unwrap();
         assert_eq!(new_pane.workspace_id, workspace_id);
+    }
+
+    // =========================================================================
+    // resolve_pane_hit Tests (Chunk: docs/chunks/pane_cursor_click_offset)
+    // =========================================================================
+
+    const TEST_TAB_BAR_HEIGHT: f32 = 30.0;
+    const TEST_RAIL_WIDTH: f32 = 40.0;
+
+    #[test]
+    fn test_resolve_pane_hit_single_pane_tab_bar() {
+        // Single pane filling bounds, click in tab bar region
+        let tree = PaneLayoutNode::single_pane(test_pane(1));
+        let bounds = (TEST_RAIL_WIDTH, 0.0, 800.0 - TEST_RAIL_WIDTH, 600.0);
+
+        // Click at y=10 (within tab bar region 0..30)
+        let hit = resolve_pane_hit(
+            TEST_RAIL_WIDTH + 100.0, // x within pane
+            10.0,                     // y in tab bar
+            bounds,
+            &tree,
+            TEST_TAB_BAR_HEIGHT,
+        );
+
+        assert!(hit.is_some());
+        let hit = hit.unwrap();
+        assert_eq!(hit.pane_id, 1);
+        assert_eq!(hit.zone, HitZone::TabBar);
+    }
+
+    #[test]
+    fn test_resolve_pane_hit_single_pane_content() {
+        // Single pane filling bounds, click in content region
+        let tree = PaneLayoutNode::single_pane(test_pane(1));
+        let bounds = (TEST_RAIL_WIDTH, 0.0, 800.0 - TEST_RAIL_WIDTH, 600.0);
+
+        // Click at y=100 (below tab bar at y=30)
+        let hit = resolve_pane_hit(
+            TEST_RAIL_WIDTH + 100.0, // x within pane
+            100.0,                    // y in content
+            bounds,
+            &tree,
+            TEST_TAB_BAR_HEIGHT,
+        );
+
+        assert!(hit.is_some());
+        let hit = hit.unwrap();
+        assert_eq!(hit.pane_id, 1);
+        assert_eq!(hit.zone, HitZone::Content);
+        // local_x should be x - pane.x = (40+100) - 40 = 100
+        assert!(approx_eq(hit.local_x, 100.0));
+        // local_y should be y - pane.y - tab_bar_height = 100 - 0 - 30 = 70
+        assert!(approx_eq(hit.local_y, 70.0));
+    }
+
+    #[test]
+    fn test_resolve_pane_hit_horizontal_split_right_pane() {
+        // HSplit(Pane[1], Pane[2]) - click in right pane content
+        let tree = PaneLayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(PaneLayoutNode::Leaf(test_pane(1))),
+            second: Box::new(PaneLayoutNode::Leaf(test_pane(2))),
+        };
+
+        // bounds: x=40, y=0, width=760, height=600
+        // With 0.5 ratio: left pane is 40..420, right pane is 420..800
+        let bounds = (TEST_RAIL_WIDTH, 0.0, 800.0 - TEST_RAIL_WIDTH, 600.0);
+
+        // Click in right pane content at screen coords (500, 100)
+        let hit = resolve_pane_hit(500.0, 100.0, bounds, &tree, TEST_TAB_BAR_HEIGHT);
+
+        assert!(hit.is_some());
+        let hit = hit.unwrap();
+        assert_eq!(hit.pane_id, 2); // Right pane
+        assert_eq!(hit.zone, HitZone::Content);
+        // Right pane starts at x=420 (40 + 380)
+        // local_x = 500 - 420 = 80
+        assert!(approx_eq(hit.local_x, 80.0));
+        // local_y = 100 - 0 - 30 = 70
+        assert!(approx_eq(hit.local_y, 70.0));
+    }
+
+    #[test]
+    fn test_resolve_pane_hit_vertical_split_bottom_pane() {
+        // VSplit(Pane[1], Pane[2]) - click in bottom pane content
+        let tree = PaneLayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(PaneLayoutNode::Leaf(test_pane(1))),
+            second: Box::new(PaneLayoutNode::Leaf(test_pane(2))),
+        };
+
+        // bounds: x=40, y=0, width=760, height=600
+        // With 0.5 ratio: top pane is y=0..300, bottom pane is y=300..600
+        let bounds = (TEST_RAIL_WIDTH, 0.0, 800.0 - TEST_RAIL_WIDTH, 600.0);
+
+        // Click in bottom pane content at screen coords (100, 400)
+        let hit = resolve_pane_hit(100.0, 400.0, bounds, &tree, TEST_TAB_BAR_HEIGHT);
+
+        assert!(hit.is_some());
+        let hit = hit.unwrap();
+        assert_eq!(hit.pane_id, 2); // Bottom pane
+        assert_eq!(hit.zone, HitZone::Content);
+        // local_x = 100 - 40 = 60
+        assert!(approx_eq(hit.local_x, 60.0));
+        // Bottom pane starts at y=300, tab bar ends at y=330
+        // local_y = 400 - 300 - 30 = 70
+        assert!(approx_eq(hit.local_y, 70.0));
+    }
+
+    #[test]
+    fn test_resolve_pane_hit_outside_bounds() {
+        let tree = PaneLayoutNode::single_pane(test_pane(1));
+        let bounds = (TEST_RAIL_WIDTH, 0.0, 800.0 - TEST_RAIL_WIDTH, 600.0);
+
+        // Click outside pane bounds (in the rail area)
+        let hit = resolve_pane_hit(10.0, 100.0, bounds, &tree, TEST_TAB_BAR_HEIGHT);
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn test_resolve_pane_hit_left_pane_no_offset() {
+        // Verify the top-left (first) pane has correct local coords
+        // This is the case that currently works; we want no regression
+        let tree = PaneLayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(PaneLayoutNode::Leaf(test_pane(1))),
+            second: Box::new(PaneLayoutNode::Leaf(test_pane(2))),
+        };
+
+        let bounds = (TEST_RAIL_WIDTH, 0.0, 800.0 - TEST_RAIL_WIDTH, 600.0);
+
+        // Click in left pane content at screen coords (100, 100)
+        // Left pane: x=40..420
+        let hit = resolve_pane_hit(100.0, 100.0, bounds, &tree, TEST_TAB_BAR_HEIGHT);
+
+        assert!(hit.is_some());
+        let hit = hit.unwrap();
+        assert_eq!(hit.pane_id, 1); // Left pane
+        assert_eq!(hit.zone, HitZone::Content);
+        // local_x = 100 - 40 = 60
+        assert!(approx_eq(hit.local_x, 60.0));
+        // local_y = 100 - 0 - 30 = 70
+        assert!(approx_eq(hit.local_y, 70.0));
+    }
+
+    #[test]
+    fn test_resolve_pane_hit_nested_split() {
+        // HSplit(Pane[1], VSplit(Pane[2], Pane[3]))
+        // Layout:
+        // +-------+-------+
+        // |       |   2   |
+        // |   1   +-------+
+        // |       |   3   |
+        // +-------+-------+
+        let tree = PaneLayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(PaneLayoutNode::Leaf(test_pane(1))),
+            second: Box::new(PaneLayoutNode::Split {
+                direction: SplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(PaneLayoutNode::Leaf(test_pane(2))),
+                second: Box::new(PaneLayoutNode::Leaf(test_pane(3))),
+            }),
+        };
+
+        let bounds = (TEST_RAIL_WIDTH, 0.0, 800.0 - TEST_RAIL_WIDTH, 600.0);
+
+        // Click in bottom-right pane (pane 3) at screen coords (600, 450)
+        // Pane 3: x=420..800, y=300..600
+        let hit = resolve_pane_hit(600.0, 450.0, bounds, &tree, TEST_TAB_BAR_HEIGHT);
+
+        assert!(hit.is_some());
+        let hit = hit.unwrap();
+        assert_eq!(hit.pane_id, 3); // Bottom-right pane
+        assert_eq!(hit.zone, HitZone::Content);
+        // local_x = 600 - 420 = 180
+        assert!(approx_eq(hit.local_x, 180.0));
+        // local_y = 450 - 300 - 30 = 120
+        assert!(approx_eq(hit.local_y, 120.0));
+    }
+
+    #[test]
+    fn test_resolve_pane_hit_bottom_pane_tab_bar() {
+        // VSplit: click in bottom pane's tab bar region
+        let tree = PaneLayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(PaneLayoutNode::Leaf(test_pane(1))),
+            second: Box::new(PaneLayoutNode::Leaf(test_pane(2))),
+        };
+
+        let bounds = (TEST_RAIL_WIDTH, 0.0, 800.0 - TEST_RAIL_WIDTH, 600.0);
+
+        // Bottom pane starts at y=300, tab bar is y=300..330
+        // Click at y=310 (within bottom pane's tab bar)
+        let hit = resolve_pane_hit(100.0, 310.0, bounds, &tree, TEST_TAB_BAR_HEIGHT);
+
+        assert!(hit.is_some());
+        let hit = hit.unwrap();
+        assert_eq!(hit.pane_id, 2); // Bottom pane
+        assert_eq!(hit.zone, HitZone::TabBar);
+    }
+
+    #[test]
+    fn test_resolve_pane_hit_pane_rect_included() {
+        // Verify that the PaneHit includes the pane_rect for access to dimensions
+        let tree = PaneLayoutNode::single_pane(test_pane(1));
+        let bounds = (TEST_RAIL_WIDTH, 0.0, 800.0 - TEST_RAIL_WIDTH, 600.0);
+
+        let hit = resolve_pane_hit(100.0, 100.0, bounds, &tree, TEST_TAB_BAR_HEIGHT);
+
+        assert!(hit.is_some());
+        let hit = hit.unwrap();
+        assert_eq!(hit.pane_rect.pane_id, 1);
+        assert!(approx_eq(hit.pane_rect.x, TEST_RAIL_WIDTH));
+        assert!(approx_eq(hit.pane_rect.y, 0.0));
+        assert!(approx_eq(hit.pane_rect.width, 800.0 - TEST_RAIL_WIDTH));
+        assert!(approx_eq(hit.pane_rect.height, 600.0));
     }
 }
