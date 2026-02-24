@@ -54,6 +54,11 @@ chmod +x "$MACOS_DIR/lite-edit"
 echo "  Copying icon..."
 cp "$ICNS" "$RESOURCES_DIR/LiteEdit.icns"
 
+# Copy the bundled font and its license
+echo "  Copying font..."
+cp "${PROJECT_ROOT}/resources/IntelOneMono-Regular.ttf" "$RESOURCES_DIR/IntelOneMono-Regular.ttf"
+cp "${PROJECT_ROOT}/resources/OFL.txt" "$RESOURCES_DIR/OFL.txt"
+
 # Copy Info.plist
 echo "  Copying Info.plist..."
 cp "$INFO_PLIST" "$CONTENTS_DIR/Info.plist"

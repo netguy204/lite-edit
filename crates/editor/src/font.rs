@@ -11,7 +11,10 @@
 
 use std::ptr::NonNull;
 
-use objc2_core_foundation::{CFRetained, CFString, CGAffineTransform, CGFloat, CGSize};
+use objc2_core_foundation::{
+    CFData, CFRetained, CFString, CGAffineTransform, CGFloat, CGSize,
+};
+use objc2_core_graphics::{CGDataProvider, CGFont};
 use objc2_core_text::{CTFont, CTFontOrientation};
 
 // =============================================================================
@@ -92,6 +95,57 @@ impl Font {
         let advance_width = Self::get_advance_width(&ct_font);
 
         // Line height is ascent + descent + leading
+        let line_height = ascent + descent + leading;
+
+        let metrics = FontMetrics {
+            advance_width,
+            line_height,
+            ascent,
+            descent,
+            leading,
+            point_size: scaled_size,
+        };
+
+        Self { ct_font, metrics }
+    }
+
+    /// Loads a font from raw TTF data at the given point size, scaled for the display
+    ///
+    /// # Arguments
+    /// * `data` - Raw TTF font file bytes
+    /// * `point_size` - The size in points (will be scaled by scale_factor)
+    /// * `scale_factor` - The display scale factor (1.0 for standard, 2.0 for Retina)
+    ///
+    /// # Panics
+    /// Panics if the font data is invalid or the font cannot be loaded.
+    pub fn from_data(data: &[u8], point_size: f64, scale_factor: f64) -> Self {
+        let scaled_size = point_size * scale_factor;
+
+        // Create CGFont from raw TTF data
+        let cf_data = CFData::from_bytes(data);
+        let provider = CGDataProvider::with_cf_data(Some(&cf_data))
+            .expect("Failed to create CGDataProvider from font data");
+        let cg_font = CGFont::with_data_provider(&provider)
+            .expect("Failed to create CGFont from font data");
+
+        let transform = CGAffineTransform {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+        };
+
+        let ct_font = unsafe {
+            CTFont::with_graphics_font(&cg_font, scaled_size as CGFloat, &transform, None)
+        };
+
+        // Extract metrics
+        let ascent = unsafe { ct_font.ascent() };
+        let descent = unsafe { ct_font.descent() };
+        let leading = unsafe { ct_font.leading() };
+        let advance_width = Self::get_advance_width(&ct_font);
         let line_height = ascent + descent + leading;
 
         let metrics = FontMetrics {
@@ -324,5 +378,65 @@ mod tests {
             font.glyph_for_char(emoji).is_none(),
             "Non-BMP characters should return None"
         );
+    }
+
+    // ==================== Embedded font (from_data) tests ====================
+
+    const INTEL_ONE_MONO: &[u8] = include_bytes!("../../../resources/IntelOneMono-Regular.ttf");
+
+    #[test]
+    fn test_from_data_loading() {
+        let font = Font::from_data(INTEL_ONE_MONO, 14.0, 1.0);
+
+        assert!(font.metrics.advance_width > 0.0, "advance_width should be positive");
+        assert!(font.metrics.line_height > 0.0, "line_height should be positive");
+        assert!(font.metrics.ascent > 0.0, "ascent should be positive");
+        assert!(font.metrics.descent > 0.0, "descent should be positive");
+    }
+
+    #[test]
+    fn test_from_data_scaling() {
+        let font_1x = Font::from_data(INTEL_ONE_MONO, 14.0, 1.0);
+        let font_2x = Font::from_data(INTEL_ONE_MONO, 14.0, 2.0);
+
+        let ratio = font_2x.metrics.advance_width / font_1x.metrics.advance_width;
+        assert!(
+            (ratio - 2.0).abs() < 0.01,
+            "2x scale should double advance_width, got ratio {}",
+            ratio
+        );
+    }
+
+    #[test]
+    fn test_from_data_has_ascii_glyphs() {
+        let font = Font::from_data(INTEL_ONE_MONO, 14.0, 1.0);
+
+        assert!(font.glyph_for_char('A').is_some(), "Should have glyph for 'A'");
+        assert!(font.glyph_for_char('z').is_some(), "Should have glyph for 'z'");
+        assert!(font.glyph_for_char('0').is_some(), "Should have glyph for '0'");
+        assert!(font.glyph_for_char(' ').is_some(), "Should have glyph for space");
+    }
+
+    #[test]
+    fn test_from_data_has_box_drawing_glyphs() {
+        let font = Font::from_data(INTEL_ONE_MONO, 14.0, 1.0);
+
+        let box_drawing_chars = [
+            ('─', "horizontal line U+2500"),
+            ('│', "vertical line U+2502"),
+            ('┌', "top-left corner U+250C"),
+            ('┐', "top-right corner U+2510"),
+            ('└', "bottom-left corner U+2514"),
+            ('┘', "bottom-right corner U+2518"),
+        ];
+
+        for (c, name) in box_drawing_chars {
+            assert!(
+                font.glyph_for_char(c).is_some(),
+                "Intel One Mono should have glyph for {} ({})",
+                c,
+                name
+            );
+        }
     }
 }

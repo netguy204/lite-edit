@@ -308,9 +308,9 @@ impl Renderer {
         // Get the scale factor for proper glyph sizing
         let scale_factor = view.scale_factor();
 
-        // Load the font at the appropriate scale
-        // Using 14pt as the default font size
-        let font = Font::new("Menlo-Regular", 14.0, scale_factor);
+        // Load the bundled Intel One Mono font at the appropriate scale
+        const FONT_DATA: &[u8] = include_bytes!("../../../resources/IntelOneMono-Regular.ttf");
+        let font = Font::from_data(FONT_DATA, 14.0, scale_factor);
 
         // Create the glyph atlas (pre-populates ASCII)
         let atlas = GlyphAtlas::new(device, &font);
