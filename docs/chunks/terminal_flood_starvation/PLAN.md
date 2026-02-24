@@ -8,170 +8,380 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk addresses terminal output flooding starving user input with two complementary fixes:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**A. Input-first event partitioning** — Modify `process_pending_events()` in `drain_loop.rs` to process user-input events (Key, Mouse, Scroll, Resize, FileDrop) *before* any PtyWakeup events. This is a simple reordering that ensures input latency is bounded by the cost of processing input events, not by accumulated PTY work.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+**B. Byte-budgeted VTE processing** — Modify `poll_events()` in `terminal_buffer.rs` to stop after processing a configurable byte budget (e.g., 4KB) per terminal per drain cycle. When the budget is exhausted, the method returns a flag indicating unprocessed data remains, triggering a follow-up wakeup. This bounds the wall-clock cost of a single drain cycle while ensuring all data is eventually processed.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/terminal_flood_starvation/GOAL.md)
-with references to the files that you expect to touch.
--->
+Both fixes preserve the existing drain-all-then-render pattern. Neither requires changes to the event channel architecture or the single-threaded ownership model.
+
+The approach follows the Humble View architecture from `docs/trunk/TESTING_PHILOSOPHY.md`: the prioritization and budgeting logic is pure, testable state manipulation. The tests can verify event ordering and budget behavior without platform dependencies.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+- **docs/subsystems/viewport_scroll** (DOCUMENTED): This chunk USES the viewport subsystem indirectly via `poll_standalone_terminals()` which calls `scroll_to_bottom()` and `is_at_bottom()`. No changes to viewport behavior are needed—the subsystem's existing methods work correctly. We just need to ensure that even with budgeted processing, the auto-follow behavior triggers correctly.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystem deviations discovered.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add `is_user_input_event()` helper to EditorEvent
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+The `EditorEvent` enum already has an `is_user_input()` method. Verify it includes all the event types we want to prioritize (Key, Mouse, Scroll, Resize, FileDrop). Add Resize if it's not already included, since window resize should be responsive.
 
-Example:
+Location: `crates/editor/src/editor_event.rs`
 
-### Step 1: Define the SegmentHeader struct
+### Step 2: Implement input-first event partitioning in drain loop
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Modify `process_pending_events()` to partition events after draining from the channel:
 
-Location: src/segment/format.rs
+```rust
+// Chunk: docs/chunks/terminal_flood_starvation - Input-first event partitioning
+pub fn process_pending_events(&mut self) {
+    let mut had_pty_wakeup = false;
 
-### Step 2: Implement header serialization
+    // Drain all events into a Vec
+    let events: Vec<EditorEvent> = self.receiver.drain().collect();
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+    // Partition: process user-input events first, then PTY/timer events
+    // This ensures input latency is never gated by accumulated terminal output
+    let (input_events, other_events): (Vec<_>, Vec<_>) = events
+        .into_iter()
+        .partition(|e| e.is_user_input() || matches!(e, EditorEvent::Resize));
 
-### Step 3: ...
+    // Process input events first
+    for event in input_events {
+        // ... existing match arms
+    }
+
+    // Then process other events (PtyWakeup, CursorBlink)
+    for event in other_events {
+        // ... existing match arms
+    }
+
+    // ... rest unchanged
+}
+```
+
+This is a behavioral change but preserves all existing functionality. The drain-all-then-render-once pattern is preserved.
+
+Location: `crates/editor/src/drain_loop.rs`
+
+### Step 3: Add byte budget constant to TerminalBuffer
+
+Add a tunable constant for the maximum bytes to process per poll cycle:
+
+```rust
+// Chunk: docs/chunks/terminal_flood_starvation - Byte-budgeted VTE processing
+impl TerminalBuffer {
+    /// Maximum bytes to process per `poll_events()` call.
+    /// When this budget is exhausted, remaining data stays in the channel
+    /// and will be processed on the next wakeup cycle.
+    pub const DEFAULT_BYTES_PER_POLL: usize = 4 * 1024; // 4KB
+}
+```
+
+Also add an instance field to allow per-terminal configuration if needed in the future.
+
+Location: `crates/terminal/src/terminal_buffer.rs`
+
+### Step 4: Modify poll_events() to use byte budget
+
+Change the unbounded `while let Some(event) = pty.try_recv()` loop to track bytes processed and stop when the budget is exhausted:
+
+```rust
+// Chunk: docs/chunks/terminal_flood_starvation - Byte-budgeted VTE processing
+pub fn poll_events(&mut self) -> PollResult {
+    let Some(ref pty) = self.pty else {
+        return PollResult::Idle;
+    };
+
+    let mut bytes_processed: usize = 0;
+    let mut processed_any = false;
+
+    // Drain events up to the byte budget
+    while let Some(event) = pty.try_recv() {
+        match event {
+            TerminalEvent::PtyOutput(data) => {
+                bytes_processed += data.len();
+                self.processor.advance(&mut self.term, &data);
+                processed_any = true;
+
+                // Check budget after processing (we always process at least one chunk)
+                if bytes_processed >= Self::DEFAULT_BYTES_PER_POLL {
+                    break;
+                }
+            }
+            TerminalEvent::PtyExited(_code) => {
+                processed_any = true;
+            }
+            TerminalEvent::PtyError(_) => {
+                processed_any = true;
+            }
+        }
+    }
+
+    // ... existing event_rx handling (DSR responses)
+
+    if processed_any {
+        self.clear_selection();
+        self.update_damage();
+        self.check_scrollback_overflow();
+    }
+
+    // Return whether more data may be pending
+    if bytes_processed >= Self::DEFAULT_BYTES_PER_POLL {
+        PollResult::MorePending
+    } else if processed_any {
+        PollResult::Processed
+    } else {
+        PollResult::Idle
+    }
+}
+```
+
+Location: `crates/terminal/src/terminal_buffer.rs`
+
+### Step 5: Define PollResult enum
+
+Create a return type that communicates both whether work was done and whether more work remains:
+
+```rust
+// Chunk: docs/chunks/terminal_flood_starvation - Byte-budgeted VTE processing
+/// Result of a `poll_events()` call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PollResult {
+    /// No events were available.
+    Idle,
+    /// Events were processed and the channel is now empty.
+    Processed,
+    /// Events were processed but more data may remain (budget exhausted).
+    /// Caller should schedule a follow-up wakeup.
+    MorePending,
+}
+```
+
+Location: `crates/terminal/src/terminal_buffer.rs` (or a new `poll_result.rs` if preferred)
+
+### Step 6: Update poll_standalone_terminals() to handle PollResult
+
+Modify `Workspace::poll_standalone_terminals()` to track whether any terminal has more pending data:
+
+```rust
+// Chunk: docs/chunks/terminal_flood_starvation - Schedule follow-up wakeup when budget exhausted
+pub fn poll_standalone_terminals(&mut self) -> (bool, bool) {
+    // Returns (had_events, needs_rewakeup)
+    let mut had_events = false;
+    let mut needs_rewakeup = false;
+
+    for pane in self.pane_root.all_panes_mut() {
+        for tab in &mut pane.tabs {
+            if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
+                let was_at_bottom = viewport.is_at_bottom(terminal.line_count());
+                let was_alt_screen = terminal.is_alt_screen();
+
+                let result = terminal.poll_events();
+
+                match result {
+                    PollResult::Processed | PollResult::MorePending => {
+                        had_events = true;
+                        if matches!(result, PollResult::MorePending) {
+                            needs_rewakeup = true;
+                        }
+                        // ... existing auto-follow logic
+                    }
+                    PollResult::Idle => {}
+                }
+            }
+        }
+    }
+
+    (had_events, needs_rewakeup)
+}
+```
+
+Location: `crates/editor/src/workspace.rs`
+
+### Step 7: Update poll_agents() to propagate needs_rewakeup
+
+Modify `EditorState::poll_agents()` to return whether a follow-up wakeup is needed:
+
+```rust
+// Chunk: docs/chunks/terminal_flood_starvation - Propagate needs_rewakeup
+pub fn poll_agents(&mut self) -> (DirtyRegion, bool) {
+    // Returns (dirty_region, needs_rewakeup)
+    let mut any_activity = false;
+    let mut any_needs_rewakeup = false;
+
+    for workspace in &mut self.editor.workspaces {
+        if workspace.poll_agent() {
+            any_activity = true;
+        }
+        let (had_events, needs_rewakeup) = workspace.poll_standalone_terminals();
+        if had_events {
+            any_activity = true;
+        }
+        if needs_rewakeup {
+            any_needs_rewakeup = true;
+        }
+    }
+
+    let dirty = if any_activity {
+        DirtyRegion::FullViewport
+    } else {
+        DirtyRegion::None
+    };
+
+    (dirty, any_needs_rewakeup)
+}
+```
+
+Location: `crates/editor/src/editor_state.rs`
+
+### Step 8: Schedule follow-up wakeup in drain loop
+
+When `poll_agents()` indicates more data is pending, send a `PtyWakeup` event to ensure the next drain cycle processes more data:
+
+```rust
+// Chunk: docs/chunks/terminal_flood_starvation - Follow-up wakeup scheduling
+fn handle_pty_wakeup(&mut self) {
+    let (terminal_dirty, needs_rewakeup) = self.state.poll_agents();
+    if terminal_dirty.is_dirty() {
+        self.state.dirty_region.merge(terminal_dirty);
+    }
+
+    // If any terminal hit its byte budget, schedule a follow-up wakeup
+    // so remaining data gets processed on the next cycle
+    if needs_rewakeup {
+        self.sender.send_pty_wakeup();
+    }
+}
+```
+
+This uses the existing `EventSender` to queue another `PtyWakeup`. Since the wakeup coalescing logic (`wakeup_pending` flag) already exists, multiple rapid wakeups won't flood the queue.
+
+Location: `crates/editor/src/drain_loop.rs`
+
+### Step 9: Add send_pty_wakeup method to EventSender
+
+Add a method to manually send a `PtyWakeup` event for follow-up scheduling:
+
+```rust
+// Chunk: docs/chunks/terminal_flood_starvation - Manual wakeup for budget overflow
+impl EventSender {
+    /// Sends a PtyWakeup event to process remaining terminal data.
+    /// Used when a terminal hits its byte budget and has more data pending.
+    pub fn send_pty_wakeup(&self) {
+        let _ = self.tx.send(EditorEvent::PtyWakeup);
+    }
+}
+```
+
+Location: `crates/editor/src/event_channel.rs`
+
+### Step 10: Write unit tests for event partitioning
+
+Test that input events are processed before PTY events regardless of arrival order:
+
+```rust
+#[test]
+fn test_input_events_processed_before_pty_wakeup() {
+    // Create events in order: PtyWakeup, Key, PtyWakeup, Mouse
+    // Verify processing order: Key, Mouse, PtyWakeup, PtyWakeup
+}
+
+#[test]
+fn test_resize_processed_before_pty_wakeup() {
+    // Resize is not "user input" but should still be prioritized
+}
+```
+
+Location: `crates/editor/src/drain_loop.rs` (test module)
+
+### Step 11: Write unit tests for byte-budgeted polling
+
+Test that `poll_events()` respects the byte budget:
+
+```rust
+#[test]
+fn test_poll_events_respects_byte_budget() {
+    // Queue 10KB of data
+    // First poll_events() returns MorePending after ~4KB
+    // Second poll_events() returns MorePending after ~4KB
+    // Third poll_events() returns Processed after ~2KB
+}
+
+#[test]
+fn test_poll_events_processes_at_least_one_chunk() {
+    // Even a single 8KB chunk is processed in one call
+    // (we always process at least one event)
+}
+```
+
+Location: `crates/terminal/src/terminal_buffer.rs` (test module)
+
+### Step 12: Write integration test for responsiveness under load
+
+Test the full drain loop behavior with simulated flooding:
+
+```rust
+#[test]
+fn test_input_responsive_during_pty_flood() {
+    // Start terminal with rapid output (e.g., yes command)
+    // Send key events during output
+    // Verify key events are processed promptly (within bounded time)
+}
+```
+
+Location: `crates/terminal/tests/flood_integration.rs` (new file)
+
+### Step 13: Update code_paths in GOAL.md
+
+Add the files touched by this implementation:
+- `crates/editor/src/drain_loop.rs`
+- `crates/editor/src/editor_event.rs`
+- `crates/editor/src/editor_state.rs`
+- `crates/editor/src/event_channel.rs`
+- `crates/editor/src/workspace.rs`
+- `crates/terminal/src/terminal_buffer.rs`
+
+Location: `docs/chunks/terminal_flood_starvation/GOAL.md`
 
 ---
 
 **BACKREFERENCE COMMENTS**
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+Add the following backreferences to modified code:
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
-
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
-
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+- `drain_loop.rs#process_pending_events`: `// Chunk: docs/chunks/terminal_flood_starvation - Input-first event partitioning`
+- `terminal_buffer.rs#poll_events`: `// Chunk: docs/chunks/terminal_flood_starvation - Byte-budgeted VTE processing`
+- `terminal_buffer.rs#PollResult`: `// Chunk: docs/chunks/terminal_flood_starvation - Byte-budgeted VTE processing`
+- `workspace.rs#poll_standalone_terminals`: `// Chunk: docs/chunks/terminal_flood_starvation - Needs rewakeup propagation`
+- `event_channel.rs#EventSender::send_pty_wakeup`: `// Chunk: docs/chunks/terminal_flood_starvation - Manual wakeup for budget overflow`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+No external dependencies. This chunk builds entirely on existing infrastructure:
+- The unified event channel (`EditorEvent`, `EventSender`, `EventReceiver`)
+- The drain loop pattern (`process_pending_events`)
+- The terminal buffer polling (`poll_events`, `poll_standalone_terminals`)
+- The PTY wakeup coalescing (`wakeup_pending` flag)
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Byte budget tuning**: The 4KB default is a reasonable starting point (matches the PTY read buffer size), but may need adjustment based on real-world testing. Too small = excessive wakeups and render churn. Too large = input latency spikes. The success criteria specify "within a perceptible timeframe (< 100ms)" which should be achievable with 4KB at reasonable VTE processing speeds.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Follow-up wakeup latency**: When we self-send a `PtyWakeup` event, it goes to the back of the event queue. With input-first partitioning, any pending input events will be processed before the follow-up. This is correct behavior (input takes priority) but means high-throughput terminal output may visually lag behind what's been received. This is acceptable—the success criteria state "normal terminal output renders without visible delay", not "instant."
+
+3. **Agent terminal polling**: The `poll_agent()` method (for workspace agents) is separate from `poll_standalone_terminals()`. The byte budget only applies to standalone terminals. If agent terminals experience similar flooding, they would need the same treatment. However, agents typically don't produce unbounded output like `yes` or continuous builds, so this may not be needed.
+
+4. **Wakeup coalescing interaction**: The existing `wakeup_pending` flag prevents redundant wakeups from the PTY reader thread. Our self-sent wakeup uses `EventSender::send_pty_wakeup()` which bypasses this flag. This is intentional—we want to guarantee a follow-up cycle when budget is exhausted, even if the reader thread has already signaled. But we should verify no infinite loop is possible (it shouldn't be, since we only send a follow-up when budget is exhausted AND more data exists).
+
+5. **DirtyRegion granularity**: Currently `poll_agents()` returns `FullViewport` if *any* terminal had activity. A future optimization could track which panes actually changed and return more granular dirty regions. This is out of scope for this chunk but would compound well with the budgeting—smaller dirty regions mean faster renders per cycle.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

@@ -12,7 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 use lite_edit_input::{Key, KeyEvent, Modifiers};
-use lite_edit_terminal::{BufferView, InputEncoder, TerminalBuffer, TerminalFocusTarget};
+use lite_edit_terminal::{BufferView, InputEncoder, PollResult, TerminalBuffer, TerminalFocusTarget};
 
 /// Helper to create a terminal with a shell.
 fn create_terminal_with_shell() -> (Rc<RefCell<TerminalBuffer>>, TerminalFocusTarget) {
@@ -326,7 +326,7 @@ fn test_paste_content_appears_after_poll() {
     // Poll for output with timeout
     let mut found = false;
     for _ in 0..50 {
-        if terminal.borrow_mut().poll_events() {
+        if matches!(terminal.borrow_mut().poll_events(), PollResult::Processed | PollResult::MorePending) {
             // Check if pasted text appears in buffer
             let term = terminal.borrow();
             for line in 0..term.line_count() {

@@ -342,11 +342,15 @@ impl AgentHandle {
     /// Polls PTY events and updates the state machine.
     ///
     /// Call this each frame. Returns true if any PTY output was processed.
+    // Chunk: docs/chunks/terminal_flood_starvation - Handle PollResult from poll_events
     pub fn poll(&mut self) -> bool {
+        use crate::terminal_buffer::PollResult;
+
         let now = Instant::now();
 
         // Poll for PTY events
-        let had_output = self.terminal.poll_events();
+        let result = self.terminal.poll_events();
+        let had_output = matches!(result, PollResult::Processed | PollResult::MorePending);
 
         // Update state machine based on what happened
         if had_output {

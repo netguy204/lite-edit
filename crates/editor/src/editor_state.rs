@@ -2502,27 +2502,37 @@ impl EditorState {
     /// 3. Update agent state machines (Running → NeedsInput → Stale)
     /// 4. Update workspace status indicators
     ///
-    /// Returns `DirtyRegion::FullViewport` if any agent or terminal had activity,
-    /// otherwise `DirtyRegion::None`.
+    /// Returns `(DirtyRegion, needs_rewakeup)`:
+    /// - `DirtyRegion::FullViewport` if any agent or terminal had activity
+    /// - `needs_rewakeup` is true if any terminal hit its byte budget and has more
+    ///   data pending (caller should schedule a follow-up wakeup)
     // Chunk: docs/chunks/terminal_tab_spawn - Poll standalone terminals
-    pub fn poll_agents(&mut self) -> DirtyRegion {
+    // Chunk: docs/chunks/terminal_flood_starvation - Propagate needs_rewakeup
+    pub fn poll_agents(&mut self) -> (DirtyRegion, bool) {
         let mut any_activity = false;
+        let mut any_needs_rewakeup = false;
 
         for workspace in &mut self.editor.workspaces {
             if workspace.poll_agent() {
                 any_activity = true;
             }
             // Chunk: docs/chunks/terminal_tab_spawn - Poll standalone terminals
-            if workspace.poll_standalone_terminals() {
+            let (had_events, needs_rewakeup) = workspace.poll_standalone_terminals();
+            if had_events {
                 any_activity = true;
+            }
+            if needs_rewakeup {
+                any_needs_rewakeup = true;
             }
         }
 
-        if any_activity {
+        let dirty = if any_activity {
             DirtyRegion::FullViewport
         } else {
             DirtyRegion::None
-        }
+        };
+
+        (dirty, any_needs_rewakeup)
     }
 
     /// Takes the dirty region, leaving `DirtyRegion::None` in its place.
@@ -7283,7 +7293,7 @@ mod tests {
         let mut found_dirty = false;
         for _ in 0..50 {
             std::thread::sleep(Duration::from_millis(20));
-            let dirty = state.poll_agents();
+            let (dirty, _needs_rewakeup) = state.poll_agents();
             if dirty.is_dirty() {
                 found_dirty = true;
                 break;

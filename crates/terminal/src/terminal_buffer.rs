@@ -45,6 +45,23 @@ use crate::pty::PtyHandle;
 use crate::pty_wakeup::PtyWakeup;
 use crate::style_convert::row_to_styled_line;
 
+// Chunk: docs/chunks/terminal_flood_starvation - Byte-budgeted VTE processing
+/// Result of a `poll_events()` call.
+///
+/// This enum communicates both whether work was done and whether more work
+/// remains, enabling the drain loop to schedule follow-up wakeups when
+/// byte budget is exhausted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PollResult {
+    /// No events were available.
+    Idle,
+    /// Events were processed and the channel is now empty.
+    Processed,
+    /// Events were processed but more data may remain (budget exhausted).
+    /// Caller should schedule a follow-up wakeup.
+    MorePending,
+}
+
 // Chunk: docs/chunks/tty_cursor_reporting - DSR/CPR event forwarding
 /// Event listener that captures terminal events and forwards them via a channel.
 ///
@@ -137,6 +154,19 @@ impl TerminalBuffer {
 
     /// Default page size for cold scrollback cache (lines per page).
     pub const DEFAULT_PAGE_SIZE: usize = 64;
+
+    // Chunk: docs/chunks/terminal_flood_starvation - Byte-budgeted VTE processing
+    /// Maximum bytes to process per `poll_events()` call.
+    ///
+    /// When this budget is exhausted, remaining data stays in the channel
+    /// and will be processed on the next wakeup cycle. This bounds the
+    /// wall-clock cost of a single drain cycle while ensuring all data is
+    /// eventually processed.
+    ///
+    /// The 4KB default matches the PTY read buffer size, ensuring roughly
+    /// one read's worth of data per poll cycle. This keeps input latency
+    /// well under 100ms even during terminal output floods.
+    pub const DEFAULT_BYTES_PER_POLL: usize = 4 * 1024; // 4KB
 
     /// Creates a new terminal buffer with the given dimensions.
     ///
@@ -265,26 +295,41 @@ impl TerminalBuffer {
         Ok(())
     }
 
-    /// Polls for and processes PTY events.
+    // Chunk: docs/chunks/terminal_flood_starvation - Byte-budgeted VTE processing
+    /// Polls for and processes PTY events with byte budgeting.
     ///
     /// This should be called regularly (e.g., each frame) to process
     /// PTY output and update the terminal state.
     ///
-    /// Returns true if any events were processed.
-    pub fn poll_events(&mut self) -> bool {
+    /// Returns a `PollResult` indicating:
+    /// - `Idle`: No events were available
+    /// - `Processed`: Events were processed and the channel is empty
+    /// - `MorePending`: Events were processed but byte budget was exhausted;
+    ///   caller should schedule a follow-up wakeup
+    ///
+    /// The byte budget ensures that processing a single terminal's output
+    /// doesn't starve other terminals or user input handling.
+    pub fn poll_events(&mut self) -> PollResult {
         let Some(ref pty) = self.pty else {
-            return false;
+            return PollResult::Idle;
         };
 
+        let mut bytes_processed: usize = 0;
         let mut processed_any = false;
 
-        // Drain all available events
+        // Drain events up to the byte budget
         while let Some(event) = pty.try_recv() {
             match event {
                 TerminalEvent::PtyOutput(data) => {
+                    bytes_processed += data.len();
                     // Feed bytes to the terminal emulator
                     self.processor.advance(&mut self.term, &data);
                     processed_any = true;
+
+                    // Check budget after processing (we always process at least one chunk)
+                    if bytes_processed >= Self::DEFAULT_BYTES_PER_POLL {
+                        break;
+                    }
                 }
                 TerminalEvent::PtyExited(_code) => {
                     // Process could handle this differently
@@ -332,7 +377,14 @@ impl TerminalBuffer {
             self.check_scrollback_overflow();
         }
 
-        processed_any
+        // Return whether more data may be pending
+        if bytes_processed >= Self::DEFAULT_BYTES_PER_POLL {
+            PollResult::MorePending
+        } else if processed_any {
+            PollResult::Processed
+        } else {
+            PollResult::Idle
+        }
     }
 
     /// Writes input data to the PTY stdin.
@@ -1126,5 +1178,44 @@ mod tests {
 
         // Sending should not panic, just silently fail
         sender.send_event(Event::PtyWrite("ignored".to_string()));
+    }
+
+    // Chunk: docs/chunks/terminal_flood_starvation - PollResult and byte budget tests
+
+    #[test]
+    fn test_poll_result_variants_exist() {
+        // Just verify the enum variants exist and can be matched
+        let idle = PollResult::Idle;
+        let processed = PollResult::Processed;
+        let more = PollResult::MorePending;
+
+        assert!(matches!(idle, PollResult::Idle));
+        assert!(matches!(processed, PollResult::Processed));
+        assert!(matches!(more, PollResult::MorePending));
+    }
+
+    #[test]
+    fn test_poll_result_equality() {
+        assert_eq!(PollResult::Idle, PollResult::Idle);
+        assert_eq!(PollResult::Processed, PollResult::Processed);
+        assert_eq!(PollResult::MorePending, PollResult::MorePending);
+        assert_ne!(PollResult::Idle, PollResult::Processed);
+        assert_ne!(PollResult::Processed, PollResult::MorePending);
+    }
+
+    #[test]
+    fn test_bytes_per_poll_constant_is_reasonable() {
+        // The byte budget should be at least 1KB to avoid excessive wakeup cycles
+        assert!(TerminalBuffer::DEFAULT_BYTES_PER_POLL >= 1024);
+        // And not more than 64KB to keep latency reasonable
+        assert!(TerminalBuffer::DEFAULT_BYTES_PER_POLL <= 64 * 1024);
+    }
+
+    #[test]
+    fn test_poll_events_no_pty_returns_idle() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+        // Without calling spawn_*, there's no PTY, so poll_events returns Idle
+        let result = terminal.poll_events();
+        assert_eq!(result, PollResult::Idle);
     }
 }

@@ -124,6 +124,27 @@ impl EventSender {
         result
     }
 
+    // Chunk: docs/chunks/terminal_flood_starvation - Manual wakeup for budget overflow
+    /// Sends a PTY wakeup event unconditionally, bypassing debouncing.
+    ///
+    /// This is called by the drain loop when a terminal hits its byte budget
+    /// and has more data pending. Unlike `send_pty_wakeup()`, this method:
+    /// - Does NOT check or modify the `wakeup_pending` flag
+    /// - Always sends an event to guarantee a follow-up cycle
+    ///
+    /// This is safe because:
+    /// 1. We only send a follow-up when budget is exhausted AND more data exists
+    /// 2. The drain loop will clear `wakeup_pending` after processing
+    /// 3. The follow-up ensures all PTY data is eventually processed
+    pub fn send_pty_wakeup_followup(&self) -> Result<(), SendError<EditorEvent>> {
+        let result = self.inner.sender.send(EditorEvent::PtyWakeup);
+
+        // Wake the run loop so it drains the channel
+        (self.inner.run_loop_waker)();
+
+        result
+    }
+
     /// Clears the wakeup pending flag.
     ///
     /// Called by the drain loop after processing a `PtyWakeup` event.
@@ -371,5 +392,73 @@ mod tests {
             }
             _ => panic!("Expected FileDrop event"),
         }
+    }
+
+    // Chunk: docs/chunks/terminal_flood_starvation - Tests for send_pty_wakeup_followup
+
+    #[test]
+    fn test_send_pty_wakeup_followup_bypasses_debouncing() {
+        let waker_called = Arc::new(AtomicUsize::new(0));
+        let waker_called_clone = waker_called.clone();
+
+        let (sender, receiver) = create_event_channel(move || {
+            waker_called_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        // First, send a regular wakeup which sets the pending flag
+        sender.send_pty_wakeup().unwrap();
+
+        // Now send a followup - this should bypass debouncing and send another event
+        sender.send_pty_wakeup_followup().unwrap();
+
+        // Both events should be in the channel
+        let mut count = 0;
+        while receiver.try_recv().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 2, "Both wakeup and followup should be sent");
+
+        // Waker should have been called twice
+        assert_eq!(waker_called.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn test_send_pty_wakeup_followup_does_not_affect_pending_flag() {
+        let (sender, receiver) = create_event_channel(|| {});
+
+        // Send followup first (no pending flag set)
+        sender.send_pty_wakeup_followup().unwrap();
+
+        // Now regular wakeup should still work (pending flag not affected by followup)
+        sender.send_pty_wakeup().unwrap();
+
+        // Both should be received
+        let mut count = 0;
+        while receiver.try_recv().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_send_pty_wakeup_followup_always_sends() {
+        let waker_called = Arc::new(AtomicUsize::new(0));
+        let waker_called_clone = waker_called.clone();
+
+        let (sender, receiver) = create_event_channel(move || {
+            waker_called_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        // Send multiple followups in a row - all should go through
+        sender.send_pty_wakeup_followup().unwrap();
+        sender.send_pty_wakeup_followup().unwrap();
+        sender.send_pty_wakeup_followup().unwrap();
+
+        let mut count = 0;
+        while receiver.try_recv().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 3, "All followup wakeups should be sent");
+        assert_eq!(waker_called.load(Ordering::SeqCst), 3);
     }
 }

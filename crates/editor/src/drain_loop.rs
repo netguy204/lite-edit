@@ -111,6 +111,7 @@ impl EventDrainLoop {
         &self.metal_view
     }
 
+    // Chunk: docs/chunks/terminal_flood_starvation - Input-first event partitioning
     /// Processes all pending events from the channel.
     ///
     /// This is the main entry point, called by the CFRunLoopSource callback.
@@ -123,6 +124,13 @@ impl EventDrainLoop {
     /// rendering. This ensures:
     /// - Latency fairness: no event is penalized by intermediate renders
     /// - Efficiency: rapid PTY output coalesces into one render
+    ///
+    /// # Input-First Partitioning
+    ///
+    /// Events are partitioned so priority events (user input, resize) are
+    /// processed before PTY wakeup events. This ensures input latency is
+    /// bounded by the cost of processing input events, not by accumulated
+    /// terminal output.
     pub fn process_pending_events(&mut self) {
         let mut had_pty_wakeup = false;
 
@@ -131,32 +139,21 @@ impl EventDrainLoop {
         // self to process each event. Collecting into a Vec separates the lifetimes.
         let events: Vec<EditorEvent> = self.receiver.drain().collect();
 
-        for event in events {
-            match event {
-                EditorEvent::Key(key_event) => {
-                    self.handle_key(key_event);
-                }
-                EditorEvent::Mouse(mouse_event) => {
-                    self.handle_mouse(mouse_event);
-                }
-                EditorEvent::Scroll(scroll_delta) => {
-                    self.handle_scroll(scroll_delta);
-                }
-                EditorEvent::PtyWakeup => {
-                    had_pty_wakeup = true;
-                    self.handle_pty_wakeup();
-                }
-                EditorEvent::CursorBlink => {
-                    self.handle_cursor_blink();
-                }
-                EditorEvent::Resize => {
-                    self.handle_resize();
-                }
-                // Chunk: docs/chunks/dragdrop_file_paste - File drop handling
-                EditorEvent::FileDrop(paths) => {
-                    self.handle_file_drop(paths);
-                }
-            }
+        // Partition: process priority events (user input, resize) first, then
+        // PTY wakeup and cursor blink events. This ensures input latency is
+        // never gated by accumulated terminal output.
+        let (priority_events, other_events): (Vec<_>, Vec<_>) = events
+            .into_iter()
+            .partition(|e| e.is_priority_event());
+
+        // Process priority events first (user input, resize)
+        for event in priority_events {
+            self.process_single_event(event, &mut had_pty_wakeup);
+        }
+
+        // Then process other events (PtyWakeup, CursorBlink)
+        for event in other_events {
+            self.process_single_event(event, &mut had_pty_wakeup);
         }
 
         // Clear the wakeup pending flag if we processed a PTY wakeup
@@ -166,6 +163,36 @@ impl EventDrainLoop {
 
         // Render once after processing all events
         self.render_if_dirty();
+    }
+
+    // Chunk: docs/chunks/terminal_flood_starvation - Single event processing
+    /// Processes a single event, updating the had_pty_wakeup flag as needed.
+    fn process_single_event(&mut self, event: EditorEvent, had_pty_wakeup: &mut bool) {
+        match event {
+            EditorEvent::Key(key_event) => {
+                self.handle_key(key_event);
+            }
+            EditorEvent::Mouse(mouse_event) => {
+                self.handle_mouse(mouse_event);
+            }
+            EditorEvent::Scroll(scroll_delta) => {
+                self.handle_scroll(scroll_delta);
+            }
+            EditorEvent::PtyWakeup => {
+                *had_pty_wakeup = true;
+                self.handle_pty_wakeup();
+            }
+            EditorEvent::CursorBlink => {
+                self.handle_cursor_blink();
+            }
+            EditorEvent::Resize => {
+                self.handle_resize();
+            }
+            // Chunk: docs/chunks/dragdrop_file_paste - File drop handling
+            EditorEvent::FileDrop(paths) => {
+                self.handle_file_drop(paths);
+            }
+        }
     }
 
     /// Handles a key event by forwarding to the editor state.
@@ -195,11 +222,24 @@ impl EventDrainLoop {
     }
 
     // Chunk: docs/chunks/terminal_pty_wakeup - Handler that polls agents when PTY data arrives
+    // Chunk: docs/chunks/terminal_flood_starvation - Follow-up wakeup scheduling
     /// Handles PTY wakeup by polling agents/terminals.
+    ///
+    /// When any terminal hits its byte budget, schedules a follow-up wakeup
+    /// to ensure remaining data is processed on the next cycle. This bounds
+    /// the wall-clock cost of a single drain cycle while ensuring all data
+    /// is eventually processed.
     fn handle_pty_wakeup(&mut self) {
-        let terminal_dirty = self.state.poll_agents();
+        let (terminal_dirty, needs_rewakeup) = self.state.poll_agents();
         if terminal_dirty.is_dirty() {
             self.state.dirty_region.merge(terminal_dirty);
+        }
+
+        // If any terminal hit its byte budget, schedule a follow-up wakeup
+        // so remaining data gets processed on the next cycle.
+        // This uses send_pty_wakeup_followup which bypasses debouncing.
+        if needs_rewakeup {
+            let _ = self.sender.send_pty_wakeup_followup();
         }
     }
 
@@ -212,9 +252,13 @@ impl EventDrainLoop {
         }
 
         // Also poll PTY events on timer tick (backup for any missed wakeups)
-        let terminal_dirty = self.state.poll_agents();
+        let (terminal_dirty, needs_rewakeup) = self.state.poll_agents();
         if terminal_dirty.is_dirty() {
             self.state.dirty_region.merge(terminal_dirty);
+        }
+        // Schedule follow-up if needed (same logic as handle_pty_wakeup)
+        if needs_rewakeup {
+            let _ = self.sender.send_pty_wakeup_followup();
         }
 
         // Check for picker streaming updates
@@ -248,9 +292,13 @@ impl EventDrainLoop {
 
     /// Polls PTY and picker after user input for responsive feedback.
     fn poll_after_input(&mut self) {
-        let terminal_dirty = self.state.poll_agents();
+        let (terminal_dirty, needs_rewakeup) = self.state.poll_agents();
         if terminal_dirty.is_dirty() {
             self.state.dirty_region.merge(terminal_dirty);
+        }
+        // Schedule follow-up if needed (same logic as handle_pty_wakeup)
+        if needs_rewakeup {
+            let _ = self.sender.send_pty_wakeup_followup();
         }
 
         let picker_dirty = self.state.tick_picker();

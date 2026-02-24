@@ -18,7 +18,8 @@ use crate::pane_layout::{gen_pane_id, Pane, PaneId, PaneLayoutNode};
 use crate::viewport::Viewport;
 use lite_edit_buffer::{BufferView, TextBuffer};
 use lite_edit_syntax::{LanguageRegistry, SyntaxHighlighter, SyntaxTheme};
-use lite_edit_terminal::{AgentConfig, AgentHandle, AgentState, TerminalBuffer};
+// Chunk: docs/chunks/terminal_flood_starvation - PollResult for byte-budgeted polling
+use lite_edit_terminal::{AgentConfig, AgentHandle, AgentState, PollResult, TerminalBuffer};
 
 // =============================================================================
 // ID Types
@@ -910,17 +911,23 @@ impl Workspace {
     // Chunk: docs/chunks/terminal_scrollback_viewport - Auto-follow on new output
     // Chunk: docs/chunks/tiling_workspace_integration - Iterate all panes
     // Chunk: docs/chunks/terminal_tab_spawn - Polls PTY events for all standalone terminal tabs
+    // Chunk: docs/chunks/terminal_flood_starvation - Needs rewakeup propagation
     /// Polls PTY events for all standalone terminal tabs across all panes.
     ///
     /// This method also handles auto-follow behavior: when the viewport is at
     /// the bottom before polling, new output will advance the viewport to keep
     /// showing the latest content.
     ///
-    /// Returns true if any terminal had output.
-    pub fn poll_standalone_terminals(&mut self) -> bool {
+    /// Returns `(had_events, needs_rewakeup)`:
+    /// - `had_events`: true if any terminal had output
+    /// - `needs_rewakeup`: true if any terminal hit its byte budget and has more
+    ///   data pending (caller should schedule a follow-up wakeup)
+    pub fn poll_standalone_terminals(&mut self) -> (bool, bool) {
         use lite_edit_buffer::BufferView;
 
         let mut had_events = false;
+        let mut needs_rewakeup = false;
+
         for pane in self.pane_root.all_panes_mut() {
             for tab in &mut pane.tabs {
                 if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
@@ -929,25 +936,33 @@ impl Workspace {
                     let was_at_bottom = viewport.is_at_bottom(terminal.line_count());
                     let was_alt_screen = terminal.is_alt_screen();
 
-                    if terminal.poll_events() {
-                        had_events = true;
+                    let result = terminal.poll_events();
 
-                        // Auto-follow behavior: if we were at bottom and in primary screen,
-                        // advance the viewport to show new content
-                        let now_alt_screen = terminal.is_alt_screen();
+                    match result {
+                        PollResult::Processed | PollResult::MorePending => {
+                            had_events = true;
+                            if matches!(result, PollResult::MorePending) {
+                                needs_rewakeup = true;
+                            }
 
-                        // Handle mode transition: alt -> primary means snap to bottom
-                        if was_alt_screen && !now_alt_screen {
-                            viewport.scroll_to_bottom(terminal.line_count());
-                        } else if !now_alt_screen && was_at_bottom {
-                            // Primary screen auto-follow
-                            viewport.scroll_to_bottom(terminal.line_count());
+                            // Auto-follow behavior: if we were at bottom and in primary screen,
+                            // advance the viewport to show new content
+                            let now_alt_screen = terminal.is_alt_screen();
+
+                            // Handle mode transition: alt -> primary means snap to bottom
+                            if was_alt_screen && !now_alt_screen {
+                                viewport.scroll_to_bottom(terminal.line_count());
+                            } else if !now_alt_screen && was_at_bottom {
+                                // Primary screen auto-follow
+                                viewport.scroll_to_bottom(terminal.line_count());
+                            }
                         }
+                        PollResult::Idle => {}
                     }
                 }
             }
         }
-        had_events
+        (had_events, needs_rewakeup)
     }
 }
 

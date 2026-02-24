@@ -8,7 +8,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use lite_edit_terminal::{BufferView, TerminalBuffer};
+use lite_edit_terminal::{BufferView, PollResult, TerminalBuffer};
 
 /// Test that spawning a shell and running echo produces visible output.
 #[test]
@@ -318,7 +318,7 @@ fn test_shell_prompt_appears() {
     // Poll until we see a prompt ($ or #)
     let mut attempts = 0;
     while attempts < 100 {
-        if terminal.poll_events() {
+        if matches!(terminal.poll_events(), PollResult::Processed | PollResult::MorePending) {
             for line in 0..terminal.line_count() {
                 if let Some(styled) = terminal.styled_line(line) {
                     let text: String = styled.spans.iter().map(|s| &s.text[..]).collect();
@@ -353,7 +353,7 @@ fn test_pty_input_output_roundtrip() {
     // Poll until we see output (with timeout)
     let mut attempts = 0;
     while attempts < 50 {
-        if terminal.poll_events() {
+        if matches!(terminal.poll_events(), PollResult::Processed | PollResult::MorePending) {
             // Check if "hello" appears in the buffer
             for line in 0..terminal.line_count() {
                 if let Some(styled) = terminal.styled_line(line) {
@@ -904,16 +904,16 @@ fn test_shell_produces_content_after_poll() {
 /// This validates the dirty tracking mechanism that the editor uses to determine
 /// whether a re-render is needed after terminal creation.
 #[test]
-fn test_poll_events_returns_true_on_output() {
+fn test_poll_events_returns_processed_on_output() {
     let mut terminal = TerminalBuffer::new(80, 24, 1000);
     terminal.spawn_shell(Path::new("/tmp")).unwrap();
 
     // The shell should produce output (prompt) shortly after spawning.
-    // Poll until we get true from poll_events.
+    // Poll until we get Processed/MorePending from poll_events.
     let mut got_output = false;
     for _ in 0..50 {
         std::thread::sleep(Duration::from_millis(20));
-        if terminal.poll_events() {
+        if matches!(terminal.poll_events(), PollResult::Processed | PollResult::MorePending) {
             got_output = true;
             break;
         }
@@ -921,7 +921,7 @@ fn test_poll_events_returns_true_on_output() {
 
     assert!(
         got_output,
-        "poll_events should return true when shell produces output"
+        "poll_events should return Processed/MorePending when shell produces output"
     );
 }
 

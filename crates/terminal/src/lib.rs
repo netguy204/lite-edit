@@ -89,7 +89,8 @@ pub use input_encoder::InputEncoder;
 pub use pty_wakeup::{set_global_wakeup_callback, PtyWakeup};
 // Re-export WakeupSignal trait for use by editor crate
 pub use lite_edit_input::WakeupSignal;
-pub use terminal_buffer::TerminalBuffer;
+// Chunk: docs/chunks/terminal_flood_starvation - Byte-budgeted VTE processing
+pub use terminal_buffer::{PollResult, TerminalBuffer};
 // Chunk: docs/chunks/terminal_scrollback_viewport - Terminal scroll action result
 pub use terminal_target::{ScrollAction, TerminalFocusTarget};
 
