@@ -1,18 +1,44 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
-code_references: []
+code_paths:
+- crates/editor/Cargo.toml
+- crates/editor/src/font.rs
+- crates/editor/src/glyph_atlas.rs
+- crates/editor/src/glyph_buffer.rs
+code_references:
+  - ref: crates/editor/src/font.rs#Font::glyph_for_char
+    implements: "Non-BMP character support via UTF-16 surrogate pairs - enables glyph lookup for characters above U+FFFF"
+  - ref: crates/editor/src/font.rs#tests::test_non_bmp_characters_with_surrogate_pairs
+    implements: "Test for non-BMP character surrogate pair handling"
+  - ref: crates/editor/src/font.rs#tests::test_non_bmp_egyptian_hieroglyphs
+    implements: "Test for Egyptian hieroglyph rendering (U+131DD, U+131DF, U+131DE)"
+  - ref: crates/editor/src/glyph_atlas.rs#tests::test_non_bmp_character_handling
+    implements: "Test for non-BMP character atlas integration"
+  - ref: crates/editor/src/glyph_atlas.rs#tests::test_non_bmp_hieroglyphs
+    implements: "Test for non-BMP hieroglyph atlas integration"
+  - ref: crates/editor/src/glyph_buffer.rs
+    implements: "Width-aware column positioning using unicode-width crate for CJK and wide characters"
+  - ref: crates/editor/src/glyph_buffer.rs#tests::test_unicode_width_cjk_characters
+    implements: "Test verifying CJK characters have width 2"
+  - ref: crates/editor/src/glyph_buffer.rs#tests::test_span_width_calculation
+    implements: "Test for width-aware span width calculation"
+  - ref: crates/editor/src/glyph_buffer.rs#tests::test_column_position_tracking
+    implements: "Test for correct column advancement with mixed-width characters"
+  - ref: crates/editor/Cargo.toml
+    implements: "Added unicode-width dependency for character display width calculation"
 narrative: null
 investigation: null
-subsystems: []
+subsystems:
+- subsystem_id: renderer
+  relationship: implements
 friction_entries: []
 bug_type: semantic
 depends_on: []
-created_after: ["terminal_flood_starvation"]
+created_after:
+- terminal_flood_starvation
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
