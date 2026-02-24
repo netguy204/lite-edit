@@ -2741,7 +2741,13 @@ impl EditorState {
     /// label is derived from the directory name.
     ///
     /// If the user cancels the dialog, no workspace is created.
+    ///
+    /// For the first workspace of a session (startup workspace via `add_startup_workspace`),
+    /// an empty file tab is created to show the welcome screen. For subsequent workspaces
+    /// created via this method, a terminal tab is spawned instead, giving experienced
+    /// users immediate shell access in the project directory.
     // Chunk: docs/chunks/workspace_dir_picker - Directory picker for new workspaces
+    // Chunk: docs/chunks/workspace_initial_terminal - Terminal tab for subsequent workspaces
     pub fn new_workspace(&mut self) {
         // Show directory picker dialog
         let selected_dir = match dir_picker::pick_directory() {
@@ -2755,8 +2761,20 @@ impl EditorState {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "workspace".to_string());
 
-        // Create the workspace with the selected directory
-        self.editor.new_workspace(label, selected_dir);
+        // Check if this is a subsequent workspace (not the startup workspace).
+        // If at least one workspace already exists, we create a terminal tab instead
+        // of an empty file tab, giving experienced users immediate shell access.
+        let is_subsequent = self.editor.workspace_count() >= 1;
+
+        if is_subsequent {
+            // Subsequent workspaces get a terminal tab instead of empty file tab
+            self.editor.new_workspace_without_tab(label, selected_dir);
+            self.new_terminal_tab();
+        } else {
+            // First workspace gets empty file tab (for welcome screen)
+            self.editor.new_workspace(label, selected_dir);
+        }
+
         self.dirty_region.merge(DirtyRegion::FullViewport);
     }
 
@@ -4687,8 +4705,11 @@ mod tests {
 
     #[test]
     fn test_new_workspace_with_selection_creates_workspace() {
+        use crate::workspace::TabKind;
+
         let mut state = EditorState::empty(test_font_metrics());
         state.update_viewport_size(160.0);
+        state.update_viewport_dimensions(800.0, 600.0); // Need dimensions for terminal sizing
 
         assert_eq!(state.editor.workspace_count(), 1);
 
@@ -4702,6 +4723,14 @@ mod tests {
         assert_eq!(state.editor.active_workspace, 1);
         // Should be dirty
         assert!(state.is_dirty());
+
+        // Chunk: docs/chunks/workspace_initial_terminal - Second workspace gets terminal tab
+        // The new workspace should have a terminal tab, not an empty file tab
+        let workspace = state.editor.active_workspace().unwrap();
+        assert_eq!(workspace.tab_count(), 1);
+        let tab = workspace.active_tab().unwrap();
+        assert_eq!(tab.kind, TabKind::Terminal);
+        assert_eq!(tab.label, "Terminal");
     }
 
     #[test]
@@ -4729,6 +4758,102 @@ mod tests {
 
         let workspace = state.editor.active_workspace().unwrap();
         assert_eq!(workspace.root_path, PathBuf::from("/specific/path"));
+    }
+
+    // =========================================================================
+    // Workspace Initial Terminal Tests (Chunk: docs/chunks/workspace_initial_terminal)
+    // =========================================================================
+
+    #[test]
+    fn test_startup_workspace_has_empty_file_tab() {
+        use crate::workspace::TabKind;
+
+        let mut state = EditorState::new_deferred(test_font_metrics());
+
+        // Simulate startup workspace creation (first workspace of session)
+        // Must be done before update_viewport_size since that requires an active workspace
+        state.add_startup_workspace(PathBuf::from("/startup/project"));
+
+        state.update_viewport_size(160.0);
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Should have exactly 1 workspace
+        assert_eq!(state.editor.workspace_count(), 1);
+
+        // The startup workspace should have exactly 1 tab
+        let workspace = state.editor.active_workspace().unwrap();
+        assert_eq!(workspace.tab_count(), 1);
+
+        // The tab should be a File type (for welcome screen)
+        let tab = workspace.active_tab().unwrap();
+        assert_eq!(tab.kind, TabKind::File);
+
+        // The buffer should be empty (welcome screen state)
+        // An empty file buffer has 1 line with length 0
+        assert_eq!(tab.buffer().line_count(), 1);
+        assert_eq!(tab.buffer().line_len(0), 0);
+    }
+
+    #[test]
+    fn test_second_workspace_has_terminal_tab() {
+        use crate::workspace::TabKind;
+
+        let mut state = EditorState::new_deferred(test_font_metrics());
+
+        // Create startup workspace first (must be done before viewport updates)
+        state.add_startup_workspace(PathBuf::from("/startup/project"));
+        assert_eq!(state.editor.workspace_count(), 1);
+
+        state.update_viewport_size(160.0);
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Create a second workspace via directory picker
+        dir_picker::mock_set_next_directory(Some(PathBuf::from("/second/project")));
+        state.new_workspace();
+
+        // Should now have 2 workspaces
+        assert_eq!(state.editor.workspace_count(), 2);
+
+        // Should be switched to the new workspace
+        assert_eq!(state.editor.active_workspace, 1);
+
+        // The new workspace should have exactly 1 tab
+        let workspace = state.editor.active_workspace().unwrap();
+        assert_eq!(workspace.tab_count(), 1);
+
+        // The tab should be a Terminal type
+        let tab = workspace.active_tab().unwrap();
+        assert_eq!(tab.kind, TabKind::Terminal);
+
+        // The terminal tab label should be "Terminal"
+        assert_eq!(tab.label, "Terminal");
+    }
+
+    #[test]
+    fn test_second_workspace_terminal_uses_workspace_root_path() {
+        use crate::workspace::TabKind;
+
+        let mut state = EditorState::new_deferred(test_font_metrics());
+
+        // Create startup workspace first (must be done before viewport updates)
+        state.add_startup_workspace(PathBuf::from("/startup/project"));
+
+        state.update_viewport_size(160.0);
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Create a second workspace with a specific root_path
+        let expected_root = PathBuf::from("/specific/root/path");
+        dir_picker::mock_set_next_directory(Some(expected_root.clone()));
+        state.new_workspace();
+
+        // The workspace should have the expected root_path
+        let workspace = state.editor.active_workspace().unwrap();
+        assert_eq!(workspace.root_path, expected_root);
+
+        // The terminal should have been spawned in this directory
+        // (new_terminal_tab() uses workspace's root_path as cwd)
+        let tab = workspace.active_tab().unwrap();
+        assert_eq!(tab.kind, TabKind::Terminal);
     }
 
     #[test]

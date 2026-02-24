@@ -1063,6 +1063,16 @@ impl Editor {
         ws_id
     }
 
+    // Chunk: docs/chunks/workspace_initial_terminal - Terminal tab for subsequent workspaces
+    /// Creates a new workspace without any initial tabs and switches to it.
+    ///
+    /// Returns the ID of the new workspace.
+    pub fn new_workspace_without_tab(&mut self, label: String, root_path: PathBuf) -> WorkspaceId {
+        let ws_id = self.new_workspace_internal(label, root_path, false);
+        self.active_workspace = self.workspaces.len() - 1;
+        ws_id
+    }
+
     /// Closes the workspace at the given index.
     ///
     /// Returns the removed workspace, or `None` if the index is invalid or
