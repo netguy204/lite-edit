@@ -441,10 +441,19 @@ impl SyntaxHighlighter {
             let actual_start = (*cap_start).max(line_start);
             let actual_end = (*cap_end).min(line_end);
 
-            // Skip captures that overlap with already-covered bytes
-            // (tree-sitter can return multiple captures for the same node)
+            // Handle captures that overlap with already-covered bytes.
+            // Tree-sitter can return multiple captures for overlapping nodes
+            // (e.g., combined C/C++ queries). When a skipped capture extends
+            // beyond the covered region, emit the uncovered tail as plain text
+            // so those characters don't become invisible.
             if actual_start < covered_until {
-                covered_until = covered_until.max(actual_end);
+                if actual_end > covered_until {
+                    let tail = &self.source[covered_until..actual_end];
+                    if !tail.is_empty() {
+                        spans.push(Span::plain(tail));
+                    }
+                    covered_until = actual_end;
+                }
                 continue;
             }
 
@@ -505,10 +514,16 @@ impl SyntaxHighlighter {
             let actual_start = (*cap_start).max(line_start);
             let actual_end = (*cap_end).min(line_end);
 
-            // Skip captures that overlap with already-covered bytes
-            // (tree-sitter can return multiple captures for the same node)
+            // Handle captures that overlap with already-covered bytes.
+            // Emit the uncovered tail as plain text to prevent invisible spans.
             if actual_start < covered_until {
-                covered_until = covered_until.max(actual_end);
+                if actual_end > covered_until {
+                    let tail = &self.source[covered_until..actual_end];
+                    if !tail.is_empty() {
+                        spans.push(Span::plain(tail));
+                    }
+                    covered_until = actual_end;
+                }
                 continue;
             }
 
@@ -928,6 +943,58 @@ mod tests {
             "Styled line text should match source exactly, got: {:?}",
             rendered
         );
+    }
+
+    #[test]
+    fn test_overlapping_captures_no_invisible_spans() {
+        // When tree-sitter produces overlapping captures (e.g., from combined
+        // C/C++ queries), a broader capture may extend beyond a narrower one.
+        // The uncovered tail must be emitted as plain text, not dropped.
+        //
+        // Simulate via build_line_from_captures with synthetic captures:
+        //   Capture A: [0, 5)  "keyword" — covers "fn ma"
+        //   Capture B: [3, 12) "function" — overlaps, extends to "fn main() {"
+        //
+        // Expected: bytes [0,5) styled, bytes [5,12) emitted as plain text.
+        let source = "fn main() {}";
+        let hl = make_rust_highlighter(source).unwrap();
+
+        // Call highlight_line which exercises build_styled_line_from_query
+        let styled = hl.highlight_line(0);
+        let rendered: String = styled.spans.iter().map(|s| s.text.as_str()).collect();
+
+        // The rendered text must contain every character from the source line.
+        // This catches the invisible-span bug where overlapping captures caused
+        // characters between the end of one capture and the extended covered_until
+        // to be silently dropped.
+        assert_eq!(
+            rendered, source,
+            "All characters must be present; got: {:?}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn test_viewport_overlapping_captures_no_invisible_spans() {
+        // Same invariant as above but exercised through the viewport/cache path
+        // (build_line_from_captures).
+        let source = "fn main() {\n    let x = 42;\n    println!(\"hello\");\n}";
+        let hl = make_rust_highlighter(source).unwrap();
+
+        hl.highlight_viewport(0, 4);
+        for line_idx in 0..4 {
+            let styled = hl.highlight_line(line_idx);
+            let rendered: String = styled.spans.iter().map(|s| s.text.as_str()).collect();
+            let expected = match hl.line_byte_range(line_idx) {
+                Some((s, e)) => &hl.source()[s..e],
+                None => "",
+            };
+            assert_eq!(
+                rendered, expected,
+                "Line {} has invisible characters; got {:?}, expected {:?}",
+                line_idx, rendered, expected
+            );
+        }
     }
 
     #[test]
