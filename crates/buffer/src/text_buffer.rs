@@ -752,6 +752,7 @@ impl TextBuffer {
     }
 
     // Chunk: docs/chunks/delete_backward_word - Alt+Backspace word deletion
+    // Chunk: docs/chunks/delete_backward_word - Character-class based backward word deletion
     /// Deletes backward by one word (Alt+Backspace).
     ///
     /// The word boundary rule is character-class based:

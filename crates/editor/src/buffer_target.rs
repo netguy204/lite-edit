@@ -2,6 +2,7 @@
 // Chunk: docs/chunks/mouse_click_cursor - Mouse click cursor positioning
 // Chunk: docs/chunks/viewport_scrolling - Scroll event handling
 // Chunk: docs/chunks/line_wrap_rendering - Wrap-aware hit-testing
+// Chunk: docs/chunks/viewport_emacs_navigation - Emacs navigation and page up/down
 //!
 //! Buffer focus target implementation.
 //!
@@ -98,6 +99,11 @@ enum Command {
     // Chunk: docs/chunks/clipboard_cut - Cut command variant
     /// Cut selection to clipboard (Cmd+X)
     Cut,
+    // Chunk: docs/chunks/viewport_emacs_navigation - Page Up/Down navigation
+    /// Scroll viewport and cursor up by one page
+    PageUp,
+    /// Scroll viewport and cursor down by one page
+    PageDown,
 }
 
 /// Resolves a key event to a command.
@@ -225,6 +231,20 @@ fn resolve_command(event: &KeyEvent) -> Option<Command> {
         // Chunk: docs/chunks/kill_line - Ctrl+K key binding resolution to DeleteToLineEnd
         // Ctrl+K → kill line (delete to end of line)
         Key::Char('k') if mods.control && !mods.command => Some(Command::DeleteToLineEnd),
+
+        // Chunk: docs/chunks/viewport_emacs_navigation - Page Up/Down and Emacs navigation bindings
+        // Page Up / Page Down → scroll by viewport height
+        Key::PageUp => Some(Command::PageUp),
+        Key::PageDown => Some(Command::PageDown),
+
+        // Ctrl+V → page down (Emacs scroll-up-command: content scrolls up, view moves down)
+        Key::Char('v') if mods.control && !mods.command => Some(Command::PageDown),
+
+        // Ctrl+F → forward-char (move cursor right)
+        Key::Char('f') if mods.control && !mods.command => Some(Command::MoveRight),
+
+        // Ctrl+B → backward-char (move cursor left)
+        Key::Char('b') if mods.control && !mods.command => Some(Command::MoveLeft),
 
         // Unhandled
         _ => None,
@@ -395,6 +415,90 @@ impl BufferFocusTarget {
                     ctx.mark_dirty(dirty);
                     ctx.ensure_cursor_visible();
                 }
+                return;
+            }
+            // Chunk: docs/chunks/viewport_emacs_navigation - Page Up/Down command execution
+            Command::PageUp => {
+                // Get page size from viewport (number of screen rows visible)
+                let page_size = ctx.viewport.visible_lines();
+                if page_size == 0 {
+                    return;
+                }
+
+                // Get current cursor position and preserve column
+                let cursor = ctx.buffer.cursor_position();
+                let current_col = cursor.col;
+
+                // Calculate new line, clamped to buffer bounds
+                let new_line = cursor.line.saturating_sub(page_size);
+
+                // Move cursor to new position, clamping column to line length
+                let line_len = ctx.buffer.line_len(new_line);
+                let new_col = current_col.min(line_len);
+                ctx.buffer.set_cursor(Position::new(new_line, new_col));
+
+                // Scroll viewport up by page_size lines (in pixels)
+                let line_height = ctx.viewport.line_height();
+                let scroll_delta = page_size as f32 * line_height;
+                let current_offset = ctx.viewport.scroll_offset_px();
+                let new_offset = (current_offset - scroll_delta).max(0.0);
+
+                // Use wrap-aware clamping for scroll bounds
+                let line_count = ctx.buffer.line_count();
+                let wrap_layout = ctx.wrap_layout();
+                ctx.viewport.set_scroll_offset_px_wrapped(
+                    new_offset,
+                    line_count,
+                    &wrap_layout,
+                    |line| ctx.buffer.line_len(line),
+                );
+
+                // Mark full viewport dirty
+                ctx.dirty_region
+                    .merge(crate::dirty_region::DirtyRegion::FullViewport);
+                ctx.ensure_cursor_visible();
+                return;
+            }
+            Command::PageDown => {
+                // Get page size from viewport (number of screen rows visible)
+                let page_size = ctx.viewport.visible_lines();
+                if page_size == 0 {
+                    return;
+                }
+
+                // Get current cursor position and preserve column
+                let cursor = ctx.buffer.cursor_position();
+                let current_col = cursor.col;
+
+                // Calculate new line, clamped to buffer bounds
+                let last_line = ctx.buffer.line_count().saturating_sub(1);
+                let new_line = (cursor.line + page_size).min(last_line);
+
+                // Move cursor to new position, clamping column to line length
+                let line_len = ctx.buffer.line_len(new_line);
+                let new_col = current_col.min(line_len);
+                ctx.buffer.set_cursor(Position::new(new_line, new_col));
+
+                // Scroll viewport down by page_size lines (in pixels)
+                let line_height = ctx.viewport.line_height();
+                let scroll_delta = page_size as f32 * line_height;
+                let current_offset = ctx.viewport.scroll_offset_px();
+                let new_offset = current_offset + scroll_delta;
+
+                // Use wrap-aware clamping for scroll bounds
+                let line_count = ctx.buffer.line_count();
+                let wrap_layout = ctx.wrap_layout();
+                ctx.viewport.set_scroll_offset_px_wrapped(
+                    new_offset,
+                    line_count,
+                    &wrap_layout,
+                    |line| ctx.buffer.line_len(line),
+                );
+
+                // Mark full viewport dirty
+                ctx.dirty_region
+                    .merge(crate::dirty_region::DirtyRegion::FullViewport);
+                ctx.ensure_cursor_visible();
                 return;
             }
         };
@@ -4596,6 +4700,435 @@ mod tests {
              Renderer: {}, Click handler: {}",
             fixed_renderer_layout.cols_per_row(),
             click_handler_layout.cols_per_row()
+        );
+    }
+
+    // =====================================================
+    // Tests for viewport_emacs_navigation chunk
+    // =====================================================
+
+    // --- Keybinding resolution tests ---
+
+    #[test]
+    fn test_page_up_resolves_to_page_up_command() {
+        let event = KeyEvent::new(Key::PageUp, Modifiers::default());
+        assert_eq!(resolve_command(&event), Some(Command::PageUp));
+    }
+
+    #[test]
+    fn test_page_down_resolves_to_page_down_command() {
+        let event = KeyEvent::new(Key::PageDown, Modifiers::default());
+        assert_eq!(resolve_command(&event), Some(Command::PageDown));
+    }
+
+    #[test]
+    fn test_ctrl_v_resolves_to_page_down() {
+        let event = KeyEvent::new(
+            Key::Char('v'),
+            Modifiers {
+                control: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(resolve_command(&event), Some(Command::PageDown));
+    }
+
+    #[test]
+    fn test_ctrl_f_resolves_to_move_right() {
+        let event = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                control: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(resolve_command(&event), Some(Command::MoveRight));
+    }
+
+    #[test]
+    fn test_ctrl_b_resolves_to_move_left() {
+        let event = KeyEvent::new(
+            Key::Char('b'),
+            Modifiers {
+                control: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(resolve_command(&event), Some(Command::MoveLeft));
+    }
+
+    #[test]
+    fn test_cmd_v_resolves_to_paste_not_page_down() {
+        // Ensure Cmd+V still maps to Paste, not PageDown
+        let event = KeyEvent::new(
+            Key::Char('v'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(resolve_command(&event), Some(Command::Paste));
+    }
+
+    // --- Behavior tests ---
+
+    #[test]
+    fn test_ctrl_f_moves_cursor_right() {
+        let mut buffer = TextBuffer::from_str("hello");
+        buffer.set_cursor(Position::new(0, 0));
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0, 100);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+                800.0,
+            );
+            let event = KeyEvent::new(
+                Key::Char('f'),
+                Modifiers {
+                    control: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(0, 1));
+    }
+
+    #[test]
+    fn test_ctrl_b_moves_cursor_left() {
+        let mut buffer = TextBuffer::from_str("hello");
+        buffer.set_cursor(Position::new(0, 3));
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0, 100);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+                800.0,
+            );
+            let event = KeyEvent::new(
+                Key::Char('b'),
+                Modifiers {
+                    control: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        assert_eq!(buffer.cursor_position(), Position::new(0, 2));
+    }
+
+    #[test]
+    fn test_page_down_moves_cursor_by_visible_lines() {
+        // Create a buffer with 20 lines
+        let content = (0..20).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let mut buffer = TextBuffer::from_str(&content);
+        buffer.set_cursor(Position::new(0, 0));
+
+        // Create viewport showing 10 lines (160px height / 16px line height = 10 lines)
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0, 100);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        let visible_lines = viewport.visible_lines();
+        assert_eq!(visible_lines, 10, "Viewport should show 10 lines");
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+                800.0,
+            );
+            let event = KeyEvent::new(Key::PageDown, Modifiers::default());
+            target.handle_key(event, &mut ctx);
+        }
+
+        // Cursor should move down by visible_lines (10 lines)
+        assert_eq!(buffer.cursor_position(), Position::new(10, 0));
+    }
+
+    #[test]
+    fn test_page_up_moves_cursor_by_visible_lines() {
+        // Create a buffer with 20 lines
+        let content = (0..20).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let mut buffer = TextBuffer::from_str(&content);
+        buffer.set_cursor(Position::new(15, 0)); // Start at line 15
+
+        // Create viewport showing 10 lines
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0, 100);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+                800.0,
+            );
+            let event = KeyEvent::new(Key::PageUp, Modifiers::default());
+            target.handle_key(event, &mut ctx);
+        }
+
+        // Cursor should move up by visible_lines (10 lines): 15 - 10 = 5
+        assert_eq!(buffer.cursor_position(), Position::new(5, 0));
+    }
+
+    #[test]
+    fn test_page_down_clamps_to_last_line() {
+        // Create a buffer with 15 lines
+        let content = (0..15).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let mut buffer = TextBuffer::from_str(&content);
+        buffer.set_cursor(Position::new(10, 0)); // Start at line 10
+
+        // Create viewport showing 10 lines
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0, 100);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+                800.0,
+            );
+            let event = KeyEvent::new(Key::PageDown, Modifiers::default());
+            target.handle_key(event, &mut ctx);
+        }
+
+        // Cursor should be clamped to last line (14): min(10 + 10, 14) = 14
+        assert_eq!(buffer.cursor_position(), Position::new(14, 0));
+    }
+
+    #[test]
+    fn test_page_up_clamps_to_first_line() {
+        // Create a buffer with 20 lines
+        let content = (0..20).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let mut buffer = TextBuffer::from_str(&content);
+        buffer.set_cursor(Position::new(5, 0)); // Start at line 5
+
+        // Create viewport showing 10 lines
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0, 100);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+                800.0,
+            );
+            let event = KeyEvent::new(Key::PageUp, Modifiers::default());
+            target.handle_key(event, &mut ctx);
+        }
+
+        // Cursor should be clamped to first line (0): max(5 - 10, 0) = 0
+        assert_eq!(buffer.cursor_position(), Position::new(0, 0));
+    }
+
+    #[test]
+    fn test_ctrl_v_behaves_like_page_down() {
+        // Create a buffer with 20 lines
+        let content = (0..20).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let mut buffer = TextBuffer::from_str(&content);
+        buffer.set_cursor(Position::new(0, 0));
+
+        // Create viewport showing 10 lines
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0, 100);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+                800.0,
+            );
+            let event = KeyEvent::new(
+                Key::Char('v'),
+                Modifiers {
+                    control: true,
+                    ..Default::default()
+                },
+            );
+            target.handle_key(event, &mut ctx);
+        }
+
+        // Ctrl+V should behave exactly like Page Down
+        assert_eq!(buffer.cursor_position(), Position::new(10, 0));
+    }
+
+    #[test]
+    fn test_page_down_preserves_column() {
+        // Create a buffer with lines of varying lengths
+        let content = "Line 0 - long line with content\nShort\nLine 2 - another long line";
+        let mut buffer = TextBuffer::from_str(content);
+        buffer.set_cursor(Position::new(0, 15)); // Start at column 15
+
+        // Create viewport showing 2 lines
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(32.0, 100); // Only 2 visible lines
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                32.0,
+                800.0,
+            );
+            let event = KeyEvent::new(Key::PageDown, Modifiers::default());
+            target.handle_key(event, &mut ctx);
+        }
+
+        // Should move to line 2, but column should be clamped to line length
+        let cursor = buffer.cursor_position();
+        assert_eq!(cursor.line, 2, "Should be on line 2");
+        // Line 2 has length 26, so column 15 should be preserved
+        assert_eq!(cursor.col, 15, "Column should be preserved when line is long enough");
+    }
+
+    #[test]
+    fn test_page_down_clamps_column_on_short_line() {
+        // Create a buffer with lines of varying lengths
+        let content = "Line 0 - very long line with lots of content here\nABC";
+        let mut buffer = TextBuffer::from_str(content);
+        buffer.set_cursor(Position::new(0, 25)); // Start at column 25
+
+        // Create viewport showing 1 line so PageDown moves to next line
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(16.0, 100); // Only 1 visible line
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                16.0,
+                800.0,
+            );
+            let event = KeyEvent::new(Key::PageDown, Modifiers::default());
+            target.handle_key(event, &mut ctx);
+        }
+
+        // Should move to line 1, but column should be clamped to line length (3)
+        let cursor = buffer.cursor_position();
+        assert_eq!(cursor.line, 1, "Should be on line 1");
+        assert_eq!(cursor.col, 3, "Column should be clamped to line length");
+    }
+
+    #[test]
+    fn test_page_down_scrolls_viewport() {
+        // Create a buffer with 30 lines
+        let content = (0..30).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let mut buffer = TextBuffer::from_str(&content);
+        buffer.set_cursor(Position::new(0, 0));
+
+        // Create viewport showing 10 lines
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0, 100);
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        let initial_offset = viewport.scroll_offset_px();
+        assert_eq!(initial_offset, 0.0, "Should start at top");
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+                800.0,
+            );
+            let event = KeyEvent::new(Key::PageDown, Modifiers::default());
+            target.handle_key(event, &mut ctx);
+        }
+
+        // Viewport should have scrolled down by 10 lines (10 * 16 = 160 pixels)
+        // Note: ensure_cursor_visible may further adjust, but we should be past 0
+        assert!(
+            viewport.scroll_offset_px() > 0.0,
+            "Viewport should have scrolled down"
+        );
+    }
+
+    #[test]
+    fn test_page_up_scrolls_viewport() {
+        // Create a buffer with 30 lines
+        let content = (0..30).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let mut buffer = TextBuffer::from_str(&content);
+        buffer.set_cursor(Position::new(20, 0)); // Start at line 20
+
+        // Create viewport showing 10 lines, scrolled down
+        let mut viewport = Viewport::new(16.0);
+        viewport.update_size(160.0, 100);
+        viewport.set_scroll_offset_px(320.0, 30); // Scroll down 20 lines worth
+        let mut dirty = DirtyRegion::None;
+        let mut target = BufferFocusTarget::new();
+
+        let initial_offset = viewport.scroll_offset_px();
+        assert!(initial_offset > 0.0, "Should start scrolled down");
+
+        {
+            let mut ctx = EditorContext::new(
+                &mut buffer,
+                &mut viewport,
+                &mut dirty,
+                test_font_metrics(),
+                160.0,
+                800.0,
+            );
+            let event = KeyEvent::new(Key::PageUp, Modifiers::default());
+            target.handle_key(event, &mut ctx);
+        }
+
+        // Viewport should have scrolled up (offset should be less)
+        assert!(
+            viewport.scroll_offset_px() < initial_offset,
+            "Viewport should have scrolled up"
         );
     }
 }
