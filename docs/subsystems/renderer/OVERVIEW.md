@@ -48,6 +48,8 @@ chunks:
   relationship: implements
 - chunk_id: terminal_background_box_drawing
   relationship: implements
+- chunk_id: terminal_multibyte_rendering
+  relationship: implements
 created_after:
 - viewport_scroll
 ---
@@ -189,6 +191,7 @@ Many editor chunks implement rendering features within this subsystem:
 - **renderer_polymorphic_buffer**: Refactored renderer to accept `BufferView` trait instead of owning buffer copies
 - **selector_list_clipping**: Added scissor rect clipping for selector item lists to prevent bleed into query area
 - **terminal_background_box_drawing**: Implemented on-demand glyph addition for terminal rendering
+- **terminal_multibyte_rendering**: Added non-BMP character support via UTF-16 surrogate pairs and width-aware column positioning for CJK/wide characters
 
 ## Known Deviations
 

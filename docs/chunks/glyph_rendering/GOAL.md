@@ -13,7 +13,6 @@ code_paths:
   - crates/editor/src/shader.rs
   - crates/editor/shaders/glyph.metal
   - crates/editor/tests/smoke_test.rs
-  - crates/editor/tests/glyph_layout_test.rs
 code_references:
   - ref: crates/editor/src/font.rs#Font
     implements: "Core Text font loading and metrics extraction (advance width, line height, ascent, descent)"
