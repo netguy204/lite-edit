@@ -496,6 +496,17 @@ impl Viewport {
     where
         F: Fn(usize) -> usize,
     {
+        // Chunk: docs/chunks/cursor_blink_stall - Guard against zero visible lines
+        // Handle uninitialized or degenerate viewport (no visible lines).
+        // Return FullViewport as the safe conservative choice — a repaint will
+        // happen, which is correct behavior even if slightly inefficient.
+        // Without this guard, the check `line_start >= visible_end` becomes true
+        // for ALL positions when visible_end == first_visible, incorrectly
+        // classifying visible cursor positions as "below viewport" => None.
+        if self.visible_lines() == 0 {
+            return DirtyRegion::FullViewport;
+        }
+
         let first_visible_screen_row = self.first_visible_screen_row();
         let visible_screen_rows = self.visible_lines();
         let visible_end_screen_row = first_visible_screen_row + visible_screen_rows;
@@ -600,6 +611,13 @@ impl Viewport {
         dirty: &DirtyLines,
         buffer_line_count: usize,
     ) -> DirtyRegion {
+        // Chunk: docs/chunks/cursor_blink_stall - Guard against zero visible lines
+        // Same rationale as dirty_lines_to_region_wrapped: return FullViewport
+        // for degenerate/uninitialized viewports to prevent false None returns.
+        if self.visible_lines() == 0 {
+            return DirtyRegion::FullViewport;
+        }
+
         let first_line = self.first_visible_line();
         let visible_start = first_line;
         let visible_end = (first_line + self.visible_lines()).min(buffer_line_count);
@@ -2447,5 +2465,69 @@ mod tests {
         vp.update_size(1280.0, 100);
         // After update_size, scroll offset should be clamped
         assert_eq!(vp.first_visible_line(), 20); // 320 / 16 = 20
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/cursor_blink_stall - Zero visible lines edge case tests
+    // =========================================================================
+
+    #[test]
+    fn test_dirty_lines_to_region_wrapped_zero_visible_lines() {
+        // Test: When visible_lines() == 0 (viewport never sized), dirty region
+        // should return FullViewport, not None. This is the root cause of the
+        // cursor blink stall bug: the boundary check `line_start >= visible_end`
+        // becomes true for ALL positions when visible_end == first_visible,
+        // incorrectly classifying visible cursor positions as "below viewport."
+
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(640.0, &crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        // Create viewport without calling update_size() - visible_lines() == 0
+        let vp = Viewport::new(16.0);
+        assert_eq!(vp.visible_lines(), 0, "Test precondition: viewport should have 0 visible lines");
+
+        let line_lens = vec![80; 10]; // 10 buffer lines, each 80 chars = 1 screen row
+        let line_count = line_lens.len();
+
+        // With visible_lines() == 0:
+        // - visible_end_screen_row == first_visible_screen_row (both 0)
+        // - line 0's screen row (0) >= visible_end_screen_row (0) => "below viewport" => None
+        // This is WRONG - the cursor IS on screen, we just don't know the viewport size yet.
+        // The fix: return FullViewport when visible_lines() == 0.
+        let region = vp.dirty_lines_to_region_wrapped(
+            &DirtyLines::Single(0),
+            line_count,
+            &wrap_layout,
+            |line| line_lens[line],
+        );
+
+        assert_eq!(
+            region,
+            DirtyRegion::FullViewport,
+            "Zero visible lines should return FullViewport (degenerate viewport)"
+        );
+    }
+
+    #[test]
+    fn test_dirty_lines_to_region_zero_visible_lines() {
+        // Non-wrapped version: same logic should apply
+
+        // Create viewport without calling update_size() - visible_lines() == 0
+        let vp = Viewport::new(16.0);
+        assert_eq!(vp.visible_lines(), 0, "Test precondition: viewport should have 0 visible lines");
+
+        let region = vp.dirty_lines_to_region(&DirtyLines::Single(0), 100);
+
+        assert_eq!(
+            region,
+            DirtyRegion::FullViewport,
+            "Zero visible lines should return FullViewport (degenerate viewport)"
+        );
     }
 }

@@ -8,170 +8,175 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The cursor blink stall occurs when `dirty_lines_to_region_wrapped()` returns `DirtyRegion::None` even though the cursor is on screen. The root cause is a boundary condition: when `visible_lines() == 0`, the check `line_start_screen_row >= visible_end_screen_row` becomes true for ALL positions (since `visible_end_screen_row == first_visible_screen_row`), causing the method to incorrectly classify visible cursor positions as "below the viewport."
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**When `visible_lines() == 0`:**
+- `visible_end_screen_row = first_visible_screen_row + 0 = first_visible_screen_row`
+- Any cursor at or after `first_visible_screen_row` satisfies `>= visible_end_screen_row`
+- Result: `DirtyRegion::None` even when the cursor IS visible
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+This condition can occur when:
+1. The viewport has never had `update_size()` called (initial state)
+2. `sync_pane_viewports()` early-returns because `view_width == 0.0 || view_height == 0.0`
+3. A tab switch activates a tab whose viewport was never sized
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/cursor_blink_stall/GOAL.md)
-with references to the files that you expect to touch.
--->
+**The fix**: In `dirty_lines_to_region_wrapped()`, treat `visible_lines() == 0` as an uninitialized or degenerate viewport state and return `DirtyRegion::FullViewport`. This is safe because:
+- It's the correct conservative choice (ensures repaint)
+- It matches the existing `FullViewport` behavior used for scroll events
+- The performance cost is negligible (one extra branch, only hit in the degenerate case)
+
+Additionally, investigate whether the viewport initialization path has a gap that allows this state to persist, and add a guard in `cursor_dirty_region()` as defense-in-depth.
+
+**Testing approach** (per TESTING_PHILOSOPHY.md):
+- Write failing tests first that reproduce the bug: create a viewport with `visible_lines() == 0`, verify that `dirty_lines_to_region_wrapped()` incorrectly returns `None`, then fix and verify it returns `FullViewport`.
+- Add regression test for the cursor dirty region method.
+- Verify the fix doesn't break existing tests that rely on correct `None` returns for out-of-viewport regions.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+- **docs/subsystems/viewport_scroll** (DOCUMENTED): This chunk USES the viewport_scroll subsystem. The fix will be in `Viewport::dirty_lines_to_region_wrapped()`, which is a core method of this subsystem. The change is consistent with subsystem invariant #4: "DirtyRegion::merge is associative and commutative with None as identity. FullViewport absorbs everything." Using `FullViewport` as a fallback for the degenerate case is the safe, consistent choice.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No deviations from subsystem patterns discovered — the bug is a missing edge case, not a pattern violation.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing test for zero-visible-lines edge case
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add a test to `crates/editor/src/viewport.rs` that reproduces the bug:
 
-Example:
+1. Create a `Viewport` with `line_height > 0` but never call `update_size()` (so `visible_lines() == 0`)
+2. Create a `WrapLayout` and a simple line length function
+3. Call `dirty_lines_to_region_wrapped()` with `DirtyLines::Single(0)`
+4. Assert that the result is `DirtyRegion::FullViewport` (currently fails, returns `None`)
 
-### Step 1: Define the SegmentHeader struct
+This test verifies the fix for the zero-visible-lines edge case.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Location: `crates/editor/src/viewport.rs` test module
 
-Location: src/segment/format.rs
+### Step 2: Fix `dirty_lines_to_region_wrapped` to handle zero visible lines
 
-### Step 2: Implement header serialization
+At the start of `dirty_lines_to_region_wrapped()`, add a guard:
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+// Handle uninitialized or degenerate viewport (no visible lines)
+// Return FullViewport as the safe conservative choice — a repaint will
+// happen, which is correct behavior even if slightly inefficient.
+if self.visible_lines() == 0 {
+    return DirtyRegion::FullViewport;
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+This goes before the `match dirty` statement, after the `visible_end_screen_row` computation (or at the very start, before any computation, since we're returning early).
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Location: `crates/editor/src/viewport.rs`, method `dirty_lines_to_region_wrapped`
 
-## Dependencies
+### Step 3: Add chunk backreference comment
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+Add a chunk backreference at the guard to document why this case exists:
 
-If there are no dependencies, delete this section.
--->
+```rust
+// Chunk: docs/chunks/cursor_blink_stall - Guard against zero visible lines
+if self.visible_lines() == 0 {
+    return DirtyRegion::FullViewport;
+}
+```
+
+Location: `crates/editor/src/viewport.rs`
+
+### Step 4: Verify existing tests still pass
+
+Run the existing dirty region tests to ensure the fix doesn't break valid behavior:
+
+```bash
+cargo test -p lite-edit-editor dirty_lines
+cargo test -p lite-edit-editor viewport
+```
+
+The existing tests use properly-initialized viewports with `visible_lines() > 0`, so they should continue to pass.
+
+### Step 5: Add defense-in-depth guard in `cursor_dirty_region`
+
+In `EditorState::cursor_dirty_region()`, add a fallback that returns `FullViewport` if the viewport's `visible_lines()` is 0. This provides defense-in-depth even if the viewport method fix is bypassed somehow:
+
+```rust
+fn cursor_dirty_region(&self) -> DirtyRegion {
+    if let Some(buffer) = self.try_buffer() {
+        // Defense-in-depth: if viewport not properly sized, force full repaint
+        // Chunk: docs/chunks/cursor_blink_stall - Defense against uninitialized viewport
+        if self.viewport().visible_lines() == 0 {
+            return DirtyRegion::FullViewport;
+        }
+
+        // ... existing wrap-aware conversion code ...
+    } else {
+        DirtyRegion::FullViewport
+    }
+}
+```
+
+Location: `crates/editor/src/editor_state.rs`, method `cursor_dirty_region`
+
+### Step 6: Add test for cursor_dirty_region with uninitialized viewport
+
+Add a test in `editor_state.rs` that:
+
+1. Creates an `EditorState` with a buffer but without calling `update_viewport_size()`
+2. Calls `cursor_dirty_region()`
+3. Asserts the result is `DirtyRegion::FullViewport`
+
+This verifies the defense-in-depth works.
+
+Location: `crates/editor/src/editor_state.rs` test module
+
+### Step 7: Investigate viewport initialization gap (optional investigation)
+
+Examine the code paths that lead to cursor blinking without viewport sizing:
+
+1. Trace from app startup to first blink timer event
+2. Check if there's a window where `toggle_cursor_blink()` can be called before `update_viewport_size()` or `sync_pane_viewports()`
+3. If found, document the initialization gap and consider whether to add an initialization guard
+
+This step is optional — the fix already handles the symptom. Understanding the root cause is valuable for preventing similar bugs but may not reveal actionable fixes.
+
+Location: Analysis of `crates/editor/src/drain_loop.rs` and `crates/editor/src/editor_state.rs`
+
+### Step 8: Update GOAL.md code_paths
+
+Update the chunk's GOAL.md to list the files touched:
+
+```yaml
+code_paths:
+  - crates/editor/src/viewport.rs
+  - crates/editor/src/editor_state.rs
+```
+
+Location: `docs/chunks/cursor_blink_stall/GOAL.md`
+
+### Step 9: Run full test suite and manual verification
+
+1. Run all editor tests: `cargo test -p lite-edit-editor`
+2. Build and run the app: `cargo run`
+3. Open a file, wait for cursor blink to stabilize
+4. Verify cursor continues blinking normally
+5. Try edge cases: window resize, tab switch, opening selector (Cmd+P) then canceling
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Root cause vs symptom**: The fix handles the symptom (`visible_lines() == 0` causing wrong dirty region) but doesn't prevent the state from occurring. The initialization gap (if any) remains. This is acceptable because:
+   - The fix is safe (FullViewport is always correct, just potentially inefficient)
+   - The degenerate state is rare (only during initialization edge cases)
+   - Fixing initialization ordering may have broader implications
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Performance**: Returning `FullViewport` when `visible_lines() == 0` could cause unnecessary full repaints during app startup before the viewport is sized. This is likely imperceptible since:
+   - It only happens during a brief initialization window
+   - The app isn't rendering much content yet anyway
+
+3. **Other callers of `dirty_lines_to_region_wrapped`**: The `EditorContext::mark_dirty()` method also calls this. Verify that callers can handle `FullViewport` correctly (they should, since it's a valid return value).
+
+4. **Non-file tabs**: `cursor_dirty_region()` already returns `FullViewport` for terminal tabs, so this fix is consistent with that pattern.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

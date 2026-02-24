@@ -1,8 +1,10 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/editor/src/viewport.rs
+  - crates/editor/src/editor_state.rs
 code_references: []
 narrative: null
 investigation: null
@@ -10,9 +12,12 @@ subsystems: []
 friction_entries: []
 bug_type: implementation
 depends_on: []
-created_after: ["dialog_pointer_cursor", "file_open_picker", "pane_cursor_click_offset", "pane_tabs_interaction"]
+created_after:
+- dialog_pointer_cursor
+- file_open_picker
+- pane_cursor_click_offset
+- pane_tabs_interaction
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

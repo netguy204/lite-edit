@@ -2619,9 +2619,17 @@ impl EditorState {
     /// This uses wrap-aware conversion to correctly handle soft line wrapping,
     /// where buffer line indices can be much smaller than screen row indices.
     // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
+    // Chunk: docs/chunks/cursor_blink_stall - Defense-in-depth for uninitialized viewport
     fn cursor_dirty_region(&self) -> DirtyRegion {
         // For terminal tabs, return FullViewport since the cursor is part of the grid.
         if let Some(buffer) = self.try_buffer() {
+            // Defense-in-depth: if viewport not properly sized, force full repaint.
+            // This guards against the cursor blink stall bug even if
+            // dirty_lines_to_region_wrapped's guard is somehow bypassed.
+            if self.viewport().visible_lines() == 0 {
+                return DirtyRegion::FullViewport;
+            }
+
             let cursor_line = buffer.cursor_position().line;
             let line_count = buffer.line_count();
 
@@ -3463,6 +3471,38 @@ mod tests {
         // Toggle should keep cursor visible
         state.toggle_cursor_blink();
         assert!(state.cursor_visible);
+    }
+
+    /// Regression test: cursor blink stall bug.
+    /// When viewport has never been sized (visible_lines == 0), toggle_cursor_blink()
+    /// must still return a dirty region that triggers repaint. Without this fix,
+    /// cursor_dirty_region() would return None (via dirty_lines_to_region_wrapped's
+    /// boundary check bug), causing the cursor to freeze.
+    // Chunk: docs/chunks/cursor_blink_stall - Regression test for cursor blink stall
+    #[test]
+    fn test_toggle_cursor_blink_uninitialized_viewport_returns_dirty() {
+        let mut state = EditorState::empty(test_font_metrics());
+        // Deliberately do NOT call update_viewport_size() - viewport has visible_lines == 0
+        assert_eq!(
+            state.viewport().visible_lines(),
+            0,
+            "Test precondition: viewport should have 0 visible lines"
+        );
+
+        // Set last_keystroke to the past so blink toggle actually toggles
+        state.last_keystroke = Instant::now() - Duration::from_secs(1);
+
+        // Toggle cursor blink should return FullViewport, not None
+        let dirty = state.toggle_cursor_blink();
+        assert!(
+            dirty.is_dirty(),
+            "Cursor blink should return dirty region even with uninitialized viewport"
+        );
+        assert_eq!(
+            dirty,
+            DirtyRegion::FullViewport,
+            "Uninitialized viewport should return FullViewport"
+        );
     }
 
     #[test]
