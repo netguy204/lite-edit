@@ -21,7 +21,7 @@
     <key>CFBundleIconFile</key>
     <string>LiteEdit</string>
 
-    <!-- Version strings (match Cargo.toml version) -->
+    <!-- Version strings (auto-updated from Cargo.toml during bundle) -->
     <key>CFBundleVersion</key>
     <string>0.1.0</string>
 

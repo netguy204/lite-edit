@@ -102,10 +102,17 @@ echo "Verifying notarization..."
 # Verify with spctl (Gatekeeper)
 spctl --assess --type exec --verbose "$APP_DIR"
 
+# Recreate the ZIP now that the notarization ticket is stapled.
+# The earlier ZIP was created pre-staple for submission to Apple.
+# This final ZIP is the one suitable for distribution.
+echo ""
+echo "Creating distribution ZIP (with stapled ticket)..."
+rm -f "$ZIP_FILE"
+ditto -c -k --keepParent "$APP_DIR" "$ZIP_FILE"
+echo "  Distribution ZIP: $ZIP_FILE"
+
 echo ""
 echo "Notarization complete!"
 echo ""
 echo "The app is now ready for distribution: $APP_DIR"
-
-# Clean up ZIP (optional, keep for reference)
-# rm -f "$ZIP_FILE"
+echo "Distribution ZIP: $ZIP_FILE"

@@ -59,9 +59,37 @@ echo "  Copying font..."
 cp "${PROJECT_ROOT}/resources/IntelOneMono-Regular.ttf" "$RESOURCES_DIR/IntelOneMono-Regular.ttf"
 cp "${PROJECT_ROOT}/resources/OFL.txt" "$RESOURCES_DIR/OFL.txt"
 
-# Copy Info.plist
+# Copy Info.plist with version from Cargo.toml
 echo "  Copying Info.plist..."
-cp "$INFO_PLIST" "$CONTENTS_DIR/Info.plist"
+
+# Extract version from Cargo.toml (prefer workspace.package.version)
+VERSION=$(grep -A 5 "workspace.package" "$PROJECT_ROOT/Cargo.toml" | grep "version" | sed 's/.*"\(.*\)".*/\1/')
+
+# Fallback to root package version if workspace.package not found
+if [[ -z "$VERSION" ]]; then
+    VERSION=$(grep "^version = " "$PROJECT_ROOT/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+fi
+
+# Default to 0.0.0 if still empty
+if [[ -z "$VERSION" ]]; then
+    VERSION="0.0.0"
+    echo "  Warning: Could not extract version, using default: $VERSION"
+else
+    echo "  Using version from Cargo.toml: $VERSION"
+fi
+
+# Update version in Info.plist for CFBundleVersion and CFBundleShortVersionString
+while IFS= read -r line; do
+    if echo "$line" | grep -q "CFBundleVersion</key>"; then
+        echo "$line"
+    elif echo "$line" | grep -q "CFBundleShortVersionString</key>"; then
+        echo "$line"
+    elif echo "$line" | grep -Eq "^[[:space:]]*<string>[0-9]+\.[0-9]+\.[0-9]+</string>$"; then
+        echo "    <string>$VERSION</string>"
+    else
+        echo "$line"
+    fi
+done < "$INFO_PLIST" > "$CONTENTS_DIR/Info.plist"
 
 # Create PkgInfo (standard macOS bundle file)
 echo "  Creating PkgInfo..."
