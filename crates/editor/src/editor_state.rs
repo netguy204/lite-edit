@@ -601,6 +601,51 @@ impl EditorState {
         }
     }
 
+    // Chunk: docs/chunks/vsplit_scroll - Pane content dimensions helper
+    /// Returns the content dimensions (height, width) for a specific pane.
+    ///
+    /// This is used by scroll handlers to create an `EditorContext` with the
+    /// correct pane-local dimensions rather than full-window dimensions. Without
+    /// this, scroll clamping in split panes would use incorrect wrap calculations.
+    ///
+    /// # Arguments
+    ///
+    /// * `pane_id` - The ID of the pane to look up
+    ///
+    /// # Returns
+    ///
+    /// `Some((content_height, content_width))` if the pane is found, `None` otherwise.
+    /// The content height is the pane height minus the tab bar height.
+    fn get_pane_content_dimensions(&self, pane_id: PaneId) -> Option<(f32, f32)> {
+        use crate::pane_layout::calculate_pane_rects;
+
+        // Skip if view dimensions haven't been set yet
+        if self.view_width == 0.0 || self.view_height == 0.0 {
+            return None;
+        }
+
+        let workspace = self.editor.active_workspace()?;
+
+        // Calculate content area (excludes left rail)
+        let content_width = self.view_width - RAIL_WIDTH;
+        let content_height = self.view_height;
+        let bounds = (0.0, 0.0, content_width, content_height);
+
+        // Calculate pane rects and find the target pane
+        let pane_rects = calculate_pane_rects(bounds, &workspace.pane_root);
+
+        for pane_rect in pane_rects {
+            if pane_rect.pane_id == pane_id {
+                // Pane content height excludes the tab bar
+                let pane_content_height = pane_rect.height - TAB_BAR_HEIGHT;
+                let pane_content_width = pane_rect.width;
+                return Some((pane_content_height, pane_content_width));
+            }
+        }
+
+        None
+    }
+
     /// Handles a key event by forwarding to the active focus target.
     ///
     /// This records the keystroke time (for cursor blink reset) and
@@ -2109,7 +2154,15 @@ impl EditorState {
 
     /// Scrolls the tab in the specified pane without changing focus.
     // Chunk: docs/chunks/pane_hover_scroll - Pane-targeted scroll execution
+    // Chunk: docs/chunks/vsplit_scroll - Use pane-specific dimensions for scroll clamping
     fn scroll_pane(&mut self, target_pane_id: crate::pane_layout::PaneId, delta: ScrollDelta) {
+        // Chunk: docs/chunks/vsplit_scroll - Get pane-specific dimensions before borrowing workspace.
+        // Using full-window dimensions here causes scroll clamping to use incorrect wrap
+        // calculations in split panes, preventing scrolling to the end of long files.
+        let (content_height, content_width) = self
+            .get_pane_content_dimensions(target_pane_id)
+            .unwrap_or((self.view_height - TAB_BAR_HEIGHT, self.view_width - RAIL_WIDTH));
+
         // Get the target pane's active tab
         let ws = match self.editor.active_workspace_mut() {
             Some(ws) => ws,
@@ -2150,9 +2203,6 @@ impl EditorState {
             // In Buffer or FindInFile mode, scroll the buffer
             // Create context and forward to focus target
             let font_metrics = self.font_metrics;
-            // Chunk: docs/chunks/content_tab_bar - Use content area dimensions
-            let content_height = self.view_height - TAB_BAR_HEIGHT;
-            let content_width = self.view_width - RAIL_WIDTH;
 
             let mut ctx = EditorContext::new(
                 buffer,
@@ -7671,6 +7721,276 @@ mod tests {
             first_visible <= 30,
             "Scroll should be at most 30 after shrink (got {})",
             first_visible
+        );
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/vsplit_scroll - Vertical split scroll bounds tests
+    // =========================================================================
+
+    /// Regression test: After a vertical split, scroll_pane should use pane-specific
+    /// dimensions for scroll bound clamping, not full-window dimensions.
+    ///
+    /// Bug: When scrolling in a vertical split pane, the EditorContext was created
+    /// with full-window height instead of pane height. This caused the WrapLayout
+    /// to underestimate total screen rows for wrapped content, resulting in a max
+    /// scroll offset that was too low to reach the end of the document.
+    #[test]
+    fn test_vsplit_scroll_uses_pane_dimensions() {
+        use crate::pane_layout::SplitDirection;
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        // Window: 800x600 total
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Get workspace
+        let ws = state.editor.active_workspace_mut().unwrap();
+        let ws_id = ws.id;
+
+        // Create a pane with 100 lines of content (enough to require scrolling)
+        let mut pane1 = Pane::new(1, ws_id);
+        let line_height = test_font_metrics().line_height as f32;
+        let mut tab1 = crate::workspace::Tab::empty_file(100, line_height);
+        if let Some(buf) = tab1.as_text_buffer_mut() {
+            for i in 0..100 {
+                buf.insert_str(&format!("Line number {}\n", i));
+            }
+            buf.set_cursor(lite_edit_buffer::Position::new(0, 0));
+        }
+        pane1.add_tab(tab1);
+
+        // Create a second pane
+        let mut pane2 = Pane::new(2, ws_id);
+        let tab2 = crate::workspace::Tab::empty_file(101, line_height);
+        pane2.add_tab(tab2);
+
+        // Create vertical split (pane1 top, pane2 bottom)
+        ws.pane_root = PaneLayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(PaneLayoutNode::Leaf(pane1)),
+            second: Box::new(PaneLayoutNode::Leaf(pane2)),
+        };
+        ws.active_pane_id = 1;
+
+        // Sync viewports after constructing the split
+        state.sync_pane_viewports();
+
+        // Calculate expected dimensions
+        // Content area: (800 - RAIL_WIDTH) x 600 = 744 x 600
+        // Pane height: 600 * 0.5 = 300
+        // Pane content height: 300 - TAB_BAR_HEIGHT = 268
+        let pane_height = 600.0 * 0.5;
+        let expected_content_height = pane_height - TAB_BAR_HEIGHT;
+        let expected_visible_lines = (expected_content_height / line_height).floor() as usize;
+
+        // Verify the helper returns correct pane dimensions
+        let dims = state.get_pane_content_dimensions(1);
+        assert!(dims.is_some(), "Should find pane 1 dimensions");
+        let (content_height, _content_width) = dims.unwrap();
+        assert!(
+            (content_height - expected_content_height).abs() < 0.01,
+            "Content height should be {} but got {}",
+            expected_content_height,
+            content_height
+        );
+
+        // Get line count for scroll calculations
+        let line_count = {
+            let ws = state.editor.active_workspace().unwrap();
+            let pane = ws.pane_root.get_pane(1).unwrap();
+            let tab = pane.active_tab().unwrap();
+            tab.as_text_buffer().unwrap().line_count()
+        };
+
+        // Calculate max scroll position based on pane content height
+        // max_scroll_line = line_count - visible_lines
+        let max_scroll_line = line_count.saturating_sub(expected_visible_lines);
+
+        // Try to scroll to the end of the document
+        // Create a large scroll delta that should take us to max position
+        let large_scroll_px = (line_count as f64) * (line_height as f64);
+        state.handle_scroll(ScrollDelta::new(0.0, large_scroll_px));
+
+        // The viewport should be scrolled to near the max position
+        let ws = state.editor.active_workspace().unwrap();
+        let pane = ws.pane_root.get_pane(1).unwrap();
+        let tab = pane.active_tab().unwrap();
+        let first_visible = tab.viewport.first_visible_line();
+
+        // With the fix, we should be able to reach near the end.
+        // The bug was that first_visible would be much smaller than max_scroll_line
+        // because the scroll was clamped using wrong (full-window) dimensions.
+        assert!(
+            first_visible >= max_scroll_line.saturating_sub(1),
+            "Should be able to scroll to line {} (max), but got line {}. \
+             This indicates scroll_pane may be using full-window dimensions instead of pane dimensions.",
+            max_scroll_line,
+            first_visible
+        );
+    }
+
+    /// Regression test: In a horizontal split (side-by-side panes), lines wrap more
+    /// in the narrower panes. The scroll clamping must use the pane's width to
+    /// compute wrap layout correctly.
+    ///
+    /// Bug: When scrolling in a horizontal split pane, the WrapLayout was created
+    /// with full-window width, causing it to underestimate how many screen rows
+    /// would result from line wrapping in the narrower pane.
+    #[test]
+    fn test_hsplit_scroll_uses_pane_width_for_wrap() {
+        use crate::left_rail::RAIL_WIDTH;
+        use crate::pane_layout::SplitDirection;
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let metrics = test_font_metrics();
+        let mut state = EditorState::empty(metrics);
+        // Window: 800x600 total
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        let line_height = metrics.line_height as f32;
+        let advance_width = metrics.advance_width as f32;
+
+        // Content area: (800 - RAIL_WIDTH) x 600
+        let content_width = 800.0 - RAIL_WIDTH;
+
+        // Get workspace
+        let ws = state.editor.active_workspace_mut().unwrap();
+        let ws_id = ws.id;
+
+        // Create a pane with lines that are 100 chars long
+        // These lines WILL wrap in a narrow pane but WON'T wrap in a full-width pane
+        let mut pane1 = Pane::new(1, ws_id);
+        let mut tab1 = crate::workspace::Tab::empty_file(100, line_height);
+        if let Some(buf) = tab1.as_text_buffer_mut() {
+            // Create 20 lines, each 100 characters long
+            for i in 0..20 {
+                let line = format!("{:0>100}\n", i); // 100 digits + newline
+                buf.insert_str(&line);
+            }
+            buf.set_cursor(lite_edit_buffer::Position::new(0, 0));
+        }
+        pane1.add_tab(tab1);
+
+        // Create a second empty pane
+        let mut pane2 = Pane::new(2, ws_id);
+        let tab2 = crate::workspace::Tab::empty_file(101, line_height);
+        pane2.add_tab(tab2);
+
+        // Create horizontal split (pane1 left, pane2 right) - each pane gets half width
+        ws.pane_root = PaneLayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(PaneLayoutNode::Leaf(pane1)),
+            second: Box::new(PaneLayoutNode::Leaf(pane2)),
+        };
+        ws.active_pane_id = 1;
+
+        // Sync viewports
+        state.sync_pane_viewports();
+
+        // Calculate expected pane dimensions
+        // Left pane width: content_width * 0.5
+        // Pane content height: 600 - TAB_BAR_HEIGHT
+        let pane_width = content_width * 0.5;
+        let pane_content_height = 600.0 - TAB_BAR_HEIGHT;
+
+        // Verify the helper returns correct pane dimensions
+        let dims = state.get_pane_content_dimensions(1);
+        assert!(dims.is_some(), "Should find pane 1 dimensions");
+        let (content_height, returned_width) = dims.unwrap();
+        assert!(
+            (returned_width - pane_width).abs() < 0.01,
+            "Pane width should be {} but got {}",
+            pane_width,
+            returned_width
+        );
+
+        // Calculate how many chars fit per row in the narrow pane
+        let cols_per_row_narrow = (pane_width / advance_width).floor() as usize;
+        // Calculate how many chars fit per row in full-window width
+        let cols_per_row_full = (content_width / advance_width).floor() as usize;
+
+        // With 100-char lines:
+        // - In narrow pane: lines should wrap (100 chars > cols_per_row_narrow)
+        // - In full-width: lines might not wrap (depending on exact width)
+        // The key is: narrow pane should have MORE screen rows than buffer lines
+
+        let line_chars = 100;
+        let screen_rows_narrow = (line_chars + cols_per_row_narrow - 1) / cols_per_row_narrow;
+        let screen_rows_full = (line_chars + cols_per_row_full - 1) / cols_per_row_full;
+
+        // Verify that narrow pane requires more screen rows per line (more wrapping)
+        assert!(
+            screen_rows_narrow >= screen_rows_full,
+            "Narrow pane should have at least as many screen rows per line ({}) as full width ({})",
+            screen_rows_narrow,
+            screen_rows_full
+        );
+
+        // Now verify scrolling works correctly with the narrower pane
+        // Get line count
+        let line_count = {
+            let ws = state.editor.active_workspace().unwrap();
+            let pane = ws.pane_root.get_pane(1).unwrap();
+            let tab = pane.active_tab().unwrap();
+            tab.as_text_buffer().unwrap().line_count()
+        };
+
+        // Calculate total screen rows in narrow pane (accounting for wrapping)
+        let total_screen_rows = line_count * screen_rows_narrow;
+        let visible_rows = (pane_content_height / line_height).floor() as usize;
+        let max_scroll_rows = total_screen_rows.saturating_sub(visible_rows);
+
+        // Try to scroll to the end
+        let large_scroll_px = (total_screen_rows as f64) * (line_height as f64);
+        state.handle_scroll(ScrollDelta::new(0.0, large_scroll_px));
+
+        // Get the scroll offset
+        let ws = state.editor.active_workspace().unwrap();
+        let pane = ws.pane_root.get_pane(1).unwrap();
+        let tab = pane.active_tab().unwrap();
+        let scroll_offset_px = tab.viewport.scroll_offset_px();
+
+        // The key invariant: with the fix, we should be able to scroll further
+        // than we would with the bug (which used full-window width for wrapping).
+        //
+        // With full-window width:
+        // - cols_per_row_full = floor(744 / 8) = 93
+        // - screen_rows_per_line = ceil(100 / 93) = 2
+        // - total_screen_rows_buggy = 20 * 2 = 40
+        // - max_scroll_rows_buggy = 40 - visible_rows
+        //
+        // With pane width (fix):
+        // - cols_per_row_narrow = floor(372 / 8) = 46
+        // - screen_rows_per_line = ceil(100 / 46) = 3
+        // - total_screen_rows_fixed = 20 * 3 = 60
+        // - max_scroll_rows_fixed = 60 - visible_rows
+        //
+        // The fix allows scrolling ~20 more rows (one line of content difference
+        // per line that wraps more).
+        let total_screen_rows_buggy = line_count * screen_rows_full;
+        let max_scroll_rows_buggy = total_screen_rows_buggy.saturating_sub(visible_rows);
+        let buggy_max_offset = (max_scroll_rows_buggy as f32) * line_height;
+
+        // The scroll offset should exceed what the buggy calculation would allow
+        // (if the bug existed, scroll_offset_px would be clamped to buggy_max_offset)
+        assert!(
+            scroll_offset_px > buggy_max_offset,
+            "Scroll offset {} should exceed buggy max {} (which uses full-window width). \
+             This indicates the fix is working - we can scroll further with correct pane width.",
+            scroll_offset_px,
+            buggy_max_offset
+        );
+
+        // Also verify we're not wildly off from reasonable bounds
+        let fixed_max_offset = (max_scroll_rows as f32) * line_height;
+        assert!(
+            scroll_offset_px <= fixed_max_offset + line_height,
+            "Scroll offset {} should not greatly exceed calculated max {} (pane width).",
+            scroll_offset_px,
+            fixed_max_offset
         );
     }
 

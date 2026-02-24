@@ -8,153 +8,120 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The bug occurs in `scroll_pane()` where the `EditorContext` is created with the **full
+window dimensions** (`self.view_height - TAB_BAR_HEIGHT`, `self.view_width - RAIL_WIDTH`)
+instead of the **pane-specific dimensions**.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+When scrolling in a split pane, the `EditorContext.wrap_layout()` method uses the full
+window width to compute line wrapping, which affects the `set_scroll_offset_px_wrapped()`
+clamping logic. The maximum scroll offset is computed as:
+`max_offset_px = (total_screen_rows - visible_rows) * line_height`
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+While `visible_rows` is correctly computed per-pane (via `sync_pane_viewports`), the
+`total_screen_rows` calculation uses a `WrapLayout` constructed with the wrong viewport
+width, causing it to under-count wrapped lines for narrower panes. This prevents
+scrolling to the end of the document.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/vsplit_scroll/GOAL.md)
-with references to the files that you expect to touch.
--->
+**Fix**: Compute the target pane's content dimensions before creating `EditorContext` in
+`scroll_pane()`. This requires:
+1. Looking up the pane's rect from `calculate_pane_rects()`
+2. Computing `pane_content_height = pane_rect.height - TAB_BAR_HEIGHT`
+3. Computing `pane_content_width = pane_rect.width`
+4. Passing these to `EditorContext::new()` instead of full-window dimensions
+
+This aligns with the pattern already used in `sync_pane_viewports()` and follows the
+`viewport_scroll` subsystem's invariants.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+- **docs/subsystems/viewport_scroll** (DOCUMENTED): This chunk USES the viewport_scroll
+  subsystem's `set_scroll_offset_px_wrapped()` method. The bug occurs because the
+  `WrapLayout` passed to this method was constructed with incorrect dimensions. The fix
+  ensures correct pane-local dimensions are used, aligning with the subsystem's
+  Invariant #2: "Scroll offset is clamped to `[0.0, max_offset_px]`".
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+- **docs/subsystems/renderer** (DOCUMENTED): This chunk USES the renderer subsystem's
+  pane rect calculation via `calculate_pane_rects()`. No deviations from renderer
+  patterns; we're adding a lookup step that mirrors existing patterns in
+  `sync_pane_viewports()`.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Create helper to get pane content dimensions
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add a helper method `get_pane_content_dimensions()` to `EditorState` that:
+1. Takes a `PaneId`
+2. Calls `calculate_pane_rects()` to get the layout
+3. Finds the pane's rect and computes content dimensions:
+   - `content_height = pane_rect.height - TAB_BAR_HEIGHT`
+   - `content_width = pane_rect.width`
+4. Returns `Option<(f32, f32)>` (height, width) or `None` if pane not found
 
-Example:
+Location: `crates/editor/src/editor_state.rs`
 
-### Step 1: Define the SegmentHeader struct
+### Step 2: Modify scroll_pane to use pane-specific dimensions
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+In `scroll_pane()`:
+1. Call `get_pane_content_dimensions(target_pane_id)` before creating `EditorContext`
+2. Use the returned pane dimensions instead of full-window dimensions
+3. Fall back to full-window dimensions if pane not found (defensive programming)
 
-Location: src/segment/format.rs
+The key change:
+```rust
+// Before (buggy):
+let content_height = self.view_height - TAB_BAR_HEIGHT;
+let content_width = self.view_width - RAIL_WIDTH;
 
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+// After (fixed):
+let (content_height, content_width) = self.get_pane_content_dimensions(target_pane_id)
+    .unwrap_or((self.view_height - TAB_BAR_HEIGHT, self.view_width - RAIL_WIDTH));
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `crates/editor/src/editor_state.rs`
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 3: Add unit test for vertical split scroll bounds
+
+Add a test that:
+1. Creates an EditorState with a long file (e.g., 100 lines)
+2. Creates a vertical split (two panes stacked)
+3. Sets up proper viewport dimensions for both panes
+4. Attempts to scroll the bottom pane to the end of the document
+5. Asserts that the scroll position reaches the expected max offset
+
+The test should verify that:
+- Each pane uses its own height for scroll clamping
+- A 50% vertical split allows scrolling based on half the window height
+- The last line of the document is reachable in both panes
+
+Location: `crates/editor/src/editor_state.rs` (test module)
+
+### Step 4: Add regression test for wrapping with narrow panes
+
+Add a test that:
+1. Creates an EditorState with a file containing long lines (that will wrap)
+2. Creates a horizontal split (side-by-side panes, each narrower than full window)
+3. Verifies that the narrower pane computes wrap correctly:
+   - More screen rows due to additional line wrapping in narrow pane
+   - Higher max scroll offset to reach the document end
+
+This tests the `view_width` parameter is correctly passed to `WrapLayout`.
+
+Location: `crates/editor/src/editor_state.rs` (test module)
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+None. This chunk fixes existing code and does not depend on other chunks.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Performance**: `calculate_pane_rects()` is called on every scroll event. This should
+  be fast (it's just geometry math), but worth monitoring. If it becomes a bottleneck,
+  we could cache the pane rects and invalidate on resize/split events.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **RAIL_WIDTH handling**: Confirmed that `calculate_pane_rects()` is called with
+  `content_width = view_width - RAIL_WIDTH`, meaning pane rects are already in
+  content-local coordinates (post-rail). We should use `pane_rect.width` directly
+  as the `view_width` for `EditorContext` without any additional `RAIL_WIDTH` subtraction.
 
 ## Deviations
 
