@@ -1778,14 +1778,42 @@ impl EditorState {
             return;
         }
 
-        // Check if click is in tab bar region (y < TAB_BAR_HEIGHT in screen space)
-        // In screen space: tab bar is at y ∈ [0, TAB_BAR_HEIGHT)
-        if screen_y < TAB_BAR_HEIGHT as f64 {
-            if let MouseEventKind::Down = screen_event.kind {
-                self.handle_tab_bar_click(screen_x as f32, screen_y as f32);
+        // Chunk: docs/chunks/pane_tabs_interaction - Check all pane tab bars, not just top-left
+        // In multi-pane layouts, each pane has its own tab bar at its top edge.
+        // We need to check if the click is within any pane's tab bar region.
+        {
+            use crate::pane_layout::calculate_pane_rects;
+
+            let is_tab_bar_click = if let Some(workspace) = self.editor.active_workspace() {
+                // Calculate pane rects in renderer space (starting at RAIL_WIDTH, 0)
+                let bounds = (
+                    RAIL_WIDTH,
+                    0.0,
+                    self.view_width - RAIL_WIDTH,
+                    self.view_height,
+                );
+                let pane_rects = calculate_pane_rects(bounds, &workspace.pane_root);
+
+                // Check if click is in any pane's tab bar region
+                pane_rects.iter().any(|pane_rect| {
+                    let tab_bar_y_start = pane_rect.y;
+                    let tab_bar_y_end = pane_rect.y + TAB_BAR_HEIGHT;
+                    screen_x >= pane_rect.x as f64
+                        && screen_x < (pane_rect.x + pane_rect.width) as f64
+                        && screen_y >= tab_bar_y_start as f64
+                        && screen_y < tab_bar_y_end as f64
+                })
+            } else {
+                false
+            };
+
+            if is_tab_bar_click {
+                if let MouseEventKind::Down = screen_event.kind {
+                    self.handle_tab_bar_click(screen_x as f32, screen_y as f32);
+                }
+                // Don't forward tab bar clicks to buffer
+                return;
             }
-            // Don't forward tab bar clicks to buffer
-            return;
         }
 
         // Step 3: Route to appropriate handler with screen-space coordinates
@@ -9521,6 +9549,195 @@ mod tests {
         let click_y = 16.0;  // Middle of tab bar [0, 32)
 
         state.handle_tab_bar_click(click_x, click_y);
+
+        // Verify: second tab should be active
+        let ws = state.editor.active_workspace().unwrap();
+        let pane = ws.active_pane().unwrap();
+        assert_eq!(pane.active_tab, 1, "Second tab should be active");
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/pane_tabs_interaction - Full click dispatch path tests
+    // =========================================================================
+    //
+    // These tests verify that handle_mouse correctly routes clicks to
+    // handle_tab_bar_click for non-top-left panes in split layouts.
+    // The existing split_tab_click tests call handle_tab_bar_click directly;
+    // these tests exercise the full dispatch path through handle_mouse.
+
+    /// Tests that handle_mouse routes clicks to the bottom pane's tab bar
+    /// in a vertical split layout.
+    ///
+    /// This is a regression test for the bug where clicks at y > TAB_BAR_HEIGHT
+    /// were not routed to handle_tab_bar_click, causing non-top-left pane tabs
+    /// to be unresponsive.
+    #[test]
+    fn test_handle_mouse_routes_to_bottom_pane_tab_bar() {
+        use crate::input::MouseEventKind;
+
+        let mut state = create_vertical_split_state();
+
+        // Layout: 800x600 window
+        // Vertical split at 0.5 ratio with bounds (RAIL_WIDTH=56, 0, 744, 600):
+        // - Top pane: x=56, y=0, width=744, height=300
+        // - Bottom pane: x=56, y=300, width=744, height=300
+        //
+        // Bottom pane's tab bar is at y ∈ [300, 332) in screen space
+        // NSView coords (origin at bottom-left): y = view_height - screen_y
+        // For y=316 in screen space: nsview_y = 600 - 316 = 284
+
+        // Click on the second tab in the BOTTOM pane via handle_mouse
+        let click_x = 185.0; // Well inside second tab
+        let nsview_y = 284.0; // 600 - 316 (middle of bottom pane's tab bar in NSView coords)
+
+        let click_event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (click_x, nsview_y),
+            modifiers: crate::input::Modifiers::default(),
+            click_count: 1,
+        };
+
+        state.handle_mouse(click_event);
+
+        // Verify: focus should have switched to bottom pane
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.active_pane_id, 2, "Focus should have switched to bottom pane");
+
+        // Verify: bottom pane should now have tab index 1 active
+        let bottom_pane = ws.pane_root.get_pane(2).unwrap();
+        assert_eq!(bottom_pane.active_tab, 1, "Bottom pane should have second tab (index 1) active");
+
+        // Verify: top pane should still have tab index 0 active
+        let top_pane = ws.pane_root.get_pane(1).unwrap();
+        assert_eq!(top_pane.active_tab, 0, "Top pane should still have first tab (index 0) active");
+    }
+
+    /// Tests that handle_mouse routes clicks to the right pane's tab bar
+    /// in a horizontal split layout.
+    ///
+    /// This is a regression test for the bug where clicks in non-top-left pane
+    /// tab bars were not routed to handle_tab_bar_click.
+    #[test]
+    fn test_handle_mouse_routes_to_right_pane_tab_bar() {
+        use crate::input::MouseEventKind;
+
+        let mut state = create_horizontal_split_state();
+
+        // Layout: 800x600 window, RAIL_WIDTH=56
+        // Horizontal split at 0.5 ratio with bounds (56, 0, 744, 600):
+        // - Left pane: x=56, y=0, width=372, height=600
+        // - Right pane: x=428, y=0, width=372, height=600
+        //
+        // Right pane's tab bar is at y ∈ [0, 32) in screen space
+        // NSView coords: y = view_height - screen_y - height
+        // For y=16 in screen space (middle of tab bar): nsview_y = 600 - 16 = 584
+
+        // Click on the second tab in the RIGHT pane via handle_mouse
+        let click_x = 560.0; // Well inside second tab in right pane
+        let nsview_y = 584.0; // 600 - 16 (middle of right pane's tab bar in NSView coords)
+
+        let click_event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (click_x, nsview_y),
+            modifiers: crate::input::Modifiers::default(),
+            click_count: 1,
+        };
+
+        state.handle_mouse(click_event);
+
+        // Verify: focus should have switched to right pane
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.active_pane_id, 2, "Focus should have switched to right pane");
+
+        // Verify: right pane should now have tab index 1 active
+        let right_pane = ws.pane_root.get_pane(2).unwrap();
+        assert_eq!(right_pane.active_tab, 1, "Right pane should have second tab (index 1) active");
+
+        // Verify: left pane should still have tab index 0 active
+        let left_pane = ws.pane_root.get_pane(1).unwrap();
+        assert_eq!(left_pane.active_tab, 0, "Left pane should still have first tab (index 0) active");
+    }
+
+    /// Tests that handle_mouse still routes top-left pane clicks correctly.
+    ///
+    /// This is a regression test to ensure the fix for non-top-left panes
+    /// doesn't break single-pane or top-left pane behavior.
+    #[test]
+    fn test_handle_mouse_routes_to_top_left_pane_tab_bar() {
+        use crate::input::MouseEventKind;
+
+        let mut state = create_vertical_split_state();
+
+        // Layout: 800x600 window
+        // Vertical split at 0.5 ratio:
+        // - Top pane: y=0, height=300 (tab bar at y ∈ [0, 32))
+        //
+        // For y=16 in screen space: nsview_y = 600 - 16 = 584
+
+        // Click on the second tab in the TOP pane via handle_mouse
+        let click_x = 200.0; // Well inside second tab
+        let nsview_y = 584.0; // 600 - 16 (middle of top pane's tab bar in NSView coords)
+
+        let click_event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (click_x, nsview_y),
+            modifiers: crate::input::Modifiers::default(),
+            click_count: 1,
+        };
+
+        state.handle_mouse(click_event);
+
+        // Verify: top pane should now have tab index 1 active
+        let ws = state.editor.active_workspace().unwrap();
+        let top_pane = ws.pane_root.get_pane(1).unwrap();
+        assert_eq!(top_pane.active_tab, 1, "Top pane should have second tab (index 1) active");
+
+        // Verify: bottom pane should still have tab index 0 active
+        let bottom_pane = ws.pane_root.get_pane(2).unwrap();
+        assert_eq!(bottom_pane.active_tab, 0, "Bottom pane should still have first tab (index 0) active");
+    }
+
+    /// Tests that handle_mouse routes clicks correctly in single-pane layouts.
+    ///
+    /// This is a regression test to ensure the multi-pane fix doesn't break
+    /// single-pane behavior.
+    #[test]
+    fn test_handle_mouse_routes_to_single_pane_tab_bar() {
+        use crate::input::MouseEventKind;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Add a second tab to the default single pane
+        let tab2 = crate::workspace::Tab::new_file(
+            200,
+            lite_edit_buffer::TextBuffer::from_str("second tab"),
+            "second.rs".to_string(),
+            None,
+            test_font_metrics().line_height as f32,
+        );
+
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            if let Some(pane) = ws.active_pane_mut() {
+                pane.add_tab(tab2);
+                pane.switch_tab(0); // Start with first tab active
+            }
+        }
+
+        // Click on the second tab via handle_mouse
+        // Single pane tab bar is at y ∈ [0, 32) in screen space
+        // For y=16: nsview_y = 600 - 16 = 584
+        let click_x = 200.0; // Inside second tab
+        let nsview_y = 584.0;
+
+        let click_event = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (click_x, nsview_y),
+            modifiers: crate::input::Modifiers::default(),
+            click_count: 1,
+        };
+
+        state.handle_mouse(click_event);
 
         // Verify: second tab should be active
         let ws = state.editor.active_workspace().unwrap();
