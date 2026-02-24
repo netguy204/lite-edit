@@ -1875,6 +1875,7 @@ impl Renderer {
     }
 
     // Chunk: docs/chunks/tiling_multi_pane_render - Pane-local welcome screen
+    // Chunk: docs/chunks/welcome_scroll - Welcome screen vertical scrolling in multi-pane rendering
     /// Draws the welcome screen within a pane's bounds.
     ///
     /// This is similar to `draw_welcome_screen` but positions the content

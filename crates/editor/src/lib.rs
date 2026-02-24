@@ -48,3 +48,6 @@ pub mod pane_layout;
 
 // Chunk: docs/chunks/workspace_session_persistence - Session persistence
 pub mod session;
+
+// Chunk: docs/chunks/dragdrop_file_paste - Shell escaping for drag-and-drop paths
+pub mod shell_escape;
