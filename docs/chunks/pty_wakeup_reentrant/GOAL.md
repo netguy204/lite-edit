@@ -15,7 +15,6 @@ code_paths:
   - crates/terminal/src/lib.rs
   - crates/terminal/tests/wakeup_integration.rs
   - crates/input/src/lib.rs
-  - crates/editor/tests/event_channel_integration.rs
 code_references:
   - ref: crates/editor/src/editor_event.rs#EditorEvent
     implements: "Unified event type enum with variants for all event sources (Key, Mouse, Scroll, PtyWakeup, CursorBlink, Resize)"

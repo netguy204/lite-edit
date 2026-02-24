@@ -413,7 +413,7 @@ impl EditorState {
         self.event_sender = Some(sender);
     }
 
-    // Chunk: docs/chunks/terminal_pty_wakeup - Creates PtyWakeup handle from registered EventSender
+    // Chunk: docs/chunks/pty_wakeup_reentrant - Creates PtyWakeup with WakeupSignal trait
     /// Creates a PTY wakeup handle using the stored event sender.
     ///
     /// Returns `None` if no event sender has been set.
