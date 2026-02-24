@@ -37,6 +37,7 @@ use crate::renderer::Renderer;
 use crate::confirm_dialog::calculate_confirm_dialog_geometry;
 use crate::selector_overlay::calculate_overlay_geometry;
 use crate::left_rail::RAIL_WIDTH;
+use crate::pane_layout::calculate_pane_rects;
 use crate::tab_bar::TAB_BAR_HEIGHT;
 
 /// The event drain loop that owns the editor controller.
@@ -361,20 +362,38 @@ impl EventDrainLoop {
             regions.add_pointer(CursorRect::new(0.0, 0.0, rail_width_pt, view_height_pt));
         }
 
-        // Tab Bar (Pointer Cursor)
+        // Chunk: docs/chunks/pane_tabs_interaction - Tab bar pointer cursor for all panes
+        // In multi-pane layouts, each pane has its own tab bar at its top edge.
+        // We need to add a pointer cursor rect for each pane's tab bar.
         if let Some(workspace) = self.state.editor.active_workspace() {
             if workspace.tab_count() > 0 {
-                let tab_bar_x_pt = RAIL_WIDTH as f64 / scale;
-                let tab_bar_width_pt = view_width_pt - tab_bar_x_pt;
-                let tab_bar_height_pt = TAB_BAR_HEIGHT as f64 / scale;
-                let tab_bar_y_pt = view_height_pt - tab_bar_height_pt;
+                // Calculate pane rects in pixel space (starting at RAIL_WIDTH, 0)
+                let bounds = (
+                    RAIL_WIDTH,
+                    0.0,
+                    view_width_px - RAIL_WIDTH,
+                    view_height_px,
+                );
+                let pane_rects = calculate_pane_rects(bounds, &workspace.pane_root);
 
-                regions.add_pointer(CursorRect::new(
-                    tab_bar_x_pt,
-                    tab_bar_y_pt,
-                    tab_bar_width_pt,
-                    tab_bar_height_pt,
-                ));
+                for pane_rect in &pane_rects {
+                    // Each pane's tab bar is at the top of its bounds
+                    // In NSView coords (origin at bottom-left), we need to convert
+                    // from screen-space y (origin at top) to NSView y
+                    let tab_bar_x_pt = pane_rect.x as f64 / scale;
+                    let tab_bar_width_pt = pane_rect.width as f64 / scale;
+                    let tab_bar_height_pt = TAB_BAR_HEIGHT as f64 / scale;
+                    // In screen space, pane_rect.y is the top of the pane (y=0 at top)
+                    // Convert to NSView coords (y=0 at bottom): nsview_y = view_height - screen_y - height
+                    let tab_bar_y_pt = view_height_pt - (pane_rect.y as f64 / scale) - tab_bar_height_pt;
+
+                    regions.add_pointer(CursorRect::new(
+                        tab_bar_x_pt,
+                        tab_bar_y_pt,
+                        tab_bar_width_pt,
+                        tab_bar_height_pt,
+                    ));
+                }
             }
         }
 
