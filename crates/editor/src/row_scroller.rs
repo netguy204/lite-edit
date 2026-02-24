@@ -246,6 +246,16 @@ impl RowScroller {
     pub(crate) fn set_scroll_offset_unclamped(&mut self, px: f32) {
         self.scroll_offset_px = px;
     }
+
+    // Chunk: docs/chunks/pane_scroll_isolation - Per-pane viewport configuration
+    /// Sets the visible row count directly, without re-clamping scroll offset.
+    ///
+    /// Use this when copying viewport state from another source that has already
+    /// been properly clamped. The tab's viewport owns the scroll state and has
+    /// correct bounds for its content.
+    pub fn set_visible_rows(&mut self, rows: usize) {
+        self.visible_rows = rows;
+    }
 }
 
 #[cfg(test)]
@@ -734,5 +744,49 @@ mod tests {
 
         assert!(scrolled);
         assert_eq!(scroller.first_visible_row(), 10);
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/pane_scroll_isolation - Per-pane viewport configuration tests
+    // =========================================================================
+
+    #[test]
+    fn test_set_visible_rows_direct() {
+        // Test that set_visible_rows updates visible_rows directly without clamping
+        let mut scroller = RowScroller::new(16.0);
+        scroller.update_size(160.0, 100); // 10 visible rows
+        scroller.set_scroll_offset_px(400.0, 100); // Scroll to row 25
+
+        assert_eq!(scroller.visible_rows(), 10);
+        assert!((scroller.scroll_offset_px() - 400.0).abs() < 0.001);
+
+        // Set visible rows directly (simulating a different pane height)
+        scroller.set_visible_rows(5);
+
+        // visible_rows should be updated
+        assert_eq!(scroller.visible_rows(), 5);
+        // scroll_offset_px should NOT be changed
+        assert!((scroller.scroll_offset_px() - 400.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_set_visible_rows_preserves_scroll_beyond_new_max() {
+        // When visible_rows increases, the scroll position may be beyond what
+        // would normally be valid for the new configuration. set_visible_rows
+        // should not clamp - that's the caller's responsibility if needed.
+        let mut scroller = RowScroller::new(16.0);
+        scroller.update_size(80.0, 50); // 5 visible rows, 50 row buffer
+        // max_offset = (50 - 5) * 16 = 720
+        scroller.set_scroll_offset_px(640.0, 50); // Scroll to row 40
+
+        assert_eq!(scroller.first_visible_row(), 40);
+
+        // Set visible rows to a larger value (simulating a taller pane)
+        // New max would be (50 - 20) * 16 = 480, but we don't clamp here
+        scroller.set_visible_rows(20);
+
+        assert_eq!(scroller.visible_rows(), 20);
+        // scroll_offset_px is preserved even though it's beyond new theoretical max
+        assert!((scroller.scroll_offset_px() - 640.0).abs() < 0.001);
     }
 }

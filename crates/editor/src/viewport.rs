@@ -381,6 +381,16 @@ impl Viewport {
         self.scroller.set_scroll_offset_unclamped(px);
     }
 
+    // Chunk: docs/chunks/pane_scroll_isolation - Per-pane viewport configuration
+    /// Sets the visible line count directly, without re-clamping scroll offset.
+    ///
+    /// Use this when copying viewport state from another source that has already
+    /// been properly clamped. The tab's viewport owns the scroll state and has
+    /// correct bounds for its content.
+    pub fn set_visible_lines(&mut self, lines: usize) {
+        self.scroller.set_visible_rows(lines);
+    }
+
     // Chunk: docs/chunks/scroll_bottom_deadzone - Wrap-aware scroll clamping
     /// Sets the scroll offset in pixels, with clamping based on total screen rows.
     ///
@@ -2248,5 +2258,81 @@ mod tests {
             DirtyRegion::None,
             "Buffer line 0 (row 0) is not visible in range [3, 8)"
         );
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/pane_scroll_isolation - Per-pane viewport configuration tests
+    // =========================================================================
+
+    #[test]
+    fn test_set_visible_lines_preserves_scroll() {
+        // Test that set_visible_lines updates visible_lines without re-clamping scroll offset.
+        // This is needed for per-pane viewport configuration where the tab's viewport
+        // has the authoritative scroll position.
+        let mut vp = Viewport::new(20.0);
+        vp.update_size(200.0, 100); // 10 visible lines
+        vp.set_scroll_offset_px(100.0, 100); // Scroll to line 5 (100 / 20 = 5)
+
+        assert_eq!(vp.visible_lines(), 10);
+        assert!((vp.scroll_offset_px() - 100.0).abs() < 0.001);
+
+        // Set visible lines to a smaller value (simulating a shorter pane)
+        vp.set_visible_lines(5);
+
+        // visible_lines should be updated
+        assert_eq!(vp.visible_lines(), 5);
+        // scroll_offset_px should NOT be re-clamped (still 100.0, not reduced)
+        assert!(
+            (vp.scroll_offset_px() - 100.0).abs() < 0.001,
+            "scroll_offset_px should be preserved, got {}",
+            vp.scroll_offset_px()
+        );
+    }
+
+    #[test]
+    fn test_set_visible_lines_different_pane_heights() {
+        // Simulate configuring viewport for different pane heights
+        let mut vp = Viewport::new(20.0);
+
+        // Pane 1: 200px tall = 10 visible lines
+        vp.update_size(200.0, 100);
+        assert_eq!(vp.visible_lines(), 10);
+
+        // Now simulate switching to pane 2: 100px tall = 5 visible lines
+        // without affecting scroll position (which should come from the pane's tab)
+        vp.set_visible_lines(5);
+        assert_eq!(vp.visible_lines(), 5);
+
+        // Switch back to a taller pane: 300px = 15 visible lines
+        vp.set_visible_lines(15);
+        assert_eq!(vp.visible_lines(), 15);
+    }
+
+    #[test]
+    fn test_viewport_configuration_preserves_scroll_from_tab() {
+        // Simulate the per-pane viewport configuration pattern:
+        // 1. Tab's viewport has a scroll position
+        // 2. Renderer's viewport copies the scroll position via set_scroll_offset_px_unclamped
+        // 3. Renderer's viewport sets visible_lines via set_visible_lines
+        // The result should preserve the tab's scroll position.
+
+        // Tab's viewport (owned by the tab)
+        let mut tab_vp = Viewport::new(16.0);
+        tab_vp.update_size(160.0, 50); // 10 visible lines, 50 line buffer
+        tab_vp.set_scroll_offset_px(320.0, 50); // Scroll to line 20 (320 / 16 = 20)
+        assert_eq!(tab_vp.first_visible_line(), 20);
+
+        // Renderer's viewport (different size, e.g., pane is smaller)
+        let mut renderer_vp = Viewport::new(16.0);
+        renderer_vp.update_size(80.0, 50); // 5 visible lines
+
+        // Configure renderer's viewport for this pane
+        renderer_vp.set_scroll_offset_px_unclamped(tab_vp.scroll_offset_px());
+        renderer_vp.set_visible_lines(5); // Pane has 5 visible lines
+
+        // Verify: scroll position matches tab, visible lines matches pane
+        assert!((renderer_vp.scroll_offset_px() - 320.0).abs() < 0.001);
+        assert_eq!(renderer_vp.first_visible_line(), 20);
+        assert_eq!(renderer_vp.visible_lines(), 5);
     }
 }

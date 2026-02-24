@@ -252,11 +252,10 @@ impl EventDrainLoop {
         self.update_window_title_if_needed();
 
         if self.state.is_dirty() {
-            // Sync viewport scroll offset
-            if let Some(_buffer_view) = self.state.editor.active_buffer_view() {
-                let state_scroll_px = self.state.viewport().scroll_offset_px();
-                self.renderer.viewport_mut().set_scroll_offset_px_unclamped(state_scroll_px);
-            }
+            // Chunk: docs/chunks/pane_scroll_isolation - Viewport sync removed
+            // Viewport sync used to happen here, but now render_with_editor and render_pane
+            // configure the viewport from the active tab's viewport before rendering.
+            // This ensures each pane uses its own scroll state in multi-pane mode.
 
             // Take the dirty region
             let _dirty = self.state.take_dirty_region();

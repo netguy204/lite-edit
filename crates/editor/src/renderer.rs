@@ -432,6 +432,40 @@ impl Renderer {
         self.glyph_buffer.set_y_offset(offset);
     }
 
+    // Chunk: docs/chunks/pane_scroll_isolation - Per-pane viewport configuration
+    /// Configures the renderer's viewport for rendering a specific pane.
+    ///
+    /// This copies the scroll state from the tab's viewport and updates dimensions
+    /// to match the pane's actual size. Must be called before `update_glyph_buffer_*`
+    /// for each pane in multi-pane mode.
+    ///
+    /// # Arguments
+    /// * `tab_viewport` - The viewport from the pane's active tab
+    /// * `pane_content_height` - The pane's content area height (excluding tab bar)
+    /// * `pane_width` - The pane's width
+    fn configure_viewport_for_pane(
+        &mut self,
+        tab_viewport: &Viewport,
+        pane_content_height: f32,
+        pane_width: f32,
+    ) {
+        // Copy scroll offset from tab (tab is authoritative)
+        self.viewport.set_scroll_offset_px_unclamped(tab_viewport.scroll_offset_px());
+
+        // Update visible lines for this pane's height
+        // The tab's viewport already has correct clamping for its content
+        let line_height = self.viewport.line_height();
+        let visible_lines = if line_height > 0.0 {
+            (pane_content_height / line_height).floor() as usize
+        } else {
+            0
+        };
+        self.viewport.set_visible_lines(visible_lines);
+
+        // Update wrap width for this pane
+        self.content_width_px = pane_width;
+    }
+
     // Chunk: docs/chunks/renderer_polymorphic_buffer - Accept line_count parameter
     /// Converts buffer-space DirtyLines to screen-space DirtyRegion
     ///
@@ -1072,9 +1106,26 @@ impl Renderer {
 
         // Chunk: docs/chunks/renderer_polymorphic_buffer - Get BufferView from Editor
         // Chunk: docs/chunks/syntax_highlighting - Use HighlightedBufferView for syntax coloring
+        // Chunk: docs/chunks/pane_scroll_isolation - Configure viewport before updating glyph buffer
         // Update glyph buffer from active tab's BufferView with syntax highlighting
         if let Some(ws) = editor.active_workspace() {
             if let Some(tab) = ws.active_tab() {
+                // Chunk: docs/chunks/pane_scroll_isolation - Configure viewport for single-pane mode
+                // For single-pane mode, configure viewport from the active tab before rendering.
+                // This mirrors what render_pane does for multi-pane mode.
+                // Note: We check pane_count() to detect single-pane mode.
+                // This is evaluated here rather than in the later branch because
+                // update_glyph_buffer needs the correct viewport configuration.
+                if ws.pane_root.pane_count() <= 1 {
+                    let frame = view.frame();
+                    let scale = view.scale_factor();
+                    let view_width = (frame.size.width * scale) as f32;
+                    let view_height = (frame.size.height * scale) as f32;
+                    let content_height = view_height - TAB_BAR_HEIGHT;
+                    let content_width = view_width - RAIL_WIDTH;
+                    self.configure_viewport_for_pane(&tab.viewport, content_height, content_width);
+                }
+
                 if tab.is_agent_tab() {
                     // AgentTerminal is a placeholder - get the actual buffer from workspace
                     if let Some(terminal) = ws.agent_terminal() {
@@ -1593,9 +1644,10 @@ impl Renderer {
             self.set_content_x_offset(pane_rect.x);
             self.set_content_y_offset(pane_rect.y + TAB_BAR_HEIGHT);
 
-            // Update glyph buffer with pane-local content width
-            let pane_content_width = pane_rect.width;
-            self.content_width_px = pane_content_width;
+            // Chunk: docs/chunks/pane_scroll_isolation - Configure viewport for this pane
+            // Copy tab's scroll state and update dimensions for pane size
+            let pane_content_height = pane_rect.height - TAB_BAR_HEIGHT;
+            self.configure_viewport_for_pane(&tab.viewport, pane_content_height, pane_rect.width);
 
             // Chunk: docs/chunks/cursor_blink_pane_focus - Only show blinking cursor in focused pane
             // Focused pane: cursor blinks (shows/hides based on self.cursor_visible)
@@ -1933,9 +1985,23 @@ impl Renderer {
 
         // Chunk: docs/chunks/renderer_polymorphic_buffer - Get BufferView from Editor
         // Chunk: docs/chunks/syntax_highlighting - Use HighlightedBufferView for syntax coloring
+        // Chunk: docs/chunks/pane_scroll_isolation - Configure viewport before updating glyph buffer
         // Update glyph buffer from active tab's BufferView with syntax highlighting
         if let Some(ws) = editor.active_workspace() {
             if let Some(tab) = ws.active_tab() {
+                // Chunk: docs/chunks/pane_scroll_isolation - Configure viewport for single-pane mode
+                // Find strip only appears in single-pane mode, so always configure viewport.
+                // Note: Find strip reduces content height, but we use full view height here
+                // since the find strip is rendered separately. The tab's viewport scroll
+                // position is correct for the content area.
+                let frame = view.frame();
+                let scale = view.scale_factor();
+                let view_width = (frame.size.width * scale) as f32;
+                let view_height = (frame.size.height * scale) as f32;
+                let content_height = view_height - TAB_BAR_HEIGHT;
+                let content_width = view_width - RAIL_WIDTH;
+                self.configure_viewport_for_pane(&tab.viewport, content_height, content_width);
+
                 if tab.is_agent_tab() {
                     // AgentTerminal is a placeholder - get the actual buffer from workspace
                     if let Some(terminal) = ws.agent_terminal() {
