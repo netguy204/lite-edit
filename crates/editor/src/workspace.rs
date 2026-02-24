@@ -189,6 +189,7 @@ impl TabBuffer {
 
 // Chunk: docs/chunks/content_tab_bar - Per-tab model: kind, buffer ref, dirty flag, unread badge
 // Chunk: docs/chunks/syntax_highlighting - Added syntax highlighter field
+// Chunk: docs/chunks/welcome_scroll - Welcome screen scroll offset field
 /// A tab within a workspace.
 ///
 /// Each tab owns its own buffer and viewport (for independent scroll positions).
@@ -211,6 +212,13 @@ pub struct Tab {
     pub associated_file: Option<PathBuf>,
     /// The syntax highlighter for file tabs (if language detected)
     highlighter: Option<SyntaxHighlighter>,
+    /// Vertical scroll offset for the welcome screen, in pixels.
+    ///
+    /// Only meaningful when this is an empty File tab showing the welcome screen.
+    /// Reset to 0 when a new blank tab becomes active. The lower bound (≥ 0) is
+    /// enforced by `set_welcome_scroll_offset_px`; the upper bound is clamped at
+    /// render time by `calculate_welcome_geometry`.
+    welcome_scroll_offset_px: f32,
 }
 
 impl Tab {
@@ -226,6 +234,7 @@ impl Tab {
             unread: false,
             associated_file: path,
             highlighter: None,
+            welcome_scroll_offset_px: 0.0,
         }
     }
 
@@ -249,6 +258,7 @@ impl Tab {
             unread: false,
             associated_file: None,
             highlighter: None,
+            welcome_scroll_offset_px: 0.0,
         }
     }
 
@@ -264,6 +274,7 @@ impl Tab {
             unread: false,
             associated_file: None,
             highlighter: None,
+            welcome_scroll_offset_px: 0.0,
         }
     }
 
@@ -328,6 +339,20 @@ impl Tab {
             TabBuffer::Terminal(term) => Some((term, &mut self.viewport)),
             TabBuffer::File(_) | TabBuffer::AgentTerminal => None,
         }
+    }
+
+    // Chunk: docs/chunks/welcome_scroll - Welcome screen scroll offset accessors
+    /// Returns the current vertical scroll offset for the welcome screen, in pixels.
+    pub fn welcome_scroll_offset_px(&self) -> f32 {
+        self.welcome_scroll_offset_px
+    }
+
+    /// Sets the vertical scroll offset for the welcome screen, in pixels.
+    ///
+    /// Enforces the lower bound (≥ 0). The upper bound is enforced at render time
+    /// by `calculate_welcome_geometry`.
+    pub fn set_welcome_scroll_offset_px(&mut self, offset: f32) {
+        self.welcome_scroll_offset_px = offset.max(0.0);
     }
 
     // Chunk: docs/chunks/content_tab_bar - Unread badge support
@@ -1108,6 +1133,17 @@ impl Editor {
         } else {
             Some(tab.buffer())
         }
+    }
+
+    // Chunk: docs/chunks/welcome_scroll - Welcome screen scroll offset for the active tab
+    /// Returns the welcome screen vertical scroll offset for the active tab, in pixels.
+    ///
+    /// Returns 0.0 if there is no active workspace or tab.
+    pub fn welcome_scroll_offset_px(&self) -> f32 {
+        self.active_workspace()
+            .and_then(|ws| ws.active_tab())
+            .map(|t| t.welcome_scroll_offset_px())
+            .unwrap_or(0.0)
     }
 
     // Chunk: docs/chunks/welcome_screen - Welcome screen visibility check

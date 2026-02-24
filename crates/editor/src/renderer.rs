@@ -33,6 +33,7 @@ use objc2_metal::{
 };
 use objc2_quartz_core::CAMetalDrawable;
 
+// Subsystem: docs/subsystems/renderer - GPU-accelerated text and UI rendering
 use crate::dirty_region::DirtyRegion;
 use crate::font::Font;
 use crate::glyph_atlas::GlyphAtlas;
@@ -221,6 +222,7 @@ fn pane_scissor_rect(
     }
 }
 
+// Chunk: docs/chunks/tiling_multi_pane_render - Pane content clipping (below tab bar)
 /// Creates a scissor rect for a pane's content area (below its tab bar).
 fn pane_content_scissor_rect(
     pane_rect: &PaneRect,
@@ -1241,7 +1243,8 @@ impl Renderer {
 
             // Chunk: docs/chunks/welcome_screen - Welcome screen or normal buffer rendering
             if editor.should_show_welcome_screen() {
-                self.draw_welcome_screen(&encoder, view);
+                let scroll = editor.welcome_scroll_offset_px();
+                self.draw_welcome_screen(&encoder, view, scroll);
             } else {
                 // Render editor text content (offset by RAIL_WIDTH and TAB_BAR_HEIGHT)
                 if self.glyph_buffer.index_count() > 0 {
@@ -1646,7 +1649,8 @@ impl Renderer {
 
         if should_show_welcome {
             // Render welcome screen within pane bounds
-            self.draw_welcome_screen_in_pane(encoder, view, pane_rect);
+            let scroll = tab.welcome_scroll_offset_px();
+            self.draw_welcome_screen_in_pane(encoder, view, pane_rect, scroll);
         } else {
             // Set content offsets for this pane
             self.set_content_x_offset(pane_rect.x);
@@ -1875,11 +1879,15 @@ impl Renderer {
     ///
     /// This is similar to `draw_welcome_screen` but positions the content
     /// within the specified pane rectangle.
+    ///
+    /// # Arguments
+    /// * `scroll_offset_px` - Vertical scroll offset from the active tab's welcome scroll state
     fn draw_welcome_screen_in_pane(
         &mut self,
         encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
         view: &MetalView,
         pane_rect: &PaneRect,
+        scroll_offset_px: f32,
     ) {
         use crate::welcome_screen::{calculate_welcome_geometry, WelcomeScreenGlyphBuffer};
 
@@ -1894,12 +1902,13 @@ impl Renderer {
         let content_width = pane_rect.width;
         let content_height = pane_rect.height - TAB_BAR_HEIGHT;
 
-        // Calculate geometry centered in pane
+        // Calculate geometry centered or scrolled in pane
         let mut geometry = calculate_welcome_geometry(
             content_width,
             content_height,
             glyph_width,
             line_height,
+            scroll_offset_px,
         );
 
         // Offset to pane position
@@ -2378,7 +2387,8 @@ impl Renderer {
             encoder.setScissorRect(content_scissor);
 
             if editor.should_show_welcome_screen() {
-                self.draw_welcome_screen(&encoder, view);
+                let scroll = editor.welcome_scroll_offset_px();
+                self.draw_welcome_screen(&encoder, view, scroll);
             } else {
                 if self.glyph_buffer.index_count() > 0 {
                     self.render_text(&encoder, view);
@@ -2786,19 +2796,22 @@ impl Renderer {
     }
 
     // Chunk: docs/chunks/welcome_screen - Welcome screen rendering
+    // Chunk: docs/chunks/welcome_scroll - Welcome screen vertical scrolling in draw function
     /// Draws the welcome screen when the active tab has an empty buffer.
     ///
     /// The welcome screen shows a feather ASCII art logo, the editor name,
-    /// tagline, and a hotkey reference table. The content is centered both
-    /// horizontally and vertically within the content viewport area.
+    /// tagline, and a hotkey reference table. Content is centered horizontally
+    /// and vertically (or scrolled when content overflows the viewport).
     ///
     /// # Arguments
     /// * `encoder` - The active render command encoder
     /// * `view` - The Metal view (for viewport dimensions)
+    /// * `scroll_offset_px` - Vertical scroll offset from the active tab's welcome scroll state
     fn draw_welcome_screen(
         &mut self,
         encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
         view: &MetalView,
+        scroll_offset_px: f32,
     ) {
         use crate::welcome_screen::{calculate_welcome_geometry, WelcomeScreenGlyphBuffer};
 
@@ -2816,7 +2829,7 @@ impl Renderer {
             return;
         }
 
-        // Calculate welcome screen geometry (centered in content area)
+        // Calculate welcome screen geometry (centered or scrolled in content area)
         let glyph_width = self.font.metrics.advance_width as f32;
         let line_height = self.font.metrics.line_height as f32;
         let mut geometry = calculate_welcome_geometry(
@@ -2824,6 +2837,7 @@ impl Renderer {
             content_height,
             glyph_width,
             line_height,
+            scroll_offset_px,
         );
 
         // Offset the geometry to account for left rail and tab bar

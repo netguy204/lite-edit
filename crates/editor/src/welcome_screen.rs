@@ -186,18 +186,26 @@ pub struct WelcomeScreenGeometry {
 
 /// Calculates the geometry for the welcome screen.
 ///
-/// Centers the content both horizontally and vertically within the viewport.
+/// Centers the content horizontally within the viewport. Vertically, content is
+/// centered when the viewport is taller than the content, or scrolled when shorter.
 ///
 /// # Arguments
 /// * `viewport_width` - Available viewport width in pixels
 /// * `viewport_height` - Available viewport height in pixels
 /// * `glyph_width` - Width of a single character in pixels
 /// * `line_height` - Height of a line in pixels
+/// * `scroll_offset_px` - Vertical scroll offset in pixels (0 = top). Clamped to
+///   `[0, max(0, content_height_px - viewport_height_px)]` internally.
+///
+/// When `viewport_height >= content_height_px`, `max_scroll = 0` and any scroll
+/// offset is clamped to 0, preserving the centered layout exactly as before.
+// Chunk: docs/chunks/welcome_scroll - Welcome screen vertical scrolling
 pub fn calculate_welcome_geometry(
     viewport_width: f32,
     viewport_height: f32,
     glyph_width: f32,
     line_height: f32,
+    scroll_offset_px: f32,
 ) -> WelcomeScreenGeometry {
     // Calculate content dimensions
     let (content_width_chars, content_height_lines) = calculate_content_dimensions();
@@ -206,9 +214,13 @@ pub fn calculate_welcome_geometry(
     let content_width_px = content_width_chars as f32 * glyph_width;
     let content_height_px = content_height_lines as f32 * line_height;
 
-    // Center horizontally and vertically
+    // Center horizontally
     let content_x = ((viewport_width - content_width_px) / 2.0).max(0.0);
-    let content_y = ((viewport_height - content_height_px) / 2.0).max(0.0);
+
+    // Apply vertical scroll with clamping
+    let max_scroll = (content_height_px - viewport_height).max(0.0);
+    let effective_scroll = scroll_offset_px.clamp(0.0, max_scroll);
+    let content_y = ((viewport_height - content_height_px) / 2.0).max(0.0) - effective_scroll;
 
     WelcomeScreenGeometry {
         content_x,
@@ -221,7 +233,7 @@ pub fn calculate_welcome_geometry(
 }
 
 /// Calculates the total content dimensions (width in chars, height in lines).
-fn calculate_content_dimensions() -> (usize, usize) {
+pub(crate) fn calculate_content_dimensions() -> (usize, usize) {
     // Logo width and height
     let logo_width = FEATHER_LOGO.iter().map(|(s, _)| s.len()).max().unwrap_or(0);
     let logo_height = FEATHER_LOGO.len();
@@ -659,7 +671,7 @@ mod tests {
     #[test]
     fn test_geometry_calculation() {
         // Use a large viewport that can fit all content
-        let geometry = calculate_welcome_geometry(1200.0, 1000.0, 8.0, 16.0);
+        let geometry = calculate_welcome_geometry(1200.0, 1000.0, 8.0, 16.0, 0.0);
 
         // Content should be centered (positive x offset)
         assert!(geometry.content_x > 0.0, "content_x should be > 0 for large viewport");
@@ -678,11 +690,80 @@ mod tests {
     #[test]
     fn test_geometry_small_viewport() {
         // Very small viewport should clamp content_x and content_y to 0
-        let geometry = calculate_welcome_geometry(50.0, 50.0, 8.0, 16.0);
+        let geometry = calculate_welcome_geometry(50.0, 50.0, 8.0, 16.0, 0.0);
 
         // Should not be negative
         assert!(geometry.content_x >= 0.0);
         assert!(geometry.content_y >= 0.0);
+    }
+
+    #[test]
+    fn test_geometry_scroll_zero_unchanged() {
+        // scroll_offset_px = 0.0 must produce the same result as the old behavior
+        let (_, content_height_lines) = calculate_content_dimensions();
+        let line_height = 16.0_f32;
+        let content_height_px = content_height_lines as f32 * line_height;
+        // Use a large viewport so content is centered
+        let viewport_height = content_height_px + 200.0;
+        let g = calculate_welcome_geometry(800.0, viewport_height, 8.0, line_height, 0.0);
+        let expected_y = (viewport_height - content_height_px) / 2.0;
+        assert!((g.content_y - expected_y).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_geometry_scroll_offsets_content_y() {
+        // With a small viewport (content overflows), scroll should shift content up
+        let (_, content_height_lines) = calculate_content_dimensions();
+        let line_height = 16.0_f32;
+        let content_height_px = content_height_lines as f32 * line_height;
+        // Viewport is shorter than content by 100px
+        let viewport_height = content_height_px - 100.0;
+        let scroll = 40.0_f32;
+        let g = calculate_welcome_geometry(800.0, viewport_height, 8.0, line_height, scroll);
+        // When content overflows, content_y without scroll = 0.0, then subtract scroll
+        let expected_y = 0.0 - scroll;
+        assert!((g.content_y - expected_y).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_geometry_scroll_clamps_at_top() {
+        // Negative scroll_offset_px should clamp to 0 (content_y unchanged)
+        let (_, content_height_lines) = calculate_content_dimensions();
+        let line_height = 16.0_f32;
+        let content_height_px = content_height_lines as f32 * line_height;
+        let viewport_height = content_height_px - 100.0;
+        let g_no_scroll = calculate_welcome_geometry(800.0, viewport_height, 8.0, line_height, 0.0);
+        let g_neg_scroll = calculate_welcome_geometry(800.0, viewport_height, 8.0, line_height, -50.0);
+        // Negative scroll clamps to 0, content_y should be the same as no scroll
+        assert!((g_neg_scroll.content_y - g_no_scroll.content_y).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_geometry_scroll_clamps_at_bottom() {
+        // scroll_offset_px > max_scroll should clamp to max_scroll
+        let (_, content_height_lines) = calculate_content_dimensions();
+        let line_height = 16.0_f32;
+        let content_height_px = content_height_lines as f32 * line_height;
+        let viewport_height = content_height_px - 100.0;
+        let max_scroll = content_height_px - viewport_height;
+        // Scroll way past the bottom
+        let g = calculate_welcome_geometry(800.0, viewport_height, 8.0, line_height, max_scroll + 9999.0);
+        let expected_y = 0.0 - max_scroll;
+        assert!((g.content_y - expected_y).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_geometry_large_viewport_ignores_scroll() {
+        // When viewport > content, max_scroll = 0 and any scroll has no effect
+        let (_, content_height_lines) = calculate_content_dimensions();
+        let line_height = 16.0_f32;
+        let content_height_px = content_height_lines as f32 * line_height;
+        let viewport_height = content_height_px + 200.0;
+        let g_no_scroll = calculate_welcome_geometry(800.0, viewport_height, 8.0, line_height, 0.0);
+        let g_with_scroll = calculate_welcome_geometry(800.0, viewport_height, 8.0, line_height, 500.0);
+        // Scroll is clamped to 0 when viewport > content; centering preserved
+        assert!((g_no_scroll.content_y - g_with_scroll.content_y).abs() < 0.001);
+        assert!(g_no_scroll.content_y > 0.0, "content should be centered (y > 0)");
     }
 
     #[test]

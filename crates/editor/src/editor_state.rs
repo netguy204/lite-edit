@@ -2126,6 +2126,25 @@ impl EditorState {
             None => return,
         };
 
+        // Chunk: docs/chunks/welcome_scroll - Welcome screen vertical scrolling
+        // If this is an empty file tab (showing the welcome screen), route scroll
+        // to the welcome screen offset rather than the buffer viewport.
+        {
+            use crate::workspace::TabKind;
+            let is_welcome = tab.kind == TabKind::File
+                && tab.as_text_buffer().map(|b| b.is_empty()).unwrap_or(false);
+
+            if is_welcome {
+                let current = tab.welcome_scroll_offset_px();
+                let new_offset = (current + delta.dy as f32).max(0.0);
+                tab.set_welcome_scroll_offset_px(new_offset);
+                if (new_offset - current).abs() > 0.001 {
+                    self.dirty_region.merge(DirtyRegion::FullViewport);
+                }
+                return;
+            }
+        }
+
         // Try to get the text buffer and viewport for file tabs
         if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
             // In Buffer or FindInFile mode, scroll the buffer
@@ -8258,5 +8277,70 @@ mod tests {
         // Dialog should be closed and the tab should be closed
         assert!(state.confirm_dialog.is_none());
         assert!(!state.editor.active_workspace().unwrap().active_tab().unwrap().dirty);
+    }
+
+    // =========================================================================
+    // Welcome Screen Scroll Tests (Chunk: docs/chunks/welcome_scroll)
+    // =========================================================================
+
+    #[test]
+    fn test_welcome_screen_scroll_updates_offset() {
+        // An empty file tab should route scroll to welcome_scroll_offset_px
+        let mut state = EditorState::empty(test_font_metrics());
+        // Ensure the active tab is an empty file tab (welcome screen)
+        assert!(state.editor.should_show_welcome_screen());
+
+        state.handle_scroll(ScrollDelta::new(0.0, 50.0));
+
+        let offset = state
+            .editor
+            .active_workspace()
+            .unwrap()
+            .active_tab()
+            .unwrap()
+            .welcome_scroll_offset_px();
+        assert!((offset - 50.0).abs() < 0.001, "expected 50.0, got {offset}");
+        assert!(state.is_dirty());
+    }
+
+    #[test]
+    fn test_welcome_screen_scroll_clamps_at_zero() {
+        // Scrolling up from offset 0 should stay at 0
+        let mut state = EditorState::empty(test_font_metrics());
+        assert!(state.editor.should_show_welcome_screen());
+
+        // Scroll up (negative dy)
+        state.handle_scroll(ScrollDelta::new(0.0, -100.0));
+
+        let offset = state
+            .editor
+            .active_workspace()
+            .unwrap()
+            .active_tab()
+            .unwrap()
+            .welcome_scroll_offset_px();
+        assert!((offset - 0.0).abs() < 0.001, "expected 0.0, got {offset}");
+    }
+
+    #[test]
+    fn test_non_welcome_scroll_uses_viewport() {
+        // A non-empty file tab should NOT update welcome_scroll_offset_px
+        let mut state = EditorState::new(
+            lite_edit_buffer::TextBuffer::from_str("hello world"),
+            test_font_metrics(),
+        );
+        state.update_viewport_size(320.0);
+        assert!(!state.editor.should_show_welcome_screen());
+
+        state.handle_scroll(ScrollDelta::new(0.0, 50.0));
+
+        let offset = state
+            .editor
+            .active_workspace()
+            .unwrap()
+            .active_tab()
+            .unwrap()
+            .welcome_scroll_offset_px();
+        assert!((offset - 0.0).abs() < 0.001, "welcome offset should remain 0 for non-welcome tab");
     }
 }

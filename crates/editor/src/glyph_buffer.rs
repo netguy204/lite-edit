@@ -1,3 +1,4 @@
+// Subsystem: docs/subsystems/renderer - GPU-accelerated text and UI rendering
 // Chunk: docs/chunks/glyph_rendering - Monospace glyph atlas + text rendering
 // Chunk: docs/chunks/viewport_rendering - Viewport + Buffer-to-Screen Rendering
 // Chunk: docs/chunks/text_selection_rendering - Selection highlight rendering

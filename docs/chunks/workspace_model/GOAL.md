@@ -23,7 +23,7 @@ code_references:
   - ref: crates/editor/src/workspace.rs#TabBuffer
     implements: "Enum wrapper for buffer types to avoid trait object downcasting"
   - ref: crates/editor/src/workspace.rs#Tab
-    implements: "Tab struct owning buffer, viewport, and metadata (dirty, unread, associated_file)"
+    implements: "Tab struct owning buffer, viewport, and metadata (dirty, unread, associated_file, welcome_scroll_offset_px)"
   - ref: crates/editor/src/workspace.rs#Tab::new_file
     implements: "Factory for file-backed tabs"
   - ref: crates/editor/src/workspace.rs#Tab::buffer_and_viewport_mut

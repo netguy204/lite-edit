@@ -1,3 +1,4 @@
+// Subsystem: docs/subsystems/renderer - GPU-accelerated text and UI rendering
 // Chunk: docs/chunks/glyph_rendering - Monospace glyph atlas + text rendering
 // Chunk: docs/chunks/terminal_background_box_drawing - On-demand glyph addition for terminal rendering
 //!
