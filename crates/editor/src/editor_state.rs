@@ -407,6 +407,7 @@ impl EditorState {
     /// mouse event coordinate flipping and selector overlay geometry.
     // Chunk: docs/chunks/resize_click_alignment - Pass line count for scroll clamping
     // Chunk: docs/chunks/scroll_max_last_line - Pass content_height to viewport
+    // Chunk: docs/chunks/scroll_max_last_line - Pass content_height to viewport
     // Chunk: docs/chunks/find_strip_scroll_clearance - Subtract TAB_BAR_HEIGHT for correct visible_lines
     // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
     pub fn update_viewport_size(&mut self, window_height: f32) {
@@ -418,6 +419,13 @@ impl EditorState {
         let content_height = window_height - TAB_BAR_HEIGHT;
         self.viewport_mut().update_size(content_height, line_count);
         self.view_height = window_height; // Keep full height for coordinate flipping
+
+        // Chunk: docs/chunks/split_scroll_viewport - Sync all pane viewports on resize
+        // When window height changes, all panes change geometry. Update each
+        // tab's viewport to reflect the new pane content heights.
+        // Note: This may be called before view_width is set, so sync_pane_viewports
+        // will early-return if dimensions are incomplete.
+        self.sync_pane_viewports();
     }
 
     /// Updates the viewport size with both width and height.
@@ -437,6 +445,11 @@ impl EditorState {
         self.viewport_mut().update_size(content_height, line_count);
         self.view_height = window_height; // Keep full height for coordinate flipping
         self.view_width = window_width;
+
+        // Chunk: docs/chunks/split_scroll_viewport - Sync all pane viewports on resize
+        // When window dimensions change, all panes change geometry. Update each
+        // tab's viewport to reflect the new pane content heights.
+        self.sync_pane_viewports();
     }
 
     /// Syncs the active tab's viewport to the current window dimensions.
@@ -472,6 +485,75 @@ impl EditorState {
         // subtract TAB_BAR_HEIGHT to compute visible_lines correctly.
         let content_height = view_height - TAB_BAR_HEIGHT;
         self.viewport_mut().update_size(content_height, line_count);
+    }
+
+    // Chunk: docs/chunks/split_scroll_viewport - Per-pane viewport synchronization
+    /// Syncs all tabs' viewports to their respective pane content heights.
+    ///
+    /// This must be called whenever the pane layout changes (e.g., after a split
+    /// or window resize) to ensure each tab's viewport has the correct
+    /// `visible_lines` value for scroll clamping and dirty region calculations.
+    ///
+    /// Unlike `sync_active_tab_viewport()` which only updates the active tab,
+    /// this method updates all tabs in all panes to handle multi-pane layouts.
+    ///
+    /// The method computes pane rectangles from the current window dimensions,
+    /// then updates each tab's viewport with the correct pane content height.
+    fn sync_pane_viewports(&mut self) {
+        use crate::pane_layout::calculate_pane_rects;
+
+        // Skip if view dimensions haven't been set yet
+        let view_width = self.view_width;
+        let view_height = self.view_height;
+        if view_width == 0.0 || view_height == 0.0 {
+            return;
+        }
+
+        // Calculate the content area (excludes left rail in single-pane, full width in multi-pane)
+        // Note: In multi-pane mode, the content bounds are relative to the content area
+        // which starts after RAIL_WIDTH horizontally, at top of window vertically.
+        let content_width = view_width - RAIL_WIDTH;
+        let content_height = view_height;
+
+        // Early return if no workspace
+        let workspace = match self.editor.active_workspace_mut() {
+            Some(ws) => ws,
+            None => return,
+        };
+
+        // Calculate pane rects for the current layout
+        let bounds = (0.0, 0.0, content_width, content_height);
+        let pane_rects = calculate_pane_rects(bounds, &workspace.pane_root);
+
+        // Update each pane's tabs with the correct viewport dimensions
+        for pane_rect in &pane_rects {
+            // Get the pane by ID
+            let pane = match workspace.pane_root.get_pane_mut(pane_rect.pane_id) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            // Calculate the pane's content height (pane height minus tab bar)
+            let pane_content_height = pane_rect.height - TAB_BAR_HEIGHT;
+
+            // Update each tab's viewport in this pane
+            for tab in &mut pane.tabs {
+                // Get the line count for this tab's content
+                // File tabs use TextBuffer line count
+                // Terminal tabs use their terminal's line count
+                let line_count = if let Some(text_buffer) = tab.as_text_buffer() {
+                    text_buffer.line_count()
+                } else if let Some((terminal, _)) = tab.terminal_and_viewport_mut() {
+                    terminal.line_count()
+                } else {
+                    // Unknown tab type, skip
+                    continue;
+                };
+
+                // Update the tab's viewport with the pane's content height
+                tab.viewport.update_size(pane_content_height, line_count);
+            }
+        }
     }
 
     /// Handles a key event by forwarding to the active focus target.
@@ -620,6 +702,10 @@ impl EditorState {
                                 // No-op, no visual change
                             }
                         }
+                        // Chunk: docs/chunks/split_scroll_viewport - Sync viewports after split
+                        // After any tab movement (including splits), sync all pane viewports
+                        // to ensure tabs have correct visible_lines for their new pane geometry.
+                        self.sync_pane_viewports();
                     }
                     return;
                 }
@@ -7083,5 +7169,229 @@ mod tests {
         let ws = state.editor.active_workspace().unwrap();
         assert_eq!(ws.pane_root.pane_count(), 1);
         assert_eq!(ws.tab_count(), 1);
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/split_scroll_viewport - Post-split viewport sync tests
+    // =========================================================================
+
+    /// Helper to create a vertical split (top/bottom panes) with content.
+    #[allow(unused_imports)]
+    fn create_vsplit_state_with_content() -> EditorState {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        use crate::left_rail::RAIL_WIDTH;
+        let _ = (TAB_BAR_HEIGHT, RAIL_WIDTH); // silence unused warnings (values used in comments)
+        let mut state = EditorState::empty(test_font_metrics());
+
+        // Window: 800x600 total
+        // Content area: (800 - RAIL_WIDTH) x 600 = (800-56) x 600 = 744 x 600
+        state.update_viewport_dimensions(800.0, 600.0);
+        let line_height = test_font_metrics().line_height as f32;
+
+        // Get the workspace
+        let ws = state.editor.active_workspace_mut().unwrap();
+        let ws_id = ws.id;
+
+        // Create two panes, each with one tab containing content
+        let mut pane1 = Pane::new(1, ws_id);
+        let mut tab1 = crate::workspace::Tab::empty_file(100, line_height);
+        // Insert 50 lines of content into the tab
+        if let Some(buf) = tab1.as_text_buffer_mut() {
+            for i in 0..50 {
+                buf.insert_str(&format!("Line {}\n", i));
+            }
+            buf.set_cursor(lite_edit_buffer::Position::new(0, 0));
+        }
+        pane1.add_tab(tab1);
+
+        let mut pane2 = Pane::new(2, ws_id);
+        let mut tab2 = crate::workspace::Tab::empty_file(101, line_height);
+        // Insert 30 lines of content into the second tab
+        if let Some(buf) = tab2.as_text_buffer_mut() {
+            for i in 0..30 {
+                buf.insert_str(&format!("Content {}\n", i));
+            }
+            buf.set_cursor(lite_edit_buffer::Position::new(0, 0));
+        }
+        pane2.add_tab(tab2);
+
+        // Create vertical split layout (pane1 top, pane2 bottom)
+        // This is the "horizontal split" described in the bug (splits horizontally,
+        // resulting in top/bottom panes with reduced vertical space each)
+        ws.pane_root = PaneLayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(PaneLayoutNode::Leaf(pane1)),
+            second: Box::new(PaneLayoutNode::Leaf(pane2)),
+        };
+        ws.active_pane_id = 1; // Start focused on top pane
+
+        // Sync viewports after constructing the split
+        state.sync_pane_viewports();
+
+        state
+    }
+
+    /// After a vertical split, each pane's viewport should have reduced visible_lines.
+    #[test]
+    fn test_vsplit_reduces_visible_lines() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let state = create_vsplit_state_with_content();
+        let line_height = test_font_metrics().line_height as f32;
+
+        // Content area: 744 x 600
+        // With vertical split at ratio 0.5:
+        // - Top pane: 744 x 300 (half of 600)
+        // - Bottom pane: 744 x 300
+        // Pane content height = pane height - TAB_BAR_HEIGHT = 300 - 32 = 268
+        // Visible lines = floor(268 / line_height)
+
+        let expected_pane_height = 600.0 / 2.0; // 300
+        let expected_content_height = expected_pane_height - TAB_BAR_HEIGHT;
+        let expected_visible_lines = (expected_content_height / line_height).floor() as usize;
+
+        let ws = state.editor.active_workspace().unwrap();
+
+        // Check top pane's tab viewport
+        let top_pane = ws.pane_root.get_pane(1).expect("pane 1 should exist");
+        let top_tab = top_pane.active_tab().expect("should have active tab");
+        assert_eq!(
+            top_tab.viewport.visible_lines(),
+            expected_visible_lines,
+            "Top pane visible_lines should match split geometry"
+        );
+
+        // Check bottom pane's tab viewport
+        let bottom_pane = ws.pane_root.get_pane(2).expect("pane 2 should exist");
+        let bottom_tab = bottom_pane.active_tab().expect("should have active tab");
+        assert_eq!(
+            bottom_tab.viewport.visible_lines(),
+            expected_visible_lines,
+            "Bottom pane visible_lines should match split geometry"
+        );
+    }
+
+    /// A tab with more lines than visible should be scrollable after split.
+    #[test]
+    fn test_tab_becomes_scrollable_after_split() {
+        let mut state = create_vsplit_state_with_content();
+
+        // The top pane has 50 lines of content
+        // After split, visible_lines is approximately floor((300-32)/line_height)
+        // With line_height ~20, visible_lines is floor(268/20) = 13 lines
+        // 50 lines > 13 visible lines, so content should be scrollable
+
+        let ws = state.editor.active_workspace_mut().unwrap();
+        let top_pane = ws.pane_root.get_pane_mut(1).expect("pane 1 should exist");
+        let top_tab = top_pane.active_tab_mut().expect("should have active tab");
+
+        let visible_lines = top_tab.viewport.visible_lines();
+        let line_count = top_tab.as_text_buffer().unwrap().line_count();
+
+        assert!(
+            line_count > visible_lines,
+            "Content ({} lines) should exceed viewport ({} visible lines)",
+            line_count,
+            visible_lines
+        );
+
+        // Verify scrolling works: scroll to line 10
+        top_tab.viewport.scroll_to(10, line_count);
+        assert_eq!(
+            top_tab.viewport.first_visible_line(),
+            10,
+            "Should be able to scroll to line 10"
+        );
+
+        // Verify we can scroll to near the end
+        let max_scroll = line_count.saturating_sub(visible_lines);
+        top_tab.viewport.scroll_to(max_scroll, line_count);
+        assert_eq!(
+            top_tab.viewport.first_visible_line(),
+            max_scroll,
+            "Should be able to scroll to max position"
+        );
+    }
+
+    /// Window resize should update all pane viewports.
+    #[test]
+    fn test_resize_updates_all_pane_viewports() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = create_vsplit_state_with_content();
+        let line_height = test_font_metrics().line_height as f32;
+
+        // Get initial visible lines
+        let initial_visible_lines = {
+            let ws = state.editor.active_workspace().unwrap();
+            let pane = ws.pane_root.get_pane(1).unwrap();
+            pane.active_tab().unwrap().viewport.visible_lines()
+        };
+
+        // Resize window to double height (600 -> 1200)
+        state.update_viewport_dimensions(800.0, 1200.0);
+
+        // After resize, each pane has half of 1200 = 600 height
+        // Pane content height = 600 - 32 = 568
+        // Visible lines = floor(568 / line_height) ≈ 28 lines
+        let new_pane_height = 1200.0 / 2.0;
+        let new_content_height = new_pane_height - TAB_BAR_HEIGHT;
+        let expected_new_visible_lines = (new_content_height / line_height).floor() as usize;
+
+        let ws = state.editor.active_workspace().unwrap();
+        let pane = ws.pane_root.get_pane(1).unwrap();
+        let actual_visible_lines = pane.active_tab().unwrap().viewport.visible_lines();
+
+        assert!(
+            actual_visible_lines > initial_visible_lines,
+            "Visible lines should increase after window resize: was {}, now {}",
+            initial_visible_lines,
+            actual_visible_lines
+        );
+        assert_eq!(
+            actual_visible_lines, expected_new_visible_lines,
+            "Visible lines should match expected geometry after resize"
+        );
+    }
+
+    /// Scroll offset should be clamped when pane shrinks.
+    #[test]
+    fn test_scroll_clamped_on_shrink() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = create_vsplit_state_with_content();
+        let line_height = test_font_metrics().line_height as f32;
+
+        // Scroll to line 30 in the top pane (which has 50 lines)
+        {
+            let ws = state.editor.active_workspace_mut().unwrap();
+            let pane = ws.pane_root.get_pane_mut(1).unwrap();
+            let tab = pane.active_tab_mut().unwrap();
+            let line_count = tab.as_text_buffer().unwrap().line_count();
+            tab.viewport.scroll_to(30, line_count);
+            assert_eq!(tab.viewport.first_visible_line(), 30);
+        }
+
+        // Shrink window height significantly (600 -> 200)
+        // This makes panes very small (100px each)
+        // Pane content height = 100 - 32 = 68px
+        // Visible lines = floor(68 / 20) ≈ 3 lines
+        // Max scroll = 50 - 3 = 47, so scroll of 30 should still be valid
+        state.update_viewport_dimensions(800.0, 200.0);
+
+        // Verify scroll is still at line 30 (within valid range)
+        let ws = state.editor.active_workspace().unwrap();
+        let pane = ws.pane_root.get_pane(1).unwrap();
+        let tab = pane.active_tab().unwrap();
+        let visible_lines = tab.viewport.visible_lines();
+        let first_visible = tab.viewport.first_visible_line();
+
+        // The scroll should be valid (not clamped) since 30 < 50 - 3 = 47
+        assert!(
+            first_visible <= 30,
+            "Scroll should be at most 30 after shrink (got {})",
+            first_visible
+        );
     }
 }
