@@ -8,153 +8,140 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The bug is in `EditorState::handle_tab_bar_click`. The current implementation
+incorrectly handles multi-pane layouts by:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. Checking only if the click is in `y < TAB_BAR_HEIGHT` in global screen space
+2. Using `tabs_from_workspace()` which returns tabs from the **active** pane only
+3. Using `calculate_tab_bar_geometry()` which assumes tabs start at `RAIL_WIDTH`
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+In a split pane layout, each pane has its own tab bar at its own position.
+Clicking on a tab bar in a non-focused pane needs to:
+1. Determine which pane's tab bar was clicked (hit-test against pane rectangles)
+2. Switch focus to that pane if it's not already focused
+3. Calculate geometry for **that pane's** tab bar, not the global tab bar
+4. Switch to the clicked tab within that pane
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/split_tab_click/GOAL.md)
-with references to the files that you expect to touch.
--->
+**Strategy**: Follow the existing pattern from `handle_mouse_buffer` which
+already does pane hit-testing for click-to-focus. Extend the tab bar click
+handling to use pane-specific geometry via `calculate_pane_tab_bar_geometry`
+and `tabs_from_pane`.
 
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+This fix builds on:
+- `tiling_multi_pane_render` - Established `calculate_pane_tab_bar_geometry`
+  and `tabs_from_pane` for per-pane tab bars
+- `tiling_focus_keybindings` - Established click-to-focus pane switching pattern
+- `pane_layout.rs` - Provides `calculate_pane_rects` and `PaneRect::contains`
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing tests for multi-pane tab click routing
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Following TDD, write tests that express the expected behavior before fixing.
+The tests should verify:
+- Clicking tab in top pane of vertical split activates tab in top pane only
+- Clicking tab in bottom pane of vertical split activates tab in bottom pane only
+- Clicking tab in left pane of horizontal split activates tab in left pane only
+- Clicking tab in right pane of horizontal split activates tab in right pane only
+- Clicking tab in inactive pane switches focus to that pane AND activates the tab
+- Close button clicks in inactive pane close the tab in that pane
 
-Example:
+Location: `crates/editor/src/editor_state.rs` (in `#[cfg(test)]` module)
 
-### Step 1: Define the SegmentHeader struct
+### Step 2: Add helper to find pane at screen coordinates for tab bar region
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Create a helper function that, given screen coordinates (x, y) in the tab bar
+region of any pane, returns the `PaneId` of the pane containing that point.
 
-Location: src/segment/format.rs
+This requires:
+1. Calculating pane rects using bounds that start at `(RAIL_WIDTH, 0.0)`
+   (the renderer bounds) rather than `(0.0, 0.0)` (the content-local bounds
+   used for buffer hit-testing)
+2. Checking if the y-coordinate is within that pane's tab bar height
+3. Returning the pane ID if found
 
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+Signature:
+```rust
+fn find_pane_at_tab_bar_click(&self, screen_x: f32, screen_y: f32) -> Option<PaneId>
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `crates/editor/src/editor_state.rs`
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 3: Refactor handle_tab_bar_click for multi-pane support
+
+Replace the current single-pane implementation with one that:
+
+1. Calls `find_pane_at_tab_bar_click` to determine which pane was clicked
+2. If no pane found, return early (click was outside all pane tab bars)
+3. Get the pane's rectangle from `calculate_pane_rects`
+4. Build `TabInfo` list from the clicked pane using `tabs_from_pane`
+5. Calculate geometry using `calculate_pane_tab_bar_geometry` with the
+   pane's position and dimensions
+6. If a tab was clicked:
+   - If this pane is not the active pane, switch `active_pane_id` first
+   - Then call `switch_tab` to activate the clicked tab
+7. If close button was clicked:
+   - If this pane is not the active pane, switch `active_pane_id` first
+   - Then call `close_tab` for that pane
+
+Key imports to add:
+```rust
+use crate::tab_bar::{calculate_pane_tab_bar_geometry, tabs_from_pane};
+use crate::pane_layout::calculate_pane_rects;
+```
+
+Location: `crates/editor/src/editor_state.rs`
+
+### Step 4: Add pane-specific close_tab variant
+
+Currently `EditorState::close_tab(index)` operates on the active pane.
+For closing tabs in a specific pane (which may not be active), we need either:
+
+Option A: A method `close_tab_in_pane(pane_id, index)` that:
+- Finds the pane by ID
+- Calls `pane.close_tab(index)` directly
+- Handles empty pane cleanup if needed
+
+Option B: Switch active pane first, then close, which maintains the existing
+invariant that mutations happen through the active pane.
+
+Choose Option B (switch-then-close) for consistency with existing code patterns.
+This means the refactored `handle_tab_bar_click` naturally handles close buttons
+by first switching focus if needed, then calling `close_tab`.
+
+### Step 5: Verify tests pass and add edge case tests
+
+Run the tests from Step 1. If they pass, add additional edge cases:
+- Single-pane layout still works (no regression)
+- Tab bar horizontal scroll offset is pane-specific
+- Clicking in the divider region between panes does nothing
+
+Location: `crates/editor/src/editor_state.rs`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+This chunk depends on completed work from:
+- `tiling_multi_pane_render` - Provides `calculate_pane_tab_bar_geometry`, `tabs_from_pane`
+- `tiling_workspace_integration` - Provides pane tree and `active_pane_id` management
+- `tiling_tree_model` - Provides `PaneLayoutNode`, `calculate_pane_rects`
 
-If there are no dependencies, delete this section.
--->
+All these chunks are ACTIVE, so no blocking dependencies.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Coordinate system complexity**: The renderer calculates pane rects with
+  bounds starting at `(RAIL_WIDTH, 0.0)`, but `handle_mouse_buffer` uses
+  content-local coordinates starting at `(0.0, 0.0)`. Need to ensure the
+  tab bar click handler uses renderer-consistent bounds to match visual
+  pane positions.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Focus change side effects**: When clicking a tab in an inactive pane,
+  switching focus may trigger viewport syncing and dirty region updates.
+  Need to ensure these are triggered correctly.
+
+- **Tab bar view offset**: Each pane has its own `tab_bar_view_offset`.
+  The geometry calculation must use the clicked pane's offset, not the
+  active pane's offset.
 
 ## Deviations
 
