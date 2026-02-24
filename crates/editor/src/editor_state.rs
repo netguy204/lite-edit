@@ -20,7 +20,10 @@ use std::time::Instant;
 
 use crate::buffer_target::BufferFocusTarget;
 // Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog import
-use crate::confirm_dialog::ConfirmDialog;
+// Chunk: docs/chunks/generic_yes_no_modal - ConfirmDialogContext and geometry import
+use crate::confirm_dialog::{
+    calculate_confirm_dialog_geometry, ConfirmDialog, ConfirmDialogContext,
+};
 use crate::context::EditorContext;
 use crate::dir_picker;
 use crate::dirty_region::DirtyRegion;
@@ -31,7 +34,6 @@ use crate::font::FontMetrics;
 use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
 use crate::left_rail::{calculate_left_rail_geometry, RAIL_WIDTH};
 use crate::mini_buffer::MiniBuffer;
-// Chunk: docs/chunks/dirty_tab_close_confirm - PaneId for pending_close
 use crate::pane_layout::PaneId;
 // Chunk: docs/chunks/content_tab_bar - Tab bar click handling
 use crate::tab_bar::{calculate_tab_bar_geometry, tabs_from_workspace, TAB_BAR_HEIGHT};
@@ -123,11 +125,12 @@ pub struct EditorState {
     /// (used as the search origin; only advances when Enter is pressed)
     pub search_origin: Position,
     // Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog state
+    // Chunk: docs/chunks/generic_yes_no_modal - Replaced pending_close with confirm_context
     /// The active confirm dialog (when focus == ConfirmDialog)
     pub confirm_dialog: Option<ConfirmDialog>,
-    /// The tab (pane_id, tab_index) that triggered the confirm dialog.
-    /// Stored so we can close the correct tab when the user confirms.
-    pub pending_close: Option<(PaneId, usize)>,
+    /// Context for what triggered the confirm dialog and what action to take on confirmation.
+    /// Replaces the previous `pending_close` field to support multiple dialog use cases.
+    pub confirm_context: Option<ConfirmDialogContext>,
     // Chunk: docs/chunks/pty_wakeup_reentrant - EventSender for PTY wakeup
     /// Event sender for creating PTY wakeup handles.
     /// Set by main.rs during setup. PtyWakeup handles signal through this sender.
@@ -314,8 +317,9 @@ impl EditorState {
             find_mini_buffer: None,
             search_origin: Position::new(0, 0),
             // Chunk: docs/chunks/dirty_tab_close_confirm - Initialize confirm dialog state
+            // Chunk: docs/chunks/generic_yes_no_modal - Use confirm_context instead of pending_close
             confirm_dialog: None,
-            pending_close: None,
+            confirm_context: None,
             // Chunk: docs/chunks/terminal_pty_wakeup - Initialize wakeup factory as None
             event_sender: None,
             // Chunk: docs/chunks/syntax_highlighting - Initialize language registry
@@ -363,8 +367,9 @@ impl EditorState {
             find_mini_buffer: None,
             search_origin: Position::new(0, 0),
             // Chunk: docs/chunks/dirty_tab_close_confirm - Initialize confirm dialog state
+            // Chunk: docs/chunks/generic_yes_no_modal - Use confirm_context instead of pending_close
             confirm_dialog: None,
-            pending_close: None,
+            confirm_context: None,
             event_sender: None,
             language_registry: LanguageRegistry::new(),
         }
@@ -1215,8 +1220,9 @@ impl EditorState {
     ///
     /// Delegates to `ConfirmDialog::handle_key()` and processes the outcome:
     /// - `Cancelled`: Close the dialog, keep the tab open
-    /// - `Confirmed`: Close the tab without saving, then close the dialog
+    /// - `Confirmed`: Dispatch to the appropriate handler based on context
     /// - `Pending`: Just mark dirty for visual update
+    // Chunk: docs/chunks/generic_yes_no_modal - Context-based outcome routing
     fn handle_key_confirm_dialog(&mut self, event: KeyEvent) {
         use crate::confirm_dialog::ConfirmOutcome;
 
@@ -1229,15 +1235,12 @@ impl EditorState {
 
         match outcome {
             ConfirmOutcome::Cancelled => {
-                // User chose Cancel or pressed Escape - close dialog, keep tab
+                // User chose Cancel or pressed Escape - close dialog
                 self.close_confirm_dialog();
             }
             ConfirmOutcome::Confirmed => {
-                // User chose Abandon - close the tab without saving, then close dialog
-                if let Some((pane_id, tab_idx)) = self.pending_close.take() {
-                    self.force_close_tab(pane_id, tab_idx);
-                }
-                self.close_confirm_dialog();
+                // User confirmed - handle based on context
+                self.handle_confirm_dialog_confirmed();
             }
             ConfirmOutcome::Pending => {
                 // Dialog still open - just mark dirty for visual update
@@ -1246,21 +1249,44 @@ impl EditorState {
         }
     }
 
+    /// Handles the confirmed outcome of the confirm dialog.
+    ///
+    /// Dispatches to the appropriate handler based on the `confirm_context`:
+    /// - `CloseDirtyTab`: Force-close the tab without saving
+    /// - `QuitWithDirtyTabs`: Set the quit flag
+    // Chunk: docs/chunks/generic_yes_no_modal - Context-based outcome routing
+    fn handle_confirm_dialog_confirmed(&mut self) {
+        if let Some(ctx) = self.confirm_context.take() {
+            match ctx {
+                ConfirmDialogContext::CloseDirtyTab { pane_id, tab_idx } => {
+                    self.force_close_tab(pane_id, tab_idx);
+                }
+                ConfirmDialogContext::QuitWithDirtyTabs { .. } => {
+                    // Set the quit flag - the main loop will handle termination
+                    self.should_quit = true;
+                }
+            }
+        }
+        self.close_confirm_dialog();
+    }
+
     /// Closes the confirm dialog and returns focus to the buffer.
+    // Chunk: docs/chunks/generic_yes_no_modal - Use confirm_context instead of pending_close
     fn close_confirm_dialog(&mut self) {
         self.confirm_dialog = None;
-        self.pending_close = None;
+        self.confirm_context = None;
         self.focus = EditorFocus::Buffer;
         self.dirty_region.merge(DirtyRegion::FullViewport);
     }
 
     /// Shows a confirmation dialog for closing a dirty tab.
     ///
-    /// This stores the pane_id and tab index so we can close the correct tab
+    /// This stores the context so we can close the correct tab
     /// if the user confirms, then transitions focus to the dialog.
+    // Chunk: docs/chunks/generic_yes_no_modal - Use ConfirmDialogContext
     fn show_confirm_dialog(&mut self, pane_id: PaneId, tab_idx: usize) {
         self.confirm_dialog = Some(ConfirmDialog::new("Abandon unsaved changes?"));
-        self.pending_close = Some((pane_id, tab_idx));
+        self.confirm_context = Some(ConfirmDialogContext::CloseDirtyTab { pane_id, tab_idx });
         self.focus = EditorFocus::ConfirmDialog;
         self.dirty_region.merge(DirtyRegion::FullViewport);
     }
@@ -1699,11 +1725,54 @@ impl EditorState {
                 self.handle_mouse_buffer(screen_event);
             }
             // Chunk: docs/chunks/dirty_tab_close_confirm - Block mouse during confirm dialog
+            // Chunk: docs/chunks/generic_yes_no_modal - Add mouse click support for confirm dialog
             EditorFocus::ConfirmDialog => {
-                // No-op: mouse events are blocked while confirm dialog is active
-                // (keyboard-only for this chunk; mouse support is future work)
+                if let MouseEventKind::Down = screen_event.kind {
+                    self.handle_mouse_confirm_dialog(screen_x as f32, screen_y as f32);
+                }
             }
         }
+    }
+
+    /// Handles a mouse click on the confirm dialog.
+    ///
+    /// Hit-tests the cancel and confirm buttons and dispatches accordingly:
+    /// - Click on cancel button: closes the dialog
+    /// - Click on confirm button: handles confirmation based on context
+    /// - Click elsewhere: no-op (dialog stays open)
+    // Chunk: docs/chunks/generic_yes_no_modal - Mouse click handling for confirm dialog
+    fn handle_mouse_confirm_dialog(&mut self, x: f32, y: f32) {
+        let dialog = match self.confirm_dialog.as_ref() {
+            Some(d) => d,
+            None => return,
+        };
+
+        // Calculate geometry to get button positions
+        let line_height = self.font_metrics.line_height as f32;
+        let glyph_width = self.font_metrics.advance_width as f32;
+        let geometry = calculate_confirm_dialog_geometry(
+            self.view_width,
+            self.view_height,
+            line_height,
+            glyph_width,
+            dialog,
+        );
+
+        // Hit test the buttons
+        if geometry.is_cancel_button(x, y) {
+            // Update selection for visual feedback before closing
+            if let Some(d) = self.confirm_dialog.as_mut() {
+                d.selected = crate::confirm_dialog::ConfirmButton::Cancel;
+            }
+            self.close_confirm_dialog();
+        } else if geometry.is_confirm_button(x, y) {
+            // Update selection for visual feedback before handling
+            if let Some(d) = self.confirm_dialog.as_mut() {
+                d.selected = crate::confirm_dialog::ConfirmButton::Abandon;
+            }
+            self.handle_confirm_dialog_confirmed();
+        }
+        // Clicks outside buttons are ignored - dialog stays open
     }
 
     /// Handles a mouse event when the selector is focused.
@@ -7616,8 +7685,9 @@ mod tests {
         assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 1);
     }
 
+    // Chunk: docs/chunks/generic_yes_no_modal - Updated to use confirm_context
     #[test]
-    fn test_close_dirty_tab_sets_pending_close() {
+    fn test_close_dirty_tab_sets_confirm_context() {
         let mut state = EditorState::empty(test_font_metrics());
         state.update_viewport_size(160.0);
 
@@ -7631,11 +7701,15 @@ mod tests {
         // Try to close the dirty tab
         state.close_tab(0);
 
-        // pending_close should have the pane_id and tab index
-        assert!(state.pending_close.is_some());
-        let (pane_id, tab_idx) = state.pending_close.unwrap();
-        assert_eq!(pane_id, expected_pane_id);
-        assert_eq!(tab_idx, 0);
+        // confirm_context should have the CloseDirtyTab variant with pane_id and tab index
+        assert!(state.confirm_context.is_some());
+        match state.confirm_context.as_ref().unwrap() {
+            ConfirmDialogContext::CloseDirtyTab { pane_id, tab_idx } => {
+                assert_eq!(*pane_id, expected_pane_id);
+                assert_eq!(*tab_idx, 0);
+            }
+            _ => panic!("Expected CloseDirtyTab context"),
+        }
     }
 
     #[test]
@@ -7676,7 +7750,8 @@ mod tests {
         // Tab should be removed, no confirm dialog
         assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 1);
         assert!(state.confirm_dialog.is_none());
-        assert!(state.pending_close.is_none());
+        // Chunk: docs/chunks/generic_yes_no_modal - Updated to use confirm_context
+        assert!(state.confirm_context.is_none());
         assert_eq!(state.focus, EditorFocus::Buffer);
     }
 
@@ -7699,7 +7774,8 @@ mod tests {
 
         // Dialog should be closed, tab still there, focus back to buffer
         assert!(state.confirm_dialog.is_none());
-        assert!(state.pending_close.is_none());
+        // Chunk: docs/chunks/generic_yes_no_modal - Updated to use confirm_context
+        assert!(state.confirm_context.is_none());
         assert_eq!(state.focus, EditorFocus::Buffer);
         assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 1);
         // Tab should still be dirty
@@ -7761,7 +7837,8 @@ mod tests {
         // Dialog should be closed, tab should be closed (replaced with empty)
         // Note: closing the last tab replaces it with an empty tab
         assert!(state.confirm_dialog.is_none());
-        assert!(state.pending_close.is_none());
+        // Chunk: docs/chunks/generic_yes_no_modal - Updated to use confirm_context
+        assert!(state.confirm_context.is_none());
         assert_eq!(state.focus, EditorFocus::Buffer);
         // The old dirty tab was closed (replaced with new empty tab)
         assert!(!state.editor.active_workspace().unwrap().active_tab().unwrap().dirty);
@@ -7985,5 +8062,201 @@ mod tests {
             actual_rows, expected_rows,
             "Terminal rows should match pane height"
         );
+    }
+
+    // =========================================================================
+    // Confirm dialog mouse interaction tests
+    // Chunk: docs/chunks/generic_yes_no_modal - Mouse click tests for confirm dialog
+    // =========================================================================
+
+    /// Helper to convert screen-space y (y=0 at top) to NSView y (y=0 at bottom).
+    /// handle_mouse expects NSView coordinates.
+    fn screen_to_nsview_y(screen_y: f64, view_height: f32) -> f64 {
+        view_height as f64 - screen_y
+    }
+
+    #[test]
+    fn test_mouse_click_cancel_button_closes_dialog() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(800.0); // Set a reasonable view size
+        state.view_width = 800.0;
+        state.view_height = 600.0;
+
+        // Make buffer dirty and open confirm dialog
+        state.handle_key(KeyEvent::char('x'));
+        state.close_tab(0);
+        assert_eq!(state.focus, EditorFocus::ConfirmDialog);
+        assert!(state.confirm_dialog.is_some());
+
+        // Calculate geometry to find cancel button position (in screen space)
+        let dialog = state.confirm_dialog.as_ref().unwrap();
+        let line_height = state.font_metrics.line_height as f32;
+        let glyph_width = state.font_metrics.advance_width as f32;
+        let geometry = calculate_confirm_dialog_geometry(
+            state.view_width,
+            state.view_height,
+            line_height,
+            glyph_width,
+            dialog,
+        );
+
+        // Click in the center of the cancel button
+        // Convert from screen space to NSView space for handle_mouse
+        let screen_x = geometry.cancel_button_x + geometry.button_width / 2.0;
+        let screen_y = geometry.buttons_y + geometry.button_height / 2.0;
+        let nsview_y = screen_to_nsview_y(screen_y as f64, state.view_height);
+        let click = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (screen_x as f64, nsview_y),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        state.handle_mouse(click);
+
+        // Dialog should be closed, tab still there, focus back to buffer
+        assert!(state.confirm_dialog.is_none());
+        assert!(state.confirm_context.is_none());
+        assert_eq!(state.focus, EditorFocus::Buffer);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 1);
+        // Tab should still be dirty (not closed)
+        assert!(state.editor.active_workspace().unwrap().active_tab().unwrap().dirty);
+    }
+
+    #[test]
+    fn test_mouse_click_confirm_button_closes_tab() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(800.0);
+        state.view_width = 800.0;
+        state.view_height = 600.0;
+
+        // Make buffer dirty and open confirm dialog
+        state.handle_key(KeyEvent::char('x'));
+        assert!(state.editor.active_workspace().unwrap().active_tab().unwrap().dirty);
+        state.close_tab(0);
+        assert_eq!(state.focus, EditorFocus::ConfirmDialog);
+
+        // Calculate geometry to find confirm button position (in screen space)
+        let dialog = state.confirm_dialog.as_ref().unwrap();
+        let line_height = state.font_metrics.line_height as f32;
+        let glyph_width = state.font_metrics.advance_width as f32;
+        let geometry = calculate_confirm_dialog_geometry(
+            state.view_width,
+            state.view_height,
+            line_height,
+            glyph_width,
+            dialog,
+        );
+
+        // Click in the center of the confirm button (abandon_button_x is the confirm button)
+        // Convert from screen space to NSView space for handle_mouse
+        let screen_x = geometry.abandon_button_x + geometry.button_width / 2.0;
+        let screen_y = geometry.buttons_y + geometry.button_height / 2.0;
+        let nsview_y = screen_to_nsview_y(screen_y as f64, state.view_height);
+        let click = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (screen_x as f64, nsview_y),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        state.handle_mouse(click);
+
+        // Dialog should be closed, tab should be closed (replaced with empty)
+        assert!(state.confirm_dialog.is_none());
+        assert!(state.confirm_context.is_none());
+        assert_eq!(state.focus, EditorFocus::Buffer);
+        // The old dirty tab was closed (replaced with new empty tab)
+        assert!(!state.editor.active_workspace().unwrap().active_tab().unwrap().dirty);
+    }
+
+    #[test]
+    fn test_mouse_click_outside_buttons_does_nothing() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(800.0);
+        state.view_width = 800.0;
+        state.view_height = 600.0;
+
+        // Make buffer dirty and open confirm dialog
+        state.handle_key(KeyEvent::char('x'));
+        state.close_tab(0);
+        assert_eq!(state.focus, EditorFocus::ConfirmDialog);
+        assert!(state.confirm_dialog.is_some());
+
+        // Click somewhere in the dialog panel but not on buttons (top area)
+        let dialog = state.confirm_dialog.as_ref().unwrap();
+        let line_height = state.font_metrics.line_height as f32;
+        let glyph_width = state.font_metrics.advance_width as f32;
+        let geometry = calculate_confirm_dialog_geometry(
+            state.view_width,
+            state.view_height,
+            line_height,
+            glyph_width,
+            dialog,
+        );
+
+        // Click in the prompt area (above the buttons in screen space)
+        // Convert from screen space to NSView space for handle_mouse
+        let screen_x = geometry.panel_x + geometry.panel_width / 2.0;
+        let screen_y = geometry.prompt_y - 5.0; // Above buttons, in prompt area
+        let nsview_y = screen_to_nsview_y(screen_y as f64, state.view_height);
+        let click = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (screen_x as f64, nsview_y),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        state.handle_mouse(click);
+
+        // Dialog should still be open
+        assert!(state.confirm_dialog.is_some());
+        assert_eq!(state.focus, EditorFocus::ConfirmDialog);
+    }
+
+    #[test]
+    fn test_mouse_click_updates_selection_before_close() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(800.0);
+        state.view_width = 800.0;
+        state.view_height = 600.0;
+
+        // Make buffer dirty and open confirm dialog
+        state.handle_key(KeyEvent::char('x'));
+        state.close_tab(0);
+
+        // Verify default selection is Cancel
+        assert_eq!(
+            state.confirm_dialog.as_ref().unwrap().selected,
+            crate::confirm_dialog::ConfirmButton::Cancel
+        );
+
+        // Calculate geometry to find confirm button position (in screen space)
+        let dialog = state.confirm_dialog.as_ref().unwrap();
+        let line_height = state.font_metrics.line_height as f32;
+        let glyph_width = state.font_metrics.advance_width as f32;
+        let geometry = calculate_confirm_dialog_geometry(
+            state.view_width,
+            state.view_height,
+            line_height,
+            glyph_width,
+            dialog,
+        );
+
+        // Click on confirm button - before closing, selection should change to Abandon
+        // (The dialog gets closed immediately, so we can't observe the selection change,
+        // but the test verifies that clicking confirm button works correctly)
+        // Convert from screen space to NSView space for handle_mouse
+        let screen_x = geometry.abandon_button_x + geometry.button_width / 2.0;
+        let screen_y = geometry.buttons_y + geometry.button_height / 2.0;
+        let nsview_y = screen_to_nsview_y(screen_y as f64, state.view_height);
+        let click = MouseEvent {
+            kind: MouseEventKind::Down,
+            position: (screen_x as f64, nsview_y),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        state.handle_mouse(click);
+
+        // Dialog should be closed and the tab should be closed
+        assert!(state.confirm_dialog.is_none());
+        assert!(!state.editor.active_workspace().unwrap().active_tab().unwrap().dirty);
     }
 }
