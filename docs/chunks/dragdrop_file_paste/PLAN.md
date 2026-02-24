@@ -8,153 +8,277 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+We implement macOS drag-and-drop by extending the existing `MetalView` NSView subclass
+to act as an `NSDraggingDestination`. The view will:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. Register for file URL drag types at creation time
+2. Implement the `NSDraggingDestination` protocol methods to accept dropped files
+3. Convert dropped `NSURL` objects to string paths
+4. Send the paths through the event channel to the drain loop
+5. Insert the paths as text at the cursor position (same flow as paste)
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+**Key architectural decisions:**
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/dragdrop_file_paste/GOAL.md)
-with references to the files that you expect to touch.
--->
+- **Event channel integration**: Dropped file paths flow through `EditorEvent` like all
+  other inputs, maintaining the unified event architecture from `pty_wakeup_reentrant`.
+  This avoids introducing new borrow patterns.
+
+- **Paste-like text insertion**: Once paths arrive at the drain loop, they're inserted
+  using the same `InputEncoder::encode_paste` mechanism used for Cmd+V. For terminal
+  tabs, this respects bracketed paste mode. For buffer editors, paths are inserted
+  directly.
+
+- **Shell escaping**: Paths containing spaces or special characters are shell-escaped
+  or quoted. We use single quotes with escaped internal single quotes to match how
+  macOS Terminal.app handles paths.
+
+- **Multiple files**: Space-separated, each individually escaped.
+
+**Testing strategy (per TESTING_PHILOSOPHY.md):**
+
+- **Unit-testable**: Shell escaping logic is pure Rust, fully testable.
+- **Humble view**: The Cocoa drag-drop setup is platform shell code (not unit-tested).
+  We verify visually that the drag cursor and drop behavior work.
+- **Integration**: The path-to-text-insertion flow is tested by simulating a
+  `FileDrop` event and asserting the terminal/buffer receives the escaped paths.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems are directly relevant. This chunk extends the event channel pattern
+established in `pty_wakeup_reentrant` but does not modify any documented subsystems.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add shell_escape utility function
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create a new utility module `crates/editor/src/shell_escape.rs` with a function
+that escapes file paths for shell use.
 
-Example:
+**Behavior:**
+- Wrap path in single quotes
+- Escape any internal single quotes by ending the quote, adding `\'`, and resuming
+- Example: `/path/to/foo's file.txt` → `'/path/to/foo'\''s file.txt'`
+- For paths without special characters, single quotes are still used for consistency
 
-### Step 1: Define the SegmentHeader struct
+**Tests (TDD - write first):**
+- Simple path: `/Users/test/file.txt` → `'/Users/test/file.txt'`
+- Path with space: `/Users/test/my file.txt` → `'/Users/test/my file.txt'`
+- Path with single quote: `/Users/test/foo's.txt` → `'/Users/test/foo'\''s.txt'`
+- Path with both: `/Users/test/foo's file.txt` → `'/Users/test/foo'\''s file.txt'`
+- Multiple paths joined: vec of paths → space-separated escaped paths
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Location: `crates/editor/src/shell_escape.rs`
 
-Location: src/segment/format.rs
+---
 
-### Step 2: Implement header serialization
+### Step 2: Add FileDrop event variant to EditorEvent
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Extend `EditorEvent` enum with a new variant for file drops:
 
-### Step 3: ...
+```rust
+/// Files were dropped onto the view
+///
+/// Contains the list of file paths (as UTF-8 strings) that were dropped.
+/// The paths are absolute and need shell escaping before insertion.
+FileDrop(Vec<String>),
+```
+
+Update `is_user_input()` to return `true` for `FileDrop` (it's user input).
+
+Location: `crates/editor/src/editor_event.rs`
+
+---
+
+### Step 3: Add send_file_drop to EventSender
+
+Add a method to `EventSender` for sending file drop events:
+
+```rust
+pub fn send_file_drop(&self, paths: Vec<String>) -> Result<(), SendError<EditorEvent>> {
+    let result = self.inner.sender.send(EditorEvent::FileDrop(paths));
+    (self.inner.run_loop_waker)();
+    result
+}
+```
+
+Location: `crates/editor/src/event_channel.rs`
+
+---
+
+### Step 4: Register MetalView for file URL drag types
+
+In `MetalView::new()`, after creating the view, register it to accept file URL
+drags. This requires:
+
+1. Get `NSPasteboardTypeFileURL` (the modern UTI for file URLs)
+2. Call `self.registerForDraggedTypes(&[file_url_type])`
+
+The `objc2-app-kit` crate provides these via the `NSPasteboard` feature. We may
+need to enable this feature in `Cargo.toml` if not already enabled.
+
+**Implementation note:** `registerForDraggedTypes` requires an `NSArray` of
+`NSPasteboardType` values. The modern type is `NSPasteboardTypeFileURL`.
+
+Location: `crates/editor/src/metal_view.rs` (in `MetalView::new()`)
+
+---
+
+### Step 5: Implement NSDraggingDestination protocol methods
+
+Add `NSDraggingDestination` protocol implementation to `MetalView`. The minimum
+required methods are:
+
+**`draggingEntered:`** - Called when drag enters the view
+- Return `NSDragOperationCopy` to indicate we accept the drop
+- This makes the drag cursor show a copy badge
+
+**`performDragOperation:`** - Called when user releases the drag
+- Extract file URLs from the `NSDraggingInfo` pasteboard
+- Convert each `NSURL` to a `String` path via `url.path().to_string()`
+- Send via `EventSender::send_file_drop()`
+- Return `true` on success
+
+**Protocol implementation pattern (following existing method overrides):**
+```rust
+impl MetalView {
+    // In the define_class! macro block:
+
+    #[unsafe(method(draggingEntered:))]
+    fn __dragging_entered(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+        NSDragOperation::Copy
+    }
+
+    #[unsafe(method(performDragOperation:))]
+    fn __perform_drag_operation(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+        // Extract paths from pasteboard and send via event channel
+        ...
+    }
+}
+```
+
+**Path extraction:**
+```rust
+let pasteboard = sender.draggingPasteboard();
+// Read file URLs from the pasteboard
+let urls: Option<Retained<NSArray<NSURL>>> = pasteboard.readObjectsForClasses_options(
+    &NSArray::from_slice(&[NSURL::class()]),
+    None
+);
+// Convert each NSURL to String path via url.path().to_string()
+```
+
+Location: `crates/editor/src/metal_view.rs`
+
+---
+
+### Step 6: Handle FileDrop in drain loop
+
+Add a match arm in `EventDrainLoop::process_pending_events()` to handle
+`EditorEvent::FileDrop(paths)`:
+
+```rust
+EditorEvent::FileDrop(paths) => {
+    self.handle_file_drop(paths);
+}
+```
+
+Implement `handle_file_drop`:
+- Shell-escape each path using the utility from Step 1
+- Join with spaces
+- Insert as text using the same mechanism as paste
+
+**For terminal focus:** Use `InputEncoder::encode_paste()` + `terminal.write_input()`
+(same as Cmd+V paste in `handle_key_terminal`).
+
+**For buffer focus:** Use `ctx.buffer.insert_str()` (same as Cmd+V paste in
+`BufferFocusTarget::execute_command(Command::Paste)`).
+
+The approach mirrors how `handle_key` routes to different targets based on focus.
+We call into `EditorState` to handle the insertion.
+
+Location: `crates/editor/src/drain_loop.rs`, `crates/editor/src/editor_state.rs`
+
+---
+
+### Step 7: Add handle_file_drop to EditorState
+
+Add a method `EditorState::handle_file_drop(paths: Vec<String>)` that:
+
+1. Shell-escapes each path
+2. Joins them with spaces into a single string
+3. Based on current focus:
+   - **Terminal**: Uses `InputEncoder::encode_paste()` + `terminal.write_input()`
+   - **Buffer/FindInFile/Selector**: Uses `buffer.insert_str()` or ignores
+
+This mirrors how `handle_key` dispatches to focus-specific handlers.
+
+Location: `crates/editor/src/editor_state.rs`
+
+---
+
+### Step 8: Integration test for FileDrop event flow
+
+Write an integration test that:
+1. Creates an `EditorState` with a terminal tab
+2. Simulates a `FileDrop(vec!["/path/to/file.txt"])` event
+3. Asserts that the shell-escaped path was written to the terminal
+
+This tests the path from event → shell_escape → terminal without involving
+the actual macOS drag-drop APIs.
+
+Location: `crates/editor/src/editor_state.rs` (test module)
+
+---
+
+### Step 9: Visual verification
+
+Manually test:
+1. Drag a single file from Finder onto the terminal pane → path appears
+2. Drag multiple files → space-separated paths appear
+3. Drag file with spaces in name → properly escaped (single-quoted)
+4. Drag file with single quote in name → properly escaped
+5. Drag onto buffer editor pane → path(s) inserted at cursor
+6. Drag non-file content (e.g., text) → no crash, no action
+7. Verify drag cursor shows copy badge during hover
+8. Test at 1x and 2x (Retina) scale factors
 
 ---
 
 **BACKREFERENCE COMMENTS**
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+When implementing code, add backreference comments:
+- `// Chunk: docs/chunks/dragdrop_file_paste - ...`
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
-
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
-
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Place at method-level for the drag-drop handlers and shell_escape functions.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+- **objc2-app-kit features**: May need to enable `NSDragging` and/or `NSPasteboard`
+  features in `Cargo.toml` to access `NSDraggingDestination`, `NSDraggingInfo`,
+  `registerForDraggedTypes`, and `NSPasteboardTypeFileURL`.
 
-If there are no dependencies, delete this section.
--->
+- **Existing chunks**: Builds on `pty_wakeup_reentrant` event channel architecture.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **objc2-app-kit API surface**: The exact API for `NSDraggingDestination` protocol
+   implementation in objc2 0.6 may differ from documentation examples. May need to
+   consult objc2 source or examples for correct trait implementation syntax.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **NSPasteboardTypeFileURL availability**: This is the modern UTI-based type.
+   If targeting older macOS versions, may need fallback to `NSFilenamesPboardType`.
+   Verify minimum macOS version requirements.
+
+3. **Non-file drags**: When dragging text or other non-file content, we should
+   gracefully ignore it. Need to verify the pasteboard doesn't contain file URLs
+   before attempting to read them.
+
+4. **Path encoding**: File paths from NSURL should be UTF-8, but edge cases with
+   filesystem encoding may exist. Convert via `path().to_string()` and handle
+   potential non-UTF-8 paths gracefully.
+
+5. **Thread safety**: `performDragOperation` is called on the main thread, same
+   as other NSView callbacks. The EventSender is designed for this, so should be fine.
 
 ## Deviations
 

@@ -1,22 +1,27 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
 code_paths:
-  - crates/editor/src/metal_view.rs
-  - crates/editor/src/drain_loop.rs
+- crates/editor/src/metal_view.rs
+- crates/editor/src/drain_loop.rs
+- crates/editor/src/editor_event.rs
+- crates/editor/src/event_channel.rs
+- crates/editor/src/editor_state.rs
+- crates/editor/src/shell_escape.rs
 code_references:
-  - ref: crates/editor/src/metal_view.rs#MetalView
-    implements: "NSView subclass that will register as NSDraggingDestination and handle dropped file URLs"
+- ref: crates/editor/src/metal_view.rs#MetalView
+  implements: NSView subclass that will register as NSDraggingDestination and handle
+    dropped file URLs
 narrative: null
 investigation: null
 subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["welcome_scroll"]
+created_after:
+- welcome_scroll
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

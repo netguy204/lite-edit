@@ -24,9 +24,14 @@ use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
-use objc2_app_kit::{NSCursor, NSEvent, NSEventModifierFlags, NSView};
-use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSRect, NSSize};
+// Chunk: docs/chunks/dragdrop_file_paste - ClassType for NSURL::class()
+use objc2::{define_class, msg_send, ClassType, DefinedClass, MainThreadOnly};
+// Chunk: docs/chunks/dragdrop_file_paste - NSDragOperation and NSDraggingInfo for drag-drop support
+use objc2_app_kit::{
+    NSCursor, NSDragOperation, NSDraggingInfo, NSEvent, NSEventModifierFlags,
+    NSPasteboardTypeFileURL, NSView,
+};
+use objc2_foundation::{MainThreadMarker, NSArray, NSObjectProtocol, NSRect, NSSize, NSURL};
 use objc2_metal::MTLDevice;
 use objc2_quartz_core::{CALayer, CAMetalLayer};
 
@@ -402,11 +407,74 @@ define_class!(
                 self.addCursorRect_cursor(self.bounds(), &ibeam_cursor);
             }
         }
+
+        // Chunk: docs/chunks/dragdrop_file_paste - NSDraggingDestination protocol implementation
+        /// Called when a drag operation enters the view.
+        ///
+        /// Returns `NSDragOperation::Copy` to indicate we accept file drops.
+        /// This makes the drag cursor show a copy badge.
+        #[unsafe(method(draggingEntered:))]
+        fn __dragging_entered(&self, _sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            NSDragOperation::Copy
+        }
+
+        // Chunk: docs/chunks/dragdrop_file_paste - NSDraggingDestination protocol implementation
+        /// Called when user releases the drag over our view.
+        ///
+        /// Extracts file URLs from the pasteboard and sends them via the event channel.
+        /// Returns `true` on success, `false` if no files were dropped.
+        #[unsafe(method(performDragOperation:))]
+        fn __perform_drag_operation(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            // Get the pasteboard from the drag info
+            let pasteboard = sender.draggingPasteboard();
+
+            // Try to read file URLs from the pasteboard
+            // We need to get the class object for NSURL
+            let url_class = NSURL::class();
+            let class_array = NSArray::from_slice(&[url_class]);
+
+            // Read file URLs from the pasteboard
+            // SAFETY: We're passing the correct class type (NSURL) and no options
+            let urls: Option<Retained<NSArray>> = unsafe {
+                pasteboard.readObjectsForClasses_options(&class_array, None)
+            };
+
+            let Some(urls) = urls else {
+                return false.into();
+            };
+
+            // Convert URLs to file paths
+            let mut paths: Vec<String> = Vec::new();
+            for i in 0..urls.len() {
+                // Get each URL object. Since we requested NSURL class, these are NSURL instances.
+                // SAFETY: We requested NSURL class, so the returned objects are NSURL instances.
+                let obj = urls.objectAtIndex(i);
+                let url: &NSURL = unsafe { &*(&*obj as *const _ as *const NSURL) };
+
+                // Get the file path from the URL
+                if let Some(path) = url.path() {
+                    paths.push(path.to_string());
+                }
+            }
+
+            if paths.is_empty() {
+                return false.into();
+            }
+
+            // Send the file drop event via the event sender
+            let event_sender_guard = self.ivars().event_sender.borrow();
+            if let Some(event_sender) = event_sender_guard.as_ref() {
+                let _ = event_sender.send_file_drop(paths);
+            }
+
+            true.into()
+        }
     }
 );
 
 impl MetalView {
     /// Creates a new MetalView with the given frame
+    // Chunk: docs/chunks/dragdrop_file_paste - Register for file URL drag types
     pub fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         // Create the view with default ivars (which initializes Metal)
         let this = mtm.alloc::<Self>();
@@ -416,6 +484,12 @@ impl MetalView {
 
         // Enable layer backing
         this.setWantsLayer(true);
+
+        // Register for file URL drag types (drag-and-drop support)
+        // This allows files to be dropped onto the view
+        let file_url_type = unsafe { NSPasteboardTypeFileURL };
+        let drag_types = NSArray::from_slice(&[file_url_type]);
+        this.registerForDraggedTypes(&drag_types);
 
         this
     }

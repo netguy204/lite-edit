@@ -44,6 +44,8 @@ use crate::workspace::Editor;
 use lite_edit_buffer::{Position, TextBuffer};
 // Chunk: docs/chunks/syntax_highlighting - Syntax highlighting support
 use lite_edit_syntax::{LanguageRegistry, SyntaxTheme};
+// Chunk: docs/chunks/dragdrop_file_paste - Shell escaping for dropped file paths
+use lite_edit::shell_escape::shell_escape_paths;
 // Chunk: docs/chunks/terminal_active_tab_safety - Terminal input encoding
 // Chunk: docs/chunks/terminal_scrollback_viewport - Terminal scroll action result
 // Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
@@ -2232,6 +2234,74 @@ impl EditorState {
 
         // Mark full viewport dirty for redraw
         self.dirty_region.merge(DirtyRegion::FullViewport);
+    }
+
+    // Chunk: docs/chunks/dragdrop_file_paste - File drop handling
+    /// Handles file drop events by inserting shell-escaped file paths.
+    ///
+    /// When files are dropped onto the view, this method:
+    /// 1. Shell-escapes each path (single-quote escaping for POSIX shells)
+    /// 2. Joins multiple paths with spaces
+    /// 3. Inserts the result as text based on the current focus:
+    ///    - Terminal tab: Uses bracketed paste encoding
+    ///    - File tab: Inserts directly into the buffer
+    ///    - Other modes (Selector, FindInFile, ConfirmDialog): Ignored
+    ///
+    /// This mirrors how macOS Terminal.app and Alacritty handle file drops.
+    pub fn handle_file_drop(&mut self, paths: Vec<String>) {
+        // Only handle drops when in Buffer focus mode
+        // (Selector/FindInFile/ConfirmDialog don't accept file drops)
+        if self.focus != EditorFocus::Buffer {
+            return;
+        }
+
+        if paths.is_empty() {
+            return;
+        }
+
+        // Shell-escape and join the paths
+        let escaped_text = shell_escape_paths(&paths);
+
+        // Get the active tab and route based on type
+        let ws = match self.editor.active_workspace_mut() {
+            Some(ws) => ws,
+            None => return,
+        };
+
+        let tab = match ws.active_tab_mut() {
+            Some(tab) => tab,
+            None => return,
+        };
+
+        // Check for terminal tab first
+        if let Some((terminal, _viewport)) = tab.terminal_and_viewport_mut() {
+            // Terminal tab: use bracketed paste encoding (same as Cmd+V)
+            let modes = terminal.term_mode();
+            let bytes = InputEncoder::encode_paste(&escaped_text, modes);
+            if !bytes.is_empty() {
+                let _ = terminal.write_input(&bytes);
+            }
+            // Don't mark dirty - let poll_agents() detect the PTY echo
+            return;
+        }
+
+        // File tab: insert text directly into buffer
+        if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
+            let dirty_lines = buffer.insert_str(&escaped_text);
+            let dirty = viewport.dirty_lines_to_region(&dirty_lines, buffer.line_count());
+            self.dirty_region.merge(dirty);
+
+            // Ensure cursor is visible after insertion
+            let cursor_line = buffer.cursor_position().line;
+            if viewport.ensure_visible(cursor_line, buffer.line_count()) {
+                self.dirty_region.merge(DirtyRegion::FullViewport);
+            }
+
+            // Mark the tab as dirty (unsaved changes)
+            tab.dirty = true;
+        }
+
+        // Other tab types (AgentOutput, Diff): no-op
     }
 
     /// Returns true if any screen region needs re-rendering.
@@ -8342,5 +8412,117 @@ mod tests {
             .unwrap()
             .welcome_scroll_offset_px();
         assert!((offset - 0.0).abs() < 0.001, "welcome offset should remain 0 for non-welcome tab");
+    }
+
+    // =========================================================================
+    // File Drop Tests (Chunk: docs/chunks/dragdrop_file_paste)
+    // =========================================================================
+
+    #[test]
+    fn test_file_drop_inserts_shell_escaped_path_in_buffer() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(320.0);
+
+        // Drop a single file
+        state.handle_file_drop(vec!["/Users/test/file.txt".to_string()]);
+
+        // Should be shell-escaped with single quotes
+        assert_eq!(state.buffer().content(), "'/Users/test/file.txt'");
+    }
+
+    #[test]
+    fn test_file_drop_escapes_spaces() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(320.0);
+
+        // Drop a file with spaces in the name
+        state.handle_file_drop(vec!["/Users/test/my file.txt".to_string()]);
+
+        // Spaces inside single quotes don't need extra escaping
+        assert_eq!(state.buffer().content(), "'/Users/test/my file.txt'");
+    }
+
+    #[test]
+    fn test_file_drop_escapes_single_quotes() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(320.0);
+
+        // Drop a file with single quote in the name
+        state.handle_file_drop(vec!["/Users/test/foo's.txt".to_string()]);
+
+        // Single quotes escaped with the '\'' pattern
+        assert_eq!(state.buffer().content(), "'/Users/test/foo'\\''s.txt'");
+    }
+
+    #[test]
+    fn test_file_drop_multiple_files() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(320.0);
+
+        // Drop multiple files
+        state.handle_file_drop(vec![
+            "/path/to/file1.txt".to_string(),
+            "/path/to/file2.txt".to_string(),
+        ]);
+
+        // Should be space-separated
+        assert_eq!(
+            state.buffer().content(),
+            "'/path/to/file1.txt' '/path/to/file2.txt'"
+        );
+    }
+
+    #[test]
+    fn test_file_drop_empty_paths_is_noop() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(320.0);
+
+        // Drop no files
+        state.handle_file_drop(vec![]);
+
+        // Buffer should remain empty
+        assert!(state.buffer().is_empty());
+    }
+
+    #[test]
+    fn test_file_drop_ignored_when_selector_focused() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(320.0);
+
+        // Simulate selector focus
+        state.focus = EditorFocus::Selector;
+
+        // Try to drop a file
+        state.handle_file_drop(vec!["/Users/test/file.txt".to_string()]);
+
+        // Buffer should remain empty because selector mode ignores drops
+        assert!(state.buffer().is_empty());
+    }
+
+    #[test]
+    fn test_file_drop_marks_tab_dirty() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(320.0);
+
+        // Initially the tab should not be dirty
+        let tab = state
+            .editor
+            .active_workspace()
+            .unwrap()
+            .active_tab()
+            .unwrap();
+        assert!(!tab.dirty);
+
+        // Drop a file
+        state.handle_file_drop(vec!["/path/to/file.txt".to_string()]);
+
+        // Tab should now be marked dirty
+        let tab = state
+            .editor
+            .active_workspace()
+            .unwrap()
+            .active_tab()
+            .unwrap();
+        assert!(tab.dirty, "Tab should be marked dirty after file drop");
     }
 }

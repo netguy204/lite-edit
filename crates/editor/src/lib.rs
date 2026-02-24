@@ -45,3 +45,6 @@ pub mod viewport;
 
 // Chunk: docs/chunks/tiling_tree_model - Binary pane layout tree data model
 pub mod pane_layout;
+
+// Chunk: docs/chunks/dragdrop_file_paste - Shell escaping for drag-and-drop paths
+pub mod shell_escape;
