@@ -5,7 +5,7 @@ parent_chunk: null
 code_paths:
 - crates/terminal/src/terminal_buffer.rs
 - crates/terminal/src/terminal_target.rs
-- crates/terminal/tests/selection_integration.rs
+- crates/terminal/tests/integration.rs
 code_references:
   - ref: crates/terminal/src/terminal_buffer.rs#TerminalBuffer::selection_anchor
     implements: "Selection anchor state getter"

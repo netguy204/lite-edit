@@ -8,153 +8,194 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The `alacritty_terminal` library already handles DSR (Device Status Report) escape sequences internally. When a hosted program sends `ESC[6n` (DSR with argument 6), alacritty's `device_status(6)` method:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. Reads the cursor position from `self.grid.cursor.point`
+2. Formats a CPR response: `format!("\x1b[{};{}R", pos.line + 1, pos.column + 1)`
+3. Emits `Event::PtyWrite(text)` via the event listener
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+The problem is that the current `EventProxy` implementation in `terminal_buffer.rs` ignores all events:
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/tty_cursor_reporting/GOAL.md)
-with references to the files that you expect to touch.
--->
+```rust
+impl EventListener for EventProxy {
+    fn send_event(&self, _event: Event) {
+        // We could capture title changes, bell events, etc. here
+        // For now, we ignore them
+    }
+}
+```
 
-## Subsystem Considerations
+**Solution:** Modify `EventProxy` to capture `Event::PtyWrite` events using a thread-safe channel, then drain that channel during `poll_events()` and write the responses back to the PTY via `PtyHandle::write()`.
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+This follows the existing event-handling pattern: just as PTY output flows from the reader thread via `crossbeam_channel` to the main thread for processing, terminal-generated responses will flow from alacritty's event listener to the main thread for PTY write-back.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
+### Why Channel-Based Approach
 
-If no subsystems are relevant, delete this section.
+The `EventListener::send_event` method takes `&self`, not `&mut self`, so we cannot directly write to the PTY. Using a channel:
+- Maintains the immutable borrow requirement of `EventListener`
+- Keeps PTY writes on the main thread (same thread as `poll_events()`)
+- Follows the existing `crossbeam_channel` pattern already used for PTY output
 
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/0001-validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/0002-error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
+### Testing Strategy
 
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
+Per TESTING_PHILOSOPHY.md, we'll use TDD for the meaningful behavioral aspect:
+1. Write a test that sends DSR escape sequence (`\x1b[6n`) to a terminal
+2. Verify the terminal responds with correct CPR format (`\x1b[row;colR`)
+3. Verify cursor position in response matches `cursor_info()` position
 
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/0001-validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Since the PTY round-trip involves real process I/O, this will be an integration test that spawns a shell, sends the DSR query, and verifies the response appears in the echoed output.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing integration test for DSR/CPR round-trip
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create a new test in `crates/terminal/tests/integration.rs` that:
+1. Spawns a shell in a `TerminalBuffer`
+2. Uses `stty` or similar to query cursor position via DSR
+3. Verifies the response is written back and appears correctly
 
-Example:
+The test should fail initially because `EventProxy` ignores `PtyWrite` events.
 
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+/// Test that DSR (Device Status Report) escape sequences receive CPR responses.
+#[test]
+fn test_dsr_cursor_position_report() {
+    // 1. Create terminal and spawn shell
+    // 2. Send DSR query via printf "\033[6n"
+    // 3. Poll events and verify CPR response was written back to PTY
+    // 4. Check that cursor position matches cursor_info()
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `crates/terminal/tests/integration.rs`
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 2: Add EventSender struct with crossbeam channel
 
-## Dependencies
+Create an `EventSender` struct that wraps a `crossbeam_channel::Sender<Event>` and implements `EventListener`. This replaces the current `EventProxy`.
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+```rust
+// Chunk: docs/chunks/tty_cursor_reporting - DSR/CPR event forwarding
+use crossbeam_channel::{unbounded, Receiver, Sender};
 
-If there are no dependencies, delete this section.
--->
+struct EventSender {
+    tx: Sender<Event>,
+}
+
+impl EventListener for EventSender {
+    fn send_event(&self, event: Event) {
+        let _ = self.tx.send(event);
+    }
+}
+```
+
+Location: `crates/terminal/src/terminal_buffer.rs`
+
+### Step 3: Update TerminalBuffer to store event receiver
+
+Add an `event_rx: Receiver<Event>` field to `TerminalBuffer` and update the constructor to create the channel and pass the sender to `Term::new()`.
+
+```rust
+pub struct TerminalBuffer {
+    term: Term<EventSender>,  // Changed from Term<EventProxy>
+    // ... existing fields ...
+    event_rx: Receiver<Event>,  // New field
+}
+
+impl TerminalBuffer {
+    pub fn new(cols: usize, rows: usize, scrollback: usize) -> Self {
+        let (event_tx, event_rx) = unbounded();
+        let event_sender = EventSender { tx: event_tx };
+        let term = Term::new(config, &size, event_sender);
+        // ...
+        Self {
+            term,
+            // ...
+            event_rx,
+        }
+    }
+}
+```
+
+Location: `crates/terminal/src/terminal_buffer.rs`
+
+### Step 4: Process terminal events in poll_events()
+
+Modify `poll_events()` to drain the terminal event channel and handle `Event::PtyWrite` by writing to the PTY.
+
+```rust
+pub fn poll_events(&mut self) -> bool {
+    // ... existing PTY event polling ...
+
+    // Chunk: docs/chunks/tty_cursor_reporting - Process terminal-generated events
+    // Handle events from alacritty_terminal (DSR responses, etc.)
+    while let Ok(event) = self.event_rx.try_recv() {
+        match event {
+            Event::PtyWrite(text) => {
+                if let Some(ref mut pty) = self.pty {
+                    let _ = pty.write(text.as_bytes());
+                }
+            }
+            // Other events (Title, Bell, etc.) could be handled here in the future
+            _ => {}
+        }
+        processed_any = true;
+    }
+
+    // ... existing damage tracking ...
+}
+```
+
+Location: `crates/terminal/src/terminal_buffer.rs`
+
+### Step 5: Add unit test for EventSender
+
+Add a unit test verifying that `EventSender` correctly forwards events through the channel.
+
+```rust
+#[test]
+fn test_event_sender_forwards_pty_write() {
+    use alacritty_terminal::event::{Event, EventListener};
+    use crossbeam_channel::unbounded;
+
+    let (tx, rx) = unbounded();
+    let sender = EventSender { tx };
+
+    sender.send_event(Event::PtyWrite("test".to_string()));
+
+    let received = rx.try_recv();
+    assert!(matches!(received, Ok(Event::PtyWrite(s)) if s == "test"));
+}
+```
+
+Location: `crates/terminal/src/terminal_buffer.rs` (in `#[cfg(test)]` module)
+
+### Step 6: Run tests and verify
+
+Run the test suite to verify:
+1. The new DSR/CPR integration test passes
+2. All existing terminal tests continue to pass
+3. No regressions in terminal behavior
+
+```bash
+cargo test -p lite-edit-terminal
+```
+
+### Step 7: Manual verification with Claude Code (optional)
+
+If possible, manually test by running Claude Code inside lite-edit's terminal and verifying the cursor is positioned correctly on the prompt line, not one row below.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Thread safety of channel send**: The `send_event` call happens on the main thread during `processor.advance()`, so there's no actual threading concern. The channel is an implementation detail to work around the `&self` constraint.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Event ordering**: Terminal events from `alacritty_terminal` and PTY output from the reader thread go through separate channels. This should be fine since:
+   - PTY output triggers `processor.advance()` which generates terminal events
+   - Terminal events are processed immediately after in the same `poll_events()` call
+   - DSR responses are synchronous reactions to DSR requests in the output stream
+
+3. **Other Event types**: We're only handling `Event::PtyWrite` for now. Other events like `Event::Title`, `Event::Bell`, `Event::ClipboardStore` could be useful in the future but are out of scope for this chunk.
+
+4. **Scrollback offset in CPR**: The DSR response from alacritty uses `grid.cursor.point` which is in viewport coordinates, not document coordinates. Per ANSI standard, CPR row/column values are 1-indexed and relative to the viewport origin, so this is correct. Programs querying cursor position expect viewport-relative coordinates.
 
 ## Deviations
 
@@ -169,9 +210,4 @@ When reality diverges from the plan, document it here:
 Minor deviations (renamed a function, used a different helper) don't need
 documentation. Significant deviations (changed the approach, skipped a step,
 added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->
