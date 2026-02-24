@@ -839,13 +839,19 @@ impl BufferView for TerminalBuffer {
         };
         let col = cursor_point.column.0;
 
-        // Map cursor shape from alacritty to our CursorShape
+        // Map cursor shape from alacritty to our CursorShape.
+        // Mirror alacritty's RenderableCursor::new(): when SHOW_CURSOR mode is off
+        // (ESC[?25l), force Hidden regardless of the configured cursor style.
         let cursor_style = self.term.cursor_style();
-        let shape = match cursor_style.shape {
-            VteCursorShape::Block | VteCursorShape::HollowBlock => CursorShape::Block,
-            VteCursorShape::Underline => CursorShape::Underline,
-            VteCursorShape::Beam => CursorShape::Beam,
-            VteCursorShape::Hidden => CursorShape::Hidden,
+        let shape = if !self.term.mode().contains(TermMode::SHOW_CURSOR) {
+            CursorShape::Hidden
+        } else {
+            match cursor_style.shape {
+                VteCursorShape::Block | VteCursorShape::HollowBlock => CursorShape::Block,
+                VteCursorShape::Underline => CursorShape::Underline,
+                VteCursorShape::Beam => CursorShape::Beam,
+                VteCursorShape::Hidden => CursorShape::Hidden,
+            }
         };
 
         // Check if cursor should blink

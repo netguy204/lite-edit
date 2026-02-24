@@ -619,8 +619,11 @@ impl GlyphBuffer {
                     let span_len = span.text.chars().count();
                     let end_col = col + span_len;
 
-                    // Only emit background quad if bg is not default
-                    if !self.palette.is_default_background(span.style.bg) {
+                    // Emit background quad if bg is not default, or if inverse
+                    // is set (inverse swaps fg↔bg, so default bg becomes fg color)
+                    let needs_bg = !self.palette.is_default_background(span.style.bg)
+                        || span.style.inverse;
+                    if needs_bg {
                         let (_, bg) = self.palette.resolve_style_colors(&span.style);
                         let quad = self.create_selection_quad_with_offset(
                             screen_row, col, end_col, &solid_glyph, y_offset, bg
@@ -1256,8 +1259,11 @@ impl GlyphBuffer {
                         let span_len = span.text.chars().count();
                         let end_col = col + span_len;
 
-                        // Only emit background quad if bg is not default
-                        if !self.palette.is_default_background(span.style.bg) {
+                        // Emit background quad if bg is not default, or if inverse
+                        // is set (inverse swaps fg↔bg, so default bg becomes fg color)
+                        let needs_bg = !self.palette.is_default_background(span.style.bg)
+                            || span.style.inverse;
+                        if needs_bg {
                             let (_, bg) = self.palette.resolve_style_colors(&span.style);
 
                             // The span may cross multiple screen rows due to wrapping.
@@ -1664,6 +1670,10 @@ impl GlyphBuffer {
 
         if cursor_visible {
             if let Some(cursor_info) = view.cursor_info() {
+                // Skip if cursor is hidden (e.g., ESC[?25l from Ink/Claude Code)
+                if cursor_info.shape == CursorShape::Hidden {
+                    // Don't render cursor
+                } else {
                 let cursor_pos = cursor_info.position;
                 let solid_glyph = atlas.solid_glyph();
 
@@ -1722,6 +1732,7 @@ impl GlyphBuffer {
 
                     let _ = found_cursor; // Suppress unused warning
                 }
+                } // end else (cursor not hidden)
             }
         }
 

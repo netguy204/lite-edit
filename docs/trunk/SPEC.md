@@ -119,6 +119,61 @@ How does the spec evolve over time?
 - How should implementations handle unknown versions?
 -->
 
+## Terminal Rendering
+
+### Cursor Visibility
+
+Terminal cursor visibility has two independent mechanisms that must both be
+respected:
+
+1. **DECTCEM mode** (`ESC[?25l` / `ESC[?25h`): Controls whether the terminal
+   cursor is visible. Tracked by `TermMode::SHOW_CURSOR`. When off, the cursor
+   must not be drawn regardless of the cursor style shape.
+
+2. **Cursor style shape**: The configured cursor appearance (Block, Beam,
+   Underline, Hidden). Set by `DECSCUSR` escape sequences.
+
+`cursor_info()` mirrors alacritty's `RenderableCursor::new()`: when
+`SHOW_CURSOR` is off, it forces `CursorShape::Hidden` regardless of the
+configured style. Both rendering paths (non-wrap and wrap-aware) skip cursor
+drawing when the shape is Hidden.
+
+Programs like Claude Code (via Ink) permanently hide the terminal cursor and
+render a simulated cursor using reverse-video text (SGR 7). The terminal
+emulator must not draw its own cursor on top of this.
+
+### Background Quad Emission
+
+Each text span may produce a background quad (a colored rectangle behind the
+text). Background quads are emitted when any of these conditions hold:
+
+- The span's `bg` color is not `Color::Default` (explicit background)
+- The span's `inverse` flag is set (SGR 7, reverse video)
+
+The second condition is critical: inverse video swaps foreground and background
+colors at resolve time (`resolve_style_colors`), so a span with default colors
+plus `inverse: true` resolves to a light background on dark text. Without
+emitting the background quad, inverse-video text would be invisible against
+the terminal's default background.
+
+This affects programs that simulate cursors with reverse-video text
+(e.g., Ink's `ESC[7m T ESC[27m` renders a highlighted `T` as a fake cursor).
+
+### Grid/Viewport Synchronization
+
+When the window resizes, pane splits/unsplits, or any layout change alters
+the content area, `sync_pane_viewports()` resizes the alacritty grid and PTY
+to match:
+
+- Terminal rows = `floor(pane_content_height / line_height)`
+- Terminal cols = `floor(pane_width / advance_width)`
+- The PTY receives the updated `TIOCGWINSZ` so programs see correct
+  `$COLUMNS`/`$LINES`
+
+The grid dimensions must match the viewport's `visible_lines` at all times.
+A mismatch causes cursor misalignment: programs position their cursor based
+on grid geometry, but the viewport renders based on its own dimensions.
+
 ## DRAFT Sections
 
 <!--
