@@ -45,3 +45,6 @@ pub mod viewport;
 
 // Chunk: docs/chunks/tiling_tree_model - Binary pane layout tree data model
 pub mod pane_layout;
+
+// Chunk: docs/chunks/workspace_session_persistence - Session persistence
+pub mod session;

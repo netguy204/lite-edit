@@ -45,6 +45,11 @@ notify = "6"
 # SHA-256 hashing for identicon generation
 # Chunk: docs/chunks/workspace_identicon - Workspace identicons
 sha2 = "0.10"
+# Chunk: docs/chunks/workspace_session_persistence - Session persistence
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Platform config directory resolution
+dirs = "5"
 
 [dev-dependencies]
 # Temporary directories for testing

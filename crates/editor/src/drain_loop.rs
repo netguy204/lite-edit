@@ -91,6 +91,14 @@ impl EventDrainLoop {
         &mut self.state
     }
 
+    // Chunk: docs/chunks/workspace_session_persistence - Editor access for session save
+    /// Returns a reference to the editor for session persistence.
+    ///
+    /// This is called during application termination to save the session.
+    pub fn editor(&self) -> &crate::workspace::Editor {
+        &self.state.editor
+    }
+
     /// Provides mutable access to the renderer for initial setup.
     pub fn renderer_mut(&mut self) -> &mut Renderer {
         &mut self.renderer

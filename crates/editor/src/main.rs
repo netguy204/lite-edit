@@ -81,6 +81,8 @@ mod viewport;
 mod welcome_screen;
 mod workspace;
 mod wrap_layout;
+// Chunk: docs/chunks/workspace_session_persistence - Session persistence
+mod session;
 
 pub use file_index::FileIndex;
 pub use row_scroller::RowScroller;
@@ -175,6 +177,21 @@ define_class!(
             // When the window closes, terminate the app
             true
         }
+
+        // Chunk: docs/chunks/workspace_session_persistence - Save session on clean exit
+        #[unsafe(method(applicationWillTerminate:))]
+        fn application_will_terminate(&self, _notification: &NSNotification) {
+            // SAFETY: DRAIN_LOOP is set once in setup_window and never cleared.
+            // We're on the main thread and the app is terminating, so no race.
+            unsafe {
+                if let Some(drain_loop_ptr) = DRAIN_LOOP {
+                    let drain_loop = &*drain_loop_ptr;
+                    if let Err(e) = session::save_session(drain_loop.editor()) {
+                        eprintln!("Failed to save session: {}", e);
+                    }
+                }
+            }
+        }
     }
 
     // SAFETY: NSWindowDelegate protocol methods are implemented correctly
@@ -235,6 +252,20 @@ impl AppDelegate {
         dir_picker::pick_directory()
     }
 
+    // Chunk: docs/chunks/workspace_session_persistence - Check for CLI override
+    /// Checks if a command-line argument was provided.
+    ///
+    /// When a CLI argument is provided, session restoration is skipped
+    /// to allow users to explicitly open a different directory.
+    fn has_cli_argument(&self) -> bool {
+        if let Some(arg) = std::env::args().nth(1) {
+            let path = std::path::PathBuf::from(&arg);
+            path.is_dir()
+        } else {
+            false
+        }
+    }
+
     /// Sets up the main window with Metal rendering
     // Chunk: docs/chunks/startup_workspace_dialog - Directory selection before window creation
     // Chunk: docs/chunks/pty_wakeup_reentrant - Unified event queue setup
@@ -279,18 +310,6 @@ impl AppDelegate {
         // desktop. The directory picker modal will then appear on top of it.
         window.makeKeyAndOrderFront(None);
 
-        // Chunk: docs/chunks/startup_workspace_dialog - Resolve directory before initializing editor
-        // Resolve the startup directory after the window is visible so that the
-        // NSOpenPanel appears on the same space as the app window.
-        let startup_dir = match self.resolve_startup_directory() {
-            Some(dir) => dir,
-            None => {
-                // User cancelled the directory picker, terminate gracefully
-                app.terminate(None);
-                return;
-            }
-        };
-
         // The renderer needs the correct scale factor to rasterize the font
         // and glyph atlas at native resolution (e.g., 2x on Retina).
         // viewDidChangeBackingProperties may not fire synchronously during
@@ -302,11 +321,55 @@ impl AppDelegate {
         // Get font metrics from the renderer
         let font_metrics = renderer.font_metrics();
 
-        // Chunk: docs/chunks/startup_workspace_dialog - Deferred editor state creation
-        // Create the editor state with deferred initialization (no workspace yet),
-        // then add the startup workspace with the user-selected directory.
-        let mut state = EditorState::new_deferred(font_metrics);
-        state.add_startup_workspace(startup_dir);
+        // Chunk: docs/chunks/workspace_session_persistence - Session restoration or directory picker
+        // Try to restore from session first (unless CLI argument was provided).
+        // If no session exists or restoration fails, fall back to directory picker.
+        let state = if !self.has_cli_argument() {
+            // Try loading existing session
+            if let Some(session_data) = session::load_session() {
+                match session_data.restore_into_editor(font_metrics.line_height as f32) {
+                    Ok(editor) => {
+                        // Session restored successfully
+                        let mut state = EditorState::new_deferred(font_metrics);
+                        state.editor = editor;
+                        Some(state)
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to restore session: {:?}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // If session restoration didn't work, use directory picker
+        let mut state = match state {
+            Some(s) => s,
+            None => {
+                // Chunk: docs/chunks/startup_workspace_dialog - Resolve directory before initializing editor
+                // Resolve the startup directory after the window is visible so that the
+                // NSOpenPanel appears on the same space as the app window.
+                let startup_dir = match self.resolve_startup_directory() {
+                    Some(dir) => dir,
+                    None => {
+                        // User cancelled the directory picker, terminate gracefully
+                        app.terminate(None);
+                        return;
+                    }
+                };
+
+                // Chunk: docs/chunks/startup_workspace_dialog - Deferred editor state creation
+                // Create the editor state with deferred initialization (no workspace yet),
+                // then add the startup workspace with the user-selected directory.
+                let mut state = EditorState::new_deferred(font_metrics);
+                state.add_startup_workspace(startup_dir);
+                state
+            }
+        };
 
         // Update viewport size based on window dimensions
         let frame = metal_view.frame();
