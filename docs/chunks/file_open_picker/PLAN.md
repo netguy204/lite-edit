@@ -8,170 +8,158 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk adds `Cmd+O` support to open files via the native macOS NSOpenPanel,
+following the established patterns in the codebase:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Humble object pattern** (per TESTING_PHILOSOPHY.md): Create a new
+   `file_picker.rs` module that mirrors `dir_picker.rs` — a thin wrapper around
+   NSOpenPanel with a thread-local mock for test isolation. The real NSOpenPanel
+   code is never touched during tests.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **App-level shortcut handling**: Add `Cmd+O` interception in
+   `EditorState::handle_key()` alongside the existing `Cmd+P`, `Cmd+S`, etc.
+   shortcuts (around line 670-830 in editor_state.rs).
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/file_open_picker/GOAL.md)
-with references to the files that you expect to touch.
--->
+3. **Reuse `associate_file`**: The existing `EditorState::associate_file(path)`
+   method already handles loading file contents, setting syntax highlighting,
+   and resetting viewport. We call this after the picker returns a file path.
 
-## Subsystem Considerations
+4. **Terminal tab no-op**: `associate_file` already guards against terminal tabs
+   via `active_tab_is_file()`. The `Cmd+O` handler will similarly be a no-op
+   when the active tab is a terminal.
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+5. **TDD approach**: Write failing tests first for the mock infrastructure and
+   the keyboard shortcut integration, then implement to make them pass.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Create file_picker.rs module (test mock infrastructure)
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create `crates/editor/src/file_picker.rs` mirroring `dir_picker.rs` structure:
 
-Example:
+- Production code (`#[cfg(not(test))]`): `pick_file() -> Option<PathBuf>` using
+  `NSOpenPanel` with `setCanChooseFiles(true)`, `setCanChooseDirectories(false)`,
+  `setAllowsMultipleSelection(false)`.
+- Test code (`#[cfg(test)]`): `thread_local!` with `MOCK_FILE` and a
+  `mock_set_next_file(Option<PathBuf>)` function.
+- Unit tests for the mock behavior: returns set value, returns None by default,
+  consumes value after one call, can be reset.
 
-### Step 1: Define the SegmentHeader struct
+Location: `crates/editor/src/file_picker.rs`
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Register file_picker module in lib.rs
 
-Location: src/segment/format.rs
+Add module declaration to `crates/editor/src/lib.rs`:
 
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+// Chunk: docs/chunks/file_open_picker - File picker for opening files via Cmd+O
+mod file_picker;
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `crates/editor/src/lib.rs`
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 3: Write failing tests for Cmd+O behavior
+
+Add tests in `crates/editor/src/editor_state.rs` (in the test module):
+
+1. `test_cmd_o_opens_file_into_active_tab`: Mock `pick_file` to return a path,
+   press `Cmd+O`, verify buffer contents match file contents and associated_file
+   is set.
+
+2. `test_cmd_o_cancelled_picker_leaves_tab_unchanged`: Mock `pick_file` to return
+   `None`, press `Cmd+O`, verify buffer contents unchanged.
+
+3. `test_cmd_o_no_op_on_terminal_tab`: Switch to terminal tab, press `Cmd+O`,
+   verify no changes (terminal remains active, no crash).
+
+4. `test_cmd_o_does_not_insert_character`: Press `Cmd+O`, verify 'o' is not
+   inserted into the buffer (same pattern as `test_cmd_p_does_not_insert_p`).
+
+Location: `crates/editor/src/editor_state.rs` (test module)
+
+### Step 4: Implement handle_cmd_o method
+
+Add a new method `handle_cmd_o(&mut self)` in `EditorState`:
+
+```rust
+/// Handles Cmd+O to open a file via the native macOS file picker.
+/// Chunk: docs/chunks/file_open_picker - Open file via system file picker
+fn handle_cmd_o(&mut self) {
+    // No-op for terminal tabs (associate_file also guards, but early return is cleaner)
+    if !self.active_tab_is_file() {
+        return;
+    }
+
+    if let Some(path) = file_picker::pick_file() {
+        self.associate_file(path);
+    }
+}
+```
+
+Location: `crates/editor/src/editor_state.rs` (near `handle_cmd_p`, around line 853)
+
+### Step 5: Add Cmd+O interception in handle_key
+
+In `EditorState::handle_key()`, add the `Cmd+O` case within the
+`if event.modifiers.command && !event.modifiers.control` block:
+
+```rust
+// Cmd+O (without Ctrl) opens system file picker
+// Chunk: docs/chunks/file_open_picker
+if let Key::Char('o') = event.key {
+    self.handle_cmd_o();
+    return;
+}
+```
+
+Location: `crates/editor/src/editor_state.rs` (inside handle_key, after Cmd+N block)
+
+### Step 6: Add import for file_picker in editor_state.rs
+
+Add `use crate::file_picker;` to the imports at the top of `editor_state.rs`.
+
+Location: `crates/editor/src/editor_state.rs` (imports section)
+
+### Step 7: Update welcome screen hotkey documentation
+
+Add `("Cmd+O", "Open file from disk")` to the HOTKEYS constant in the "File"
+category.
+
+Location: `crates/editor/src/welcome_screen.rs` (HOTKEYS constant, line ~83)
+
+### Step 8: Add backreference to main.rs
+
+Add chunk backreference comment to `main.rs`:
+
+```rust
+// Chunk: docs/chunks/file_open_picker - System file picker (Cmd+O) integration
+```
+
+Location: `crates/editor/src/main.rs` (chunk comment block at top)
+
+### Step 9: Run tests and verify
+
+Run `cargo test` in the editor crate to verify all tests pass.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+No external dependencies. This chunk relies on:
+- Existing `associate_file` infrastructure
+- `objc2_app_kit::NSOpenPanel` (already in dependencies for `dir_picker`)
+- Test patterns established by `dir_picker.rs`
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **NSOpenPanel modal blocks the main thread**: This is the same behavior as
+  `dir_picker` and is expected for macOS file/directory pickers. The main event
+  loop resumes after the user confirms or cancels.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **MainThreadMarker safety**: The `pick_file()` call requires being on the main
+  thread. This is guaranteed because `handle_key` is called from the main event
+  loop. The code asserts this with `MainThreadMarker::new().expect(...)`.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

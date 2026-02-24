@@ -79,9 +79,11 @@ const TAGLINE: &str = "A lightweight, terminal-native code editor";
 
 /// Hotkey definitions organized by category.
 /// Each category is (category_name, &[(key_combo, description)]).
+// Chunk: docs/chunks/file_open_picker - Added Cmd+O to hotkey reference
 const HOTKEYS: &[(&str, &[(&str, &str)])] = &[
     ("File", &[
         ("Cmd+S", "Save file"),
+        ("Cmd+O", "Open file from disk"),
         ("Cmd+P", "Open file picker"),
         ("Cmd+N", "New workspace"),
         ("Cmd+T", "New tab"),

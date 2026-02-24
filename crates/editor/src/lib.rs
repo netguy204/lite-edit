@@ -37,6 +37,9 @@ pub mod file_index;
 // Chunk: docs/chunks/workspace_dir_picker - Directory picker for new workspaces
 mod dir_picker;
 
+// Chunk: docs/chunks/file_open_picker - File picker for opening files via Cmd+O
+mod file_picker;
+
 // Chunk: docs/chunks/workspace_model - Workspace model for the editor
 pub mod workspace;
 

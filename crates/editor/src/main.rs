@@ -7,6 +7,7 @@
 // Chunk: docs/chunks/viewport_scrolling - Scroll event handling
 // Chunk: docs/chunks/quit_command - Cmd+Q app termination handling
 // Chunk: docs/chunks/file_picker - File picker (Cmd+P) integration
+// Chunk: docs/chunks/file_open_picker - System file picker (Cmd+O) integration
 // Chunk: docs/chunks/file_save - File-buffer association and Cmd+S save
 // Chunk: docs/chunks/workspace_model - Workspace model and left rail rendering
 // Chunk: docs/chunks/pty_wakeup_reentrant - Unified event queue architecture
@@ -43,6 +44,8 @@ mod context;
 // Chunk: docs/chunks/workspace_dir_picker - Directory picker for new workspaces
 mod dir_picker;
 mod dirty_region;
+// Chunk: docs/chunks/file_open_picker - File picker for opening files via Cmd+O
+mod file_picker;
 // Chunk: docs/chunks/pty_wakeup_reentrant - Unified event queue
 mod drain_loop;
 // Chunk: docs/chunks/pty_wakeup_reentrant - Editor event types

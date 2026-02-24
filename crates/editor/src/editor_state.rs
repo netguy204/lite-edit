@@ -27,6 +27,8 @@ use crate::confirm_dialog::{
 };
 use crate::context::EditorContext;
 use crate::dir_picker;
+// Chunk: docs/chunks/file_open_picker - File picker for opening files via Cmd+O
+use crate::file_picker;
 use crate::dirty_region::DirtyRegion;
 // Chunk: docs/chunks/pty_wakeup_reentrant - EventSender for PTY wakeup
 use crate::event_channel::EventSender;
@@ -703,6 +705,13 @@ impl EditorState {
                 }
             }
 
+            // Cmd+O (without Ctrl) opens system file picker
+            // Chunk: docs/chunks/file_open_picker
+            if let Key::Char('o') = event.key {
+                self.handle_cmd_o();
+                return;
+            }
+
             // Cmd+W closes the active tab, Cmd+Shift+W closes the active workspace
             if let Key::Char('w') = event.key {
                 if event.modifiers.shift {
@@ -869,6 +878,19 @@ impl EditorState {
             EditorFocus::ConfirmDialog => {
                 // Don't open file picker while confirm dialog is active
             }
+        }
+    }
+
+    /// Handles Cmd+O to open a file via the native macOS file picker.
+    /// Chunk: docs/chunks/file_open_picker - Open file via system file picker
+    fn handle_cmd_o(&mut self) {
+        // No-op for terminal tabs (associate_file also guards, but early return is cleaner)
+        if !self.active_tab_is_file() {
+            return;
+        }
+
+        if let Some(path) = file_picker::pick_file() {
+            self.associate_file(path);
         }
     }
 
@@ -3754,6 +3776,139 @@ mod tests {
         state.handle_key(cmd_p);
         assert_eq!(state.focus, EditorFocus::Buffer);
         assert!(state.active_selector.is_none());
+    }
+
+    // ======================================================================
+    // Cmd+O System File Picker Tests (Chunk: docs/chunks/file_open_picker)
+    // ======================================================================
+
+    #[test]
+    fn test_cmd_o_opens_file_into_active_tab() {
+        use std::io::Write;
+        use crate::file_picker;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Create a temporary file with content
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_cmd_o_file.txt");
+        {
+            let mut f = std::fs::File::create(&temp_file).unwrap();
+            f.write_all(b"Hello from Cmd+O!\nSecond line\n").unwrap();
+        }
+
+        // Mock the file picker to return the temp file
+        file_picker::mock_set_next_file(Some(temp_file.clone()));
+
+        // Press Cmd+O
+        let cmd_o = KeyEvent::new(
+            Key::Char('o'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_o);
+
+        // Buffer should contain the file content
+        assert_eq!(state.buffer().content(), "Hello from Cmd+O!\nSecond line\n");
+
+        // Associated file should be set
+        assert_eq!(state.associated_file(), Some(&temp_file));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn test_cmd_o_cancelled_picker_leaves_tab_unchanged() {
+        use crate::file_picker;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Type some content into the buffer first
+        state.handle_key(KeyEvent::char('a'));
+        state.handle_key(KeyEvent::char('b'));
+        state.handle_key(KeyEvent::char('c'));
+        let original_content = state.buffer().content().to_string();
+
+        // Mock the file picker to return None (user cancelled)
+        file_picker::mock_set_next_file(None);
+
+        // Press Cmd+O
+        let cmd_o = KeyEvent::new(
+            Key::Char('o'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_o);
+
+        // Buffer should be unchanged
+        assert_eq!(state.buffer().content(), original_content);
+
+        // No file should be associated (still None from initial state)
+        assert!(state.associated_file().is_none());
+    }
+
+    #[test]
+    fn test_cmd_o_no_op_on_terminal_tab() {
+        use crate::file_picker;
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Create a terminal tab (making it the active tab)
+        state.new_terminal_tab();
+
+        // Verify we're on a terminal tab
+        assert!(!state.active_tab_is_file());
+
+        // Mock the file picker to return a path
+        let temp_path = std::env::temp_dir().join("should_not_load.txt");
+        file_picker::mock_set_next_file(Some(temp_path));
+
+        // Press Cmd+O
+        let cmd_o = KeyEvent::new(
+            Key::Char('o'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_o);
+
+        // The mock file picker should NOT have been called (early return)
+        // We can't directly verify this, but we can verify nothing changed
+        // and no panic occurred (terminal tabs don't have a buffer to load into)
+        assert!(!state.active_tab_is_file());
+    }
+
+    #[test]
+    fn test_cmd_o_does_not_insert_character() {
+        use crate::file_picker;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Mock the file picker to return None (user cancels)
+        file_picker::mock_set_next_file(None);
+
+        let cmd_o = KeyEvent::new(
+            Key::Char('o'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_o);
+
+        // Buffer should remain empty - 'o' should not be inserted
+        assert!(state.buffer().is_empty());
     }
 
     #[test]
