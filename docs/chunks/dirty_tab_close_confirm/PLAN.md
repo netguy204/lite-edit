@@ -8,153 +8,304 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk adds a confirmation dialog for closing dirty tabs using the same architectural patterns as the existing `SelectorWidget` and find strip:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Humble View Architecture**: Pure state struct (`ConfirmDialog`) with no platform dependencies. All layout calculations are pure functions that can be unit tested without Metal.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **Focus state routing**: New `EditorFocus::ConfirmDialog` variant that routes keyboard input to the dialog.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/dirty_tab_close_confirm/GOAL.md)
-with references to the files that you expect to touch.
--->
+3. **Overlay rendering**: Reuse the existing selector overlay rendering infrastructure (`SelectorGlyphBuffer` patterns) for the dialog panel.
 
-## Subsystem Considerations
+4. **Pending action tracking**: `EditorState` gains a `pending_close: Option<(PaneId, usize)>` field to remember which tab triggered the dialog while it's displayed.
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+The implementation follows the established patterns:
+- Focus transitions (like `handle_cmd_f` and `open_selector`)
+- Overlay geometry calculation (like `calculate_overlay_geometry`)
+- Keyboard handling through the focus system (like `SelectorWidget::handle_key`)
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/0001-validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/0002-error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/0001-validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Testing follows the TDD approach in `TESTING_PHILOSOPHY.md`: write failing tests first for the pure logic (dialog state, geometry, key handling), then implement.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Define ConfirmDialog widget (TDD)
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create `crates/editor/src/confirm_dialog.rs` with a pure state struct and key handling.
 
-Example:
+**Tests first** (in `#[cfg(test)]` module):
+- `test_new_dialog_has_cancel_selected_by_default`
+- `test_tab_toggles_selection_to_abandon`
+- `test_tab_toggles_selection_back_to_cancel`
+- `test_left_selects_cancel`
+- `test_right_selects_abandon`
+- `test_enter_on_cancel_returns_cancelled`
+- `test_enter_on_abandon_returns_confirmed`
+- `test_escape_always_returns_cancelled`
 
-### Step 1: Define the SegmentHeader struct
+**Implementation**:
+```rust
+// Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog widget
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+/// Which button is currently selected in the confirm dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConfirmButton {
+    #[default]
+    Cancel,
+    Abandon,
+}
 
-Location: src/segment/format.rs
+/// Outcome of handling a key event in the confirm dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmOutcome {
+    /// User pressed Enter with Cancel selected, or Escape
+    Cancelled,
+    /// User pressed Enter with Abandon selected
+    Confirmed,
+    /// Dialog is still open
+    Pending,
+}
 
-### Step 2: Implement header serialization
+/// A confirmation dialog widget for binary yes/no decisions.
+#[derive(Debug, Clone)]
+pub struct ConfirmDialog {
+    /// The prompt message (e.g., "Abandon unsaved changes?")
+    pub prompt: String,
+    /// Currently selected button (default: Cancel)
+    pub selected: ConfirmButton,
+}
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
+impl ConfirmDialog {
+    pub fn new(prompt: impl Into<String>) -> Self { ... }
+    pub fn handle_key(&mut self, event: &KeyEvent) -> ConfirmOutcome { ... }
+}
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+
+Location: `crates/editor/src/confirm_dialog.rs`
+
+### Step 2: Add ConfirmDialog geometry calculation (TDD)
+
+Add pure geometry calculation for the dialog overlay to `confirm_dialog.rs`.
+
+**Tests first**:
+- `test_dialog_geometry_centered_horizontally`
+- `test_dialog_geometry_centered_vertically`
+- `test_dialog_geometry_has_correct_button_positions`
+- `test_dialog_geometry_with_small_viewport`
+
+**Implementation**:
+```rust
+/// Computed geometry for the confirm dialog overlay
+#[derive(Debug, Clone, Copy)]
+pub struct ConfirmDialogGeometry {
+    pub panel_x: f32,
+    pub panel_y: f32,
+    pub panel_width: f32,
+    pub panel_height: f32,
+    pub prompt_x: f32,
+    pub prompt_y: f32,
+    pub cancel_button_x: f32,
+    pub abandon_button_x: f32,
+    pub buttons_y: f32,
+    pub button_width: f32,
+    pub button_height: f32,
+}
+
+pub fn calculate_confirm_dialog_geometry(
+    view_width: f32,
+    view_height: f32,
+    line_height: f32,
+    glyph_width: f32,
+) -> ConfirmDialogGeometry { ... }
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+The dialog should be:
+- Horizontally centered
+- Vertically centered (or ~40% from top)
+- Wide enough for the prompt and two buttons side by side
+- Two lines tall: prompt row + buttons row (plus padding)
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 3: Add EditorFocus::ConfirmDialog variant
 
-## Dependencies
+Update `crates/editor/src/editor_state.rs`:
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+1. Add the variant to the `EditorFocus` enum:
+```rust
+pub enum EditorFocus {
+    Buffer,
+    Selector,
+    FindInFile,
+    ConfirmDialog,  // New
+}
+```
 
-If there are no dependencies, delete this section.
--->
+2. Add fields to `EditorState`:
+```rust
+/// The active confirm dialog (when focus == ConfirmDialog)
+pub confirm_dialog: Option<ConfirmDialog>,
+/// The tab (pane_id, tab_index) that triggered the confirm dialog
+pub pending_close: Option<(PaneId, usize)>,
+```
+
+Location: `crates/editor/src/editor_state.rs`
+
+### Step 4: Modify close_tab to show dialog for dirty tabs (TDD)
+
+**Tests first** (add to `editor_state.rs` tests):
+- `test_close_dirty_tab_opens_confirm_dialog`
+- `test_close_dirty_tab_sets_pending_close`
+- `test_close_dirty_tab_sets_focus_to_confirm_dialog`
+- `test_close_clean_tab_still_closes_immediately`
+
+**Implementation**:
+
+Modify `close_tab()` to check the dirty flag and either:
+- Close immediately (clean tab) - existing behavior
+- Open a confirm dialog (dirty tab) - new behavior
+
+```rust
+// In close_tab():
+if tab.dirty {
+    // Open confirm dialog instead of returning
+    self.confirm_dialog = Some(ConfirmDialog::new("Abandon unsaved changes?"));
+    self.pending_close = Some((pane_id, index));
+    self.focus = EditorFocus::ConfirmDialog;
+    self.dirty_region.merge(DirtyRegion::FullViewport);
+    return;
+}
+```
+
+### Step 5: Add confirm dialog key handling to handle_key (TDD)
+
+**Tests first**:
+- `test_confirm_dialog_escape_closes_dialog_keeps_tab`
+- `test_confirm_dialog_enter_on_cancel_closes_dialog_keeps_tab`
+- `test_confirm_dialog_tab_then_enter_closes_tab`
+
+**Implementation**:
+
+Add a new match arm in `EditorState::handle_key()` for `EditorFocus::ConfirmDialog`:
+
+```rust
+EditorFocus::ConfirmDialog => {
+    if let Some(dialog) = &mut self.confirm_dialog {
+        match dialog.handle_key(&event) {
+            ConfirmOutcome::Cancelled => {
+                self.close_confirm_dialog();
+            }
+            ConfirmOutcome::Confirmed => {
+                // Close the tab and the dialog
+                if let Some((pane_id, tab_idx)) = self.pending_close.take() {
+                    self.force_close_tab(pane_id, tab_idx);
+                }
+                self.close_confirm_dialog();
+            }
+            ConfirmOutcome::Pending => {
+                self.dirty_region.merge(DirtyRegion::FullViewport);
+            }
+        }
+    }
+}
+```
+
+Add helper methods:
+- `close_confirm_dialog()` - clears dialog state, resets focus to Buffer, marks dirty
+- `force_close_tab(pane_id, tab_idx)` - closes the tab without checking dirty flag
+
+### Step 6: Add ConfirmDialogGlyphBuffer for rendering
+
+Create the rendering buffer in `crates/editor/src/selector_overlay.rs` (or new file if it gets too large).
+
+Follow the same pattern as `SelectorGlyphBuffer`:
+- Background rect
+- Prompt text
+- Two button rects (Cancel, Abandon)
+- Button labels
+- Selection highlight on the selected button
+
+```rust
+pub struct ConfirmDialogGlyphBuffer {
+    vertex_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
+    index_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
+    index_count: usize,
+    layout: GlyphLayout,
+    // Quad ranges
+    background_range: QuadRange,
+    prompt_text_range: QuadRange,
+    cancel_button_range: QuadRange,
+    cancel_label_range: QuadRange,
+    abandon_button_range: QuadRange,
+    abandon_label_range: QuadRange,
+    selection_highlight_range: QuadRange,
+}
+
+impl ConfirmDialogGlyphBuffer {
+    pub fn new(layout: GlyphLayout) -> Self { ... }
+    pub fn update_from_dialog(
+        &mut self,
+        device: &ProtocolObject<dyn MTLDevice>,
+        atlas: &GlyphAtlas,
+        dialog: &ConfirmDialog,
+        geometry: &ConfirmDialogGeometry,
+    ) { ... }
+}
+```
+
+Location: `crates/editor/src/selector_overlay.rs`
+
+### Step 7: Add dialog rendering to Renderer
+
+Update `crates/editor/src/renderer.rs`:
+
+1. Add a `confirm_dialog_buffer: Option<ConfirmDialogGlyphBuffer>` field to `Renderer`.
+
+2. Add a `draw_confirm_dialog()` method similar to `draw_selector_overlay()`.
+
+3. In `render_with_editor()`, after rendering the selector overlay (or instead of, since ConfirmDialog should block Selector):
+```rust
+if let (Some(dialog), EditorFocus::ConfirmDialog) = (&state.confirm_dialog, state.focus) {
+    self.draw_confirm_dialog(&encoder, view, dialog);
+}
+```
+
+### Step 8: Add focus blocking for other overlays
+
+When `EditorFocus::ConfirmDialog` is active, other overlays (file picker, find strip) should be blocked.
+
+Update `handle_cmd_p` and `handle_cmd_f` to early-return if `focus == ConfirmDialog`.
+
+**Test**:
+- `test_cmd_p_blocked_during_confirm_dialog`
+- `test_cmd_f_blocked_during_confirm_dialog`
+
+### Step 9: Wire up in drain_loop.rs
+
+Update `crates/editor/src/drain_loop.rs` to handle mouse events for the confirm dialog focus mode (no-op for this chunk since mouse click is out of scope).
+
+Add a match arm for `EditorFocus::ConfirmDialog` in the scroll handling (no-op).
+
+### Step 10: Integration test and clippy
+
+Run the full test suite and clippy:
+```bash
+cargo test -p lite-edit
+cargo clippy -p lite-edit -- -D warnings
+```
+
+Verify manual testing:
+1. Open a file, type some text (dirty flag set)
+2. Press Cmd+W to close
+3. Dialog appears with "Abandon unsaved changes?" and Cancel/Abandon buttons
+4. Press Escape → dialog closes, tab remains open
+5. Press Cmd+W again, dialog reappears
+6. Press Tab, then Enter → tab closes
+7. Verify clean tabs still close immediately
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Button layout**: The GOAL specifies Tab/Left/Right for toggling between buttons. Need to verify this feels natural (Tab for cycling, arrow keys for direct navigation).
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Dialog blocking**: When the dialog is open, the user cannot interact with the buffer beneath or open other overlays. This is intentional but should be verified as the expected UX.
+
+- **PaneId type**: The goal mentions `pending_close: Option<(PaneId, usize)>`. Need to verify `PaneId` is the correct type from the pane_layout module and is Copy/Clone.
 
 ## Deviations
 
