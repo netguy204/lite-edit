@@ -1,4 +1,5 @@
 // Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog widget
+// Chunk: docs/chunks/generic_yes_no_modal - Generalized confirm dialog context
 //!
 //! A confirmation dialog widget for binary yes/no decisions.
 //!
@@ -16,6 +17,10 @@
 //! Following the project's Humble View Architecture, `ConfirmDialog` is pure
 //! interaction state with no platform dependencies. Downstream code (renderers,
 //! focus targets) consume this state and translate it to pixels or editor mutations.
+//!
+//! The [`ConfirmDialogContext`] enum captures what triggered the dialog and what
+//! action should occur on confirmation. This allows the same dialog infrastructure
+//! to support multiple use cases: close-dirty-tab, quit-with-dirty-tabs, etc.
 //!
 //! # Example
 //!
@@ -37,6 +42,33 @@
 //! ```
 
 use crate::input::{Key, KeyEvent};
+use crate::pane_layout::PaneId;
+
+// =============================================================================
+// Context enum for what triggered the confirm dialog
+// =============================================================================
+
+/// Context for what triggered the confirm dialog and what action to take on confirmation.
+///
+/// This enum replaces the tightly-coupled `pending_close: Option<(PaneId, usize)>` field
+/// in EditorState, allowing the same dialog infrastructure to support multiple use cases.
+/// Each variant contains the data needed for its specific outcome handler.
+// Chunk: docs/chunks/generic_yes_no_modal - ConfirmDialogContext enum
+#[derive(Debug, Clone)]
+pub enum ConfirmDialogContext {
+    /// Closing a tab with unsaved changes.
+    CloseDirtyTab {
+        /// The pane containing the dirty tab.
+        pane_id: PaneId,
+        /// The index of the tab within the pane.
+        tab_idx: usize,
+    },
+    /// Quitting the application with dirty tabs.
+    QuitWithDirtyTabs {
+        /// Number of dirty tabs (for display in prompt).
+        dirty_count: usize,
+    },
+}
 
 /// Which button is currently selected in the confirm dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -69,27 +101,57 @@ pub enum ConfirmOutcome {
     Pending,
 }
 
+/// Default label for the cancel button
+pub const DEFAULT_CANCEL_LABEL: &str = "Cancel";
+/// Default label for the confirm button
+pub const DEFAULT_CONFIRM_LABEL: &str = "Abandon";
+
 /// A confirmation dialog widget for binary yes/no decisions.
 ///
 /// This struct holds the pure state for a modal confirmation dialog.
 /// Following the Humble View Architecture, it has no platform dependencies
 /// and can be unit tested without Metal or macOS.
+// Chunk: docs/chunks/generic_yes_no_modal - Parameterized button labels
 #[derive(Debug, Clone)]
 pub struct ConfirmDialog {
     /// The prompt message (e.g., "Abandon unsaved changes?")
     pub prompt: String,
     /// Currently selected button (default: Cancel)
     pub selected: ConfirmButton,
+    /// Label for the cancel (left) button
+    pub cancel_label: String,
+    /// Label for the confirm (right) button
+    pub confirm_label: String,
 }
 
 impl ConfirmDialog {
     /// Creates a new confirmation dialog with the given prompt.
     ///
+    /// Uses default button labels ("Cancel" / "Abandon").
     /// The Cancel button is selected by default (safe default).
     pub fn new(prompt: impl Into<String>) -> Self {
         Self {
             prompt: prompt.into(),
             selected: ConfirmButton::Cancel,
+            cancel_label: DEFAULT_CANCEL_LABEL.to_string(),
+            confirm_label: DEFAULT_CONFIRM_LABEL.to_string(),
+        }
+    }
+
+    /// Creates a new confirmation dialog with custom button labels.
+    ///
+    /// The Cancel button is selected by default (safe default).
+    // Chunk: docs/chunks/generic_yes_no_modal - Custom label constructor
+    pub fn with_labels(
+        prompt: impl Into<String>,
+        cancel_label: impl Into<String>,
+        confirm_label: impl Into<String>,
+    ) -> Self {
+        Self {
+            prompt: prompt.into(),
+            selected: ConfirmButton::Cancel,
+            cancel_label: cancel_label.into(),
+            confirm_label: confirm_label.into(),
         }
     }
 
@@ -136,6 +198,7 @@ impl ConfirmDialog {
 ///
 /// All measurements are in pixels. The dialog is centered both horizontally
 /// and vertically (or ~40% from top for better visual balance).
+// Chunk: docs/chunks/generic_yes_no_modal - Added hit testing methods
 #[derive(Debug, Clone, Copy)]
 pub struct ConfirmDialogGeometry {
     /// X coordinate of the panel's left edge
@@ -162,12 +225,30 @@ pub struct ConfirmDialogGeometry {
     pub button_height: f32,
 }
 
+impl ConfirmDialogGeometry {
+    /// Returns true if (x, y) is inside the cancel button.
+    // Chunk: docs/chunks/generic_yes_no_modal - Hit testing for mouse clicks
+    pub fn is_cancel_button(&self, x: f32, y: f32) -> bool {
+        x >= self.cancel_button_x
+            && x < self.cancel_button_x + self.button_width
+            && y >= self.buttons_y
+            && y < self.buttons_y + self.button_height
+    }
+
+    /// Returns true if (x, y) is inside the confirm button.
+    // Chunk: docs/chunks/generic_yes_no_modal - Hit testing for mouse clicks
+    pub fn is_confirm_button(&self, x: f32, y: f32) -> bool {
+        x >= self.abandon_button_x
+            && x < self.abandon_button_x + self.button_width
+            && y >= self.buttons_y
+            && y < self.buttons_y + self.button_height
+    }
+}
+
 // Padding and sizing constants
 const DIALOG_PADDING: f32 = 16.0;
 const BUTTON_PADDING: f32 = 8.0;
 const BUTTON_GAP: f32 = 16.0;
-const CANCEL_LABEL: &str = "Cancel";
-const ABANDON_LABEL: &str = "Abandon";
 
 /// Calculates geometry for the confirm dialog overlay.
 ///
@@ -183,24 +264,26 @@ const ABANDON_LABEL: &str = "Abandon";
 /// - `view_height`: The height of the view in pixels
 /// - `line_height`: The height of a text line in pixels
 /// - `glyph_width`: The width of a single glyph in pixels (monospace assumed)
+/// - `dialog`: The confirm dialog state (used for prompt and button label widths)
+// Chunk: docs/chunks/generic_yes_no_modal - Accept dialog reference for dynamic labels
 pub fn calculate_confirm_dialog_geometry(
     view_width: f32,
     view_height: f32,
     line_height: f32,
     glyph_width: f32,
+    dialog: &ConfirmDialog,
 ) -> ConfirmDialogGeometry {
-    // Calculate button dimensions
-    let cancel_label_width = CANCEL_LABEL.len() as f32 * glyph_width;
-    let abandon_label_width = ABANDON_LABEL.len() as f32 * glyph_width;
-    let button_width = cancel_label_width.max(abandon_label_width) + 2.0 * BUTTON_PADDING;
+    // Calculate button dimensions using the dialog's actual labels
+    let cancel_label_width = dialog.cancel_label.len() as f32 * glyph_width;
+    let confirm_label_width = dialog.confirm_label.len() as f32 * glyph_width;
+    let button_width = cancel_label_width.max(confirm_label_width) + 2.0 * BUTTON_PADDING;
     let button_height = line_height + BUTTON_PADDING;
 
     // Calculate total buttons width (two buttons + gap)
     let buttons_total_width = 2.0 * button_width + BUTTON_GAP;
 
-    // Calculate prompt width (use a reasonable default prompt)
-    let default_prompt = "Abandon unsaved changes?";
-    let prompt_width = default_prompt.len() as f32 * glyph_width;
+    // Calculate prompt width using the actual prompt
+    let prompt_width = dialog.prompt.len() as f32 * glyph_width;
 
     // Panel width is the larger of buttons row or prompt, plus padding
     let content_width = buttons_total_width.max(prompt_width);
@@ -244,6 +327,82 @@ pub fn calculate_confirm_dialog_geometry(
 mod tests {
     use super::*;
     use crate::input::Modifiers;
+
+    // =========================================================================
+    // ConfirmDialogContext tests
+    // Chunk: docs/chunks/generic_yes_no_modal - Tests for context enum
+    // =========================================================================
+
+    #[test]
+    fn test_context_close_dirty_tab_stores_pane_and_index() {
+        let ctx = ConfirmDialogContext::CloseDirtyTab {
+            pane_id: 42,
+            tab_idx: 3,
+        };
+
+        // Verify we can pattern match and extract the values
+        match ctx {
+            ConfirmDialogContext::CloseDirtyTab { pane_id, tab_idx } => {
+                assert_eq!(pane_id, 42);
+                assert_eq!(tab_idx, 3);
+            }
+            _ => panic!("Expected CloseDirtyTab variant"),
+        }
+    }
+
+    #[test]
+    fn test_context_quit_with_dirty_tabs_stores_count() {
+        let ctx = ConfirmDialogContext::QuitWithDirtyTabs { dirty_count: 5 };
+
+        // Verify we can pattern match and extract the value
+        match ctx {
+            ConfirmDialogContext::QuitWithDirtyTabs { dirty_count } => {
+                assert_eq!(dirty_count, 5);
+            }
+            _ => panic!("Expected QuitWithDirtyTabs variant"),
+        }
+    }
+
+    #[test]
+    fn test_context_is_clone() {
+        let ctx = ConfirmDialogContext::CloseDirtyTab {
+            pane_id: 1,
+            tab_idx: 0,
+        };
+        let cloned = ctx.clone();
+
+        match (ctx, cloned) {
+            (
+                ConfirmDialogContext::CloseDirtyTab { pane_id: a, tab_idx: b },
+                ConfirmDialogContext::CloseDirtyTab { pane_id: c, tab_idx: d },
+            ) => {
+                assert_eq!(a, c);
+                assert_eq!(b, d);
+            }
+            _ => panic!("Clone should produce same variant"),
+        }
+    }
+
+    // =========================================================================
+    // Button label parameterization tests
+    // Chunk: docs/chunks/generic_yes_no_modal - Tests for parameterized labels
+    // =========================================================================
+
+    #[test]
+    fn test_new_uses_default_labels() {
+        let dialog = ConfirmDialog::new("Test prompt");
+        assert_eq!(dialog.cancel_label, DEFAULT_CANCEL_LABEL);
+        assert_eq!(dialog.confirm_label, DEFAULT_CONFIRM_LABEL);
+    }
+
+    #[test]
+    fn test_with_labels_uses_custom_labels() {
+        let dialog = ConfirmDialog::with_labels("Reload file?", "Keep Edits", "Reload");
+        assert_eq!(dialog.prompt, "Reload file?");
+        assert_eq!(dialog.cancel_label, "Keep Edits");
+        assert_eq!(dialog.confirm_label, "Reload");
+        assert_eq!(dialog.selected, ConfirmButton::Cancel); // Default selection
+    }
 
     // =========================================================================
     // Step 1: ConfirmDialog widget key handling tests
@@ -368,7 +527,13 @@ mod tests {
 
     // =========================================================================
     // Step 2: Geometry calculation tests
+    // Chunk: docs/chunks/generic_yes_no_modal - Updated to pass dialog reference
     // =========================================================================
+
+    /// Helper to create a default dialog for geometry tests
+    fn default_test_dialog() -> ConfirmDialog {
+        ConfirmDialog::new("Abandon unsaved changes?")
+    }
 
     #[test]
     fn test_dialog_geometry_centered_horizontally() {
@@ -376,8 +541,9 @@ mod tests {
         let view_height = 600.0;
         let line_height = 16.0;
         let glyph_width = 8.0;
+        let dialog = default_test_dialog();
 
-        let geom = calculate_confirm_dialog_geometry(view_width, view_height, line_height, glyph_width);
+        let geom = calculate_confirm_dialog_geometry(view_width, view_height, line_height, glyph_width, &dialog);
 
         // Panel should be centered horizontally
         let panel_center_x = geom.panel_x + geom.panel_width / 2.0;
@@ -396,8 +562,9 @@ mod tests {
         let view_height = 600.0;
         let line_height = 16.0;
         let glyph_width = 8.0;
+        let dialog = default_test_dialog();
 
-        let geom = calculate_confirm_dialog_geometry(view_width, view_height, line_height, glyph_width);
+        let geom = calculate_confirm_dialog_geometry(view_width, view_height, line_height, glyph_width, &dialog);
 
         // Panel should be positioned at ~40% from top
         let panel_center_y = geom.panel_y + geom.panel_height / 2.0;
@@ -416,8 +583,9 @@ mod tests {
         let view_height = 600.0;
         let line_height = 16.0;
         let glyph_width = 8.0;
+        let dialog = default_test_dialog();
 
-        let geom = calculate_confirm_dialog_geometry(view_width, view_height, line_height, glyph_width);
+        let geom = calculate_confirm_dialog_geometry(view_width, view_height, line_height, glyph_width, &dialog);
 
         // Cancel button should be to the left of Abandon button
         assert!(
@@ -456,8 +624,9 @@ mod tests {
         let view_height = 150.0;
         let line_height = 16.0;
         let glyph_width = 8.0;
+        let dialog = default_test_dialog();
 
-        let geom = calculate_confirm_dialog_geometry(view_width, view_height, line_height, glyph_width);
+        let geom = calculate_confirm_dialog_geometry(view_width, view_height, line_height, glyph_width, &dialog);
 
         // Panel should still be centered (even if it overflows)
         let panel_center_x = geom.panel_x + geom.panel_width / 2.0;
@@ -476,12 +645,13 @@ mod tests {
     fn test_dialog_geometry_scales_with_font_metrics() {
         let view_width = 800.0;
         let view_height = 600.0;
+        let dialog = default_test_dialog();
 
         // Test with smaller font
-        let geom_small = calculate_confirm_dialog_geometry(view_width, view_height, 12.0, 6.0);
+        let geom_small = calculate_confirm_dialog_geometry(view_width, view_height, 12.0, 6.0, &dialog);
 
         // Test with larger font
-        let geom_large = calculate_confirm_dialog_geometry(view_width, view_height, 20.0, 10.0);
+        let geom_large = calculate_confirm_dialog_geometry(view_width, view_height, 20.0, 10.0, &dialog);
 
         // Larger font should produce larger geometry
         assert!(
@@ -495,6 +665,154 @@ mod tests {
         assert!(
             geom_large.button_width > geom_small.button_width,
             "Larger font should produce wider buttons"
+        );
+    }
+
+    // =========================================================================
+    // Hit testing tests
+    // Chunk: docs/chunks/generic_yes_no_modal - Tests for button hit testing
+    // =========================================================================
+
+    #[test]
+    fn test_is_cancel_button_inside() {
+        let dialog = default_test_dialog();
+        let geom = calculate_confirm_dialog_geometry(800.0, 600.0, 16.0, 8.0, &dialog);
+
+        // Point in the center of the cancel button
+        let center_x = geom.cancel_button_x + geom.button_width / 2.0;
+        let center_y = geom.buttons_y + geom.button_height / 2.0;
+        assert!(
+            geom.is_cancel_button(center_x, center_y),
+            "Center of cancel button should be inside"
+        );
+
+        // Point at the top-left corner (just inside)
+        assert!(
+            geom.is_cancel_button(geom.cancel_button_x, geom.buttons_y),
+            "Top-left corner should be inside"
+        );
+    }
+
+    #[test]
+    fn test_is_cancel_button_outside() {
+        let dialog = default_test_dialog();
+        let geom = calculate_confirm_dialog_geometry(800.0, 600.0, 16.0, 8.0, &dialog);
+
+        // Point to the left of the cancel button
+        assert!(
+            !geom.is_cancel_button(geom.cancel_button_x - 1.0, geom.buttons_y),
+            "Point to the left should be outside"
+        );
+
+        // Point above the cancel button
+        assert!(
+            !geom.is_cancel_button(geom.cancel_button_x + geom.button_width / 2.0, geom.buttons_y - 1.0),
+            "Point above should be outside"
+        );
+
+        // Point below the cancel button
+        assert!(
+            !geom.is_cancel_button(
+                geom.cancel_button_x + geom.button_width / 2.0,
+                geom.buttons_y + geom.button_height
+            ),
+            "Point at bottom edge should be outside"
+        );
+    }
+
+    #[test]
+    fn test_is_confirm_button_inside() {
+        let dialog = default_test_dialog();
+        let geom = calculate_confirm_dialog_geometry(800.0, 600.0, 16.0, 8.0, &dialog);
+
+        // Point in the center of the confirm button
+        let center_x = geom.abandon_button_x + geom.button_width / 2.0;
+        let center_y = geom.buttons_y + geom.button_height / 2.0;
+        assert!(
+            geom.is_confirm_button(center_x, center_y),
+            "Center of confirm button should be inside"
+        );
+
+        // Point at the top-left corner (just inside)
+        assert!(
+            geom.is_confirm_button(geom.abandon_button_x, geom.buttons_y),
+            "Top-left corner should be inside"
+        );
+    }
+
+    #[test]
+    fn test_is_confirm_button_outside() {
+        let dialog = default_test_dialog();
+        let geom = calculate_confirm_dialog_geometry(800.0, 600.0, 16.0, 8.0, &dialog);
+
+        // Point to the right of the confirm button
+        assert!(
+            !geom.is_confirm_button(geom.abandon_button_x + geom.button_width, geom.buttons_y),
+            "Point at right edge should be outside"
+        );
+
+        // Point in the gap between buttons
+        let gap_x = geom.cancel_button_x + geom.button_width + 1.0;
+        assert!(
+            !geom.is_confirm_button(gap_x, geom.buttons_y),
+            "Point in gap should be outside confirm button"
+        );
+    }
+
+    #[test]
+    fn test_button_hit_areas_do_not_overlap() {
+        let dialog = default_test_dialog();
+        let geom = calculate_confirm_dialog_geometry(800.0, 600.0, 16.0, 8.0, &dialog);
+
+        // Sample points across the button row
+        let y = geom.buttons_y + geom.button_height / 2.0;
+
+        // Point in cancel button should not be in confirm button
+        let cancel_center_x = geom.cancel_button_x + geom.button_width / 2.0;
+        assert!(geom.is_cancel_button(cancel_center_x, y));
+        assert!(!geom.is_confirm_button(cancel_center_x, y));
+
+        // Point in confirm button should not be in cancel button
+        let confirm_center_x = geom.abandon_button_x + geom.button_width / 2.0;
+        assert!(geom.is_confirm_button(confirm_center_x, y));
+        assert!(!geom.is_cancel_button(confirm_center_x, y));
+
+        // Point in gap should be in neither
+        let gap_x = (geom.cancel_button_x + geom.button_width + geom.abandon_button_x) / 2.0;
+        assert!(!geom.is_cancel_button(gap_x, y));
+        assert!(!geom.is_confirm_button(gap_x, y));
+    }
+
+    #[test]
+    fn test_geometry_with_custom_labels() {
+        let dialog = ConfirmDialog::with_labels(
+            "Delete file permanently?",
+            "No",
+            "Yes, Delete",
+        );
+        let geom = calculate_confirm_dialog_geometry(800.0, 600.0, 16.0, 8.0, &dialog);
+
+        // Button width should accommodate the longer label ("Yes, Delete" = 11 chars)
+        let expected_min_width = 11.0 * 8.0 + 16.0; // 11 chars * glyph_width + 2*padding
+        assert!(
+            geom.button_width >= expected_min_width,
+            "Button width ({}) should be >= {} for label 'Yes, Delete'",
+            geom.button_width,
+            expected_min_width
+        );
+    }
+
+    #[test]
+    fn test_geometry_button_width_scales_with_label_length() {
+        let short_dialog = ConfirmDialog::with_labels("?", "No", "Yes");
+        let long_dialog = ConfirmDialog::with_labels("?", "Cancel", "Permanently Delete");
+
+        let geom_short = calculate_confirm_dialog_geometry(800.0, 600.0, 16.0, 8.0, &short_dialog);
+        let geom_long = calculate_confirm_dialog_geometry(800.0, 600.0, 16.0, 8.0, &long_dialog);
+
+        assert!(
+            geom_long.button_width > geom_short.button_width,
+            "Longer labels should produce wider buttons"
         );
     }
 }
@@ -637,11 +955,12 @@ impl ConfirmDialogGlyphBuffer {
         dialog: &ConfirmDialog,
         geometry: &ConfirmDialogGeometry,
     ) {
-        // Estimate capacity: panel bg + 2 button bgs + prompt chars + cancel chars + abandon chars
+        // Estimate capacity: panel bg + 2 button bgs + prompt chars + cancel chars + confirm chars
+        // Chunk: docs/chunks/generic_yes_no_modal - Use dialog's actual labels
         let prompt_len = dialog.prompt.chars().count();
-        let cancel_len = CANCEL_LABEL.len();
-        let abandon_len = ABANDON_LABEL.len();
-        let estimated_quads = 3 + prompt_len + cancel_len + abandon_len;
+        let cancel_len = dialog.cancel_label.len();
+        let confirm_len = dialog.confirm_label.len();
+        let estimated_quads = 3 + prompt_len + cancel_len + confirm_len;
 
         let mut vertices: Vec<GlyphVertex> = Vec::with_capacity(estimated_quads * 4);
         let mut indices: Vec<u32> = Vec::with_capacity(estimated_quads * 6);
@@ -743,16 +1062,17 @@ impl ConfirmDialogGlyphBuffer {
         self.prompt_range = QuadRange::new(prompt_start, indices.len() - prompt_start);
 
         // ==================== Phase 5: Cancel Button Text ====================
+        // Chunk: docs/chunks/generic_yes_no_modal - Use dialog's actual cancel label
         let cancel_text_start = indices.len();
         {
             let glyph_width = self.layout.glyph_width;
-            let text_width = CANCEL_LABEL.len() as f32 * glyph_width;
+            let text_width = dialog.cancel_label.len() as f32 * glyph_width;
             // Center the text in the button
             let x_start = geometry.cancel_button_x + (geometry.button_width - text_width) / 2.0;
             let mut x = x_start;
             let y = geometry.buttons_y + (geometry.button_height - self.layout.line_height) / 2.0;
 
-            for c in CANCEL_LABEL.chars() {
+            for c in dialog.cancel_label.chars() {
                 if c == ' ' {
                     x += glyph_width;
                     continue;
@@ -769,17 +1089,18 @@ impl ConfirmDialogGlyphBuffer {
         }
         self.cancel_text_range = QuadRange::new(cancel_text_start, indices.len() - cancel_text_start);
 
-        // ==================== Phase 6: Abandon Button Text ====================
+        // ==================== Phase 6: Confirm Button Text ====================
+        // Chunk: docs/chunks/generic_yes_no_modal - Use dialog's actual confirm label
         let abandon_text_start = indices.len();
         {
             let glyph_width = self.layout.glyph_width;
-            let text_width = ABANDON_LABEL.len() as f32 * glyph_width;
+            let text_width = dialog.confirm_label.len() as f32 * glyph_width;
             // Center the text in the button
             let x_start = geometry.abandon_button_x + (geometry.button_width - text_width) / 2.0;
             let mut x = x_start;
             let y = geometry.buttons_y + (geometry.button_height - self.layout.line_height) / 2.0;
 
-            for c in ABANDON_LABEL.chars() {
+            for c in dialog.confirm_label.chars() {
                 if c == ' ' {
                     x += glyph_width;
                     continue;

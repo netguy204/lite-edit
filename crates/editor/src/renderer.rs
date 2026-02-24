@@ -2446,11 +2446,13 @@ impl Renderer {
         let glyph_width = self.font.metrics.advance_width as f32;
 
         // Calculate dialog geometry
+        // Chunk: docs/chunks/generic_yes_no_modal - Pass dialog reference for dynamic labels
         let geometry = calculate_confirm_dialog_geometry(
             view_width,
             view_height,
             line_height,
             glyph_width,
+            dialog,
         );
 
         // Ensure confirm dialog buffer is initialized
