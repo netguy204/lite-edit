@@ -3147,9 +3147,21 @@ impl EditorState {
         use crate::workspace::Tab;
         use lite_edit_terminal::TerminalBuffer;
 
-        // Compute content area dimensions
-        let content_height = self.view_height - TAB_BAR_HEIGHT;
-        let content_width = self.view_width - RAIL_WIDTH;
+        // Chunk: docs/chunks/terminal_pane_initial_sizing - Use pane dimensions for terminal sizing
+        // Get active pane ID to compute pane-specific dimensions. In multi-pane layouts, the
+        // active pane is only a fraction of the window content area, so we use the actual pane
+        // dimensions rather than the full window dimensions.
+        let pane_dimensions = self.editor.active_workspace()
+            .map(|ws| ws.active_pane_id)
+            .and_then(|pane_id| self.get_pane_content_dimensions(pane_id));
+
+        let (content_height, content_width) = match pane_dimensions {
+            Some((height, width)) => (height, width),
+            None => {
+                // Fall back to full window dimensions (single-pane or dimensions not set)
+                (self.view_height - TAB_BAR_HEIGHT, self.view_width - RAIL_WIDTH)
+            }
+        };
 
         // Guard against zero dimensions
         if content_height <= 0.0 || content_width <= 0.0 {
@@ -3222,6 +3234,12 @@ impl EditorState {
         // Sync viewport to ensure dirty region calculations work correctly
         // (This is a no-op for terminal tabs but kept for consistency)
         self.sync_active_tab_viewport();
+
+        // Chunk: docs/chunks/terminal_pane_initial_sizing - Sync viewports after terminal creation
+        // Ensure the terminal's PTY is correctly sized for its pane. This is especially important
+        // in split layouts where the pane is smaller than the window content area. This call
+        // iterates all panes and syncs terminal sizes to match their actual pane geometry.
+        self.sync_pane_viewports();
 
         // Ensure the new tab is visible in the tab bar
         self.ensure_active_tab_visible();
@@ -10020,5 +10038,126 @@ mod tests {
             ws.active_pane_id, 2,
             "Focus should have switched to right pane (pane 2)"
         );
+    }
+
+    // =========================================================================
+    // Terminal initial sizing in split pane tests
+    // Chunk: docs/chunks/terminal_pane_initial_sizing - Terminal sizing in split panes
+    // =========================================================================
+
+    /// Tests that a terminal tab opened in a split pane receives correct initial dimensions
+    /// matching the pane's actual dimensions, not the full window dimensions.
+    #[test]
+    fn test_terminal_initial_sizing_in_split_pane() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        use crate::left_rail::RAIL_WIDTH;
+        use crate::pane_layout::Direction;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Create a file tab and split horizontally
+        state.new_tab();
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.move_active_tab(Direction::Right);
+        }
+        state.sync_pane_viewports();
+
+        // Now create a terminal tab in the active pane (right half)
+        state.new_terminal_tab();
+
+        // Get terminal size
+        let (term_cols, _term_rows) = {
+            let ws = state.editor.active_workspace().unwrap();
+            let tab = ws.active_pane().unwrap().active_tab().unwrap();
+            let term = tab.as_terminal_buffer().unwrap();
+            term.size()
+        };
+
+        // Calculate expected columns for the RIGHT pane (half of content area)
+        let content_width = 800.0 - RAIL_WIDTH;
+        let pane_width = content_width * 0.5; // Half due to horizontal split
+        let expected_cols = (pane_width as f64 / test_font_metrics().advance_width).floor() as usize;
+
+        // Terminal should be sized for the PANE, not the full window
+        assert_eq!(term_cols, expected_cols,
+            "Terminal should have {} columns for pane width {}, but has {}",
+            expected_cols, pane_width, term_cols);
+    }
+
+    /// Tests that a terminal tab in a vertical split receives correct initial row count
+    /// matching the pane's height, not the full window height.
+    #[test]
+    fn test_terminal_initial_sizing_in_vertical_split() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        use crate::pane_layout::Direction;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        let view_height = 600.0 + TAB_BAR_HEIGHT;
+        state.update_viewport_dimensions(800.0, view_height);
+
+        // Create a file tab and split vertically
+        state.new_tab();
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.move_active_tab(Direction::Down);
+        }
+        state.sync_pane_viewports();
+
+        // Create a terminal tab in the active pane (bottom half)
+        state.new_terminal_tab();
+
+        // Get terminal size
+        let (_term_cols, term_rows) = {
+            let ws = state.editor.active_workspace().unwrap();
+            let tab = ws.active_pane().unwrap().active_tab().unwrap();
+            let term = tab.as_terminal_buffer().unwrap();
+            term.size()
+        };
+
+        // Calculate expected rows for the BOTTOM pane (half of view_height, minus its tab bar)
+        // In pane layout calculation, bounds are (0, 0, content_width, view_height)
+        // So each pane in vertical split has height = view_height / 2
+        let pane_height = view_height * 0.5; // Half due to vertical split
+        let pane_content_height = pane_height - TAB_BAR_HEIGHT;
+        let expected_rows = (pane_content_height as f64 / test_font_metrics().line_height).floor() as usize;
+
+        // Terminal should be sized for the PANE, not the full window
+        assert_eq!(term_rows, expected_rows,
+            "Terminal should have {} rows for pane content height {}, but has {}",
+            expected_rows, pane_content_height, term_rows);
+    }
+
+    /// Tests that a terminal tab in a single-pane layout still receives correct dimensions
+    /// (regression test to ensure the fix doesn't break the common case).
+    #[test]
+    fn test_terminal_initial_sizing_in_single_pane() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        use crate::left_rail::RAIL_WIDTH;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        let view_height = 600.0 + TAB_BAR_HEIGHT;
+        state.update_viewport_dimensions(800.0, view_height);
+
+        // Create a terminal tab in the default single pane
+        state.new_terminal_tab();
+
+        // Get terminal size
+        let (term_cols, term_rows) = {
+            let ws = state.editor.active_workspace().unwrap();
+            let tab = ws.active_pane().unwrap().active_tab().unwrap();
+            let term = tab.as_terminal_buffer().unwrap();
+            term.size()
+        };
+
+        // Calculate expected dimensions for full content area
+        // In single pane layout, pane height = view_height, content height = pane height - TAB_BAR_HEIGHT
+        let content_width = 800.0 - RAIL_WIDTH;
+        let content_height = view_height - TAB_BAR_HEIGHT; // 600.0
+
+        let expected_cols = (content_width as f64 / test_font_metrics().advance_width).floor() as usize;
+        let expected_rows = (content_height as f64 / test_font_metrics().line_height).floor() as usize;
+
+        assert_eq!(term_cols, expected_cols, "Terminal columns mismatch in single pane");
+        assert_eq!(term_rows, expected_rows, "Terminal rows mismatch in single pane");
     }
 }
