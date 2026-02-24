@@ -518,6 +518,7 @@ impl EditorState {
     ///
     /// The method computes pane rectangles from the current window dimensions,
     /// then updates each tab's viewport with the correct pane content height.
+    // Chunk: docs/chunks/terminal_resize_sync - Propagate resize to terminal grid
     fn sync_pane_viewports(&mut self) {
         use crate::pane_layout::calculate_pane_rects;
 
@@ -533,6 +534,10 @@ impl EditorState {
         // which starts after RAIL_WIDTH horizontally, at top of window vertically.
         let content_width = view_width - RAIL_WIDTH;
         let content_height = view_height;
+
+        // Chunk: docs/chunks/terminal_resize_sync - Cache font metrics for terminal resize calculations
+        let line_height = self.font_metrics.line_height;
+        let advance_width = self.font_metrics.advance_width;
 
         // Early return if no workspace
         let workspace = match self.editor.active_workspace_mut() {
@@ -552,11 +557,27 @@ impl EditorState {
                 None => continue,
             };
 
-            // Calculate the pane's content height (pane height minus tab bar)
+            // Calculate the pane's content height and width (pane height minus tab bar)
             let pane_content_height = pane_rect.height - TAB_BAR_HEIGHT;
+            let pane_width = pane_rect.width;
 
             // Update each tab's viewport in this pane
             for tab in &mut pane.tabs {
+                // Chunk: docs/chunks/terminal_resize_sync - Resize terminal grid on layout change
+                // For terminal tabs, resize the alacritty grid to match the new pane dimensions.
+                // This ensures hosted programs (Claude Code, vim, htop) see the correct terminal
+                // size via TIOCGWINSZ and position their cursors accurately.
+                if let Some(terminal) = tab.as_terminal_buffer_mut() {
+                    let rows = (pane_content_height as f64 / line_height).floor() as usize;
+                    let cols = (pane_width as f64 / advance_width).floor() as usize;
+
+                    // Only resize if dimensions actually changed (avoid PTY thrashing)
+                    let (current_cols, current_rows) = terminal.size();
+                    if (cols != current_cols || rows != current_rows) && cols > 0 && rows > 0 {
+                        terminal.resize(cols, rows);
+                    }
+                }
+
                 // Get the line count for this tab's content
                 // File tabs use TextBuffer line count
                 // Terminal tabs use their terminal's line count
@@ -7794,5 +7815,175 @@ mod tests {
         // Should still be in ConfirmDialog, not FindInFile
         assert_eq!(state.focus, EditorFocus::ConfirmDialog);
         assert!(state.find_mini_buffer.is_none());
+    }
+
+    // =========================================================================
+    // Terminal Resize Sync Tests (Chunk: docs/chunks/terminal_resize_sync)
+    // =========================================================================
+
+    /// Tests that sync_pane_viewports resizes the terminal when viewport dimensions change.
+    #[test]
+    fn test_sync_pane_viewports_resizes_terminal() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        use crate::left_rail::RAIL_WIDTH;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Get initial terminal size
+        let initial_size = {
+            let ws = state.editor.active_workspace().unwrap();
+            let tab = ws.active_pane().unwrap().active_tab().unwrap();
+            let term = tab.as_terminal_buffer().unwrap();
+            term.size()
+        };
+
+        // Resize window (double the height)
+        state.update_viewport_dimensions(800.0, 1200.0 + TAB_BAR_HEIGHT);
+
+        // Terminal should have more rows now
+        let new_size = {
+            let ws = state.editor.active_workspace().unwrap();
+            let tab = ws.active_pane().unwrap().active_tab().unwrap();
+            let term = tab.as_terminal_buffer().unwrap();
+            term.size()
+        };
+
+        // With double the content height, we should have roughly double the rows
+        assert!(
+            new_size.1 > initial_size.1,
+            "Terminal rows should increase after resize: was {:?}, now {:?}",
+            initial_size,
+            new_size
+        );
+    }
+
+    /// Tests that terminal resize works correctly when a pane splits (reducing the content area).
+    #[test]
+    fn test_terminal_resize_on_split() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        use crate::pane_layout::Direction;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Get initial terminal size
+        let initial_rows = {
+            let ws = state.editor.active_workspace().unwrap();
+            let tab = ws.active_pane().unwrap().active_tab().unwrap();
+            let term = tab.as_terminal_buffer().unwrap();
+            term.size().1 // rows
+        };
+
+        // Create a second tab so we can move it to trigger a split
+        state.new_tab();
+
+        // Move the new tab to create a vertical split (which reduces height per pane)
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.move_active_tab(Direction::Down);
+        }
+
+        // Sync viewports after split
+        state.sync_pane_viewports();
+
+        // Terminal should have fewer rows now (roughly half, since the pane is split vertically)
+        let new_rows = {
+            // The terminal tab is in the first pane (pane_id 0 or the original pane)
+            // We need to find it
+            let ws = state.editor.active_workspace().unwrap();
+            for pane in ws.all_panes() {
+                for tab in &pane.tabs {
+                    if let Some(term) = tab.as_terminal_buffer() {
+                        return assert!(
+                            term.size().1 < initial_rows,
+                            "Terminal rows should decrease after split: was {}, now {}",
+                            initial_rows,
+                            term.size().1
+                        );
+                    }
+                }
+            }
+            panic!("Terminal tab not found after split");
+        };
+    }
+
+    /// Tests that sync_pane_viewports doesn't call terminal resize when dimensions haven't changed.
+    #[test]
+    fn test_terminal_resize_skipped_when_unchanged() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Get initial terminal size
+        let initial_size = {
+            let ws = state.editor.active_workspace().unwrap();
+            let tab = ws.active_pane().unwrap().active_tab().unwrap();
+            let term = tab.as_terminal_buffer().unwrap();
+            term.size()
+        };
+
+        // Call sync_pane_viewports again with the same dimensions
+        state.sync_pane_viewports();
+
+        // Size should be unchanged
+        let new_size = {
+            let ws = state.editor.active_workspace().unwrap();
+            let tab = ws.active_pane().unwrap().active_tab().unwrap();
+            let term = tab.as_terminal_buffer().unwrap();
+            term.size()
+        };
+
+        assert_eq!(initial_size, new_size, "Terminal size should not change");
+    }
+
+    /// Tests that the terminal size matches the expected dimensions based on pane geometry.
+    #[test]
+    fn test_terminal_size_matches_pane_geometry() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        use crate::left_rail::RAIL_WIDTH;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        let fm = test_font_metrics();
+
+        // Set up viewport
+        let view_width = 800.0;
+        let view_height = 600.0 + TAB_BAR_HEIGHT;
+        state.update_viewport_dimensions(view_width, view_height);
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Calculate expected terminal dimensions
+        let content_width = view_width - RAIL_WIDTH;
+        let content_height = view_height - TAB_BAR_HEIGHT;
+        let expected_cols = (content_width as f64 / fm.advance_width).floor() as usize;
+        let expected_rows = (content_height as f64 / fm.line_height).floor() as usize;
+
+        // Get actual terminal size
+        let (actual_cols, actual_rows) = {
+            let ws = state.editor.active_workspace().unwrap();
+            let tab = ws.active_pane().unwrap().active_tab().unwrap();
+            let term = tab.as_terminal_buffer().unwrap();
+            term.size()
+        };
+
+        assert_eq!(
+            actual_cols, expected_cols,
+            "Terminal columns should match pane width"
+        );
+        assert_eq!(
+            actual_rows, expected_rows,
+            "Terminal rows should match pane height"
+        );
     }
 }

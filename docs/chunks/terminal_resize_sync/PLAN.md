@@ -8,153 +8,346 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The root cause of the cursor misalignment is that `sync_pane_viewports()` updates
+each tab's `Viewport.visible_lines` when the window resizes or a pane splits, but
+for terminal tabs it does **not** call `TerminalBuffer::resize()`. This means
+the alacritty grid retains its original row/column count while the viewport
+expects a different number of visible lines. Programs query cursor position via
+DSR/CPR and receive coordinates relative to the stale grid geometry.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The fix is straightforward: in `sync_pane_viewports()`, when iterating over
+terminal tabs, compute the new grid dimensions from `(pane_content_height, pane_width)`
+and `font_metrics`, then call `TerminalBuffer::resize(cols, rows)`. This updates
+both the alacritty grid (via `Term::resize`) and the PTY (via `TIOCGWINSZ`).
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+We follow the existing pattern from `new_terminal_tab()` for computing
+`rows = (content_height / line_height).floor()` and
+`cols = (content_width / advance_width).floor()`.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/terminal_resize_sync/GOAL.md)
-with references to the files that you expect to touch.
--->
+To avoid excessive PTY writes during rapid resize events (e.g., dragging a window
+edge), we'll add a simple guard: only call `TerminalBuffer::resize()` when the
+computed `(cols, rows)` differs from the terminal's current `size()`.
+
+**Key architectural pattern**: This chunk USES the `viewport_scroll` subsystem
+(DOCUMENTED status) for viewport updates and follows the humble view principle
+from TESTING_PHILOSOPHY.md — the model (TerminalBuffer + Viewport) is updated
+on resize, and the renderer just projects state.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+- **docs/subsystems/viewport_scroll** (DOCUMENTED): This chunk USES the subsystem.
+  `Viewport::update_size()` is already called in `sync_pane_viewports()` for all
+  tabs. This chunk adds a parallel resize call for terminal buffers to keep the
+  alacritty grid in sync with the viewport's visible_lines. The subsystem's
+  invariant "resize re-clamps scroll offset" is preserved because we continue
+  calling `tab.viewport.update_size()`.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing test for terminal resize on viewport sync
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create a test that:
+1. Creates an EditorState with a terminal tab
+2. Verifies the terminal's initial size
+3. Simulates a window resize by calling `update_viewport_dimensions()` with new dimensions
+4. Asserts that the terminal's `size()` matches the expected new dimensions
 
-Example:
+This test will fail because `sync_pane_viewports()` does not currently call
+`TerminalBuffer::resize()`.
 
-### Step 1: Define the SegmentHeader struct
+```rust
+#[test]
+fn test_sync_pane_viewports_resizes_terminal() {
+    use crate::tab_bar::TAB_BAR_HEIGHT;
+    use crate::left_rail::RAIL_WIDTH;
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+    let mut state = EditorState::empty(test_font_metrics());
+    state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
 
-Location: src/segment/format.rs
+    // Create a terminal tab
+    state.new_terminal_tab();
 
-### Step 2: Implement header serialization
+    // Get initial terminal size
+    let initial_size = {
+        let ws = state.editor.active_workspace().unwrap();
+        let tab = ws.active_pane().unwrap().active_tab().unwrap();
+        let term = tab.as_terminal().unwrap();
+        term.size()
+    };
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+    // Resize window (double the height)
+    state.update_viewport_dimensions(800.0, 1200.0 + TAB_BAR_HEIGHT);
 
-### Step 3: ...
+    // Terminal should have more rows now
+    let new_size = {
+        let ws = state.editor.active_workspace().unwrap();
+        let tab = ws.active_pane().unwrap().active_tab().unwrap();
+        let term = tab.as_terminal().unwrap();
+        term.size()
+    };
 
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+    // With double the content height, we should have roughly double the rows
+    assert!(new_size.1 > initial_size.1,
+        "Terminal rows should increase after resize: was {:?}, now {:?}",
+        initial_size, new_size);
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `crates/editor/src/editor_state.rs` (in `#[cfg(test)]` module)
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 2: Add `as_terminal()` accessor to Tab
+
+The test needs read-only access to the terminal buffer for assertions. Add a
+method to `Tab` that returns `Option<&TerminalBuffer>`:
+
+```rust
+/// Returns a reference to the terminal buffer, if this is a terminal tab.
+pub fn as_terminal(&self) -> Option<&TerminalBuffer> {
+    match &self.buffer {
+        TabBuffer::Terminal(term) => Some(term),
+        TabBuffer::File(_) | TabBuffer::AgentTerminal => None,
+    }
+}
+```
+
+This mirrors the existing `terminal_and_viewport_mut()` pattern but is read-only
+for test assertions.
+
+Location: `crates/editor/src/workspace.rs` (impl Tab)
+
+### Step 3: Add `as_terminal_mut()` accessor to Tab
+
+For the resize implementation, we need mutable access to the terminal buffer
+independent of the viewport:
+
+```rust
+/// Returns a mutable reference to the terminal buffer, if this is a terminal tab.
+pub fn as_terminal_mut(&mut self) -> Option<&mut TerminalBuffer> {
+    match &mut self.buffer {
+        TabBuffer::Terminal(term) => Some(term),
+        TabBuffer::File(_) | TabBuffer::AgentTerminal => None,
+    }
+}
+```
+
+Location: `crates/editor/src/workspace.rs` (impl Tab)
+
+### Step 4: Modify `sync_pane_viewports()` to resize terminal tabs
+
+In `EditorState::sync_pane_viewports()`, after computing the pane content
+dimensions but before the `tab.viewport.update_size()` call, add terminal
+resize logic:
+
+```rust
+// Chunk: docs/chunks/terminal_resize_sync - Propagate resize to terminal grid
+// For terminal tabs, also resize the terminal buffer to keep the
+// alacritty grid synchronized with the viewport dimensions.
+if let Some(terminal) = tab.as_terminal_mut() {
+    // Compute new terminal dimensions from pane content area
+    let rows = (pane_content_height as f64 / self.font_metrics.line_height).floor() as usize;
+    let cols = (pane_width as f64 / self.font_metrics.advance_width).floor() as usize;
+
+    // Only resize if dimensions actually changed (avoid PTY thrashing)
+    let (current_cols, current_rows) = terminal.size();
+    if cols != current_cols || rows != current_rows {
+        if cols > 0 && rows > 0 {
+            terminal.resize(cols, rows);
+        }
+    }
+}
+```
+
+**Key points:**
+- We compute `pane_width` from `pane_rect.width` (need to capture this from the loop)
+- The `font_metrics` must be accessible; store a copy at the start of the method
+- We guard against zero dimensions and only resize when dimensions change
+
+The full modified loop structure:
+
+```rust
+// Update each pane's tabs with the correct viewport dimensions
+let line_height = self.font_metrics.line_height;
+let advance_width = self.font_metrics.advance_width;
+
+for pane_rect in &pane_rects {
+    // Get the pane by ID
+    let pane = match workspace.pane_root.get_pane_mut(pane_rect.pane_id) {
+        Some(p) => p,
+        None => continue,
+    };
+
+    // Calculate the pane's content dimensions (pane height/width minus tab bar)
+    let pane_content_height = pane_rect.height - TAB_BAR_HEIGHT;
+    let pane_width = pane_rect.width;
+
+    // Update each tab's viewport in this pane
+    for tab in &mut pane.tabs {
+        // Chunk: docs/chunks/terminal_resize_sync - Resize terminal grid on layout change
+        // For terminal tabs, resize the alacritty grid to match the new pane dimensions.
+        // This ensures hosted programs (Claude Code, vim, htop) see the correct terminal
+        // size via TIOCGWINSZ and position their cursors accurately.
+        if let Some(terminal) = tab.as_terminal_mut() {
+            let rows = (pane_content_height as f64 / line_height).floor() as usize;
+            let cols = (pane_width as f64 / advance_width).floor() as usize;
+
+            let (current_cols, current_rows) = terminal.size();
+            if cols != current_cols || rows != current_rows {
+                if cols > 0 && rows > 0 {
+                    terminal.resize(cols, rows);
+                }
+            }
+        }
+
+        // Get the line count for this tab's content (existing code)
+        // ...
+    }
+}
+```
+
+Location: `crates/editor/src/editor_state.rs#EditorState::sync_pane_viewports`
+
+### Step 5: Run the test from Step 1
+
+Verify the test now passes. The terminal size should increase when the window
+is resized.
+
+### Step 6: Write test for terminal resize on pane split
+
+Create a test that verifies terminal resize works correctly when a pane splits
+(reducing the content area):
+
+```rust
+#[test]
+fn test_terminal_resize_on_split() {
+    use crate::tab_bar::TAB_BAR_HEIGHT;
+
+    let mut state = EditorState::empty(test_font_metrics());
+    state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+    // Create a terminal tab
+    state.new_terminal_tab();
+
+    // Get initial terminal size
+    let initial_rows = {
+        let ws = state.editor.active_workspace().unwrap();
+        let tab = ws.active_pane().unwrap().active_tab().unwrap();
+        let term = tab.as_terminal().unwrap();
+        term.size().1 // rows
+    };
+
+    // Split vertically (top/bottom panes)
+    // This should halve the height available to each pane
+    // ... invoke split command ...
+
+    // Terminal should have fewer rows now (roughly half)
+    let new_rows = {
+        let ws = state.editor.active_workspace().unwrap();
+        let tab = ws.active_pane().unwrap().active_tab().unwrap();
+        let term = tab.as_terminal().unwrap();
+        term.size().1
+    };
+
+    assert!(new_rows < initial_rows,
+        "Terminal rows should decrease after split: was {}, now {}",
+        initial_rows, new_rows);
+}
+```
+
+Location: `crates/editor/src/editor_state.rs` (in `#[cfg(test)]` module)
+
+### Step 7: Write test for no-op resize when dimensions unchanged
+
+Verify that `sync_pane_viewports()` doesn't call `TerminalBuffer::resize()` when
+the terminal dimensions haven't changed (important for avoiding PTY thrashing):
+
+```rust
+#[test]
+fn test_terminal_resize_skipped_when_unchanged() {
+    use crate::tab_bar::TAB_BAR_HEIGHT;
+
+    let mut state = EditorState::empty(test_font_metrics());
+    state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+    // Create a terminal tab
+    state.new_terminal_tab();
+
+    // Get initial terminal size
+    let initial_size = {
+        let ws = state.editor.active_workspace().unwrap();
+        let tab = ws.active_pane().unwrap().active_tab().unwrap();
+        let term = tab.as_terminal().unwrap();
+        term.size()
+    };
+
+    // Call sync_pane_viewports again with the same dimensions
+    state.sync_pane_viewports();
+
+    // Size should be unchanged
+    let new_size = {
+        let ws = state.editor.active_workspace().unwrap();
+        let tab = ws.active_pane().unwrap().active_tab().unwrap();
+        let term = tab.as_terminal().unwrap();
+        term.size()
+    };
+
+    assert_eq!(initial_size, new_size, "Terminal size should not change");
+}
+```
+
+This test verifies the guard condition `if cols != current_cols || rows != current_rows`
+is working correctly.
+
+Location: `crates/editor/src/editor_state.rs` (in `#[cfg(test)]` module)
+
+### Step 8: Run full test suite
+
+Run `cargo test -p lite-edit` to verify:
+- All new tests pass
+- No regressions in existing terminal tests
+- No regressions in viewport/scroll tests
+- No regressions in pane split tests
+
+### Step 9: Manual verification with vttest
+
+After the code changes, manually run `vttest` in a terminal tab to verify:
+1. **Cursor positioning (vttest 1)**: The E/+ border test should fill the entire screen
+2. **Autowrap (vttest 1)**: Letters on the right margin should appear at consistent positions
+3. **Origin mode (vttest 2)**: Text positioned at "bottom of screen" should appear at the actual last visible row
+
+### Step 10: Manual verification with Claude Code
+
+Run Claude Code in a terminal tab and verify:
+1. After a window resize, the block cursor renders on the correct row (the input prompt line)
+2. The cursor does not drift below the prompt after resize
+
+### Step 11: Update GOAL.md code_paths
+
+Add the files touched to the chunk's GOAL.md frontmatter:
+- `crates/editor/src/editor_state.rs`
+- `crates/editor/src/workspace.rs`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **tty_cursor_reporting** (ACTIVE): This chunk assumes DSR/CPR round-trip works correctly.
+  The fix here ensures the CPR response contains coordinates for the correct grid geometry.
+- **split_scroll_viewport** (ACTIVE): This chunk's `sync_pane_viewports()` function is
+  the integration point for the terminal resize logic.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Rapid resize performance**: The guard condition (only resize when dimensions change)
+  should prevent PTY thrashing, but if users drag window edges very rapidly, we may
+  still send many resize signals. This is acceptable because the PTY kernel buffers
+  TIOCGWINSZ signals, and the terminal program (shell, vim, etc.) handles SIGWINCH
+  debouncing internally.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Alt screen mode**: When in alternate screen mode (e.g., vim, htop), resize should
+  still work. `TerminalBuffer::resize()` calls `self.term.resize(size)` which handles
+  both primary and alternate screen grids. No special handling needed.
+
+- **Cold scrollback during resize**: If a resize occurs while there's cold scrollback,
+  the line count may change. The viewport update already handles this via
+  `update_size(pane_content_height, line_count)`. No additional handling needed.
 
 ## Deviations
 
