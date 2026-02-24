@@ -37,6 +37,8 @@ mod buffer_target;
 mod clipboard;
 // Chunk: docs/chunks/renderer_styled_content - ColorPalette for styled text
 mod color_palette;
+// Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog widget
+mod confirm_dialog;
 mod context;
 // Chunk: docs/chunks/workspace_dir_picker - Directory picker for new workspaces
 mod dir_picker;

@@ -292,6 +292,15 @@ impl EventDrainLoop {
                         self.state.cursor_visible,
                     );
                 }
+                // Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog rendering
+                EditorFocus::ConfirmDialog => {
+                    self.renderer.set_cursor_visible(self.state.cursor_visible);
+                    self.renderer.render_with_confirm_dialog(
+                        &self.metal_view,
+                        &self.state.editor,
+                        self.state.confirm_dialog.as_ref(),
+                    );
+                }
             }
 
             // Update cursor regions after rendering

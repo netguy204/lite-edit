@@ -46,6 +46,10 @@ use crate::selector_overlay::{
     calculate_find_strip_geometry, calculate_overlay_geometry, FindStripGlyphBuffer,
     OverlayGeometry, SelectorGlyphBuffer,
 };
+// Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog rendering
+use crate::confirm_dialog::{
+    calculate_confirm_dialog_geometry, ConfirmDialog, ConfirmDialogGlyphBuffer,
+};
 use crate::shader::GlyphPipeline;
 // Chunk: docs/chunks/content_tab_bar - Content tab bar rendering
 use crate::tab_bar::{
@@ -277,6 +281,9 @@ pub struct Renderer {
     // Chunk: docs/chunks/tiling_multi_pane_render - Pane frame rendering
     /// The buffer for pane dividers and focus borders (lazy-initialized)
     pane_frame_buffer: Option<crate::pane_frame_buffer::PaneFrameBuffer>,
+    // Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog rendering
+    /// The glyph buffer for confirm dialog rendering (lazy-initialized)
+    confirm_dialog_buffer: Option<ConfirmDialogGlyphBuffer>,
     /// Current viewport width in pixels (for wrap layout calculation)
     viewport_width_px: f32,
     // Chunk: docs/chunks/wrap_click_offset - Content width for consistent wrap calculation
@@ -350,6 +357,7 @@ impl Renderer {
             find_strip_buffer: None,
             welcome_screen_buffer: None,
             pane_frame_buffer: None,
+            confirm_dialog_buffer: None,
             viewport_width_px,
             content_width_px,
         }
@@ -2230,6 +2238,356 @@ impl Renderer {
                 encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
                     MTLPrimitiveType::Triangle,
                     cursor_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+    }
+
+    // Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog rendering (entry point)
+    /// Renders the editor with a confirm dialog overlay.
+    ///
+    /// This is similar to `render_with_editor` but adds a modal confirm dialog
+    /// on top of the buffer content. The dialog has a semi-transparent backdrop
+    /// and centered panel with prompt and buttons.
+    ///
+    /// # Arguments
+    /// * `view` - The Metal view to render to
+    /// * `editor` - The Editor state containing workspace information
+    /// * `dialog` - Optional confirm dialog to render as an overlay
+    pub fn render_with_confirm_dialog(
+        &mut self,
+        view: &MetalView,
+        editor: &Editor,
+        dialog: Option<&ConfirmDialog>,
+    ) {
+        // Set content area offset to account for left rail and tab bar
+        self.set_content_x_offset(RAIL_WIDTH);
+        self.set_content_y_offset(TAB_BAR_HEIGHT);
+
+        // Update glyph buffer from active tab's BufferView with syntax highlighting
+        if let Some(ws) = editor.active_workspace() {
+            if let Some(tab) = ws.active_tab() {
+                // For single-pane mode, configure viewport from the active tab before rendering.
+                if ws.pane_root.pane_count() <= 1 {
+                    let frame = view.frame();
+                    let scale = view.scale_factor();
+                    let view_width = (frame.size.width * scale) as f32;
+                    let view_height = (frame.size.height * scale) as f32;
+                    let content_height = view_height - TAB_BAR_HEIGHT;
+                    let content_width = view_width - RAIL_WIDTH;
+                    self.configure_viewport_for_pane(&tab.viewport, content_height, content_width);
+                }
+
+                if tab.is_agent_tab() {
+                    if let Some(terminal) = ws.agent_terminal() {
+                        self.update_glyph_buffer(terminal);
+                    }
+                } else if let Some(text_buffer) = tab.as_text_buffer() {
+                    let highlighted_view = HighlightedBufferView::new(
+                        text_buffer,
+                        tab.highlighter(),
+                    );
+                    self.update_glyph_buffer(&highlighted_view);
+                } else {
+                    self.update_glyph_buffer(tab.buffer());
+                }
+            }
+        }
+        let metal_layer = view.metal_layer();
+
+        // Get the next drawable from the layer
+        let drawable = match metal_layer.nextDrawable() {
+            Some(d) => d,
+            None => {
+                eprintln!("Failed to get next drawable");
+                return;
+            }
+        };
+
+        // Create a render pass descriptor
+        let render_pass_descriptor = MTLRenderPassDescriptor::new();
+
+        // Configure the color attachment
+        let color_attachments = render_pass_descriptor.colorAttachments();
+        let color_attachment = unsafe { color_attachments.objectAtIndexedSubscript(0) };
+
+        // Set the drawable's texture as the render target
+        color_attachment.setTexture(Some(drawable.texture().as_ref()));
+
+        // Clear to our background color
+        color_attachment.setLoadAction(MTLLoadAction::Clear);
+        color_attachment.setClearColor(BACKGROUND_COLOR);
+
+        // Store the result
+        color_attachment.setStoreAction(MTLStoreAction::Store);
+
+        // Create a command buffer
+        let command_buffer = match self.command_queue.commandBuffer() {
+            Some(cb) => cb,
+            None => {
+                eprintln!("Failed to create command buffer");
+                return;
+            }
+        };
+
+        // Create a render command encoder
+        let encoder =
+            match command_buffer.renderCommandEncoderWithDescriptor(&render_pass_descriptor) {
+                Some(e) => e,
+                None => {
+                    eprintln!("Failed to create render command encoder");
+                    return;
+                }
+            };
+
+        // Get view dimensions for scissor rect
+        let frame = view.frame();
+        let scale = view.scale_factor();
+        let view_width = (frame.size.width * scale) as f32;
+        let view_height = (frame.size.height * scale) as f32;
+
+        // Render left rail first (background layer)
+        self.draw_left_rail(&encoder, view, editor);
+
+        // Calculate pane rectangles for the active workspace
+        let pane_rects: Vec<PaneRect>;
+        let focused_pane_id: PaneId;
+        if let Some(ws) = editor.active_workspace() {
+            let bounds = (
+                RAIL_WIDTH,
+                0.0,
+                view_width - RAIL_WIDTH,
+                view_height,
+            );
+            pane_rects = calculate_pane_rects(bounds, &ws.pane_root);
+            focused_pane_id = ws.active_pane_id;
+        } else {
+            pane_rects = Vec::new();
+            focused_pane_id = 0;
+        }
+
+        // Render panes (single or multi-pane)
+        if pane_rects.len() <= 1 {
+            // Single-pane case: render as before (global tab bar, no dividers)
+            self.draw_tab_bar(&encoder, view, editor);
+
+            let content_scissor = buffer_content_scissor_rect(TAB_BAR_HEIGHT, view_width, view_height);
+            encoder.setScissorRect(content_scissor);
+
+            if editor.should_show_welcome_screen() {
+                self.draw_welcome_screen(&encoder, view);
+            } else {
+                if self.glyph_buffer.index_count() > 0 {
+                    self.render_text(&encoder, view);
+                }
+            }
+        } else {
+            // Multi-pane case: render each pane independently
+            if let Some(ws) = editor.active_workspace() {
+                for pane_rect in &pane_rects {
+                    self.render_pane(&encoder, view, ws, pane_rect, view_width, view_height);
+                }
+            }
+
+            // Reset scissor to full viewport before drawing frames on top
+            let full_scissor = full_viewport_scissor_rect(view_width, view_height);
+            encoder.setScissorRect(full_scissor);
+
+            // Draw pane dividers and focus border
+            self.draw_pane_frames(&encoder, view, &pane_rects, focused_pane_id);
+        }
+
+        // Reset scissor for overlay
+        let full_scissor = full_viewport_scissor_rect(view_width, view_height);
+        encoder.setScissorRect(full_scissor);
+
+        // Render confirm dialog overlay on top if present
+        if let Some(dlg) = dialog {
+            self.draw_confirm_dialog(&encoder, view, dlg);
+        }
+
+        // End encoding
+        encoder.endEncoding();
+
+        // Present the drawable
+        let mtl_drawable: &ProtocolObject<dyn MTLDrawable> = ProtocolObject::from_ref(&*drawable);
+        command_buffer.presentDrawable(mtl_drawable);
+
+        // Commit the command buffer
+        command_buffer.commit();
+    }
+
+    // Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog rendering (draw method)
+    /// Draws the confirm dialog overlay.
+    ///
+    /// The dialog is centered in the viewport and shows:
+    /// - A semi-transparent background panel
+    /// - A prompt message
+    /// - Cancel and Abandon buttons with selection highlight
+    ///
+    /// # Arguments
+    /// * `encoder` - The active render command encoder
+    /// * `view` - The Metal view (for viewport dimensions)
+    /// * `dialog` - The confirm dialog state
+    fn draw_confirm_dialog(
+        &mut self,
+        encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        view: &MetalView,
+        dialog: &ConfirmDialog,
+    ) {
+        let frame = view.frame();
+        let scale = view.scale_factor();
+        let view_width = (frame.size.width * scale) as f32;
+        let view_height = (frame.size.height * scale) as f32;
+        let line_height = self.font.metrics.line_height as f32;
+        let glyph_width = self.font.metrics.advance_width as f32;
+
+        // Calculate dialog geometry
+        let geometry = calculate_confirm_dialog_geometry(
+            view_width,
+            view_height,
+            line_height,
+            glyph_width,
+        );
+
+        // Ensure confirm dialog buffer is initialized
+        if self.confirm_dialog_buffer.is_none() {
+            let layout = GlyphLayout::from_metrics(&self.font.metrics);
+            self.confirm_dialog_buffer = Some(ConfirmDialogGlyphBuffer::new(layout));
+        }
+
+        // Update the confirm dialog buffer with current content
+        let confirm_dialog_buffer = self.confirm_dialog_buffer.as_mut().unwrap();
+        confirm_dialog_buffer.update(
+            &self.device,
+            &self.atlas,
+            dialog,
+            &geometry,
+        );
+
+        // Get buffers
+        let vertex_buffer = match confirm_dialog_buffer.vertex_buffer() {
+            Some(b) => b,
+            None => return,
+        };
+        let index_buffer = match confirm_dialog_buffer.index_buffer() {
+            Some(b) => b,
+            None => return,
+        };
+
+        // Set the render pipeline state
+        encoder.setRenderPipelineState(self.pipeline.pipeline_state());
+
+        // Set the vertex buffer
+        unsafe {
+            encoder.setVertexBuffer_offset_atIndex(Some(vertex_buffer), 0, 0);
+        }
+
+        // Set uniforms (viewport size)
+        let uniforms = Uniforms {
+            viewport_size: [view_width, view_height],
+        };
+        let uniforms_ptr =
+            NonNull::new(&uniforms as *const Uniforms as *mut std::ffi::c_void).unwrap();
+        unsafe {
+            encoder.setVertexBytes_length_atIndex(
+                uniforms_ptr,
+                std::mem::size_of::<Uniforms>(),
+                1,
+            );
+        }
+
+        // Set the atlas texture
+        unsafe {
+            encoder.setFragmentTexture_atIndex(Some(self.atlas.texture()), 0);
+        }
+
+        // Draw panel background
+        let panel_range = confirm_dialog_buffer.panel_range();
+        if !panel_range.is_empty() {
+            let index_offset = panel_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    panel_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
+        // Draw Cancel button background
+        let cancel_bg_range = confirm_dialog_buffer.cancel_bg_range();
+        if !cancel_bg_range.is_empty() {
+            let index_offset = cancel_bg_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    cancel_bg_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
+        // Draw Abandon button background
+        let abandon_bg_range = confirm_dialog_buffer.abandon_bg_range();
+        if !abandon_bg_range.is_empty() {
+            let index_offset = abandon_bg_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    abandon_bg_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
+        // Draw prompt text
+        let prompt_range = confirm_dialog_buffer.prompt_range();
+        if !prompt_range.is_empty() {
+            let index_offset = prompt_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    prompt_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
+        // Draw Cancel button text
+        let cancel_text_range = confirm_dialog_buffer.cancel_text_range();
+        if !cancel_text_range.is_empty() {
+            let index_offset = cancel_text_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    cancel_text_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
+        // Draw Abandon button text
+        let abandon_text_range = confirm_dialog_buffer.abandon_text_range();
+        if !abandon_text_range.is_empty() {
+            let index_offset = abandon_text_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    abandon_text_range.count,
                     MTLIndexType::UInt32,
                     index_buffer,
                     index_offset,

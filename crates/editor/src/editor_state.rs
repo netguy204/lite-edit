@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::buffer_target::BufferFocusTarget;
+// Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog import
+use crate::confirm_dialog::ConfirmDialog;
 use crate::context::EditorContext;
 use crate::dir_picker;
 use crate::dirty_region::DirtyRegion;
@@ -29,6 +31,8 @@ use crate::font::FontMetrics;
 use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
 use crate::left_rail::{calculate_left_rail_geometry, RAIL_WIDTH};
 use crate::mini_buffer::MiniBuffer;
+// Chunk: docs/chunks/dirty_tab_close_confirm - PaneId for pending_close
+use crate::pane_layout::PaneId;
 // Chunk: docs/chunks/content_tab_bar - Tab bar click handling
 use crate::tab_bar::{calculate_tab_bar_geometry, tabs_from_workspace, TAB_BAR_HEIGHT};
 use crate::selector::{SelectorOutcome, SelectorWidget};
@@ -59,6 +63,9 @@ pub enum EditorFocus {
     // Chunk: docs/chunks/find_in_file - Find-in-file focus variant
     /// Find-in-file strip is active
     FindInFile,
+    // Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog focus variant
+    /// Confirm dialog is active (e.g., abandon unsaved changes?)
+    ConfirmDialog,
 }
 
 /// Consolidated editor state.
@@ -115,6 +122,12 @@ pub struct EditorState {
     /// The buffer position from which the current search started
     /// (used as the search origin; only advances when Enter is pressed)
     pub search_origin: Position,
+    // Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog state
+    /// The active confirm dialog (when focus == ConfirmDialog)
+    pub confirm_dialog: Option<ConfirmDialog>,
+    /// The tab (pane_id, tab_index) that triggered the confirm dialog.
+    /// Stored so we can close the correct tab when the user confirms.
+    pub pending_close: Option<(PaneId, usize)>,
     // Chunk: docs/chunks/pty_wakeup_reentrant - EventSender for PTY wakeup
     /// Event sender for creating PTY wakeup handles.
     /// Set by main.rs during setup. PtyWakeup handles signal through this sender.
@@ -300,6 +313,9 @@ impl EditorState {
             resolved_path: None,
             find_mini_buffer: None,
             search_origin: Position::new(0, 0),
+            // Chunk: docs/chunks/dirty_tab_close_confirm - Initialize confirm dialog state
+            confirm_dialog: None,
+            pending_close: None,
             // Chunk: docs/chunks/terminal_pty_wakeup - Initialize wakeup factory as None
             event_sender: None,
             // Chunk: docs/chunks/syntax_highlighting - Initialize language registry
@@ -346,6 +362,9 @@ impl EditorState {
             resolved_path: None,
             find_mini_buffer: None,
             search_origin: Position::new(0, 0),
+            // Chunk: docs/chunks/dirty_tab_close_confirm - Initialize confirm dialog state
+            confirm_dialog: None,
+            pending_close: None,
             event_sender: None,
             language_registry: LanguageRegistry::new(),
         }
@@ -746,6 +765,10 @@ impl EditorState {
             EditorFocus::FindInFile => {
                 self.handle_key_find(event);
             }
+            // Chunk: docs/chunks/dirty_tab_close_confirm - Key handling for confirm dialog
+            EditorFocus::ConfirmDialog => {
+                self.handle_key_confirm_dialog(event);
+            }
         }
     }
 
@@ -763,6 +786,10 @@ impl EditorState {
             }
             EditorFocus::FindInFile => {
                 // Don't open file picker while find is active
+            }
+            // Chunk: docs/chunks/dirty_tab_close_confirm - Block file picker during confirm dialog
+            EditorFocus::ConfirmDialog => {
+                // Don't open file picker while confirm dialog is active
             }
         }
     }
@@ -890,6 +917,10 @@ impl EditorState {
             }
             EditorFocus::Selector => {
                 // No-op: don't open find while file picker is open
+            }
+            // Chunk: docs/chunks/dirty_tab_close_confirm - Block find during confirm dialog
+            EditorFocus::ConfirmDialog => {
+                // No-op: don't open find while confirm dialog is active
             }
         }
     }
@@ -1153,6 +1184,123 @@ impl EditorState {
 
         // Run the search from the new origin
         self.run_live_search();
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog key handling
+    // =========================================================================
+
+    /// Handles a key event when the confirm dialog is focused.
+    ///
+    /// Delegates to `ConfirmDialog::handle_key()` and processes the outcome:
+    /// - `Cancelled`: Close the dialog, keep the tab open
+    /// - `Confirmed`: Close the tab without saving, then close the dialog
+    /// - `Pending`: Just mark dirty for visual update
+    fn handle_key_confirm_dialog(&mut self, event: KeyEvent) {
+        use crate::confirm_dialog::ConfirmOutcome;
+
+        let dialog = match self.confirm_dialog.as_mut() {
+            Some(d) => d,
+            None => return,
+        };
+
+        let outcome = dialog.handle_key(&event);
+
+        match outcome {
+            ConfirmOutcome::Cancelled => {
+                // User chose Cancel or pressed Escape - close dialog, keep tab
+                self.close_confirm_dialog();
+            }
+            ConfirmOutcome::Confirmed => {
+                // User chose Abandon - close the tab without saving, then close dialog
+                if let Some((pane_id, tab_idx)) = self.pending_close.take() {
+                    self.force_close_tab(pane_id, tab_idx);
+                }
+                self.close_confirm_dialog();
+            }
+            ConfirmOutcome::Pending => {
+                // Dialog still open - just mark dirty for visual update
+                self.dirty_region.merge(DirtyRegion::FullViewport);
+            }
+        }
+    }
+
+    /// Closes the confirm dialog and returns focus to the buffer.
+    fn close_confirm_dialog(&mut self) {
+        self.confirm_dialog = None;
+        self.pending_close = None;
+        self.focus = EditorFocus::Buffer;
+        self.dirty_region.merge(DirtyRegion::FullViewport);
+    }
+
+    /// Shows a confirmation dialog for closing a dirty tab.
+    ///
+    /// This stores the pane_id and tab index so we can close the correct tab
+    /// if the user confirms, then transitions focus to the dialog.
+    fn show_confirm_dialog(&mut self, pane_id: PaneId, tab_idx: usize) {
+        self.confirm_dialog = Some(ConfirmDialog::new("Abandon unsaved changes?"));
+        self.pending_close = Some((pane_id, tab_idx));
+        self.focus = EditorFocus::ConfirmDialog;
+        self.dirty_region.merge(DirtyRegion::FullViewport);
+    }
+
+    /// Closes a tab without checking the dirty flag.
+    ///
+    /// This is used after the user confirms abandoning unsaved changes.
+    /// The `_pane_id` parameter is currently unused because we always operate
+    /// on the active pane, but it's kept for future multi-pane confirmation dialogs.
+    fn force_close_tab(&mut self, _pane_id: PaneId, tab_idx: usize) {
+        // Pre-compute values needed for fallback before borrowing workspace mutably
+        let tab_id = self.editor.gen_tab_id();
+        let line_height = self.editor.line_height();
+
+        if let Some(workspace) = self.editor.active_workspace_mut() {
+            let pane_count = workspace.pane_root.pane_count();
+
+            if pane_count > 1 {
+                // Multi-pane layout: check if pane will become empty
+                let pane_will_be_empty = workspace.active_pane()
+                    .map(|p| p.tabs.len() == 1)
+                    .unwrap_or(false);
+
+                // Find fallback focus BEFORE mutating (to avoid borrow conflicts)
+                let fallback_focus = if pane_will_be_empty {
+                    workspace.find_fallback_focus()
+                } else {
+                    None
+                };
+
+                // Close the tab
+                if let Some(pane) = workspace.active_pane_mut() {
+                    pane.close_tab(tab_idx);
+                }
+
+                // If pane is now empty, cleanup the tree and update focus
+                if pane_will_be_empty {
+                    if let Some(fallback_pane_id) = fallback_focus {
+                        // Update focus BEFORE cleanup (cleanup removes the empty pane)
+                        workspace.active_pane_id = fallback_pane_id;
+                    }
+                    // Cleanup empty panes (collapses the tree)
+                    crate::pane_layout::cleanup_empty_panes(&mut workspace.pane_root);
+                }
+            } else {
+                // Single pane layout
+                if let Some(pane) = workspace.active_pane_mut() {
+                    if pane.tabs.len() > 1 {
+                        // Multiple tabs: just close the tab
+                        pane.close_tab(tab_idx);
+                    } else {
+                        // Single tab in single pane: replace with empty tab
+                        let new_tab = crate::workspace::Tab::empty_file(tab_id, line_height);
+                        pane.tabs[0] = new_tab;
+                        pane.active_tab = 0;
+                    }
+                }
+            }
+        }
+
+        self.dirty_region.merge(DirtyRegion::FullViewport);
     }
 
     /// Handles a key event when the selector is focused.
@@ -1528,6 +1676,11 @@ impl EditorState {
                 // In FindInFile mode, mouse events still go to the buffer
                 // so the user can scroll/click while searching
                 self.handle_mouse_buffer(screen_event);
+            }
+            // Chunk: docs/chunks/dirty_tab_close_confirm - Block mouse during confirm dialog
+            EditorFocus::ConfirmDialog => {
+                // No-op: mouse events are blocked while confirm dialog is active
+                // (keyboard-only for this chunk; mouse support is future work)
             }
         }
     }
@@ -2145,6 +2298,12 @@ impl EditorState {
                 // Return FullViewport since overlay cursors aren't on a specific buffer line
                 DirtyRegion::FullViewport
             }
+            // Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog has no cursor to blink
+            EditorFocus::ConfirmDialog => {
+                // The confirm dialog doesn't have a text input cursor, so no blink needed.
+                // Return None to avoid unnecessary redraws.
+                DirtyRegion::None
+            }
         }
     }
 
@@ -2459,25 +2618,36 @@ impl EditorState {
     /// Closes the tab at the given index in the active pane.
     ///
     /// If this is the last tab in the last pane, creates a new empty tab instead of closing.
+    /// If the tab is dirty (has unsaved changes), shows a confirm dialog asking the user
+    /// whether to abandon the changes or cancel.
     // Chunk: docs/chunks/content_tab_bar - Close tab with dirty-buffer guard (Cmd+W)
     // Chunk: docs/chunks/tiling_workspace_integration - Resolve through pane tree
     // Chunk: docs/chunks/pane_close_last_tab - Cleanup empty panes on last tab close
+    // Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog for dirty tabs
     pub fn close_tab(&mut self, index: usize) {
         // Pre-compute values needed for fallback before borrowing workspace mutably
         let tab_id = self.editor.gen_tab_id();
         let line_height = self.editor.line_height();
 
+        // Chunk: docs/chunks/dirty_tab_close_confirm - Show confirm dialog for dirty tabs
+        // Check if the tab is dirty and show confirmation dialog if so.
+        // We check this in a separate borrow scope so we can call show_confirm_dialog after.
+        let dirty_pane_id = self.editor
+            .active_workspace()
+            .and_then(|ws| ws.active_pane())
+            .and_then(|pane| {
+                pane.tabs.get(index).and_then(|tab| {
+                    if tab.dirty { Some(pane.id) } else { None }
+                })
+            });
+
+        if let Some(pane_id) = dirty_pane_id {
+            self.show_confirm_dialog(pane_id, index);
+            return;
+        }
+
         if let Some(workspace) = self.editor.active_workspace_mut() {
             let pane_count = workspace.pane_root.pane_count();
-
-            // Guard: don't close dirty tabs (confirmation UI is future work)
-            if let Some(pane) = workspace.active_pane() {
-                if let Some(tab) = pane.tabs.get(index) {
-                    if tab.dirty {
-                        return;
-                    }
-                }
-            }
 
             if pane_count > 1 {
                 // Multi-pane layout: check if pane will become empty
@@ -7393,5 +7563,236 @@ mod tests {
             "Scroll should be at most 30 after shrink (got {})",
             first_visible
         );
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/dirty_tab_close_confirm - EditorState integration tests
+    // =========================================================================
+
+    #[test]
+    fn test_close_dirty_tab_opens_confirm_dialog() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Type some text to make the buffer dirty
+        state.handle_key(KeyEvent::char('h'));
+        state.handle_key(KeyEvent::char('e'));
+        state.handle_key(KeyEvent::char('l'));
+        state.handle_key(KeyEvent::char('l'));
+        state.handle_key(KeyEvent::char('o'));
+        assert!(state.editor.active_workspace().unwrap().active_tab().unwrap().dirty);
+
+        // Try to close the dirty tab
+        state.close_tab(0);
+
+        // Should open confirm dialog instead of closing
+        assert!(state.confirm_dialog.is_some());
+        assert_eq!(
+            state.confirm_dialog.as_ref().unwrap().prompt,
+            "Abandon unsaved changes?"
+        );
+        // Tab should still be there
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 1);
+    }
+
+    #[test]
+    fn test_close_dirty_tab_sets_pending_close() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Make the buffer dirty
+        state.handle_key(KeyEvent::char('x'));
+        assert!(state.editor.active_workspace().unwrap().active_tab().unwrap().dirty);
+
+        // Get the pane_id before closing
+        let expected_pane_id = state.editor.active_workspace().unwrap().active_pane_id;
+
+        // Try to close the dirty tab
+        state.close_tab(0);
+
+        // pending_close should have the pane_id and tab index
+        assert!(state.pending_close.is_some());
+        let (pane_id, tab_idx) = state.pending_close.unwrap();
+        assert_eq!(pane_id, expected_pane_id);
+        assert_eq!(tab_idx, 0);
+    }
+
+    #[test]
+    fn test_close_dirty_tab_sets_focus_to_confirm_dialog() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Start with buffer focus
+        assert_eq!(state.focus, EditorFocus::Buffer);
+
+        // Make the buffer dirty
+        state.handle_key(KeyEvent::char('x'));
+
+        // Try to close the dirty tab
+        state.close_tab(0);
+
+        // Focus should be on confirm dialog
+        assert_eq!(state.focus, EditorFocus::ConfirmDialog);
+    }
+
+    #[test]
+    fn test_close_clean_tab_still_closes_immediately() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Add a second tab so we can close one
+        {
+            let tab_id = state.editor.gen_tab_id();
+            let line_height = state.editor.line_height();
+            let tab = crate::workspace::Tab::empty_file(tab_id, line_height);
+            state.editor.active_workspace_mut().unwrap().add_tab(tab);
+        }
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 2);
+
+        // Close the clean first tab (should close immediately)
+        state.close_tab(0);
+
+        // Tab should be removed, no confirm dialog
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 1);
+        assert!(state.confirm_dialog.is_none());
+        assert!(state.pending_close.is_none());
+        assert_eq!(state.focus, EditorFocus::Buffer);
+    }
+
+    #[test]
+    fn test_confirm_dialog_escape_closes_dialog_keeps_tab() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Make buffer dirty
+        state.handle_key(KeyEvent::char('x'));
+
+        // Try to close dirty tab (opens confirm dialog)
+        state.close_tab(0);
+        assert_eq!(state.focus, EditorFocus::ConfirmDialog);
+        assert!(state.confirm_dialog.is_some());
+
+        // Press Escape to cancel
+        let escape = KeyEvent::new(Key::Escape, Modifiers::default());
+        state.handle_key(escape);
+
+        // Dialog should be closed, tab still there, focus back to buffer
+        assert!(state.confirm_dialog.is_none());
+        assert!(state.pending_close.is_none());
+        assert_eq!(state.focus, EditorFocus::Buffer);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 1);
+        // Tab should still be dirty
+        assert!(state.editor.active_workspace().unwrap().active_tab().unwrap().dirty);
+    }
+
+    #[test]
+    fn test_confirm_dialog_enter_on_cancel_closes_dialog_keeps_tab() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Make buffer dirty
+        state.handle_key(KeyEvent::char('x'));
+
+        // Try to close dirty tab (opens confirm dialog)
+        state.close_tab(0);
+        assert_eq!(state.focus, EditorFocus::ConfirmDialog);
+
+        // Default selection is Cancel, press Enter
+        let enter = KeyEvent::new(Key::Return, Modifiers::default());
+        state.handle_key(enter);
+
+        // Dialog should be closed, tab still there
+        assert!(state.confirm_dialog.is_none());
+        assert_eq!(state.focus, EditorFocus::Buffer);
+        assert_eq!(state.editor.active_workspace().unwrap().tab_count(), 1);
+        // Tab should still be dirty
+        assert!(state.editor.active_workspace().unwrap().active_tab().unwrap().dirty);
+    }
+
+    #[test]
+    fn test_confirm_dialog_tab_then_enter_closes_tab() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Make buffer dirty
+        state.handle_key(KeyEvent::char('x'));
+        assert!(state.editor.active_workspace().unwrap().active_tab().unwrap().dirty);
+
+        // Try to close dirty tab (opens confirm dialog)
+        state.close_tab(0);
+        assert_eq!(state.focus, EditorFocus::ConfirmDialog);
+
+        // Press Tab to select Abandon
+        let tab = KeyEvent::new(Key::Tab, Modifiers::default());
+        state.handle_key(tab);
+
+        // Verify selection changed (dialog still open)
+        assert!(state.confirm_dialog.is_some());
+        assert_eq!(
+            state.confirm_dialog.as_ref().unwrap().selected,
+            crate::confirm_dialog::ConfirmButton::Abandon
+        );
+
+        // Press Enter to confirm
+        let enter = KeyEvent::new(Key::Return, Modifiers::default());
+        state.handle_key(enter);
+
+        // Dialog should be closed, tab should be closed (replaced with empty)
+        // Note: closing the last tab replaces it with an empty tab
+        assert!(state.confirm_dialog.is_none());
+        assert!(state.pending_close.is_none());
+        assert_eq!(state.focus, EditorFocus::Buffer);
+        // The old dirty tab was closed (replaced with new empty tab)
+        assert!(!state.editor.active_workspace().unwrap().active_tab().unwrap().dirty);
+    }
+
+    #[test]
+    fn test_cmd_p_blocked_during_confirm_dialog() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Make buffer dirty and open confirm dialog
+        state.handle_key(KeyEvent::char('x'));
+        state.close_tab(0);
+        assert_eq!(state.focus, EditorFocus::ConfirmDialog);
+
+        // Try to open file picker with Cmd+P
+        let cmd_p = KeyEvent::new(
+            Key::Char('p'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_p);
+
+        // Should still be in ConfirmDialog, not Selector
+        assert_eq!(state.focus, EditorFocus::ConfirmDialog);
+        assert!(state.active_selector.is_none());
+    }
+
+    #[test]
+    fn test_cmd_f_blocked_during_confirm_dialog() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Make buffer dirty and open confirm dialog
+        state.handle_key(KeyEvent::char('x'));
+        state.close_tab(0);
+        assert_eq!(state.focus, EditorFocus::ConfirmDialog);
+
+        // Try to open find strip with Cmd+F
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+
+        // Should still be in ConfirmDialog, not FindInFile
+        assert_eq!(state.focus, EditorFocus::ConfirmDialog);
+        assert!(state.find_mini_buffer.is_none());
     }
 }
