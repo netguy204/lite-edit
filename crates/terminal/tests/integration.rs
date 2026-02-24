@@ -1159,3 +1159,122 @@ fn test_block_element_characters_captured() {
         found_upper_half
     );
 }
+
+// =============================================================================
+// DSR/CPR (Device Status Report / Cursor Position Report) tests
+// Chunk: docs/chunks/tty_cursor_reporting - DSR/CPR event forwarding
+// =============================================================================
+
+/// Test that DSR (Device Status Report) escape sequences receive CPR responses.
+///
+/// When a program sends ESC[6n (DSR with argument 6), the terminal emulator must
+/// respond with a CPR (Cursor Position Report) in the format ESC[<row>;<col>R.
+/// This response is written back to the PTY so the program can read it.
+///
+/// This is essential for programs like Claude Code that query cursor position
+/// to correctly position their UI elements.
+#[test]
+fn test_dsr_cursor_position_report() {
+    let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+    // Use a simple approach: spawn cat, send DSR, and see if cat echoes the response.
+    // The DSR query (ESC[6n) triggers alacritty to emit Event::PtyWrite with the CPR
+    // response (ESC[row;colR). This should be written back to the PTY's stdin, which
+    // cat will then echo to stdout.
+    terminal
+        .spawn_command("cat", &[], Path::new("/tmp"))
+        .unwrap();
+
+    // Wait for cat to start
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Send DSR query (ESC[6n) to cat's stdin
+    // This is processed by alacritty's VTE parser, which triggers device_status(6)
+    // and emits Event::PtyWrite with the CPR response.
+    // After our fix, this response is written back to the PTY's master,
+    // which cat receives and echoes to its stdout.
+    terminal.write_input(b"\x1b[6n").unwrap();
+
+    // Poll multiple times to process:
+    // 1. The DSR query going to alacritty
+    // 2. alacritty emitting PtyWrite event
+    // 3. Us writing the CPR response back to PTY
+    // 4. Cat echoing the response
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(50));
+        terminal.poll_events();
+    }
+
+    // Send a marker so we can find the area in the output
+    terminal.write_input(b"DONE\n").unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // End cat
+    terminal.write_input(b"\x04").unwrap(); // Ctrl+D
+    std::thread::sleep(Duration::from_millis(100));
+    terminal.poll_events();
+
+    // Look for the CPR response in the terminal output
+    // The CPR format is ESC[<row>;<col>R, but when echoed by cat,
+    // the ESC character may render as ^[ or similar, or the escape
+    // sequence might be parsed by the terminal and not displayed.
+    //
+    // Most reliably, we should see the pattern "<digits>;<digits>R"
+    // somewhere in the output, possibly with a [ prefix.
+    let mut found_cpr = false;
+    let mut all_text = String::new();
+
+    for line in 0..terminal.line_count() {
+        if let Some(styled) = terminal.styled_line(line) {
+            let text: String = styled.spans.iter().map(|s| &s.text[..]).collect();
+            all_text.push_str(&text);
+            all_text.push('\n');
+
+            // Look for CPR pattern: digits;digitsR
+            // The response is always 1-indexed row;col followed by R
+            // e.g., "1;1R" for top-left corner
+            let bytes = text.as_bytes();
+            for i in 0..bytes.len() {
+                // Look for a digit
+                if bytes[i].is_ascii_digit() {
+                    // Look ahead for ;
+                    let mut j = i + 1;
+                    while j < bytes.len() && bytes[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    // j should now point to ;
+                    if j < bytes.len() && bytes[j] == b';' {
+                        let mut k = j + 1;
+                        while k < bytes.len() && bytes[k].is_ascii_digit() {
+                            k += 1;
+                        }
+                        // k should now point to R
+                        if k < bytes.len() && bytes[k] == b'R' && k > j + 1 {
+                            // Found pattern digits;digitsR
+                            found_cpr = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if found_cpr {
+                break;
+            }
+        }
+    }
+
+    // Also check if we found the marker, to ensure the terminal is working
+    assert!(
+        all_text.contains("DONE"),
+        "Test marker 'DONE' should appear in terminal output"
+    );
+
+    assert!(
+        found_cpr,
+        "Expected to find CPR response pattern (digits;digitsR) in terminal output.\n\
+         Terminal content:\n{}",
+        all_text.lines().take(30).collect::<Vec<_>>().join("\n")
+    );
+}

@@ -31,6 +31,7 @@ use alacritty_terminal::index::Line;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{CursorShape as VteCursorShape, Processor};
+use crossbeam_channel::{unbounded, Receiver, Sender};
 
 // Chunk: docs/chunks/terminal_clipboard_selection - Terminal selection types
 use lite_edit_buffer::{
@@ -44,17 +45,31 @@ use crate::pty::PtyHandle;
 use crate::pty_wakeup::PtyWakeup;
 use crate::style_convert::row_to_styled_line;
 
-/// Event listener that captures terminal events.
+// Chunk: docs/chunks/tty_cursor_reporting - DSR/CPR event forwarding
+/// Event listener that captures terminal events and forwards them via a channel.
 ///
-/// Currently we don't process these events, but the alacritty_terminal
-/// Term requires an event listener.
+/// This is used by `TerminalBuffer` to receive events from alacritty_terminal,
+/// such as `Event::PtyWrite` for DSR (Device Status Report) responses that need
+/// to be written back to the PTY.
+///
+/// ## Why Channel-Based
+///
+/// The `EventListener::send_event` method takes `&self`, not `&mut self`, so we
+/// cannot directly write to the PTY. Using a channel:
+/// - Maintains the immutable borrow requirement of `EventListener`
+/// - Keeps PTY writes on the main thread (same thread as `poll_events()`)
+/// - Follows the existing `crossbeam_channel` pattern already used for PTY output
 #[derive(Clone)]
-struct EventProxy;
+struct EventSender {
+    tx: Sender<Event>,
+}
 
-impl EventListener for EventProxy {
-    fn send_event(&self, _event: Event) {
-        // We could capture title changes, bell events, etc. here
-        // For now, we ignore them
+impl EventListener for EventSender {
+    fn send_event(&self, event: Event) {
+        // Forward the event through the channel.
+        // Ignore send errors - they indicate the receiver was dropped,
+        // which can happen during shutdown.
+        let _ = self.tx.send(event);
     }
 }
 
@@ -76,7 +91,7 @@ impl EventListener for EventProxy {
 // Chunk: docs/chunks/terminal_file_backed_scrollback - File-backed cold scrollback
 pub struct TerminalBuffer {
     /// The alacritty terminal emulator.
-    term: Term<EventProxy>,
+    term: Term<EventSender>,
     /// VTE processor for feeding bytes to the terminal.
     processor: Processor,
     /// PTY handle (None if no process attached).
@@ -107,6 +122,10 @@ pub struct TerminalBuffer {
     /// Selection head (current end of selection).
     /// In terminal grid coordinates (line, col).
     selection_head: Option<Position>,
+    // Chunk: docs/chunks/tty_cursor_reporting - DSR/CPR event forwarding
+    /// Receiver for terminal events from alacritty_terminal.
+    /// Used to receive Event::PtyWrite (DSR responses, etc.) for write-back to PTY.
+    event_rx: Receiver<Event>,
 }
 
 impl TerminalBuffer {
@@ -130,7 +149,12 @@ impl TerminalBuffer {
         let size = TermSize::new(cols, rows);
         let config = Config::default();
 
-        let term = Term::new(config, &size, EventProxy);
+        // Chunk: docs/chunks/tty_cursor_reporting - DSR/CPR event forwarding
+        // Create channel for terminal events (DSR responses, title changes, etc.)
+        let (event_tx, event_rx) = unbounded();
+        let event_sender = EventSender { tx: event_tx };
+
+        let term = Term::new(config, &size, event_sender);
         let processor = Processor::new();
 
         // Use the smaller of scrollback limit and our hot limit
@@ -150,6 +174,7 @@ impl TerminalBuffer {
             hot_scrollback_limit: hot_limit,
             selection_anchor: None,
             selection_head: None,
+            event_rx,
         }
     }
 
@@ -270,6 +295,27 @@ impl TerminalBuffer {
                     // Handle error - could log or propagate
                     processed_any = true;
                 }
+            }
+        }
+
+        // Chunk: docs/chunks/tty_cursor_reporting - Process terminal-generated events
+        // Handle events from alacritty_terminal (DSR responses, title changes, etc.)
+        // These events are generated when processing PTY output above (e.g., when the
+        // hosted program sends a DSR query, alacritty responds with a PtyWrite event).
+        while let Ok(event) = self.event_rx.try_recv() {
+            match event {
+                Event::PtyWrite(text) => {
+                    // Write the response back to the PTY.
+                    // This handles DSR (Device Status Report) responses like cursor
+                    // position queries (ESC[6n → ESC[row;colR).
+                    if let Some(ref mut pty) = self.pty {
+                        let _ = pty.write(text.as_bytes());
+                    }
+                    processed_any = true;
+                }
+                // Other events (Title, Bell, ClipboardStore, etc.) could be handled
+                // here in the future, but are out of scope for this chunk.
+                _ => {}
             }
         }
 
@@ -1015,5 +1061,64 @@ mod tests {
         // Should have marked lines as dirty to remove highlight
         let dirty = term.take_dirty();
         assert!(!dirty.is_none());
+    }
+
+    // =========================================================================
+    // EventSender Tests
+    // Chunk: docs/chunks/tty_cursor_reporting - EventSender unit tests
+    // =========================================================================
+
+    #[test]
+    fn test_event_sender_forwards_pty_write() {
+        let (tx, rx) = unbounded();
+        let sender = EventSender { tx };
+
+        // Send a PtyWrite event through the EventListener interface
+        sender.send_event(Event::PtyWrite("test response".to_string()));
+
+        // Verify it was received
+        let received = rx.try_recv();
+        assert!(
+            matches!(&received, Ok(Event::PtyWrite(s)) if s == "test response"),
+            "Expected PtyWrite event with 'test response', got: {:?}",
+            received
+        );
+    }
+
+    #[test]
+    fn test_event_sender_handles_multiple_events() {
+        let (tx, rx) = unbounded();
+        let sender = EventSender { tx };
+
+        // Send multiple events
+        sender.send_event(Event::PtyWrite("first".to_string()));
+        sender.send_event(Event::PtyWrite("second".to_string()));
+
+        // Verify both were received in order
+        let first = rx.try_recv();
+        let second = rx.try_recv();
+
+        assert!(
+            matches!(&first, Ok(Event::PtyWrite(s)) if s == "first"),
+            "Expected first event, got: {:?}",
+            first
+        );
+        assert!(
+            matches!(&second, Ok(Event::PtyWrite(s)) if s == "second"),
+            "Expected second event, got: {:?}",
+            second
+        );
+    }
+
+    #[test]
+    fn test_event_sender_does_not_panic_on_closed_channel() {
+        let (tx, rx) = unbounded();
+        let sender = EventSender { tx };
+
+        // Drop the receiver to close the channel
+        drop(rx);
+
+        // Sending should not panic, just silently fail
+        sender.send_event(Event::PtyWrite("ignored".to_string()));
     }
 }
