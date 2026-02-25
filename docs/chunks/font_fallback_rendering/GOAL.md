@@ -14,8 +14,7 @@ subsystems:
   relationship: implements
 friction_entries: []
 bug_type: semantic
-depends_on:
-- terminal_multibyte_rendering
+depends_on: []
 created_after: ["terminal_multibyte_rendering", "terminal_pane_initial_sizing"]
 ---
 
