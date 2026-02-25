@@ -367,6 +367,7 @@ impl Font {
         None
     }
 
+    // Chunk: docs/chunks/font_fallback_rendering - Helper for fallback glyph lookup
     /// Gets a glyph ID from a specific font (helper for fallback lookup)
     fn glyph_id_from_font(&self, font: &CTFont, c: char) -> Option<u16> {
         let code = c as u32;
@@ -413,6 +414,7 @@ impl Font {
         }
     }
 
+    // Chunk: docs/chunks/font_fallback_rendering - Fallback font glyph verification
     /// Checks if a fallback font has a glyph for the given character.
     fn fallback_font_has_glyph(&self, font: &CTFont, c: char) -> bool {
         let code = c as u32;
