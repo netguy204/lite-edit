@@ -24,8 +24,9 @@ use objc2_core_graphics::{
     CGBitmapContextCreate, CGBitmapContextGetData, CGColorSpace, CGContext, CGImageAlphaInfo,
 };
 use objc2_metal::{MTLDevice, MTLPixelFormat, MTLRegion, MTLTexture, MTLTextureDescriptor};
+use objc2_core_text::CTFont;
 
-use crate::font::Font;
+use crate::font::{Font, GlyphFont, GlyphSource};
 
 // =============================================================================
 // Constants
@@ -250,6 +251,109 @@ impl GlyphAtlas {
         true
     }
 
+    // Chunk: docs/chunks/font_fallback_rendering - Add glyph from primary or fallback font
+    /// Adds a glyph to the atlas using a GlyphSource (primary or fallback font).
+    ///
+    /// This is the fallback-aware version of `add_glyph`. It accepts a `GlyphSource`
+    /// that specifies which font the glyph comes from.
+    ///
+    /// Returns true if the glyph was added, false if there's no space.
+    pub fn add_glyph_with_source(&mut self, font: &Font, c: char, source: GlyphSource) -> bool {
+        // Check if already in atlas
+        if self.glyphs.contains_key(&c) {
+            return true;
+        }
+
+        // Check if we have space
+        let glyph_width = self.cell_width;
+        let glyph_height = self.cell_height;
+
+        // Check if we need to move to next row
+        if self.cursor_x + glyph_width + self.padding > ATLAS_SIZE {
+            self.cursor_x = 0;
+            self.cursor_y += self.row_height + self.padding;
+            self.row_height = 0;
+        }
+
+        // Check if we've run out of vertical space
+        if self.cursor_y + glyph_height > ATLAS_SIZE {
+            eprintln!("Warning: Glyph atlas is full, cannot add '{}'", c);
+            return false;
+        }
+
+        // Rasterize the glyph from the appropriate font
+        let bitmap = match &source.font {
+            GlyphFont::Primary => {
+                // Use the primary font
+                self.rasterize_glyph(font, source.glyph_id, glyph_width, glyph_height)
+            }
+            GlyphFont::Fallback(fallback_font) => {
+                // Use the fallback font, but position using primary font's descent
+                // for consistent baseline alignment
+                self.rasterize_glyph_with_ct_font(
+                    fallback_font,
+                    font.metrics.descent,
+                    source.glyph_id,
+                    glyph_width,
+                    glyph_height,
+                )
+            }
+        };
+
+        // Upload to texture
+        let region = MTLRegion {
+            origin: objc2_metal::MTLOrigin {
+                x: self.cursor_x,
+                y: self.cursor_y,
+                z: 0,
+            },
+            size: objc2_metal::MTLSize {
+                width: glyph_width,
+                height: glyph_height,
+                depth: 1,
+            },
+        };
+
+        // Create a NonNull pointer from the bitmap data
+        let bytes_ptr = NonNull::new(bitmap.as_ptr() as *mut std::ffi::c_void)
+            .expect("bitmap pointer should not be null");
+
+        // SAFETY: We're uploading valid bitmap data to the texture
+        unsafe {
+            self.texture
+                .replaceRegion_mipmapLevel_withBytes_bytesPerRow(region, 0, bytes_ptr, glyph_width);
+        }
+
+        // Calculate UV coordinates (normalized)
+        let atlas_size = ATLAS_SIZE as f32;
+        let uv_min = (
+            self.cursor_x as f32 / atlas_size,
+            self.cursor_y as f32 / atlas_size,
+        );
+        let uv_max = (
+            (self.cursor_x + glyph_width) as f32 / atlas_size,
+            (self.cursor_y + glyph_height) as f32 / atlas_size,
+        );
+
+        // Store glyph info
+        let info = GlyphInfo {
+            uv_min,
+            uv_max,
+            width: glyph_width as f32,
+            height: glyph_height as f32,
+            bearing_x: 1.0, // Padding offset
+            bearing_y: font.metrics.ascent as f32,
+        };
+
+        self.glyphs.insert(c, info);
+
+        // Advance cursor
+        self.cursor_x += glyph_width + self.padding;
+        self.row_height = self.row_height.max(glyph_height);
+
+        true
+    }
+
     /// Adds a fully opaque (white) cell to the atlas.
     ///
     /// This provides a solid UV region that the cursor and other non-glyph
@@ -316,6 +420,22 @@ impl GlyphAtlas {
 
     /// Rasterizes a single glyph into an R8 bitmap
     fn rasterize_glyph(&self, font: &Font, glyph_id: u16, width: usize, height: usize) -> Vec<u8> {
+        self.rasterize_glyph_with_ct_font(font.ct_font(), font.metrics.descent, glyph_id, width, height)
+    }
+
+    // Chunk: docs/chunks/font_fallback_rendering - Rasterize from any CTFont (primary or fallback)
+    /// Rasterizes a single glyph into an R8 bitmap using a specific CTFont.
+    ///
+    /// This allows rasterizing glyphs from fallback fonts while still using
+    /// the primary font's descent for baseline positioning.
+    fn rasterize_glyph_with_ct_font(
+        &self,
+        ct_font: &CTFont,
+        descent: f64,
+        glyph_id: u16,
+        width: usize,
+        height: usize,
+    ) -> Vec<u8> {
         // Create a grayscale color space
         let color_space = CGColorSpace::new_device_gray();
 
@@ -363,12 +483,12 @@ impl GlyphAtlas {
         // Core Graphics has origin at bottom-left
         let position = CGPoint {
             x: 1.0, // Small padding
-            y: font.metrics.descent,
+            y: descent,
         };
 
         // Draw the glyph
         unsafe {
-            font.ct_font().draw_glyphs(
+            ct_font.draw_glyphs(
                 NonNull::from(&glyph_id),
                 NonNull::from(&position),
                 1,
@@ -394,15 +514,61 @@ impl GlyphAtlas {
         result
     }
 
-    /// Ensures a glyph is in the atlas, adding it if necessary
+    // Chunk: docs/chunks/font_fallback_rendering - Fallback-aware glyph lookup
+    /// Ensures a glyph is in the atlas, adding it if necessary.
+    ///
+    /// This method implements the font fallback chain:
+    /// 1. Try to add the glyph from the primary font
+    /// 2. If not found, try to find a fallback font via Core Text
+    /// 3. If no fallback found, render the replacement character (U+FFFD)
+    /// 4. If even U+FFFD fails, use the solid glyph as a visible placeholder
     pub fn ensure_glyph(&mut self, font: &Font, c: char) -> Option<&GlyphInfo> {
-        if !self.glyphs.contains_key(&c) {
-            if !self.add_glyph(font, c) {
-                // Failed to add, try to return space glyph
-                return self.glyphs.get(&' ');
+        // If already in atlas, return it
+        if self.glyphs.contains_key(&c) {
+            return self.glyphs.get(&c);
+        }
+
+        // Try to add with fallback support
+        if let Some(source) = font.glyph_for_char_with_fallback(c) {
+            if self.add_glyph_with_source(font, c, source) {
+                return self.glyphs.get(&c);
+            }
+            // Atlas is full - fall through to replacement character
+        }
+
+        // No glyph found in any font, or atlas is full
+        // Try to use the replacement character (U+FFFD)
+        self.ensure_replacement_glyph(font, c)
+    }
+
+    // Chunk: docs/chunks/font_fallback_rendering - Replacement character for truly missing glyphs
+    /// Returns a replacement glyph for characters with no glyph in any font.
+    ///
+    /// First attempts to use U+FFFD (REPLACEMENT CHARACTER), which should be
+    /// available in most system fonts. If that fails, falls back to a solid
+    /// glyph as a visible placeholder.
+    fn ensure_replacement_glyph(&mut self, font: &Font, c: char) -> Option<&GlyphInfo> {
+        const REPLACEMENT_CHAR: char = '\u{FFFD}';
+
+        // First, try to ensure we have the replacement character itself
+        if c != REPLACEMENT_CHAR {
+            // If we're not already looking for the replacement char, try to get it
+            if !self.glyphs.contains_key(&REPLACEMENT_CHAR) {
+                // Try to add U+FFFD via the fallback path
+                if let Some(source) = font.glyph_for_char_with_fallback(REPLACEMENT_CHAR) {
+                    self.add_glyph_with_source(font, REPLACEMENT_CHAR, source);
+                }
+            }
+
+            // If we have the replacement character, use it
+            if self.glyphs.contains_key(&REPLACEMENT_CHAR) {
+                return self.glyphs.get(&REPLACEMENT_CHAR);
             }
         }
-        self.glyphs.get(&c)
+
+        // U+FFFD not available either - use the solid glyph as ultimate fallback
+        // This ensures characters are never invisible
+        Some(self.solid_glyph())
     }
 }
 
@@ -630,5 +796,150 @@ mod tests {
         // Should return the same glyph info (same UV coordinates)
         assert_eq!(g1.uv_min, g2.uv_min, "ensure_glyph should be idempotent");
         assert_eq!(g1.uv_max, g2.uv_max, "ensure_glyph should be idempotent");
+    }
+
+    // ==================== Font fallback integration tests ====================
+    // Chunk: docs/chunks/font_fallback_rendering - Integration tests for fallback glyph caching
+
+    #[test]
+    fn test_fallback_glyphs_cached_in_atlas() {
+        let device = get_test_device();
+        let font = Font::new("Menlo-Regular", 14.0, 1.0);
+        let mut atlas = GlyphAtlas::new(&device, &font);
+
+        // Emoji should come from a fallback font (Apple Color Emoji)
+        let emoji = '😀'; // U+1F600
+
+        // First call - should lookup and cache
+        let glyph1 = atlas.ensure_glyph(&font, emoji);
+        assert!(glyph1.is_some(), "Emoji should have a glyph via fallback");
+        let g1 = glyph1.unwrap().clone();
+
+        // Second call - should return cached glyph
+        let glyph2 = atlas.ensure_glyph(&font, emoji);
+        assert!(glyph2.is_some());
+        let g2 = glyph2.unwrap();
+
+        // UV coordinates should be identical (same cached glyph)
+        assert_eq!(
+            g1.uv_min, g2.uv_min,
+            "Fallback glyph should be cached (same UV coords)"
+        );
+        assert_eq!(
+            g1.uv_max, g2.uv_max,
+            "Fallback glyph should be cached (same UV coords)"
+        );
+    }
+
+    #[test]
+    fn test_fallback_glyphs_have_valid_dimensions() {
+        let device = get_test_device();
+        let font = Font::new("Menlo-Regular", 14.0, 1.0);
+        let mut atlas = GlyphAtlas::new(&device, &font);
+
+        // Characters that should come from fallback fonts
+        let fallback_chars = [
+            '😀', // Emoji
+            '∫',  // Mathematical integral (may be in Menlo, may be fallback)
+        ];
+
+        for c in fallback_chars {
+            let glyph = atlas.ensure_glyph(&font, c);
+            assert!(glyph.is_some(), "Char '{}' should have a glyph", c);
+
+            let g = glyph.unwrap();
+            assert!(g.width > 0.0, "Glyph for '{}' should have positive width", c);
+            assert!(g.height > 0.0, "Glyph for '{}' should have positive height", c);
+            assert!(
+                g.uv_min.0 < g.uv_max.0,
+                "Glyph for '{}' should have valid UV x coords",
+                c
+            );
+            assert!(
+                g.uv_min.1 < g.uv_max.1,
+                "Glyph for '{}' should have valid UV y coords",
+                c
+            );
+        }
+    }
+
+    #[test]
+    fn test_replacement_character_rendered_for_unmapped_codepoints() {
+        let device = get_test_device();
+        let font = Font::new("Menlo-Regular", 14.0, 1.0);
+        let mut atlas = GlyphAtlas::new(&device, &font);
+
+        // Use a Private Use Area character that likely has no glyph
+        let private_use = '\u{F0000}';
+
+        // Should return Some (either replacement char or solid glyph)
+        let glyph = atlas.ensure_glyph(&font, private_use);
+        assert!(
+            glyph.is_some(),
+            "Unmapped codepoint should return a replacement glyph"
+        );
+
+        let g = glyph.unwrap();
+        assert!(g.width > 0.0, "Replacement glyph should have positive width");
+        assert!(g.height > 0.0, "Replacement glyph should have positive height");
+    }
+
+    #[test]
+    fn test_hieroglyphs_render_via_fallback() {
+        let device = get_test_device();
+        let font = Font::new("Menlo-Regular", 14.0, 1.0);
+        let mut atlas = GlyphAtlas::new(&device, &font);
+
+        // Egyptian hieroglyphs from the GOAL.md
+        let hieroglyphs = ['𓆝', '𓆟', '𓆞']; // U+131DD, U+131DF, U+131DE
+
+        for c in hieroglyphs {
+            // Verify Menlo doesn't have this glyph directly
+            assert!(
+                font.glyph_for_char(c).is_none(),
+                "Menlo should NOT have hieroglyph '{}' (U+{:04X})",
+                c, c as u32
+            );
+
+            // But ensure_glyph should still return a valid glyph
+            let glyph = atlas.ensure_glyph(&font, c);
+            assert!(
+                glyph.is_some(),
+                "Hieroglyph '{}' (U+{:04X}) should have a glyph via fallback",
+                c, c as u32
+            );
+
+            let g = glyph.unwrap();
+            assert!(
+                g.width > 0.0 && g.height > 0.0,
+                "Hieroglyph '{}' glyph should have valid dimensions",
+                c
+            );
+        }
+    }
+
+    #[test]
+    fn test_ascii_uses_primary_font_not_fallback() {
+        let device = get_test_device();
+        let font = Font::new("Menlo-Regular", 14.0, 1.0);
+        let atlas = GlyphAtlas::new(&device, &font);
+
+        // ASCII characters should be pre-populated from the primary font
+        // (no fallback needed)
+        for c in 'A'..='Z' {
+            // Verify the primary font has this glyph
+            assert!(
+                font.glyph_for_char(c).is_some(),
+                "Menlo should have ASCII char '{}'",
+                c
+            );
+
+            // And it should be in the atlas (pre-populated)
+            assert!(
+                atlas.get_glyph(c).is_some(),
+                "ASCII char '{}' should be pre-populated in atlas",
+                c
+            );
+        }
     }
 }

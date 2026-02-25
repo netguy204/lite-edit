@@ -1,5 +1,5 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
 code_paths:
@@ -15,9 +15,10 @@ subsystems:
 friction_entries: []
 bug_type: semantic
 depends_on: []
-created_after: ["terminal_multibyte_rendering", "terminal_pane_initial_sizing"]
+created_after:
+- terminal_multibyte_rendering
+- terminal_pane_initial_sizing
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
