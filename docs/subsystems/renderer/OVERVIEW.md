@@ -50,6 +50,8 @@ chunks:
   relationship: implements
 - chunk_id: terminal_multibyte_rendering
   relationship: implements
+- chunk_id: font_fallback_rendering
+  relationship: implements
 created_after:
 - viewport_scroll
 ---
@@ -192,6 +194,7 @@ Many editor chunks implement rendering features within this subsystem:
 - **selector_list_clipping**: Added scissor rect clipping for selector item lists to prevent bleed into query area
 - **terminal_background_box_drawing**: Implemented on-demand glyph addition for terminal rendering
 - **terminal_multibyte_rendering**: Added non-BMP character support via UTF-16 surrogate pairs and width-aware column positioning for CJK/wide characters
+- **font_fallback_rendering**: Implemented Core Text font fallback for characters not in the primary font (hieroglyphs, emoji, math symbols) with U+FFFD replacement for truly missing glyphs
 
 ## Known Deviations
 

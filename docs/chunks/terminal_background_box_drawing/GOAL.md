@@ -10,7 +10,7 @@ code_paths:
   - crates/terminal/tests/integration.rs
 code_references:
   - ref: crates/editor/src/glyph_atlas.rs#GlyphAtlas::ensure_glyph
-    implements: "On-demand glyph rasterization - adds non-ASCII characters to atlas when first encountered, with fallback to space for missing glyphs"
+    implements: "On-demand glyph rasterization - adds non-ASCII characters to atlas when first encountered"
   - ref: crates/editor/src/glyph_buffer.rs#GlyphBuffer::update
     implements: "Text buffer rendering with mutable atlas for on-demand glyph addition"
   - ref: crates/editor/src/glyph_buffer.rs#GlyphBuffer::update_from_buffer_with_cursor
@@ -18,7 +18,7 @@ code_references:
   - ref: crates/editor/src/glyph_buffer.rs#GlyphBuffer::update_from_buffer_with_wrap
     implements: "Wrapped text rendering with on-demand glyph addition and per-span background quads"
   - ref: crates/editor/src/font.rs#Font::glyph_for_char
-    implements: "Character-to-glyph mapping for BMP characters, returns None for non-BMP (enabling fallback)"
+    implements: "Character-to-glyph mapping for the primary font"
 narrative: null
 investigation: null
 subsystems: []
