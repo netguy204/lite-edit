@@ -8,153 +8,212 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The `font_fallback_rendering` chunk established the font fallback chain: primary font → Core Text fallback lookup → replacement character. However, fallback glyphs are currently rasterized into a bitmap sized for the **primary font's metrics** (Menlo), and positioned using Menlo's descent as the baseline.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+When a fallback font has different vertical metrics (taller ascent, larger em-square), the glyph overflows the bitmap and Core Graphics silently clips it. This is visible with powerline symbols, nerd font icons, and other fallback glyphs that appear with tops/bottoms cut off.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+**Root cause analysis:**
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/fallback_glyph_metrics/GOAL.md)
-with references to the files that you expect to touch.
--->
+1. `GlyphAtlas::new()` computes `cell_height` from `font.metrics.line_height` (Menlo's) — all glyphs share this fixed cell size
+2. `add_glyph_with_source()` passes `font.metrics.descent` (Menlo's) as the baseline for fallback glyphs to `rasterize_glyph_with_ct_font()`
+3. `rasterize_glyph_with_ct_font()` creates a `CGBitmapContext` of exactly `cell_width × cell_height` and draws at `y = descent` — content beyond bounds is clipped
+
+**Fix strategy: Query and adapt to fallback font metrics**
+
+Rather than assuming all fonts share Menlo's metrics, the fix:
+
+1. Queries the fallback font's own metrics (ascent, descent, line_height) when rasterizing
+2. Computes the ratio between the fallback font's line_height and the primary font's line_height
+3. If the fallback glyph would overflow, scales it down to fit within the cell bounds
+4. Centers the scaled glyph vertically within the cell for visual balance
+
+This preserves the fixed-size cell grid (required for the terminal's character grid layout) while ensuring the full glyph is visible.
+
+**Alternative considered but rejected:** Variable cell heights per glyph would break the grid layout assumption. The grid is fundamental to terminal rendering where every character occupies exactly one cell width and one line height.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+- **docs/subsystems/renderer** (DOCUMENTED): This chunk IMPLEMENTS part of the renderer subsystem's glyph atlas functionality. The chunk extends `GlyphAtlas` to handle fallback font metrics correctly. The subsystem's invariants are preserved:
+  - **Atlas Availability**: Glyphs are still rasterized and cached before rendering
+  - **Single Frame Contract**: No change to the render loop
+  - **Screen-Space Consistency**: Cell dimensions remain uniform
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add helper to extract metrics from any CTFont
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add a function `get_font_metrics(ct_font: &CTFont) -> (f64, f64, f64)` in `font.rs` that extracts `(ascent, descent, line_height)` from any Core Text font. This is needed to query fallback font metrics.
 
-Example:
+Location: `crates/editor/src/font.rs`
 
-### Step 1: Define the SegmentHeader struct
+**Test (TDD):**
+```rust
+#[test]
+fn test_get_font_metrics_menlo() {
+    let font = Font::new("Menlo-Regular", 14.0, 1.0);
+    let (ascent, descent, line_height) = font.get_font_metrics(font.ct_font());
+    assert!(ascent > 0.0);
+    assert!(descent > 0.0);
+    assert!((line_height - (ascent + descent)).abs() < 1.0); // May have leading
+}
+```
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Modify `rasterize_glyph_with_ct_font` to accept font metrics
 
-Location: src/segment/format.rs
+Change the signature of `rasterize_glyph_with_ct_font` to accept the fallback font's own metrics `(ascent, descent, line_height)` instead of just `descent`. This is a refactoring step — the behavior doesn't change yet, but the function now has access to the full metrics.
 
-### Step 2: Implement header serialization
+Location: `crates/editor/src/glyph_atlas.rs`
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+### Step 3: Implement scaling logic for oversized fallback glyphs
 
-### Step 3: ...
+When the fallback font's `line_height` exceeds the cell's `cell_height`, compute a scale factor `scale = cell_height / fallback_line_height` and apply it. Core Graphics supports scaling transforms via `CGContextScaleCTM`.
+
+The implementation:
+1. Compute scale factor: `scale = min(1.0, cell_height as f64 / fallback_line_height)`
+2. If `scale < 1.0`:
+   - Apply `CGContextScaleCTM(context, scale, scale)` before drawing
+   - Adjust the draw position to center the scaled glyph vertically
+3. If `scale >= 1.0`, use the existing baseline positioning (no change)
+
+Location: `crates/editor/src/glyph_atlas.rs#rasterize_glyph_with_ct_font`
+
+**Test (visual verification initially, then integration test):**
+```rust
+#[test]
+fn test_fallback_glyph_not_clipped() {
+    // Render a powerline symbol and verify the bitmap has non-zero pixels
+    // near the top and bottom edges (not clipped)
+    let device = get_test_device();
+    let font = Font::new("Menlo-Regular", 14.0, 1.0);
+    let mut atlas = GlyphAtlas::new(&device, &font);
+
+    // Powerline separator (often comes from a tall nerd font)
+    let powerline = '\u{E0B0}'; //
+    let glyph = atlas.ensure_glyph(&font, powerline);
+
+    // Should return a glyph (either actual or replacement)
+    assert!(glyph.is_some());
+}
+```
+
+### Step 4: Update `add_glyph_with_source` to pass fallback font metrics
+
+Modify `add_glyph_with_source` to query the fallback font's metrics and pass them to `rasterize_glyph_with_ct_font` instead of the primary font's descent.
+
+Location: `crates/editor/src/glyph_atlas.rs#add_glyph_with_source`
+
+Before:
+```rust
+self.rasterize_glyph_with_ct_font(
+    fallback_font,
+    font.metrics.descent,  // Wrong: using primary font's descent
+    source.glyph_id,
+    glyph_width,
+    glyph_height,
+)
+```
+
+After:
+```rust
+let (fb_ascent, fb_descent, fb_line_height) = Font::get_ct_font_metrics(fallback_font);
+self.rasterize_glyph_with_ct_font(
+    fallback_font,
+    fb_ascent,
+    fb_descent,
+    fb_line_height,
+    source.glyph_id,
+    glyph_width,
+    glyph_height,
+)
+```
+
+### Step 5: Refactor rasterize_glyph to use the new signature
+
+Update `rasterize_glyph` (the primary font path) to call `rasterize_glyph_with_ct_font` with the primary font's metrics. This ensures both paths go through the same code.
+
+Location: `crates/editor/src/glyph_atlas.rs#rasterize_glyph`
+
+### Step 6: Add integration tests for vertical centering
+
+Write tests that verify fallback glyphs are positioned correctly (not clipped at top/bottom) and don't regress the primary font path.
+
+Location: `crates/editor/src/glyph_atlas.rs` (test module)
+
+```rust
+#[test]
+fn test_ascii_glyphs_unaffected_by_fallback_metrics_changes() {
+    // ASCII characters should render identically before and after this change
+    let device = get_test_device();
+    let font = Font::new("Menlo-Regular", 14.0, 1.0);
+    let atlas = GlyphAtlas::new(&device, &font);
+
+    for c in 'A'..='Z' {
+        let glyph = atlas.get_glyph(c);
+        assert!(glyph.is_some());
+        // Dimensions should match cell size
+        let (cell_w, cell_h) = atlas.cell_dimensions();
+        let g = glyph.unwrap();
+        assert_eq!(g.width as usize, cell_w);
+        assert_eq!(g.height as usize, cell_h);
+    }
+}
+
+#[test]
+fn test_fallback_glyphs_fit_within_cell() {
+    let device = get_test_device();
+    let font = Font::new("Menlo-Regular", 14.0, 1.0);
+    let mut atlas = GlyphAtlas::new(&device, &font);
+
+    // Emoji often come from tall Apple Color Emoji font
+    let emoji = '😀';
+    let glyph = atlas.ensure_glyph(&font, emoji);
+
+    assert!(glyph.is_some());
+    let g = glyph.unwrap();
+    let (cell_w, cell_h) = atlas.cell_dimensions();
+    assert_eq!(g.width as usize, cell_w, "Glyph width should match cell width");
+    assert_eq!(g.height as usize, cell_h, "Glyph height should match cell height");
+}
+```
+
+### Step 7: Manual visual verification
+
+Test with real terminal content containing powerline symbols and nerd font icons:
+1. Build and run lite-edit
+2. Open a terminal tab
+3. Run a command that displays powerline symbols (e.g., a shell prompt with powerline)
+4. Verify symbols are fully visible (not clipped at top/bottom)
+5. Compare against macOS Terminal.app as reference
 
 ---
 
 **BACKREFERENCE COMMENTS**
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+When implementing code, add backreference comments:
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
+```rust
+// Chunk: docs/chunks/fallback_glyph_metrics - Scale fallback glyphs to fit cell bounds
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
-
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
-
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **font_fallback_rendering** (ACTIVE): This chunk extends the font fallback mechanism established there. The `GlyphFont::Fallback(CFRetained<CTFont>)` variant and `glyph_for_char_with_fallback()` must exist.
+- No new external libraries required — Core Graphics `CGContextScaleCTM` is already available via the existing objc2 bindings.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Scaling artifacts**: Scaling down a glyph may introduce visual artifacts (blurry edges, jagged lines). Core Graphics uses high-quality interpolation by default, but we should verify visually that scaled glyphs remain legible.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Apple Color Emoji special case**: Apple Color Emoji is a bitmap font (COLR/CPAL or sbix), not an outline font. Core Text's `ct_font.draw_glyphs()` may handle this differently. Testing with emoji will reveal if special handling is needed.
+
+3. **Performance impact**: Querying fallback font metrics adds overhead to the fallback path. This should be negligible since:
+   - It only fires for fallback glyphs (non-ASCII, non-Menlo characters)
+   - Results are cached in the glyph atlas
+   - The primary ASCII path is unchanged
+
+4. **Vertical centering vs baseline alignment**: The current approach centers the scaled glyph vertically. An alternative is baseline alignment (preserving the baseline position and only scaling the glyph). Need to verify which looks better with real content.
+
+5. **CGContextScaleCTM availability**: Need to verify the objc2_core_graphics crate exposes this function. If not, may need to use `CGAffineTransform` on the font instead.
 
 ## Deviations
 

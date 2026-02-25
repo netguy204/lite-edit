@@ -186,6 +186,24 @@ impl Font {
         &self.ct_font
     }
 
+    // Chunk: docs/chunks/fallback_glyph_metrics - Extract metrics from any CTFont
+    /// Extracts font metrics (ascent, descent, line_height) from any Core Text font.
+    ///
+    /// This is used to query fallback font metrics so we can correctly scale and
+    /// position fallback glyphs within the primary font's cell bounds.
+    ///
+    /// Returns `(ascent, descent, line_height)` where:
+    /// - ascent: Distance from baseline to top of glyph (positive)
+    /// - descent: Distance from baseline to bottom of glyph (positive)
+    /// - line_height: Total line height (ascent + descent + leading)
+    pub fn get_ct_font_metrics(ct_font: &CTFont) -> (f64, f64, f64) {
+        let ascent = unsafe { ct_font.ascent() };
+        let descent = unsafe { ct_font.descent() };
+        let leading = unsafe { ct_font.leading() };
+        let line_height = ascent + descent + leading;
+        (ascent, descent, line_height)
+    }
+
     /// Gets the advance width for a representative monospace character
     fn get_advance_width(ct_font: &CTFont) -> f64 {
         // Use 'M' as the representative character
@@ -452,6 +470,34 @@ mod tests {
         assert!(font.metrics.line_height > 0.0, "line_height should be positive");
         assert!(font.metrics.ascent > 0.0, "ascent should be positive");
         assert!(font.metrics.descent > 0.0, "descent should be positive");
+    }
+
+    // Chunk: docs/chunks/fallback_glyph_metrics - Test CTFont metrics extraction
+    #[test]
+    fn test_get_ct_font_metrics() {
+        let font = Font::new("Menlo-Regular", 14.0, 1.0);
+        let (ascent, descent, line_height) = Font::get_ct_font_metrics(font.ct_font());
+
+        // Metrics should match those extracted during font creation
+        assert!(
+            (ascent - font.metrics.ascent).abs() < 0.001,
+            "Ascent should match: {} vs {}",
+            ascent,
+            font.metrics.ascent
+        );
+        assert!(
+            (descent - font.metrics.descent).abs() < 0.001,
+            "Descent should match: {} vs {}",
+            descent,
+            font.metrics.descent
+        );
+        // line_height should be close to ascent + descent + leading
+        assert!(
+            (line_height - font.metrics.line_height).abs() < 1.0,
+            "Line height should match: {} vs {}",
+            line_height,
+            font.metrics.line_height
+        );
     }
 
     #[test]

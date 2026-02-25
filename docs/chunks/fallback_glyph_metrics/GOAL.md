@@ -1,8 +1,10 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/editor/src/font.rs
+- crates/editor/src/glyph_atlas.rs
 code_references: []
 narrative: null
 investigation: null
@@ -11,10 +13,11 @@ subsystems:
   relationship: implements
 friction_entries: []
 bug_type: semantic
-depends_on: ["font_fallback_rendering"]
-created_after: ["font_fallback_rendering"]
+depends_on:
+- font_fallback_rendering
+created_after:
+- font_fallback_rendering
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

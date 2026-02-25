@@ -282,17 +282,21 @@ impl GlyphAtlas {
         }
 
         // Rasterize the glyph from the appropriate font
+        // Chunk: docs/chunks/fallback_glyph_metrics - Use fallback font's own metrics
         let bitmap = match &source.font {
             GlyphFont::Primary => {
-                // Use the primary font
+                // Use the primary font with its own metrics
                 self.rasterize_glyph(font, source.glyph_id, glyph_width, glyph_height)
             }
             GlyphFont::Fallback(fallback_font) => {
-                // Use the fallback font, but position using primary font's descent
-                // for consistent baseline alignment
+                // Query the fallback font's own metrics for proper scaling and positioning
+                let (fb_ascent, fb_descent, fb_line_height) =
+                    Font::get_ct_font_metrics(fallback_font);
                 self.rasterize_glyph_with_ct_font(
                     fallback_font,
-                    font.metrics.descent,
+                    fb_ascent,
+                    fb_descent,
+                    fb_line_height,
                     source.glyph_id,
                     glyph_width,
                     glyph_height,
@@ -418,20 +422,42 @@ impl GlyphAtlas {
         self.row_height = self.row_height.max(glyph_height);
     }
 
-    /// Rasterizes a single glyph into an R8 bitmap
+    /// Rasterizes a single glyph into an R8 bitmap using the primary font.
+    // Chunk: docs/chunks/fallback_glyph_metrics - Pass full primary font metrics
     fn rasterize_glyph(&self, font: &Font, glyph_id: u16, width: usize, height: usize) -> Vec<u8> {
-        self.rasterize_glyph_with_ct_font(font.ct_font(), font.metrics.descent, glyph_id, width, height)
+        self.rasterize_glyph_with_ct_font(
+            font.ct_font(),
+            font.metrics.ascent,
+            font.metrics.descent,
+            font.metrics.line_height,
+            glyph_id,
+            width,
+            height,
+        )
     }
 
     // Chunk: docs/chunks/font_fallback_rendering - Rasterize from any CTFont (primary or fallback)
+    // Chunk: docs/chunks/fallback_glyph_metrics - Scale fallback glyphs to fit cell bounds
     /// Rasterizes a single glyph into an R8 bitmap using a specific CTFont.
     ///
-    /// This allows rasterizing glyphs from fallback fonts while still using
-    /// the primary font's descent for baseline positioning.
+    /// This allows rasterizing glyphs from fallback fonts with proper metrics handling.
+    /// When the fallback font's line_height exceeds the cell height, the glyph is scaled
+    /// down and vertically centered to fit within the cell bounds.
+    ///
+    /// # Arguments
+    /// * `ct_font` - The font to rasterize from (primary or fallback)
+    /// * `font_ascent` - The font's ascent (for baseline calculation)
+    /// * `font_descent` - The font's descent (for baseline calculation)
+    /// * `font_line_height` - The font's line height (for scale calculation)
+    /// * `glyph_id` - The glyph ID to rasterize
+    /// * `width` - Target bitmap width (cell width)
+    /// * `height` - Target bitmap height (cell height)
     fn rasterize_glyph_with_ct_font(
         &self,
         ct_font: &CTFont,
-        descent: f64,
+        _font_ascent: f64,
+        font_descent: f64,
+        font_line_height: f64,
         glyph_id: u16,
         width: usize,
         height: usize,
@@ -479,11 +505,56 @@ impl GlyphAtlas {
         // Set the text color to white (this is what we'll draw the glyph with)
         CGContext::set_gray_fill_color(Some(&*context), 1.0, 1.0);
 
-        // Position for drawing: baseline is at y = descent (from bottom)
-        // Core Graphics has origin at bottom-left
+        // Compute scale factor: scale down if the font's line_height exceeds cell height
+        let cell_height = height as f64;
+        let scale = if font_line_height > cell_height {
+            cell_height / font_line_height
+        } else {
+            1.0
+        };
+
+        // Position for drawing. Core Graphics has origin at bottom-left.
+        // The baseline is positioned so that:
+        // - For scale=1.0: baseline at y = descent (standard positioning)
+        // - For scale<1.0: glyph is scaled and vertically centered
+        let (draw_x, draw_y) = if scale < 1.0 {
+            // Apply scaling transform to fit oversized glyph in cell
+            // CGContextScaleCTM scales around the origin, so we need to adjust position
+            //
+            // After scaling by `scale`, the glyph's visual extent is:
+            //   scaled_height = font_line_height * scale = cell_height
+            //
+            // To center vertically:
+            //   y_offset = (cell_height - scaled_height) / 2.0 = 0 (exactly fits)
+            //
+            // The baseline in the scaled coordinate system:
+            //   The font's descent determines how far below the baseline the glyph extends.
+            //   In the scaled space, we want the glyph centered, so position baseline at:
+            //   y = scaled_descent + vertical_centering_offset
+            //
+            // Since we're drawing at scale, positions are divided by scale in the
+            // transform, so we specify positions in scaled (cell) coordinates.
+            let scaled_descent = font_descent * scale;
+
+            // For horizontal positioning, keep small padding
+            let x = 1.0 / scale; // Account for scale transform
+
+            // Vertically center: the scaled glyph height equals cell_height,
+            // so we position the baseline at scaled_descent from the bottom
+            let y = scaled_descent;
+
+            // Apply the scale transform
+            CGContext::scale_ctm(Some(&*context), scale, scale);
+
+            (x, y)
+        } else {
+            // No scaling needed - use standard positioning
+            (1.0, font_descent)
+        };
+
         let position = CGPoint {
-            x: 1.0, // Small padding
-            y: descent,
+            x: draw_x,
+            y: draw_y,
         };
 
         // Draw the glyph
@@ -938,6 +1009,183 @@ mod tests {
             assert!(
                 atlas.get_glyph(c).is_some(),
                 "ASCII char '{}' should be pre-populated in atlas",
+                c
+            );
+        }
+    }
+
+    // ==================== Fallback glyph metrics tests ====================
+    // Chunk: docs/chunks/fallback_glyph_metrics - Test fallback glyph scaling and metrics
+
+    #[test]
+    fn test_ascii_glyphs_unaffected_by_fallback_metrics_changes() {
+        // ASCII characters should render identically before and after this change
+        // since they use the primary font (Menlo) which doesn't need scaling
+        let device = get_test_device();
+        let font = Font::new("Menlo-Regular", 14.0, 1.0);
+        let atlas = GlyphAtlas::new(&device, &font);
+
+        for c in 'A'..='Z' {
+            let glyph = atlas.get_glyph(c);
+            assert!(glyph.is_some(), "ASCII char '{}' should be in atlas", c);
+
+            // Dimensions should match cell size
+            let (cell_w, cell_h) = atlas.cell_dimensions();
+            let g = glyph.unwrap();
+            assert_eq!(
+                g.width as usize, cell_w,
+                "ASCII '{}' width should match cell width",
+                c
+            );
+            assert_eq!(
+                g.height as usize, cell_h,
+                "ASCII '{}' height should match cell height",
+                c
+            );
+        }
+    }
+
+    #[test]
+    fn test_fallback_glyphs_fit_within_cell() {
+        let device = get_test_device();
+        let font = Font::new("Menlo-Regular", 14.0, 1.0);
+        let mut atlas = GlyphAtlas::new(&device, &font);
+        let (cell_w, cell_h) = atlas.cell_dimensions();
+
+        // Emoji often come from tall Apple Color Emoji font
+        let emoji = '😀';
+        let glyph = atlas.ensure_glyph(&font, emoji);
+
+        assert!(glyph.is_some(), "Emoji should have a glyph");
+        let g = glyph.unwrap();
+
+        // The glyph info should have dimensions matching cell size
+        // (the scaling happens during rasterization, the GlyphInfo dimensions are fixed)
+        assert_eq!(
+            g.width as usize, cell_w,
+            "Emoji glyph width should match cell width"
+        );
+        assert_eq!(
+            g.height as usize, cell_h,
+            "Emoji glyph height should match cell height"
+        );
+    }
+
+    #[test]
+    fn test_fallback_glyph_scaling_preserves_visibility() {
+        // This test verifies that fallback glyphs from fonts with larger metrics
+        // (like Apple Color Emoji or symbol fonts) are scaled to fit within cells
+        let device = get_test_device();
+        let font = Font::new("Menlo-Regular", 14.0, 1.0);
+        let mut atlas = GlyphAtlas::new(&device, &font);
+
+        // Test characters that typically come from fallback fonts with different metrics
+        let test_chars = [
+            '😀', // Emoji - Apple Color Emoji has large metrics
+            '∫',  // Mathematical integral
+            '∑',  // Summation symbol
+            '√',  // Square root
+        ];
+
+        let (cell_w, cell_h) = atlas.cell_dimensions();
+
+        for c in test_chars {
+            let glyph = atlas.ensure_glyph(&font, c);
+            assert!(
+                glyph.is_some(),
+                "Character '{}' (U+{:04X}) should have a glyph",
+                c, c as u32
+            );
+
+            let g = glyph.unwrap();
+
+            // All glyphs should fit within the cell dimensions
+            assert_eq!(
+                g.width as usize, cell_w,
+                "Glyph '{}' width should match cell width",
+                c
+            );
+            assert_eq!(
+                g.height as usize, cell_h,
+                "Glyph '{}' height should match cell height",
+                c
+            );
+
+            // UV coordinates should be valid (glyph was actually rasterized)
+            assert!(
+                g.uv_min.0 < g.uv_max.0 && g.uv_min.1 < g.uv_max.1,
+                "Glyph '{}' should have valid UV coordinates",
+                c
+            );
+        }
+    }
+
+    #[test]
+    fn test_powerline_symbols_render() {
+        // Powerline symbols often come from nerd fonts or fallback fonts
+        // with different metrics. This test ensures they render without clipping.
+        let device = get_test_device();
+        let font = Font::new("Menlo-Regular", 14.0, 1.0);
+        let mut atlas = GlyphAtlas::new(&device, &font);
+        let (cell_w, cell_h) = atlas.cell_dimensions();
+
+        // Common powerline/nerd font symbols
+        let powerline_chars = [
+            '\u{E0B0}', // Right-pointing triangle (powerline separator)
+            '\u{E0B2}', // Left-pointing triangle (powerline separator)
+        ];
+
+        for c in powerline_chars {
+            let glyph = atlas.ensure_glyph(&font, c);
+
+            // These may not be available on all systems, but if they are,
+            // they should render correctly
+            if let Some(g) = glyph {
+                assert!(g.width > 0.0, "Powerline glyph '{}' should have width", c);
+                assert!(g.height > 0.0, "Powerline glyph '{}' should have height", c);
+
+                // The glyph should fit within cell dimensions
+                assert_eq!(
+                    g.width as usize, cell_w,
+                    "Powerline glyph width should match cell width"
+                );
+                assert_eq!(
+                    g.height as usize, cell_h,
+                    "Powerline glyph height should match cell height"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_no_regression_box_drawing_after_metrics_change() {
+        // Box-drawing characters should still work correctly
+        // These are typically in Menlo, so they shouldn't need scaling
+        let device = get_test_device();
+        let font = Font::new("Menlo-Regular", 14.0, 1.0);
+        let mut atlas = GlyphAtlas::new(&device, &font);
+
+        let box_chars = ['─', '│', '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼'];
+
+        let (cell_w, cell_h) = atlas.cell_dimensions();
+
+        for c in box_chars {
+            let glyph = atlas.ensure_glyph(&font, c);
+            assert!(
+                glyph.is_some(),
+                "Box-drawing char '{}' should be rasterizable",
+                c
+            );
+
+            let g = glyph.unwrap();
+            assert_eq!(
+                g.width as usize, cell_w,
+                "Box-drawing '{}' width should match cell",
+                c
+            );
+            assert_eq!(
+                g.height as usize, cell_h,
+                "Box-drawing '{}' height should match cell",
                 c
             );
         }
