@@ -40,6 +40,8 @@ mod clipboard;
 mod color_palette;
 // Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog widget
 mod confirm_dialog;
+// Chunk: docs/chunks/focus_stack - Confirm dialog focus target
+mod confirm_dialog_target;
 mod context;
 // Chunk: docs/chunks/workspace_dir_picker - Directory picker for new workspaces
 mod dir_picker;
@@ -59,8 +61,12 @@ pub mod file_index;
 mod file_change_debouncer;
 // Chunk: docs/chunks/file_change_events - Self-write suppression
 mod file_change_suppression;
+// Chunk: docs/chunks/focus_stack - Find focus target
+mod find_target;
 mod focus;
 mod font;
+// Chunk: docs/chunks/focus_stack - Global shortcut focus target
+mod global_shortcuts;
 mod glyph_atlas;
 mod glyph_buffer;
 // Chunk: docs/chunks/syntax_highlighting - Syntax-highlighted buffer view wrapper
@@ -82,6 +88,8 @@ mod runloop_source;
 mod tab_bar;
 mod selector;
 mod selector_overlay;
+// Chunk: docs/chunks/focus_stack - Selector focus target
+mod selector_target;
 mod shader;
 mod viewport;
 // Chunk: docs/chunks/welcome_screen - Welcome screen for empty file tabs

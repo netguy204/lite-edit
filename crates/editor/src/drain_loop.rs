@@ -29,7 +29,9 @@ use objc2_app_kit::NSApplication;
 use objc2_foundation::{MainThreadMarker, NSString};
 
 use crate::editor_event::EditorEvent;
-use crate::editor_state::{EditorFocus, EditorState};
+// Chunk: docs/chunks/focus_stack - Use FocusLayer for render decisions
+use crate::editor_state::EditorState;
+use crate::focus::FocusLayer;
 use crate::event_channel::{EventReceiver, EventSender};
 use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
 use crate::metal_view::{CursorRect, CursorRegions, MetalView};
@@ -423,9 +425,10 @@ impl EventDrainLoop {
             // Take the dirty region
             let _dirty = self.state.take_dirty_region();
 
-            // Render based on current focus mode
-            match self.state.focus {
-                EditorFocus::Selector => {
+            // Chunk: docs/chunks/focus_stack - Render based on focus layer
+            // Render based on current focus layer (derived from EditorFocus enum)
+            match self.state.focus_layer() {
+                FocusLayer::Selector => {
                     self.renderer.set_cursor_visible(self.state.cursor_visible);
                     self.renderer.render_with_editor(
                         &self.metal_view,
@@ -436,7 +439,7 @@ impl EventDrainLoop {
                     );
                 }
                 // Chunk: docs/chunks/find_strip_multi_pane - Use render_with_editor for find strip
-                EditorFocus::FindInFile => {
+                FocusLayer::FindInFile => {
                     self.renderer.set_cursor_visible(self.state.cursor_visible);
                     // Build the find strip state from the mini buffer
                     // Note: We need to extract content into a local variable because
@@ -459,7 +462,7 @@ impl EventDrainLoop {
                         );
                     }
                 }
-                EditorFocus::Buffer => {
+                FocusLayer::Buffer | FocusLayer::GlobalShortcuts => {
                     self.renderer.set_cursor_visible(self.state.cursor_visible);
                     self.renderer.render_with_editor(
                         &self.metal_view,
@@ -470,7 +473,7 @@ impl EventDrainLoop {
                     );
                 }
                 // Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog rendering
-                EditorFocus::ConfirmDialog => {
+                FocusLayer::ConfirmDialog => {
                     self.renderer.set_cursor_visible(self.state.cursor_visible);
                     self.renderer.render_with_confirm_dialog(
                         &self.metal_view,
@@ -553,8 +556,9 @@ impl EventDrainLoop {
             }
         }
 
+        // Chunk: docs/chunks/focus_stack - Use focus_layer() for cursor region decisions
         // Selector Overlay (Pointer Cursor for items, I-beam for query)
-        if let EditorFocus::Selector = self.state.focus {
+        if self.state.focus_layer() == FocusLayer::Selector {
             if let Some(ref selector) = self.state.active_selector {
                 let line_height = self.state.font_metrics().line_height as f32;
                 let geometry = calculate_overlay_geometry(
@@ -592,7 +596,7 @@ impl EventDrainLoop {
 
         // Chunk: docs/chunks/dialog_pointer_cursor - Pointer cursor for confirm dialog buttons
         // Confirm Dialog (Pointer Cursor for Cancel and Confirm buttons)
-        if let EditorFocus::ConfirmDialog = self.state.focus {
+        if self.state.focus_layer() == FocusLayer::ConfirmDialog {
             if let Some(ref dialog) = self.state.confirm_dialog {
                 let font_metrics = self.state.font_metrics();
                 let line_height = font_metrics.line_height as f32;

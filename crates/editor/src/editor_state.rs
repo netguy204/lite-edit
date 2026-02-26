@@ -34,7 +34,8 @@ use crate::dirty_region::DirtyRegion;
 use crate::event_channel::EventSender;
 // Chunk: docs/chunks/file_change_events - Self-write suppression
 use crate::file_change_suppression::FileChangeSuppression;
-use crate::focus::FocusTarget;
+// Chunk: docs/chunks/focus_stack - FocusLayer import for focus state bridge
+use crate::focus::{FocusLayer, FocusTarget};
 use crate::font::FontMetrics;
 use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
 use crate::left_rail::{calculate_left_rail_geometry, RAIL_WIDTH};
@@ -455,6 +456,21 @@ impl EditorState {
     /// Returns the font metrics.
     pub fn font_metrics(&self) -> &FontMetrics {
         &self.font_metrics
+    }
+
+    // Chunk: docs/chunks/focus_stack - Bridge from EditorFocus enum to FocusLayer
+    /// Returns the current focus layer.
+    ///
+    /// This method bridges the existing `EditorFocus` enum to the new `FocusLayer`
+    /// type used by the focus stack architecture. The renderer uses this to
+    /// determine which overlay to render.
+    pub fn focus_layer(&self) -> FocusLayer {
+        match self.focus {
+            EditorFocus::Buffer => FocusLayer::Buffer,
+            EditorFocus::Selector => FocusLayer::Selector,
+            EditorFocus::FindInFile => FocusLayer::FindInFile,
+            EditorFocus::ConfirmDialog => FocusLayer::ConfirmDialog,
+        }
     }
 
     // Chunk: docs/chunks/pty_wakeup_reentrant - EventSender for PTY wakeup
