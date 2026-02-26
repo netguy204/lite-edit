@@ -246,6 +246,16 @@ fn resolve_command(event: &KeyEvent) -> Option<Command> {
         // Ctrl+B → backward-char (move cursor left)
         Key::Char('b') if mods.control && !mods.command => Some(Command::MoveLeft),
 
+        // Chunk: docs/chunks/emacs_keybindings - Ctrl+D/N/P Emacs bindings
+        // Ctrl+D → delete-char (delete character under cursor)
+        Key::Char('d') if mods.control && !mods.command => Some(Command::DeleteForward),
+
+        // Ctrl+N → next-line (move cursor down)
+        Key::Char('n') if mods.control && !mods.command => Some(Command::MoveDown),
+
+        // Ctrl+P → previous-line (move cursor up)
+        Key::Char('p') if mods.control && !mods.command => Some(Command::MoveUp),
+
         // Unhandled
         _ => None,
     }
@@ -4841,6 +4851,43 @@ mod tests {
         }
 
         assert_eq!(buffer.cursor_position(), Position::new(0, 2));
+    }
+
+    // Chunk: docs/chunks/emacs_keybindings - Ctrl+D/N/P Emacs bindings
+    #[test]
+    fn test_ctrl_d_resolves_to_delete_forward() {
+        let event = KeyEvent::new(
+            Key::Char('d'),
+            Modifiers {
+                control: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(resolve_command(&event), Some(Command::DeleteForward));
+    }
+
+    #[test]
+    fn test_ctrl_n_resolves_to_move_down() {
+        let event = KeyEvent::new(
+            Key::Char('n'),
+            Modifiers {
+                control: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(resolve_command(&event), Some(Command::MoveDown));
+    }
+
+    #[test]
+    fn test_ctrl_p_resolves_to_move_up() {
+        let event = KeyEvent::new(
+            Key::Char('p'),
+            Modifiers {
+                control: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(resolve_command(&event), Some(Command::MoveUp));
     }
 
     #[test]

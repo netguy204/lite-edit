@@ -8,170 +8,114 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This is a minimal-touch keybinding addition following the existing pattern in `resolve_command()`. The strategy is straightforward:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. Add three new match arms in `resolve_command()` that map Ctrl+D, Ctrl+N, and Ctrl+P to their respective existing commands
+2. Follow the established pattern: `Key::Char(ch) if mods.control && !mods.command => Some(Command::*)`
+3. Add tests following the TDD approach from docs/trunk/TESTING_PHILOSOPHY.md
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+The commands (`DeleteForward`, `MoveDown`, `MoveUp`) already exist and are fully implemented. The execution path in `execute_command()` already handles them. This chunk only adds alternative key triggers.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/delete_char_forward/GOAL.md)
-with references to the files that you expect to touch.
--->
+The implementation mirrors how the existing Emacs bindings were added:
+- Ctrl+F → `MoveRight` (same as Right arrow)
+- Ctrl+B → `MoveLeft` (same as Left arrow)
+- Ctrl+V → `PageDown` (same as Page Down key)
+
+Now we're adding:
+- Ctrl+D → `DeleteForward` (same as Delete key)
+- Ctrl+N → `MoveDown` (same as Down arrow)
+- Ctrl+P → `MoveUp` (same as Up arrow)
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems are directly relevant to this change. The keybinding resolution is self-contained in `buffer_target.rs` and doesn't interact with cross-cutting patterns. The `viewport_scroll` subsystem is used by the existing `MoveDown`/`MoveUp` command execution, but this chunk doesn't modify that behavior—it only adds new key triggers.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing tests for the new keybindings
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Following TDD, add tests in `buffer_target.rs` that verify:
 
-Example:
+1. `test_ctrl_d_resolves_to_delete_forward` - Ctrl+D maps to `Command::DeleteForward`
+2. `test_ctrl_n_resolves_to_move_down` - Ctrl+N maps to `Command::MoveDown`
+3. `test_ctrl_p_resolves_to_move_up` - Ctrl+P maps to `Command::MoveUp`
 
-### Step 1: Define the SegmentHeader struct
+These tests should call `resolve_command()` with synthetic `KeyEvent` objects and assert the expected `Command` variant is returned. This matches the existing test pattern used for Ctrl+F, Ctrl+B, and Ctrl+V (see lines 4743-4770).
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Location: `crates/editor/src/buffer_target.rs`, in the `#[cfg(test)]` module
 
-Location: src/segment/format.rs
+### Step 2: Add the three keybinding match arms in resolve_command
 
-### Step 2: Implement header serialization
+Add match arms for Ctrl+D, Ctrl+N, and Ctrl+P in the `resolve_command()` function. Place them after the existing Ctrl+B binding (line 247) and before the `_` catch-all.
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Pattern to follow (from existing code):
+```rust
+// Ctrl+F → forward-char (move cursor right)
+Key::Char('f') if mods.control && !mods.command => Some(Command::MoveRight),
 
-### Step 3: ...
+// Ctrl+B → backward-char (move cursor left)
+Key::Char('b') if mods.control && !mods.command => Some(Command::MoveLeft),
+```
+
+New bindings to add:
+```rust
+// Chunk: docs/chunks/emacs_keybindings - Ctrl+D/N/P Emacs bindings
+// Ctrl+D → delete-char (delete character under cursor)
+Key::Char('d') if mods.control && !mods.command => Some(Command::DeleteForward),
+
+// Ctrl+N → next-line (move cursor down)
+Key::Char('n') if mods.control && !mods.command => Some(Command::MoveDown),
+
+// Ctrl+P → previous-line (move cursor up)
+Key::Char('p') if mods.control && !mods.command => Some(Command::MoveUp),
+```
+
+Location: `crates/editor/src/buffer_target.rs`, in `resolve_command()` around line 248
+
+### Step 3: Run tests and verify all pass
+
+Run the test suite to verify:
+1. The new tests pass (Ctrl+D/N/P resolve to correct commands)
+2. Existing tests still pass (no regressions to Delete, Down, Up arrow keys)
+
+Command: `cargo test -p editor`
+
+### Step 4: Update the chunk GOAL.md code_paths
+
+Add `crates/editor/src/buffer_target.rs` to the `code_paths` frontmatter field.
 
 ---
 
 **BACKREFERENCE COMMENTS**
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+Add a backreference comment before the new keybinding block:
+```rust
+// Chunk: docs/chunks/emacs_keybindings - Ctrl+D/N/P Emacs bindings
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
-
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+This links the code back to this chunk for future archaeology.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+None. All required commands and their execution logic already exist:
+- `Command::DeleteForward` - bound to `Key::Delete`, calls `ctx.buffer.delete_forward()`
+- `Command::MoveDown` - bound to `Key::Down`, calls `ctx.buffer.move_down()`
+- `Command::MoveUp` - bound to `Key::Up`, calls `ctx.buffer.move_up()`
 
-If there are no dependencies, delete this section.
--->
+The macOS event handling for Ctrl+letter keys was fixed in the `line_nav_keybindings` chunk (using `charactersIgnoringModifiers` when Control is held).
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+**Ctrl+D conflict with Option+D**: Option+D is already bound to `DeleteForwardWord`. These use different modifiers (Control vs Option) so there's no conflict. However, verify the guard conditions are mutually exclusive:
+- Option+D: `Key::Char('d') if mods.option && !mods.command`
+- Ctrl+D: `Key::Char('d') if mods.control && !mods.command`
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+**Ctrl+N/P in other contexts**: These bindings apply only to the buffer focus target. Terminal tabs pass all keys through to the PTY. The file picker and mini-buffer have their own key handling. No changes needed there—the Emacs bindings should only affect buffer editing.
+
+**Match arm ordering**: The new match arms must come after more specific guards (like Shift+Ctrl combinations) but before the catch-all. The existing pattern places Ctrl+letter bindings in the "Movement commands" section after selection commands.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->
