@@ -658,6 +658,7 @@ pub const FIND_LABEL_COLOR: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
 /// Computed geometry for the find strip (bottom-anchored, 1 line tall)
 ///
 /// All values are in screen coordinates (pixels).
+// Chunk: docs/chunks/find_in_file - Find-in-file geometry calculation
 #[derive(Debug, Clone, Copy)]
 pub struct FindStripGeometry {
     /// Left edge of the strip in screen coordinates
@@ -693,6 +694,7 @@ pub struct FindStripGeometry {
 /// * `line_height` - The height of a text line in pixels
 /// * `glyph_width` - The width of a single glyph
 /// * `cursor_col` - The cursor column position in the query
+// Chunk: docs/chunks/find_in_file - Find-in-file geometry calculation
 pub fn calculate_find_strip_geometry(
     view_width: f32,
     view_height: f32,
@@ -775,6 +777,7 @@ pub fn calculate_find_strip_geometry_in_pane(
 /// Manages vertex and index buffers for rendering the find strip
 ///
 /// Similar to `SelectorGlyphBuffer` but specialized for the find strip UI.
+// Chunk: docs/chunks/find_in_file - Find-in-file rendering
 // Chunk: docs/chunks/quad_buffer_prealloc - Persistent buffers to eliminate per-frame allocations
 pub struct FindStripGlyphBuffer {
     /// The vertex buffer containing quad vertices

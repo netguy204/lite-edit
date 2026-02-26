@@ -32,8 +32,8 @@ code_references:
   implements: "Calculate find strip positioning"
 - ref: crates/editor/src/selector_overlay.rs#FindStripGlyphBuffer
   implements: "Glyph buffer for rendering find strip"
-- ref: crates/editor/src/renderer.rs#Renderer::render_with_find_strip
-  implements: "Render entry point for find mode"
+- ref: crates/editor/src/renderer.rs#Renderer::draw_find_strip
+  implements: "Render the find strip at the bottom of the viewport"
 narrative: minibuffer
 investigation: null
 subsystems: []
