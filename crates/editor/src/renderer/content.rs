@@ -1,4 +1,5 @@
 // Chunk: docs/chunks/renderer_decomposition - Text content rendering extracted from renderer.rs
+// Chunk: docs/chunks/glyph_rendering - render_text and set_content for glyph-based text rendering
 
 //! Text content rendering implementation.
 //!

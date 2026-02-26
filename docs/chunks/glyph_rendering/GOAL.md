@@ -6,7 +6,8 @@ code_paths:
   - crates/editor/Cargo.toml
   - crates/editor/build.rs
   - crates/editor/src/main.rs
-  - crates/editor/src/renderer.rs
+  - crates/editor/src/renderer/mod.rs
+  - crates/editor/src/renderer/content.rs
   - crates/editor/src/font.rs
   - crates/editor/src/glyph_atlas.rs
   - crates/editor/src/glyph_buffer.rs
@@ -30,9 +31,9 @@ code_references:
     implements: "Metal render pipeline with alpha blending for anti-aliased glyphs"
   - ref: crates/editor/shaders/glyph.metal
     implements: "Vertex/fragment shaders for textured quad rendering with orthographic projection"
-  - ref: crates/editor/src/renderer.rs#Renderer::render_text
+  - ref: crates/editor/src/renderer/content.rs#Renderer::render_text
     implements: "Text rendering integration - binds atlas, buffers, uniforms and issues draw call"
-  - ref: crates/editor/src/renderer.rs#Renderer::set_content
+  - ref: crates/editor/src/renderer/content.rs#Renderer::set_content
     implements: "API for updating displayed text content"
 narrative: null
 investigation: editor_core_architecture

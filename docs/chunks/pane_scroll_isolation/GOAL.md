@@ -3,12 +3,12 @@ status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
-  - crates/editor/src/renderer.rs
+  - crates/editor/src/renderer/panes.rs
   - crates/editor/src/viewport.rs
   - crates/editor/src/row_scroller.rs
   - crates/editor/src/drain_loop.rs
 code_references:
-  - ref: crates/editor/src/renderer.rs#Renderer::configure_viewport_for_pane
+  - ref: crates/editor/src/renderer/panes.rs#Renderer::configure_viewport_for_pane
     implements: "Per-pane viewport configuration - copies scroll state from tab and updates dimensions"
   - ref: crates/editor/src/viewport.rs#Viewport::set_visible_lines
     implements: "Direct visible line count setter without re-clamping scroll offset"

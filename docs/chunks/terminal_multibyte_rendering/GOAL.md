@@ -24,7 +24,7 @@ code_references:
     implements: "Test verifying CJK characters have width 2"
   - ref: crates/editor/src/glyph_buffer.rs#tests::test_span_width_calculation
     implements: "Test for width-aware span width calculation"
-  - ref: crates/editor/src/glyph_buffer.rs#tests::test_column_position_tracking
+  - ref: crates/editor/src/glyph_buffer.rs#tests::test_column_advancement_simulation
     implements: "Test for correct column advancement with mixed-width characters"
   - ref: crates/editor/Cargo.toml
     implements: "Added unicode-width dependency for character display width calculation"
