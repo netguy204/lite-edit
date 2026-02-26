@@ -236,6 +236,34 @@ define_class!(
                 let _ = sender.send_resize();
             }
         }
+
+        // Chunk: docs/chunks/app_nap_blink_timer - Stop blink timer when backgrounded for App Nap
+        #[unsafe(method(windowDidResignKey:))]
+        fn window_did_resign_key(&self, _notification: &NSNotification) {
+            // Invalidate and clear the blink timer to allow App Nap when backgrounded.
+            // The 0.5s repeating timer prevents macOS from napping the process.
+            let mut timer_slot = self.ivars().blink_timer.borrow_mut();
+            if let Some(timer) = timer_slot.take() {
+                timer.invalidate();
+            }
+        }
+
+        // Chunk: docs/chunks/app_nap_blink_timer - Restart blink timer when foregrounded
+        #[unsafe(method(windowDidBecomeKey:))]
+        fn window_did_become_key(&self, _notification: &NSNotification) {
+            let mtm = MainThreadMarker::from(self);
+
+            // Recreate the blink timer now that the window is active again
+            let sender = self.ivars().event_sender.borrow();
+            if let Some(sender) = sender.as_ref() {
+                let new_timer = self.setup_cursor_blink_timer(mtm, sender.clone());
+                *self.ivars().blink_timer.borrow_mut() = Some(new_timer);
+
+                // Send a cursor blink event so the cursor shows immediately.
+                // This ensures the cursor is visible when the user returns to the app.
+                let _ = sender.send_cursor_blink();
+            }
+        }
     }
 );
 
@@ -496,6 +524,11 @@ impl AppDelegate {
                 &block,
             )
         };
+
+        // Chunk: docs/chunks/app_nap_blink_timer - Allow timer coalescing for reduced wakeups
+        // Set a 0.1s tolerance to allow macOS to coalesce this timer with other
+        // system timers, reducing CPU wakeups even while the app is in the foreground.
+        timer.setTolerance(0.1);
 
         // Add to common run loop modes so it fires during tracking (resize/drag)
         let run_loop = NSRunLoop::currentRunLoop();
