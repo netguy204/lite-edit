@@ -4,7 +4,7 @@ ticket: null
 parent_chunk: null
 code_paths:
   - crates/editor/src/metal_view.rs
-  - crates/editor/src/main.rs
+  - crates/editor/src/drain_loop.rs
   - crates/editor/src/editor_state.rs
   - crates/editor/src/buffer_target.rs
   - crates/editor/tests/viewport_test.rs
@@ -25,8 +25,8 @@ code_references:
     implements: "Forwards scroll events to focus target via EditorContext"
   - ref: crates/editor/src/editor_state.rs#EditorState::handle_key
     implements: "Ensures cursor visibility before keystroke processing (snap-back logic)"
-  - ref: crates/editor/src/main.rs#EditorController::handle_scroll
-    implements: "Controller method that forwards scroll to state and triggers render"
+  - ref: crates/editor/src/drain_loop.rs#EventDrainLoop::handle_scroll
+    implements: "Drain loop method that forwards scroll to state and triggers render"
 narrative: null
 investigation: null
 subsystems: []

@@ -28,7 +28,7 @@ objc2 = "0.6"
 objc2-foundation = "0.3"
 # AppKit framework (NSApplication, NSWindow, NSView)
 # Chunk: docs/chunks/dragdrop_file_paste - NSPasteboard feature for drag-and-drop
-objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSResponder", "NSWindow"] }
+objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSResponder", "NSWindow", "NSTextInputClient"] }
 # Metal framework bindings
 objc2-metal = "0.3"
 # Core Animation (CAMetalLayer)

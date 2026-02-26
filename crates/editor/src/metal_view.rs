@@ -38,9 +38,10 @@ use objc2::runtime::ProtocolObject;
 // Chunk: docs/chunks/dragdrop_file_paste - ClassType for NSURL::class()
 use objc2::{define_class, msg_send, ClassType, DefinedClass, MainThreadOnly};
 // Chunk: docs/chunks/dragdrop_file_paste - NSDragOperation and NSDraggingInfo for drag-drop support
+// Chunk: docs/chunks/input_keystroke_regression - NSTextInputClient protocol conformance
 use objc2_app_kit::{
     NSCursor, NSDragOperation, NSDraggingInfo, NSEvent, NSEventModifierFlags,
-    NSPasteboardTypeFileURL, NSView,
+    NSPasteboardTypeFileURL, NSTextInputClient, NSView,
 };
 use objc2_foundation::{MainThreadMarker, NSArray, NSObjectProtocol, NSRect, NSSize, NSURL};
 use objc2_metal::MTLDevice;
@@ -213,6 +214,12 @@ define_class!(
 
     // SAFETY: NSObjectProtocol is correctly implemented - we inherit from NSView
     unsafe impl NSObjectProtocol for MetalView {}
+
+    // Chunk: docs/chunks/input_keystroke_regression - NSTextInputClient protocol conformance
+    // SAFETY: NSTextInputClient methods are implemented below in the impl MetalView block.
+    // This declaration tells macOS that our class conforms to the NSTextInputClient protocol,
+    // enabling the text input system to route insertText:, doCommandBySelector:, etc. to us.
+    unsafe impl NSTextInputClient for MetalView {}
 
     // Methods for MetalView - overriding NSView methods
     impl MetalView {
@@ -988,6 +995,7 @@ impl MetalView {
         })
     }
 
+    // Chunk: docs/chunks/scroll_wheel_speed - Line height constant for scroll conversion
     /// Default line height for mouse wheel scroll conversion.
     /// Mouse wheel events report line-based deltas; we convert to pixels
     /// using this constant. Matches typical editor line heights.
