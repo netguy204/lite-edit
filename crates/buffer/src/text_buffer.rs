@@ -10,6 +10,8 @@
 
 use crate::buffer_view::{BufferView, CursorInfo, StyledLine};
 use crate::gap_buffer::GapBuffer;
+// Chunk: docs/chunks/grapheme_cluster_awareness - Import grapheme cluster boundary helpers
+use crate::grapheme::{grapheme_boundary_left, grapheme_boundary_right, grapheme_len_at, grapheme_len_before, is_grapheme_boundary};
 use crate::line_index::LineIndex;
 use crate::types::{DirtyLines, Position};
 
@@ -290,10 +292,13 @@ impl TextBuffer {
     // Spec: docs/trunk/SPEC.md#word-model
     /// Selects the word or whitespace run at the given column on the current line.
     ///
+    // Chunk: docs/chunks/grapheme_cluster_awareness - Grapheme-aware word selection
     /// Sets the selection anchor at the word start and the cursor at the word end.
     /// Returns `true` if a selection was made, `false` if the line is empty.
     ///
     /// If `col` is past the end of the line, the last run on that line is selected.
+    /// Word boundaries are snapped to grapheme cluster boundaries to ensure
+    /// combining characters stay with their base characters.
     pub fn select_word_at(&mut self, col: usize) -> bool {
         let line_content = self.line_content(self.cursor.line);
         let line_chars: Vec<char> = line_content.chars().collect();
@@ -308,8 +313,25 @@ impl TextBuffer {
         let word_start = word_boundary_left(&line_chars, col + 1);
         let word_end = word_boundary_right(&line_chars, col);
 
-        self.selection_anchor = Some(Position::new(self.cursor.line, word_start));
-        self.cursor.col = word_end;
+        // Snap word boundaries to grapheme cluster boundaries.
+        // This ensures combining characters stay with their base characters.
+
+        // For word_start: if we're in the middle of a grapheme, snap to its start
+        let snapped_start = if is_grapheme_boundary(&line_chars, word_start) {
+            word_start
+        } else {
+            grapheme_boundary_left(&line_chars, word_start)
+        };
+
+        // For word_end: if we're in the middle of a grapheme, snap to its end.
+        let snapped_end = if is_grapheme_boundary(&line_chars, word_end) {
+            word_end
+        } else {
+            grapheme_boundary_right(&line_chars, word_end)
+        };
+
+        self.selection_anchor = Some(Position::new(self.cursor.line, snapped_start));
+        self.cursor.col = snapped_end;
         true
     }
 
@@ -377,7 +399,11 @@ impl TextBuffer {
         line_start + pos.col
     }
 
-    /// Moves the cursor left by one character.
+    // Chunk: docs/chunks/grapheme_cluster_awareness - Grapheme-aware cursor movement
+    /// Moves the cursor left by one grapheme cluster.
+    ///
+    /// A grapheme cluster is what users perceive as a single "character", which may
+    /// consist of multiple Unicode code points (e.g., ZWJ emoji, combining characters).
     ///
     /// If at the beginning of a line, moves to the end of the previous line.
     /// If at the beginning of the buffer, does nothing.
@@ -385,14 +411,31 @@ impl TextBuffer {
     pub fn move_left(&mut self) {
         self.clear_selection();
         if self.cursor.col > 0 {
-            self.cursor.col -= 1;
+            // Fast path: if the character before cursor is ASCII, move by 1
+            let cursor_offset = self.position_to_offset(self.cursor);
+            if cursor_offset > 0 {
+                if let Some(prev_char) = self.buffer.char_at(cursor_offset - 1) {
+                    if prev_char.is_ascii() {
+                        self.cursor.col -= 1;
+                        return;
+                    }
+                }
+            }
+            // Slow path: analyze grapheme boundaries
+            let line_content = self.line_content(self.cursor.line);
+            let line_chars: Vec<char> = line_content.chars().collect();
+            self.cursor.col = grapheme_boundary_left(&line_chars, self.cursor.col);
         } else if self.cursor.line > 0 {
             self.cursor.line -= 1;
             self.cursor.col = self.line_len(self.cursor.line);
         }
     }
 
-    /// Moves the cursor right by one character.
+    // Chunk: docs/chunks/grapheme_cluster_awareness - Grapheme-aware cursor movement
+    /// Moves the cursor right by one grapheme cluster.
+    ///
+    /// A grapheme cluster is what users perceive as a single "character", which may
+    /// consist of multiple Unicode code points (e.g., ZWJ emoji, combining characters).
     ///
     /// If at the end of a line, moves to the beginning of the next line.
     /// If at the end of the buffer, does nothing.
@@ -402,7 +445,24 @@ impl TextBuffer {
         let line_len = self.line_len(self.cursor.line);
 
         if self.cursor.col < line_len {
-            self.cursor.col += 1;
+            // Fast path: if current and next chars are ASCII, move by 1
+            let cursor_offset = self.position_to_offset(self.cursor);
+            if let Some(current_char) = self.buffer.char_at(cursor_offset) {
+                if current_char.is_ascii() {
+                    let next_is_ascii = self
+                        .buffer
+                        .char_at(cursor_offset + 1)
+                        .is_none_or(|c| c.is_ascii());
+                    if next_is_ascii {
+                        self.cursor.col += 1;
+                        return;
+                    }
+                }
+            }
+            // Slow path: analyze grapheme boundaries
+            let line_content = self.line_content(self.cursor.line);
+            let line_chars: Vec<char> = line_content.chars().collect();
+            self.cursor.col = grapheme_boundary_right(&line_chars, self.cursor.col);
         } else if self.cursor.line + 1 < self.line_count() {
             self.cursor.line += 1;
             self.cursor.col = 0;
@@ -577,7 +637,7 @@ impl TextBuffer {
     #[cfg(debug_assertions)]
     fn assert_line_index_consistent(&mut self) {
         self.debug_mutation_count += 1;
-        if self.debug_mutation_count % 64 != 0 {
+        if !self.debug_mutation_count.is_multiple_of(64) {
             return;
         }
         let mut expected = LineIndex::new();
@@ -651,7 +711,11 @@ impl TextBuffer {
         self.accumulate_dirty(dirty)
     }
 
-    /// Deletes the character before the cursor (Backspace).
+    // Chunk: docs/chunks/grapheme_cluster_awareness - Grapheme-aware backspace deletion
+    /// Deletes the grapheme cluster before the cursor (Backspace).
+    ///
+    /// A grapheme cluster is what users perceive as a single "character", which may
+    /// consist of multiple Unicode code points (e.g., ZWJ emoji, combining characters).
     ///
     /// If there is an active selection, deletes the selection instead.
     /// Returns the dirty lines affected by this operation.
@@ -688,21 +752,50 @@ impl TextBuffer {
             self.assert_line_index_consistent();
             self.accumulate_dirty(DirtyLines::FromLineToEnd(prev_line))
         } else {
-            // Delete a regular character within the line
-            let deleted = self.buffer.delete_backward();
-            if deleted.is_none() {
+            // Delete the grapheme cluster before the cursor
+            // Fast path: peek at the character before cursor. If it's ASCII,
+            // we know it's a single-char grapheme and can delete directly.
+            let cursor_offset = self.position_to_offset(self.cursor);
+            if cursor_offset > 0 {
+                if let Some(prev_char) = self.buffer.char_at(cursor_offset - 1) {
+                    if prev_char.is_ascii() {
+                        // ASCII char is always a single-char grapheme
+                        self.buffer.delete_backward();
+                        self.line_index.remove_char(self.cursor.line);
+                        self.cursor.col -= 1;
+                        self.assert_line_index_consistent();
+                        return self.accumulate_dirty(DirtyLines::Single(self.cursor.line));
+                    }
+                }
+            }
+
+            // Slow path: need to analyze grapheme boundaries
+            let line_content = self.line_content(self.cursor.line);
+            let line_chars: Vec<char> = line_content.chars().collect();
+            let chars_to_delete = grapheme_len_before(&line_chars, self.cursor.col);
+
+            if chars_to_delete == 0 {
                 return DirtyLines::None;
             }
 
-            self.line_index.remove_char(self.cursor.line);
-            self.cursor.col -= 1;
+            // Delete all chars in the grapheme cluster
+            for _ in 0..chars_to_delete {
+                self.buffer.delete_backward();
+                self.line_index.remove_char(self.cursor.line);
+            }
+
+            self.cursor.col -= chars_to_delete;
 
             self.assert_line_index_consistent();
             self.accumulate_dirty(DirtyLines::Single(self.cursor.line))
         }
     }
 
-    /// Deletes the character after the cursor (Delete key).
+    // Chunk: docs/chunks/grapheme_cluster_awareness - Grapheme-aware forward deletion
+    /// Deletes the grapheme cluster after the cursor (Delete key).
+    ///
+    /// A grapheme cluster is what users perceive as a single "character", which may
+    /// consist of multiple Unicode code points (e.g., ZWJ emoji, combining characters).
     ///
     /// If there is an active selection, deletes the selection instead.
     /// Returns the dirty lines affected by this operation.
@@ -737,13 +830,41 @@ impl TextBuffer {
             self.assert_line_index_consistent();
             self.accumulate_dirty(DirtyLines::FromLineToEnd(self.cursor.line))
         } else {
-            // Delete a regular character within the line
-            let deleted = self.buffer.delete_forward();
-            if deleted.is_none() {
+            // Delete the grapheme cluster at the cursor
+            // Fast path: peek at the character at cursor. If it's ASCII and
+            // the next char (if any) is also ASCII, we can delete directly.
+            let cursor_offset = self.position_to_offset(self.cursor);
+            if let Some(current_char) = self.buffer.char_at(cursor_offset) {
+                if current_char.is_ascii() {
+                    // Check if next char exists and is ASCII (or we're at end)
+                    let next_is_ascii = self
+                        .buffer
+                        .char_at(cursor_offset + 1)
+                        .is_none_or(|c| c.is_ascii());
+                    if next_is_ascii {
+                        // ASCII char followed by ASCII or nothing = single-char grapheme
+                        self.buffer.delete_forward();
+                        self.line_index.remove_char(self.cursor.line);
+                        self.assert_line_index_consistent();
+                        return self.accumulate_dirty(DirtyLines::Single(self.cursor.line));
+                    }
+                }
+            }
+
+            // Slow path: need to analyze grapheme boundaries
+            let line_content = self.line_content(self.cursor.line);
+            let line_chars: Vec<char> = line_content.chars().collect();
+            let chars_to_delete = grapheme_len_at(&line_chars, self.cursor.col);
+
+            if chars_to_delete == 0 {
                 return DirtyLines::None;
             }
 
-            self.line_index.remove_char(self.cursor.line);
+            // Delete all chars in the grapheme cluster
+            for _ in 0..chars_to_delete {
+                self.buffer.delete_forward();
+                self.line_index.remove_char(self.cursor.line);
+            }
 
             // Cursor stays in place
             self.assert_line_index_consistent();
