@@ -1,18 +1,27 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/editor/src/buffer_file_watcher.rs
+- crates/editor/src/file_index.rs
+- crates/editor/src/editor_state.rs
+- crates/editor/src/editor_event.rs
+- crates/editor/src/drain_loop.rs
+- crates/editor/src/main.rs
+- crates/editor/src/event_channel.rs
 code_references: []
 narrative: null
 investigation: null
 subsystems: []
 friction_entries: []
 bug_type: null
-depends_on: ["app_nap_blink_timer"]
-created_after: ["buffer_file_watching", "highlight_injection"]
+depends_on:
+- app_nap_blink_timer
+created_after:
+- buffer_file_watching
+- highlight_injection
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

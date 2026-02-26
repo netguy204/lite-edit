@@ -242,6 +242,29 @@ impl EventSender {
         (self.inner.run_loop_waker)();
         result
     }
+
+    // Chunk: docs/chunks/app_nap_file_watcher_pause - Pause file watchers event sender
+    /// Sends a pause-file-watchers event to the channel.
+    ///
+    /// This is called when the window loses key status to pause file watchers
+    /// and allow App Nap. The event is processed synchronously on the main
+    /// thread, so we don't need to wake the run loop.
+    pub fn send_pause_file_watchers(&self) -> Result<(), SendError<EditorEvent>> {
+        let result = self.inner.sender.send(EditorEvent::PauseFileWatchers);
+        (self.inner.run_loop_waker)();
+        result
+    }
+
+    // Chunk: docs/chunks/app_nap_file_watcher_pause - Resume file watchers event sender
+    /// Sends a resume-file-watchers event to the channel.
+    ///
+    /// This is called when the window becomes key again to resume file watchers
+    /// and detect any changes that occurred while paused.
+    pub fn send_resume_file_watchers(&self) -> Result<(), SendError<EditorEvent>> {
+        let result = self.inner.sender.send(EditorEvent::ResumeFileWatchers);
+        (self.inner.run_loop_waker)();
+        result
+    }
 }
 
 // Implement WakeupSignal so EventSender can be used by the terminal crate

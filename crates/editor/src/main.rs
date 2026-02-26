@@ -238,6 +238,7 @@ define_class!(
         }
 
         // Chunk: docs/chunks/app_nap_blink_timer - Stop blink timer when backgrounded for App Nap
+        // Chunk: docs/chunks/app_nap_file_watcher_pause - Pause file watchers for App Nap
         #[unsafe(method(windowDidResignKey:))]
         fn window_did_resign_key(&self, _notification: &NSNotification) {
             // Invalidate and clear the blink timer to allow App Nap when backgrounded.
@@ -246,16 +247,28 @@ define_class!(
             if let Some(timer) = timer_slot.take() {
                 timer.invalidate();
             }
+
+            // Pause file watchers to eliminate wakeups that prevent App Nap.
+            // The watcher threads would otherwise wake the process to deliver events.
+            let sender = self.ivars().event_sender.borrow();
+            if let Some(sender) = sender.as_ref() {
+                let _ = sender.send_pause_file_watchers();
+            }
         }
 
         // Chunk: docs/chunks/app_nap_blink_timer - Restart blink timer when foregrounded
+        // Chunk: docs/chunks/app_nap_file_watcher_pause - Resume file watchers after App Nap
         #[unsafe(method(windowDidBecomeKey:))]
         fn window_did_become_key(&self, _notification: &NSNotification) {
             let mtm = MainThreadMarker::from(self);
 
-            // Recreate the blink timer now that the window is active again
+            // Resume file watchers first so any changes that occurred while paused
+            // are detected before the user starts interacting with the app.
             let sender = self.ivars().event_sender.borrow();
             if let Some(sender) = sender.as_ref() {
+                let _ = sender.send_resume_file_watchers();
+
+                // Recreate the blink timer now that the window is active again
                 let new_timer = self.setup_cursor_blink_timer(mtm, sender.clone());
                 *self.ivars().blink_timer.borrow_mut() = Some(new_timer);
 

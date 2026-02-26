@@ -227,6 +227,13 @@ impl EventDrainLoop {
             EditorEvent::UnmarkText => {
                 self.handle_unmark_text();
             }
+            // Chunk: docs/chunks/app_nap_file_watcher_pause - Pause/resume file watchers
+            EditorEvent::PauseFileWatchers => {
+                self.state.pause_file_watchers();
+            }
+            EditorEvent::ResumeFileWatchers => {
+                self.state.resume_file_watchers();
+            }
         }
     }
 

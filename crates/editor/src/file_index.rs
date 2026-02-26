@@ -1,5 +1,6 @@
 // Chunk: docs/chunks/fuzzy_file_matcher - File index and fuzzy matching
 // Chunk: docs/chunks/file_change_events - File content change callback support
+// Chunk: docs/chunks/app_nap_file_watcher_pause - Pause/resume for App Nap
 //!
 //! A stateful, background-threaded file index that recursively walks a root
 //! directory, caches every discovered path incrementally, watches the filesystem
@@ -23,7 +24,7 @@
 
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use notify::event::{DataChange, ModifyKind};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -31,7 +32,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use crate::file_change_debouncer::FileChangeDebouncer;
 
@@ -58,6 +59,7 @@ pub type FileRenamedCallback = Box<dyn Fn(PathBuf, PathBuf) + Send + Sync>;
 /// Internal struct bundling all file event callbacks.
 ///
 /// This is used to pass callbacks cleanly to the watcher thread.
+#[derive(Clone)]
 struct FileEventCallbacks {
     /// Callback for content changes (debounced).
     on_change: Option<Arc<FileChangeCallback>>,
@@ -106,6 +108,12 @@ pub struct FileIndex {
     _watcher_stop_tx: Option<Sender<()>>,
     /// The filesystem watcher (kept alive).
     _watcher: Option<RecommendedWatcher>,
+    // Chunk: docs/chunks/app_nap_file_watcher_pause - Pause flag for App Nap
+    /// True when the watcher is paused (for App Nap eligibility).
+    /// When paused, the watcher thread continues to run but skips event processing.
+    paused: Arc<AtomicBool>,
+    /// Stores callbacks for use on resume.
+    callbacks: Arc<Mutex<Option<FileEventCallbacks>>>,
 }
 
 impl FileIndex {
@@ -189,6 +197,9 @@ impl FileIndex {
         }));
         let version = Arc::new(AtomicU64::new(0));
         let indexing = Arc::new(AtomicBool::new(true));
+        // Chunk: docs/chunks/app_nap_file_watcher_pause - Initialize pause state
+        let paused = Arc::new(AtomicBool::new(false));
+        let stored_callbacks = Arc::new(Mutex::new(Some(callbacks.clone())));
 
         // Check if root exists before starting the walk
         let root_exists = root.is_dir();
@@ -244,6 +255,8 @@ impl FileIndex {
         let watcher_state = Arc::clone(&state);
         let watcher_version = Arc::clone(&version);
         let watcher_root = root.clone();
+        // Chunk: docs/chunks/app_nap_file_watcher_pause - Pass pause flag to watcher thread
+        let watcher_paused = Arc::clone(&paused);
 
         let watcher_handle = thread::spawn(move || {
             process_watcher_events(
@@ -253,6 +266,7 @@ impl FileIndex {
                 event_rx,
                 stop_rx,
                 callbacks,
+                watcher_paused,
             );
         });
 
@@ -265,6 +279,8 @@ impl FileIndex {
             _watcher_handle: Some(watcher_handle),
             _watcher_stop_tx: Some(stop_tx),
             _watcher: watcher,
+            paused,
+            callbacks: stored_callbacks,
         }
     }
 
@@ -417,6 +433,110 @@ impl FileIndex {
             save_recency(&self.root, &state.recency);
         }
     }
+
+    // Chunk: docs/chunks/app_nap_file_watcher_pause - Pause watcher for App Nap
+    /// Pauses the file watcher to allow App Nap when the app is backgrounded.
+    ///
+    /// When paused:
+    /// - The watcher thread continues to run but skips event processing
+    /// - Events received while paused are discarded
+    /// - The caller is responsible for checking file mtimes on resume
+    ///
+    /// Returns a `PausedFileIndexState` containing the mtimes of recently accessed
+    /// files. This should be passed to `resume()` to detect changes that occurred
+    /// while paused.
+    ///
+    /// If already paused, this is a no-op and returns an empty state.
+    pub fn pause(&self) -> PausedFileIndexState {
+        // Set the paused flag - the watcher thread will see this and skip processing
+        let was_paused = self.paused.swap(true, Ordering::SeqCst);
+        if was_paused {
+            // Already paused, return empty state
+            return PausedFileIndexState {
+                file_mtimes: HashMap::new(),
+            };
+        }
+
+        // Capture mtimes for recently accessed files (from recency list)
+        // These are the files most likely to have been modified while paused
+        let mut file_mtimes = HashMap::new();
+        {
+            let state = self.state.lock().unwrap();
+            for relative_path in &state.recency {
+                let absolute_path = self.root.join(relative_path);
+                let mtime = std::fs::metadata(&absolute_path)
+                    .and_then(|m| m.modified())
+                    .ok();
+                file_mtimes.insert(absolute_path, mtime);
+            }
+        }
+
+        PausedFileIndexState { file_mtimes }
+    }
+
+    // Chunk: docs/chunks/app_nap_file_watcher_pause - Resume watcher after App Nap
+    /// Resumes the file watcher after returning from background.
+    ///
+    /// This method:
+    /// 1. Clears the paused flag so the watcher thread resumes processing
+    /// 2. Checks if any recently accessed files were modified while paused
+    /// 3. Emits FileChanged events for modified files
+    ///
+    /// # Arguments
+    ///
+    /// * `paused_state` - The state returned from `pause()`
+    pub fn resume(&self, paused_state: PausedFileIndexState) {
+        // Clear the paused flag - the watcher thread will resume processing
+        let was_paused = self.paused.swap(false, Ordering::SeqCst);
+        if !was_paused {
+            // Wasn't paused, nothing to do
+            return;
+        }
+
+        // Get the on_change callback if available
+        let on_change = {
+            let callbacks_guard = self.callbacks.lock().unwrap();
+            callbacks_guard.as_ref().and_then(|cb| cb.on_change.clone())
+        };
+
+        // Check for modifications while paused and emit FileChanged events
+        if let Some(callback) = on_change {
+            for (file_path, old_mtime) in paused_state.file_mtimes {
+                let current_mtime = std::fs::metadata(&file_path)
+                    .and_then(|m| m.modified())
+                    .ok();
+
+                // If mtime changed (or file was created/deleted), emit change event
+                let changed = match (old_mtime, current_mtime) {
+                    (Some(old), Some(new)) => old != new,
+                    (None, Some(_)) => true,  // File was created
+                    (Some(_), None) => true,  // File was deleted
+                    (None, None) => false,    // Still doesn't exist
+                };
+
+                if changed {
+                    callback(file_path);
+                }
+            }
+        }
+    }
+
+    /// Returns true if the watcher is currently paused.
+    #[allow(dead_code)]
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+}
+
+// Chunk: docs/chunks/app_nap_file_watcher_pause - State preserved across pause/resume
+/// State captured when pausing the file index watcher.
+///
+/// This struct holds the information needed to detect changes that occurred
+/// while paused.
+#[derive(Default)]
+pub struct PausedFileIndexState {
+    /// Map from file path to its modification time at pause.
+    file_mtimes: HashMap<PathBuf, Option<SystemTime>>,
 }
 
 impl Drop for FileIndex {
@@ -560,12 +680,16 @@ fn walk_directory(
 
 // Chunk: docs/chunks/file_change_events - File content change callback
 // Chunk: docs/chunks/deletion_rename_handling - File deletion and rename callbacks
+// Chunk: docs/chunks/app_nap_file_watcher_pause - Pause-aware event processing
 /// Processes filesystem watcher events.
 ///
 /// Handles path cache updates (create/delete/rename) and optionally forwards
 /// file events to callbacks:
 /// - Content changes are debounced (100ms) to coalesce rapid successive writes
 /// - Deletions and renames are delivered immediately (no debouncing)
+///
+/// When `paused` is true, events are still received but not processed. This allows
+/// the app to enter App Nap while keeping the watcher thread alive.
 fn process_watcher_events(
     root: &Path,
     state: &Arc<Mutex<SharedState>>,
@@ -573,6 +697,7 @@ fn process_watcher_events(
     event_rx: Receiver<Event>,
     stop_rx: Receiver<()>,
     callbacks: FileEventCallbacks,
+    paused: Arc<AtomicBool>,
 ) {
     // Debouncer for file content changes (only used if callback is provided)
     let mut debouncer = FileChangeDebouncer::with_default();
@@ -583,23 +708,34 @@ fn process_watcher_events(
             break;
         }
 
+        // Chunk: docs/chunks/app_nap_file_watcher_pause - Skip processing when paused
+        // When paused, drain events but don't process them to allow App Nap.
+        // The 100ms timeout keeps the thread responsive to unpause without burning CPU.
+        let is_paused = paused.load(Ordering::Relaxed);
+
         // Try to receive an event with timeout
         // The 100ms timeout also serves as our debounce flush interval
         match event_rx.recv_timeout(std::time::Duration::from_millis(100)) {
             Ok(event) => {
-                handle_fs_event(root, state, version, &event, &mut debouncer, &callbacks);
+                if !is_paused {
+                    handle_fs_event(root, state, version, &event, &mut debouncer, &callbacks);
+                }
+                // When paused, events are discarded. On resume, the caller is responsible
+                // for checking file mtimes to detect any changes that occurred while paused.
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                // No event received, but we still need to flush the debouncer
+                // No event received, but we still need to flush the debouncer if not paused
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
-        // Flush any debounced content changes that are ready
-        if let Some(ref cb) = callbacks.on_change {
-            let now = Instant::now();
-            for path in debouncer.flush_ready(now) {
-                cb(path);
+        // Flush any debounced content changes that are ready (only when not paused)
+        if !is_paused {
+            if let Some(ref cb) = callbacks.on_change {
+                let now = Instant::now();
+                for path in debouncer.flush_ready(now) {
+                    cb(path);
+                }
             }
         }
     }

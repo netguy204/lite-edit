@@ -100,6 +100,22 @@ pub enum EditorEvent {
     /// - Focus changes away from the text field
     /// - The text input system needs to clear marked state
     UnmarkText,
+
+    // Chunk: docs/chunks/app_nap_file_watcher_pause - Pause file watchers for App Nap
+    /// Window lost key status - pause file watchers to allow App Nap.
+    ///
+    /// This event is sent when the window loses key status (`windowDidResignKey:`),
+    /// indicating the app is being backgrounded. File watchers should be paused
+    /// to eliminate periodic wakeups that prevent App Nap.
+    PauseFileWatchers,
+
+    // Chunk: docs/chunks/app_nap_file_watcher_pause - Resume file watchers after App Nap
+    /// Window gained key status - resume file watchers.
+    ///
+    /// This event is sent when the window becomes key (`windowDidBecomeKey:`),
+    /// indicating the app is returning to the foreground. File watchers should
+    /// be resumed and any files modified while paused should be detected.
+    ResumeFileWatchers,
 }
 
 impl EditorEvent {
