@@ -8326,6 +8326,62 @@ mod tests {
         );
     }
 
+    // Chunk: docs/chunks/terminal_single_pane_refresh - Single-pane terminal rendering test
+    /// Tests that a terminal in single-pane mode produces dirty regions and content.
+    ///
+    /// This validates the fix for the single-pane rendering path: when a terminal tab
+    /// is spawned in a single-pane workspace, PTY output should trigger dirty regions
+    /// and the terminal buffer should have content. The actual rendering behavior
+    /// (glyph buffer update during render pass) must be verified visually.
+    #[test]
+    fn test_single_pane_terminal_dirty_and_content() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Verify this is a single-pane workspace
+        let ws = state.editor.active_workspace().expect("workspace");
+        assert_eq!(
+            ws.pane_root.pane_count(), 1,
+            "Test requires a single-pane workspace"
+        );
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Wait for shell startup and poll for PTY events
+        let mut found_dirty = false;
+        for _ in 0..50 {
+            std::thread::sleep(Duration::from_millis(20));
+            let (dirty, _needs_rewakeup) = state.poll_agents();
+            if dirty.is_dirty() {
+                found_dirty = true;
+                break;
+            }
+        }
+
+        assert!(
+            found_dirty,
+            "poll_agents should return dirty when terminal produces output in single-pane mode"
+        );
+
+        // Verify terminal buffer has content
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(
+            tab.buffer().line_count() > 0,
+            "Terminal buffer should have content after shell starts (got {} lines)",
+            tab.buffer().line_count()
+        );
+
+        // Verify we're still in single-pane mode (no accidental splits)
+        assert_eq!(
+            ws.pane_root.pane_count(), 1,
+            "Should still be single-pane after terminal creation"
+        );
+    }
+
     // =========================================================================
     // Dirty Flag Tests (Chunk: docs/chunks/unsaved_tab_tint)
     // =========================================================================
