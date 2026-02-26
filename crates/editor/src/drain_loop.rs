@@ -202,13 +202,16 @@ impl EventDrainLoop {
 
     // Chunk: docs/chunks/file_change_events - File change event handler
     // Chunk: docs/chunks/base_snapshot_reload - Reload clean buffers on external modification
+    // Chunk: docs/chunks/three_way_merge - Merge dirty buffers on external modification
     /// Handles external file modification events.
     ///
     /// This method is called when the filesystem watcher detects that a file
     /// within the workspace was modified by an external process.
     ///
     /// For clean tabs (dirty == false), reloads the buffer from disk.
-    /// For dirty tabs (dirty == true), does nothing (deferred to three_way_merge chunk).
+    /// For dirty tabs (dirty == true), performs a three-way merge to combine
+    /// the user's local edits with the external changes.
+    ///
     /// The self-write suppression check prevents reacting to our own saves.
     fn handle_file_changed(&mut self, path: std::path::PathBuf) {
         // Check if this is a self-triggered event (our own save)
@@ -224,9 +227,23 @@ impl EventDrainLoop {
         // - Reloads the buffer content from disk if clean
         // - Updates base_content and re-applies syntax highlighting
         // - Returns false if no matching tab or if tab is dirty
-        let _reloaded = self.state.reload_file_tab(&path);
-        // Note: We don't need to do anything special if reload fails -
-        // it just means the file isn't open or has unsaved changes
+        if self.state.reload_file_tab(&path) {
+            return;
+        }
+
+        // Chunk: docs/chunks/three_way_merge - Merge for dirty buffers
+        // If reload returned false and a matching dirty tab exists, try merge.
+        // The merge_file_tab method:
+        // - Finds the tab across all workspaces
+        // - Checks if the tab is dirty (dirty == true)
+        // - Performs three-way merge: base_content → buffer, base_content → disk
+        // - Updates buffer with merged content (including any conflict markers)
+        // - Updates base_content to new disk content
+        // - Re-applies syntax highlighting
+        // - Returns Some(MergeResult) if merge was performed
+        let _merge_result = self.state.merge_file_tab(&path);
+        // Note: merge_result contains Clean or Conflict status.
+        // The conflict_mode_lifecycle chunk will add handling for conflicts.
     }
 
     /// Handles a key event by forwarding to the editor state.

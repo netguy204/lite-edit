@@ -60,3 +60,6 @@ pub mod session;
 
 // Chunk: docs/chunks/dragdrop_file_paste - Shell escaping for drag-and-drop paths
 pub mod shell_escape;
+
+// Chunk: docs/chunks/three_way_merge - Line-level three-way merge for concurrent edits
+pub mod merge;

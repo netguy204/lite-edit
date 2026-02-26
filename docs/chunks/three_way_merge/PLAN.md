@@ -8,170 +8,321 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk implements line-level three-way merge for dirty buffers when external file changes are detected. The approach follows the validated prototype from the concurrent_edit_sync investigation (`docs/investigations/concurrent_edit_sync/prototypes/three_way_merge_test.rs`).
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**High-level strategy:**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. Add the `similar` crate as a workspace dependency for line-level diffing
+2. Create a new `merge.rs` module in `crates/editor/src/` containing:
+   - `MergeResult` enum (Clean/Conflict variants)
+   - `three_way_merge(base, ours, theirs)` function implementing the diff3 algorithm
+   - Supporting types (`Action`, `EditMap`) for tracking per-line edits
+3. Wire the merge into the `FileChanged` handler in `drain_loop.rs`:
+   - When `dirty == true`, call `merge_file_tab` instead of skipping
+4. Add `merge_file_tab` method to `EditorState` that:
+   - Performs the three-way merge
+   - Updates buffer content with merged result
+   - Preserves/adjusts cursor position
+   - Updates `base_content` to the new disk content
+   - Re-applies syntax highlighting
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/three_way_merge/GOAL.md)
-with references to the files that you expect to touch.
--->
+**Testing philosophy alignment:**
 
-## Subsystem Considerations
+Per `docs/trunk/TESTING_PHILOSOPHY.md`, tests are written first for behavior with meaningful semantics. The merge algorithm has clear semantic properties (non-overlapping edits merge cleanly, conflicts produce markers, etc.) that map directly to test cases. The prototype already validated 12 scenarios — we'll adapt these as unit tests.
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+The integration with `handle_file_changed` touches the "humble object" boundary (event loop), so we'll focus unit tests on the pure merge function and the `merge_file_tab` state mutation, not the event routing.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add `similar` crate to workspace
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add the `similar` crate to `crates/editor/Cargo.toml` as a dependency. This provides the `TextDiff::from_lines` API for computing line-level diffs.
 
-Example:
+**Location:** `crates/editor/Cargo.toml`
 
-### Step 1: Define the SegmentHeader struct
+**Validation:** `cargo check` passes with the new dependency.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Create merge module with MergeResult type
 
-Location: src/segment/format.rs
+Create `crates/editor/src/merge.rs` with the `MergeResult` enum:
 
-### Step 2: Implement header serialization
+```rust
+// Chunk: docs/chunks/three_way_merge - Line-level three-way merge for concurrent edits
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+/// Result of a three-way merge operation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MergeResult {
+    /// Merge succeeded with no conflicts. The String contains the merged content.
+    Clean(String),
+    /// Merge produced conflicts. The String contains the merged content with
+    /// git-style conflict markers (<<<<<<< buffer / ======= / >>>>>>> disk).
+    Conflict(String),
+}
 
-### Step 3: ...
+impl MergeResult {
+    /// Returns true if the merge completed without conflicts.
+    pub fn is_clean(&self) -> bool {
+        matches!(self, MergeResult::Clean(_))
+    }
 
----
+    /// Returns the merged content, whether clean or conflicted.
+    pub fn content(&self) -> &str {
+        match self {
+            MergeResult::Clean(s) | MergeResult::Conflict(s) => s,
+        }
+    }
 
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+    /// Consumes the result and returns the merged content.
+    pub fn into_content(self) -> String {
+        match self {
+            MergeResult::Clean(s) | MergeResult::Conflict(s) => s,
+        }
+    }
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+**Location:** `crates/editor/src/merge.rs`
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+**Validation:** Module compiles and `MergeResult` can be constructed.
+
+### Step 3: Implement Action enum and EditMap
+
+Add the supporting types that track what happened to each base line:
+
+```rust
+/// Represents the action taken on a base line.
+#[derive(Debug, Clone, PartialEq)]
+enum Action {
+    /// Line unchanged from base
+    Keep,
+    /// Line deleted
+    Delete,
+    /// Line replaced with new content
+    Replace(Vec<String>),
+}
+
+/// Tracks edits from base to a derived version (ours or theirs).
+struct EditMap {
+    /// Action for each base line index
+    actions: Vec<Action>,
+    /// Lines inserted before each base line index (key = base index)
+    /// Index base_lines.len() means insertions at the end
+    insertions: Vec<Vec<String>>,
+}
+```
+
+Add `EditMap::action_at(base_idx)` and `EditMap::insertions_before(base_idx)` accessor methods.
+
+Implement `fn build_edit_map(diff: &TextDiff, base_len: usize) -> EditMap` that walks the diff ops and populates the action/insertion vectors.
+
+**Location:** `crates/editor/src/merge.rs`
+
+**Validation:** Unit tests for `build_edit_map` with simple diffs.
+
+### Step 4: Implement three_way_merge function
+
+Implement the core merge function following the prototype's algorithm:
+
+```rust
+/// Performs a line-level three-way merge.
+///
+/// # Arguments
+///
+/// * `base` - The common ancestor content (stored base_content snapshot)
+/// * `ours` - The current buffer content (user's local edits)
+/// * `theirs` - The new disk content (external program's edits)
+///
+/// # Returns
+///
+/// A `MergeResult` indicating whether the merge was clean or produced conflicts.
+/// The merged content is available via `result.content()`.
+pub fn three_way_merge(base: &str, ours: &str, theirs: &str) -> MergeResult {
+    // 1. Compute line-level diffs from base to each side
+    // 2. Build edit maps for both sides
+    // 3. Walk through base lines, merging non-overlapping edits
+    // 4. For overlapping edits:
+    //    - Same content → take it (convergent edits)
+    //    - Different content → emit conflict markers
+    // 5. Return Clean or Conflict based on whether markers were emitted
+}
+```
+
+The algorithm handles:
+- `Keep/Keep` → output base line
+- `Keep/Delete` or `Delete/Keep` → accept the deletion
+- `Delete/Delete` → agree on deletion
+- `Keep/Replace` or `Replace/Keep` → accept the replacement
+- `Replace/Replace` with same content → accept the convergent edit
+- `Replace/Replace` with different content → conflict
+- `Replace/Delete` or `Delete/Replace` → conflict
+- Insertions before each base line are merged similarly
+
+Conflict markers use the git-style format:
+```
+<<<<<<< buffer
+[ours content]
+=======
+[theirs content]
+>>>>>>> disk
+```
+
+**Location:** `crates/editor/src/merge.rs`
+
+**Validation:** Comprehensive unit tests covering the 12 prototype scenarios plus edge cases.
+
+### Step 5: Write unit tests for three_way_merge
+
+Create test cases adapted from the investigation prototype:
+
+1. Non-overlapping: edits at different locations
+2. Non-overlapping: user adds above, external adds below
+3. Non-overlapping: user deletes function, external adds different function
+4. Convergent: both make the same change
+5. Conflict: both edit the same line differently
+6. Conflict: user deletes, external modifies same line
+7. Claude adds function while user edits existing one
+8. Claude refactors function body while user adds import
+9. Adjacent edits: line N and line N+1 (should merge cleanly)
+10. Empty base: external program writes full file
+11. User appends at end while external prepends at top
+12. Delete-vs-modify conflict (both directions)
+
+Tests should be in a `#[cfg(test)] mod tests` block within `merge.rs`.
+
+**Location:** `crates/editor/src/merge.rs`
+
+**Validation:** `cargo test -p lite-edit merge` passes all tests.
+
+### Step 6: Add merge module to editor lib
+
+Add `pub mod merge;` to `crates/editor/src/lib.rs` to expose the module.
+
+**Location:** `crates/editor/src/lib.rs`
+
+**Validation:** Module is accessible from other files in the crate.
+
+### Step 7: Implement merge_file_tab method in EditorState
+
+Add a method to `EditorState` that handles the dirty buffer merge case:
+
+```rust
+// Chunk: docs/chunks/three_way_merge - Merge dirty buffer with external changes
+/// Merges external file changes into a dirty buffer using three-way merge.
+///
+/// This is called when a FileChanged event arrives for a tab with dirty == true.
+///
+/// # Behavior
+///
+/// - Reads the new disk content
+/// - Performs three-way merge: base_content → buffer, base_content → disk
+/// - On clean merge: replaces buffer content, preserves/adjusts cursor
+/// - On conflict: replaces buffer content (including markers)
+/// - Updates base_content to new disk content
+/// - Dirty flag remains true (user still has unsaved changes)
+/// - Re-applies syntax highlighting
+///
+/// # Returns
+///
+/// `Some(MergeResult)` if merge was performed, `None` if tab not found or
+/// not a dirty file tab.
+pub fn merge_file_tab(&mut self, path: &Path) -> Option<MergeResult> {
+    // 1. Find workspace and tab (similar to reload_file_tab)
+    // 2. Verify tab.dirty == true
+    // 3. Read disk content
+    // 4. Get base_content (must exist for dirty buffer)
+    // 5. Get current buffer content
+    // 6. Call three_way_merge(base, buffer, disk)
+    // 7. Replace buffer with merged content
+    // 8. Clamp cursor to new buffer bounds
+    // 9. Update base_content = disk_content
+    // 10. Re-apply syntax highlighting
+    // 11. Mark full viewport dirty
+    // 12. Return the MergeResult
+}
+```
+
+The method follows the same pattern as `reload_file_tab` but performs merge instead of reload.
+
+**Location:** `crates/editor/src/editor_state.rs`
+
+**Validation:** Unit tests for merge_file_tab behavior.
+
+### Step 8: Wire merge into handle_file_changed
+
+Modify the `handle_file_changed` method in `drain_loop.rs` to call `merge_file_tab` for dirty buffers:
+
+```rust
+fn handle_file_changed(&mut self, path: std::path::PathBuf) {
+    if self.state.is_file_change_suppressed(&path) {
+        return;
+    }
+
+    // Try reload first (handles clean buffers)
+    if self.state.reload_file_tab(&path) {
+        return;
+    }
+
+    // If reload returned false and a matching dirty tab exists, try merge
+    // Chunk: docs/chunks/three_way_merge - Merge for dirty buffers
+    let _merge_result = self.state.merge_file_tab(&path);
+    // Note: merge_result is returned but we don't need to act on it here.
+    // The conflict_mode_lifecycle chunk will add handling for conflicts.
+}
+```
+
+**Location:** `crates/editor/src/drain_loop.rs`
+
+**Validation:** Manual test: edit a file, make external change, observe merge behavior.
+
+### Step 9: Update GOAL.md with code_paths
+
+Update the chunk's GOAL.md frontmatter with the files being created/modified:
+
+```yaml
+code_paths:
+  - crates/editor/src/merge.rs
+  - crates/editor/src/editor_state.rs
+  - crates/editor/src/drain_loop.rs
+  - crates/editor/src/lib.rs
+  - crates/editor/Cargo.toml
+```
+
+**Location:** `docs/chunks/three_way_merge/GOAL.md`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+- **base_snapshot_reload chunk (ACTIVE)**: This chunk depends on `Tab.base_content` and `reload_file_tab` being implemented. The `base_content` field provides the merge base, and the reload logic provides the pattern for file tab updates.
 
-If there are no dependencies, delete this section.
--->
+- **similar crate**: Must be added to workspace dependencies. Pure Rust, no system deps, compatible with the existing dependency profile.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+### Trailing newline handling
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+The prototype handles trailing newlines by checking if either input ends with `\n` and ensuring the output does too. Need to verify this works correctly with the `TextBuffer` which may or may not store trailing newlines consistently.
+
+**Mitigation:** Add explicit test cases for trailing newline scenarios.
+
+### Large file performance
+
+The merge algorithm is O(n) in the number of lines for diff computation and merge walking. For very large files (100k+ lines), this could cause a perceptible pause.
+
+**Mitigation:** This is acceptable for the initial implementation. The investigation noted that files this large are rare in typical usage. If needed, future work could add progress indication or async merge.
+
+### base_content missing for dirty buffer
+
+If somehow a dirty buffer has `base_content = None`, the merge cannot proceed. This shouldn't happen in normal operation (base_content is set on file load), but defensive handling is needed.
+
+**Mitigation:** If base_content is None, treat as if we can't merge and leave the buffer unchanged. Log a warning for debugging.
+
+### Cursor position after conflict
+
+When conflict markers are inserted, the cursor position may end up in an unexpected location. The goal states "cursor position is preserved or adjusted to the first changed line."
+
+**Mitigation:** Use the same cursor clamping as reload_file_tab. For conflicts specifically, could position cursor at first conflict marker, but this is a nice-to-have for the conflict_mode_lifecycle chunk.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

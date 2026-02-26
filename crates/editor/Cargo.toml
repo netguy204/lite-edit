@@ -54,6 +54,9 @@ dirs = "5"
 # Unicode character display widths (for terminal wide characters)
 # Chunk: docs/chunks/terminal_multibyte_rendering - Wide character width tracking
 unicode-width = "0.1"
+# Line-level diffing for three-way merge
+# Chunk: docs/chunks/three_way_merge - Concurrent edit merge support
+similar = "2.6"
 
 [dev-dependencies]
 # Temporary directories for testing

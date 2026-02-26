@@ -3017,6 +3017,100 @@ impl EditorState {
 
         true
     }
+
+    // Chunk: docs/chunks/three_way_merge - Merge dirty buffer with external changes
+    /// Merges external file changes into a dirty buffer using three-way merge.
+    ///
+    /// This is called when a FileChanged event arrives for a tab with `dirty == true`.
+    /// The merge uses the stored `base_content` as the common ancestor, the current
+    /// buffer content as "ours", and the new disk content as "theirs".
+    ///
+    /// # Behavior
+    ///
+    /// - Reads the new disk content
+    /// - Performs three-way merge: base_content → buffer, base_content → disk
+    /// - On clean merge: replaces buffer content with the merged result
+    /// - On conflict: replaces buffer content including conflict markers
+    /// - Cursor position is clamped to new buffer bounds
+    /// - Updates `base_content` to new disk content
+    /// - Dirty flag remains true (user still has unsaved changes)
+    /// - Re-applies syntax highlighting
+    /// - Marks full viewport dirty
+    ///
+    /// # Returns
+    ///
+    /// `Some(MergeResult)` if merge was performed, `None` if:
+    /// - No matching tab was found
+    /// - Tab is not dirty (should use reload_file_tab instead)
+    /// - Tab is not a file tab
+    /// - File couldn't be read
+    /// - base_content is missing (shouldn't happen for dirty buffers)
+    pub fn merge_file_tab(&mut self, path: &Path) -> Option<lite_edit::merge::MergeResult> {
+        use lite_edit::merge::three_way_merge;
+
+        // Find the workspace and tab for this path
+        let mut found_workspace_idx: Option<usize> = None;
+
+        for (ws_idx, ws) in self.editor.workspaces.iter().enumerate() {
+            if ws.find_tab_by_path(path).is_some() {
+                found_workspace_idx = Some(ws_idx);
+                break;
+            }
+        }
+
+        let ws_idx = found_workspace_idx?;
+
+        // Get the workspace and tab mutably
+        let ws = &mut self.editor.workspaces[ws_idx];
+        let tab = ws.find_tab_mut_by_path(path)?;
+
+        // Only merge if the tab is dirty
+        if !tab.dirty {
+            // Clean tabs should use reload_file_tab instead
+            return None;
+        }
+
+        // Get the base content (required for merge)
+        let base_content = tab.base_content.clone()?;
+
+        // Get current buffer content
+        let buffer = tab.as_text_buffer()?;
+        let ours_content = buffer.content();
+
+        // Store old cursor position before replacing buffer
+        let old_cursor = buffer.cursor_position();
+
+        // Read the new disk content
+        let bytes = std::fs::read(path).ok()?;
+        let theirs_content = String::from_utf8_lossy(&bytes).to_string();
+
+        // Perform three-way merge
+        let merge_result = three_way_merge(&base_content, &ours_content, &theirs_content);
+        let merged_content = merge_result.content().to_string();
+
+        // Replace buffer content with merged result
+        let buffer = tab.as_text_buffer_mut()?;
+        *buffer = TextBuffer::from_str(&merged_content);
+
+        // Clamp cursor position to new buffer bounds
+        let new_cursor = clamp_position_to_buffer(old_cursor, buffer);
+        buffer.set_cursor(new_cursor);
+
+        // Update base_content to the new disk content
+        // (so subsequent saves will correctly detect what changed)
+        tab.base_content = Some(theirs_content);
+
+        // Dirty flag remains true - user still has unsaved merged changes
+
+        // Re-apply syntax highlighting
+        let theme = SyntaxTheme::catppuccin_mocha();
+        tab.setup_highlighting(&self.language_registry, theme);
+
+        // Mark full viewport dirty
+        self.dirty_region.merge(DirtyRegion::FullViewport);
+
+        Some(merge_result)
+    }
 }
 
 impl Default for EditorState {
