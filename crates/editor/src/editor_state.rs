@@ -50,7 +50,8 @@ use crate::selector::{SelectorOutcome, SelectorWidget};
 use crate::selector_overlay::calculate_overlay_geometry;
 use crate::viewport::Viewport;
 use crate::workspace::Editor;
-use lite_edit_buffer::{Position, TextBuffer};
+// Chunk: docs/chunks/styled_line_cache - DirtyLines for cache invalidation tracking
+use lite_edit_buffer::{DirtyLines, Position, TextBuffer};
 // Chunk: docs/chunks/syntax_highlighting - Syntax highlighting support
 use lite_edit_syntax::{LanguageRegistry, SyntaxTheme};
 // Chunk: docs/chunks/dragdrop_file_paste - Shell escaping for dropped file paths
@@ -101,6 +102,11 @@ pub struct EditorState {
     pub editor: Editor,
     /// Accumulated dirty region for the current event batch
     pub dirty_region: DirtyRegion,
+    // Chunk: docs/chunks/styled_line_cache - Buffer-level dirty tracking for cache invalidation
+    /// Accumulated buffer-level dirty lines for styled line cache invalidation.
+    /// This tracks which buffer lines have changed since the last render, allowing
+    /// fine-grained cache invalidation instead of clearing the entire cache.
+    pub dirty_lines: DirtyLines,
     /// The active focus target (currently always the buffer target)
     pub focus_target: BufferFocusTarget,
     /// Whether the cursor is currently visible (for blink animation)
@@ -353,6 +359,7 @@ impl EditorState {
         Self {
             editor,
             dirty_region: DirtyRegion::None,
+            dirty_lines: DirtyLines::None,
             focus_target: BufferFocusTarget::new(),
             cursor_visible: true,
             last_keystroke: Instant::now(),
@@ -410,6 +417,7 @@ impl EditorState {
         Self {
             editor,
             dirty_region: DirtyRegion::None,
+            dirty_lines: DirtyLines::None,
             focus_target: BufferFocusTarget::new(),
             cursor_visible: true,
             last_keystroke: Instant::now(),
@@ -2666,6 +2674,8 @@ impl EditorState {
             let dirty_lines = buffer.insert_str(&escaped_text);
             let dirty = viewport.dirty_lines_to_region(&dirty_lines, buffer.line_count());
             self.dirty_region.merge(dirty);
+            // Chunk: docs/chunks/styled_line_cache - Track dirty lines for cache invalidation
+            self.dirty_lines.merge(dirty_lines);
 
             // Ensure cursor is visible after insertion
             let cursor_line = buffer.cursor_position().line;
@@ -2789,6 +2799,16 @@ impl EditorState {
     /// Call this after rendering to reset the dirty state.
     pub fn take_dirty_region(&mut self) -> DirtyRegion {
         std::mem::take(&mut self.dirty_region)
+    }
+
+    // Chunk: docs/chunks/styled_line_cache - Take dirty lines for cache invalidation
+    /// Takes the dirty lines, leaving `DirtyLines::None` in its place.
+    ///
+    /// Call this after rendering to reset the dirty state. The returned value
+    /// should be passed to `Renderer::invalidate_styled_lines()` to invalidate
+    /// cached styled lines for the changed buffer lines.
+    pub fn take_dirty_lines(&mut self) -> DirtyLines {
+        std::mem::take(&mut self.dirty_lines)
     }
 
     /// Toggles cursor visibility for blink animation.

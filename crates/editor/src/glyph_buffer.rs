@@ -44,11 +44,14 @@ use crate::color_palette::ColorPalette;
 use crate::font::{Font, FontMetrics};
 use crate::glyph_atlas::{GlyphAtlas, GlyphInfo};
 use crate::shader::VERTEX_SIZE;
+// Chunk: docs/chunks/styled_line_cache - Styled line cache for reducing per-frame allocations
+use crate::styled_line_cache::StyledLineCache;
 use crate::viewport::Viewport;
 use crate::wrap_layout::WrapLayout;
 // Chunk: docs/chunks/buffer_view_trait - Use BufferView trait instead of TextBuffer
 // Chunk: docs/chunks/renderer_styled_content - Use Style types for per-span colors
-use lite_edit_buffer::{BufferView, CursorShape, UnderlineStyle};
+// Chunk: docs/chunks/styled_line_cache - DirtyLines for cache invalidation
+use lite_edit_buffer::{BufferView, CursorShape, DirtyLines, StyledLine, UnderlineStyle};
 // Chunk: docs/chunks/terminal_multibyte_rendering - Wide character width tracking
 use unicode_width::UnicodeWidthChar;
 
@@ -285,6 +288,10 @@ pub struct GlyphBuffer {
     persistent_indices: Vec<u32>,
     /// Persistent buffer for tracking which buffer lines are rendered
     rendered_buffer_lines: Vec<usize>,
+    // Chunk: docs/chunks/styled_line_cache - Cache for computed styled lines
+    /// Cache for computed styled lines, keyed by buffer line index.
+    /// Eliminates redundant `styled_line()` calls for unchanged lines.
+    styled_line_cache: StyledLineCache,
     /// Timing of the last styled_line collection pass (perf-instrumentation only).
     #[cfg(feature = "perf-instrumentation")]
     last_styled_line_timing: Option<(std::time::Duration, usize)>,
@@ -312,6 +319,7 @@ impl GlyphBuffer {
             persistent_vertices: Vec::new(),
             persistent_indices: Vec::new(),
             rendered_buffer_lines: Vec::new(),
+            styled_line_cache: StyledLineCache::new(),
             #[cfg(feature = "perf-instrumentation")]
             last_styled_line_timing: None,
         }
@@ -343,6 +351,24 @@ impl GlyphBuffer {
     /// Returns the current vertical offset
     pub fn y_offset(&self) -> f32 {
         self.y_offset
+    }
+
+    // Chunk: docs/chunks/styled_line_cache - Cache invalidation and management
+    /// Invalidates cached styled lines based on dirty line information.
+    ///
+    /// Call this at the start of each render pass with the `DirtyLines` from
+    /// `BufferView::take_dirty()`. This ensures that modified lines are
+    /// recomputed while unchanged lines are served from cache.
+    pub fn invalidate_styled_lines(&mut self, dirty: &DirtyLines) {
+        self.styled_line_cache.invalidate(dirty);
+    }
+
+    /// Clears the styled line cache entirely.
+    ///
+    /// Call this when switching to a different buffer (tab change) to ensure
+    /// stale cache entries don't cause visual artifacts.
+    pub fn clear_styled_line_cache(&mut self) {
+        self.styled_line_cache.clear();
     }
 
     /// Takes the last styled_line timing measurement, if any (perf-instrumentation only).
@@ -598,12 +624,28 @@ impl GlyphBuffer {
         let visible_range = viewport.visible_range(view.line_count());
 
         // Chunk: docs/chunks/glyph_single_styled_line - Pre-collect styled lines to avoid redundant calls
-        // Pre-collect styled lines once per visible buffer line. Previously, styled_line() was called
-        // 3 times per visible line (in background, glyph, and underline phases). This optimization
-        // collects once and references in each phase.
+        // Chunk: docs/chunks/styled_line_cache - Use cache to avoid redundant styled_line() calls
+        // Collect styled lines for visible range, using cache for unchanged lines.
+        // Lines not in cache are computed and cached. Lines that were invalidated
+        // by DirtyLines (via invalidate_styled_lines) are recomputed.
         let first_visible = viewport.first_visible_line();
-        let styled_lines: Vec<Option<_>> = visible_range.clone()
-            .map(|line| view.styled_line(line))
+        let line_count = view.line_count();
+
+        // Ensure cache is sized appropriately
+        self.styled_line_cache.resize(line_count);
+
+        // Populate cache for any missing lines (cache miss = recompute)
+        for line in visible_range.clone() {
+            if self.styled_line_cache.get(line).is_none() {
+                if let Some(styled) = view.styled_line(line) {
+                    self.styled_line_cache.insert(line, styled);
+                }
+            }
+        }
+
+        // Collect references to cached styled lines
+        let styled_lines: Vec<Option<&StyledLine>> = visible_range.clone()
+            .map(|line| self.styled_line_cache.get(line))
             .collect();
 
         // Estimate character count for buffer sizing using pre-collected styled lines
@@ -1253,12 +1295,26 @@ impl GlyphBuffer {
         }
         estimated_quads += 1; // cursor
 
-        // Pre-collect styled lines for all rendered buffer lines
+        // Chunk: docs/chunks/styled_line_cache - Use cache to avoid redundant styled_line() calls
+        // Ensure cache is sized appropriately
+        self.styled_line_cache.resize(line_count);
+
+        // Pre-collect styled lines for all rendered buffer lines, using cache where possible
         #[cfg(feature = "perf-instrumentation")]
         let styled_line_start = std::time::Instant::now();
 
-        let styled_lines: Vec<Option<_>> = self.rendered_buffer_lines.iter()
-            .map(|&line| view.styled_line(line))
+        // Populate cache for any missing lines (cache miss = recompute)
+        for &line in &self.rendered_buffer_lines {
+            if self.styled_line_cache.get(line).is_none() {
+                if let Some(styled) = view.styled_line(line) {
+                    self.styled_line_cache.insert(line, styled);
+                }
+            }
+        }
+
+        // Collect references to cached styled lines
+        let styled_lines: Vec<Option<&StyledLine>> = self.rendered_buffer_lines.iter()
+            .map(|&line| self.styled_line_cache.get(line))
             .collect();
 
         #[cfg(feature = "perf-instrumentation")]

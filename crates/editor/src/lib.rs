@@ -63,3 +63,6 @@ pub mod shell_escape;
 
 // Chunk: docs/chunks/three_way_merge - Line-level three-way merge for concurrent edits
 pub mod merge;
+
+// Chunk: docs/chunks/styled_line_cache - Styled line cache for reducing per-frame allocations
+mod styled_line_cache;

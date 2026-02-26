@@ -1,8 +1,12 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/editor/src/styled_line_cache.rs
+- crates/editor/src/glyph_buffer.rs
+- crates/editor/src/renderer.rs
+- crates/editor/src/lib.rs
 code_references: []
 narrative: null
 investigation: null
@@ -10,9 +14,9 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["typescript_highlight_layering"]
+created_after:
+- typescript_highlight_layering
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

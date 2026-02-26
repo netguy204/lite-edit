@@ -497,6 +497,25 @@ impl Renderer {
         self.viewport.dirty_lines_to_region(dirty_lines, line_count)
     }
 
+    // Chunk: docs/chunks/styled_line_cache - Cache management methods
+    /// Invalidates cached styled lines based on dirty line information.
+    ///
+    /// Call this before rendering when buffer content has changed. The dirty
+    /// lines should come from `BufferView::take_dirty()` on the active buffer.
+    /// This ensures that modified lines are recomputed during the next render
+    /// while unchanged lines are served from cache.
+    pub fn invalidate_styled_lines(&mut self, dirty: &DirtyLines) {
+        self.glyph_buffer.invalidate_styled_lines(dirty);
+    }
+
+    /// Clears the styled line cache entirely.
+    ///
+    /// Call this when switching to a different buffer (tab change) to ensure
+    /// stale cache entries from the previous buffer don't cause visual artifacts.
+    pub fn clear_styled_line_cache(&mut self) {
+        self.glyph_buffer.clear_styled_line_cache();
+    }
+
     // Chunk: docs/chunks/renderer_polymorphic_buffer - Legacy method, not used with workspace model
     /// Renders based on dirty region (legacy method - use render_with_editor instead)
     ///

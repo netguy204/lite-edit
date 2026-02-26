@@ -63,6 +63,8 @@ mod focus;
 mod font;
 mod glyph_atlas;
 mod glyph_buffer;
+// Chunk: docs/chunks/styled_line_cache - Styled line cache for reducing per-frame allocations
+mod styled_line_cache;
 // Chunk: docs/chunks/syntax_highlighting - Syntax-highlighted buffer view wrapper
 mod highlighted_buffer;
 mod input;

@@ -8,170 +8,276 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The `StyledLineCache` is a per-buffer cache that stores computed `StyledLine` results keyed by buffer line index. The cache sits between the renderer and the underlying `BufferView`, intercepting `styled_line()` calls and serving from cache when valid.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Strategy:**
+1. Create `StyledLineCache` struct in the editor crate (near `glyph_buffer.rs`)
+2. Integrate the cache into the render path, invalidating based on `DirtyLines` from `take_dirty()`
+3. Handle line insertion/deletion by shifting or invalidating cache entries from the mutation point
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+**Key insight from ARCHITECTURE_REVIEW.md (recommendation #3):**
+> Every call to `styled_line(line_idx)` allocates a new `StyledLine` containing a `Vec<StyledSpan>`. For a 40-line viewport, that's 40 `Vec` allocations per frame — even for lines that haven't changed.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/styled_line_cache/GOAL.md)
-with references to the files that you expect to touch.
--->
+The cache eliminates ~90% of these allocations during typical editing (only the edited line changes).
+
+**Why cache at the editor layer, not BufferView:**
+- `BufferView` is a trait implemented by both `TextBuffer` (via `HighlightedBufferView`) and `TerminalBuffer`
+- Each implementation has different costs for `styled_line()` — syntax highlighting for text buffers, cell iteration for terminals
+- A single cache at the render layer handles both uniformly and avoids duplicating cache logic
+
+**Testing approach (per TESTING_PHILOSOPHY.md):**
+- Unit tests verify cache hit/miss behavior and invalidation correctness
+- No visual/GPU testing needed — the cache is pure data structure manipulation
+- Boundary tests: empty buffer, line insertion/deletion, `FromLineToEnd` invalidation
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+- **docs/subsystems/renderer** (DOCUMENTED): This chunk IMPLEMENTS a cache layer that integrates with the rendering pipeline. The cache invalidation is driven by `DirtyLines` which flows through the existing dirty tracking.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+- **docs/subsystems/viewport_scroll** (DOCUMENTED): This chunk USES the viewport's `visible_range()` to determine which lines to cache. The cache benefits scroll performance by retaining lines from the previous viewport that overlap with the new viewport.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Define `StyledLineCache` struct
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create `crates/editor/src/styled_line_cache.rs` with:
 
-Example:
+```rust
+// Chunk: docs/chunks/styled_line_cache - Cached styled lines per buffer line
+use lite_edit_buffer::{DirtyLines, StyledLine};
 
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+pub struct StyledLineCache {
+    /// Cached styled lines indexed by buffer line number.
+    /// `None` means the line needs recomputation.
+    lines: Vec<Option<StyledLine>>,
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Core API:
+- `new() -> Self` — creates empty cache
+- `get(&self, line: usize) -> Option<&StyledLine>` — returns cached line if present
+- `insert(&mut self, line: usize, styled: StyledLine)` — stores a computed line
+- `invalidate(&mut self, dirty: &DirtyLines)` — clears affected entries based on dirty info
+- `resize(&mut self, line_count: usize)` — adjusts cache size when buffer line count changes
+- `clear(&mut self)` — clears all entries (for buffer switch / tab change)
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Location: `crates/editor/src/styled_line_cache.rs`
+
+### Step 2: Implement invalidation logic
+
+The `invalidate()` method handles each `DirtyLines` variant:
+
+```rust
+pub fn invalidate(&mut self, dirty: &DirtyLines) {
+    match dirty {
+        DirtyLines::None => {}
+        DirtyLines::Single(line) => {
+            if *line < self.lines.len() {
+                self.lines[*line] = None;
+            }
+        }
+        DirtyLines::Range { from, to } => {
+            for line in *from..*to {
+                if line < self.lines.len() {
+                    self.lines[line] = None;
+                }
+            }
+        }
+        DirtyLines::FromLineToEnd(line) => {
+            // Truncate to invalidate all lines from this point
+            if *line < self.lines.len() {
+                self.lines.truncate(*line);
+            }
+        }
+    }
+}
+```
+
+**Line insertion/deletion handling:**
+- `FromLineToEnd(line)` triggers truncation — all lines from `line` onward become invalid because line indices shift
+- This is conservative but correct; shifted lines will be recomputed on next access
+
+Location: `crates/editor/src/styled_line_cache.rs`
+
+### Step 3: Write unit tests for cache behavior
+
+Test cases (TDD — write tests first, then implementation):
+
+1. **Cache miss returns None:**
+   ```rust
+   #[test]
+   fn test_cache_miss_returns_none() {
+       let cache = StyledLineCache::new();
+       assert!(cache.get(0).is_none());
+   }
+   ```
+
+2. **Cache hit after insert:**
+   ```rust
+   #[test]
+   fn test_cache_hit_after_insert() {
+       let mut cache = StyledLineCache::new();
+       cache.resize(10);
+       cache.insert(5, StyledLine::plain("hello"));
+       assert_eq!(cache.get(5).unwrap(), &StyledLine::plain("hello"));
+   }
+   ```
+
+3. **Single line invalidation:**
+   ```rust
+   #[test]
+   fn test_invalidate_single() {
+       let mut cache = StyledLineCache::new();
+       cache.resize(10);
+       cache.insert(5, StyledLine::plain("hello"));
+       cache.invalidate(&DirtyLines::Single(5));
+       assert!(cache.get(5).is_none());
+   }
+   ```
+
+4. **Range invalidation:**
+   ```rust
+   #[test]
+   fn test_invalidate_range() {
+       let mut cache = StyledLineCache::new();
+       cache.resize(10);
+       for i in 0..10 { cache.insert(i, StyledLine::plain("line")); }
+       cache.invalidate(&DirtyLines::Range { from: 3, to: 7 });
+       assert!(cache.get(2).is_some());  // before range
+       assert!(cache.get(3).is_none());  // in range
+       assert!(cache.get(6).is_none());  // in range
+       assert!(cache.get(7).is_some());  // after range (exclusive end)
+   }
+   ```
+
+5. **FromLineToEnd truncation:**
+   ```rust
+   #[test]
+   fn test_invalidate_from_line_to_end() {
+       let mut cache = StyledLineCache::new();
+       cache.resize(10);
+       for i in 0..10 { cache.insert(i, StyledLine::plain("line")); }
+       cache.invalidate(&DirtyLines::FromLineToEnd(5));
+       assert!(cache.get(4).is_some());  // before
+       assert!(cache.get(5).is_none());  // at point
+       assert_eq!(cache.len(), 5);        // truncated
+   }
+   ```
+
+6. **Clear on buffer switch:**
+   ```rust
+   #[test]
+   fn test_clear() {
+       let mut cache = StyledLineCache::new();
+       cache.resize(10);
+       cache.insert(5, StyledLine::plain("hello"));
+       cache.clear();
+       assert!(cache.get(5).is_none());
+       assert_eq!(cache.len(), 0);
+   }
+   ```
+
+Location: `crates/editor/src/styled_line_cache.rs` (in `#[cfg(test)]` module)
+
+### Step 4: Integrate cache into `GlyphBuffer`
+
+The cache will be owned by the code that iterates visible lines — currently in `GlyphBuffer::update_glyphs_wrapped()` and `GlyphBuffer::update_glyphs()`.
+
+Modify `GlyphBuffer` to:
+1. Add a `StyledLineCache` field
+2. Before the render pass, call `cache.invalidate(dirty_lines)` with the dirty info from `BufferView::take_dirty()`
+3. Replace direct `view.styled_line(line)` calls with a pattern that checks cache first:
+
+```rust
+fn get_or_compute_styled_line(
+    &mut self,
+    line: usize,
+    view: &dyn BufferView,
+) -> Option<&StyledLine> {
+    if self.styled_line_cache.get(line).is_none() {
+        if let Some(styled) = view.styled_line(line) {
+            self.styled_line_cache.insert(line, styled);
+        } else {
+            return None;
+        }
+    }
+    self.styled_line_cache.get(line)
+}
+```
+
+**Key change:** The pre-collected `styled_lines: Vec<Option<_>>` pattern currently used in `update_glyphs_wrapped()` will be replaced with cache lookups. This eliminates the per-frame Vec allocation for this collection as well.
+
+Location: `crates/editor/src/glyph_buffer.rs`
+
+### Step 5: Handle buffer switch / tab change
+
+When a tab is switched, the cache must be cleared or replaced. Options:
+1. **Per-tab cache:** Each tab owns its own `StyledLineCache`
+2. **Single cache with clear:** One cache in `GlyphBuffer`, cleared on tab switch
+
+Option 2 is simpler since the cache is already in `GlyphBuffer`. Add a `clear_styled_line_cache()` method called from tab switch logic.
+
+The tab switch detection can happen in `Renderer::render_pane()` by tracking the previous buffer identity (e.g., via a buffer ID or pointer comparison).
+
+Location: `crates/editor/src/glyph_buffer.rs`, `crates/editor/src/renderer.rs`
+
+### Step 6: Handle resize (line count changes)
+
+When the buffer's line count changes (lines added/deleted), call `cache.resize(new_line_count)`:
+- If growing: extend with `None` entries
+- If shrinking: truncate
+
+This is already handled implicitly by `FromLineToEnd` invalidation, but explicit resize ensures the cache stays sized appropriately.
+
+Location: `crates/editor/src/styled_line_cache.rs`, called from `glyph_buffer.rs`
+
+### Step 7: Add perf instrumentation (optional but recommended)
+
+Under `#[cfg(feature = "perf-instrumentation")]`, track:
+- Cache hit/miss counts per frame
+- Recomputation time vs. cache hit time
+
+This validates the expected 90% hit rate during typical editing.
+
+```rust
+#[cfg(feature = "perf-instrumentation")]
+pub struct CacheStats {
+    pub hits: usize,
+    pub misses: usize,
+}
+```
+
+Location: `crates/editor/src/styled_line_cache.rs`
+
+### Step 8: Integration test with HighlightedBufferView
+
+Verify that the cache integrates correctly with syntax-highlighted buffers:
+1. Type a character — only that line should be recomputed
+2. Scroll — overlapping lines should be cache hits
+3. Insert newline (splitting a line) — current line + all below should be invalidated
+
+This can be a manual test or an automated integration test using `EditorContext`.
+
+Location: `crates/editor/tests/` (new integration test file)
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+- **typescript_highlight_layering** (listed in `created_after`): Ensures the highlighting infrastructure is stable before adding caching on top.
 
-If there are no dependencies, delete this section.
--->
+No new external crates needed — the cache uses only standard library types.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Memory overhead:** The cache holds `StyledLine` clones for all visible lines plus scroll overlap. For a 40-line viewport with ~10 spans/line averaging 20 chars, that's ~40 * 10 * 20 * 4 = ~32KB per tab. This is acceptable.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Terminal buffer frequency:** Terminal buffers can change many lines per PTY read. The cache still provides value when only partial grid updates occur (e.g., cursor movement, single-line echo). For full-screen redraws (vim, less), the cache provides no benefit but adds no overhead (cache is invalidated and rebuilt).
+
+3. **Cache identity on buffer switch:** Need to ensure the cache is properly invalidated when switching tabs. A stale cache would cause visual artifacts. Solution: Clear cache on tab switch or track buffer identity.
+
+4. **Integration with pane-per-frame caching:** The `Renderer` currently operates on a per-pane basis. The cache should be per-pane or per-buffer, not global to the renderer. The plan attaches it to `GlyphBuffer`, which is already per-pane.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->
