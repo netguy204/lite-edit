@@ -1,18 +1,24 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/terminal/src/terminal_buffer.rs
+- crates/editor/src/glyph_buffer.rs
+- crates/terminal/tests/integration.rs
 code_references: []
 narrative: null
 investigation: null
-subsystems: []
+subsystems:
+  - subsystem_id: "renderer"
+    relationship: uses
 friction_entries: []
 bug_type: semantic
 depends_on: []
-created_after: ["emacs_line_nav", "pane_mirror_restore"]
+created_after:
+- emacs_line_nav
+- pane_mirror_restore
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

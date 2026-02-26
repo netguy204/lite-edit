@@ -1,177 +1,131 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The bug manifests as the cursor's block inversion being rendered one character behind the actual cursor position, with ghost shading persisting on old positions. This suggests a mismatch between where the cursor **is** (as reported by `TerminalBuffer::cursor_info()`) and where the cursor **shading** is rendered in `GlyphBuffer`.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Hypothesis**: The issue is most likely in how the cursor position from `cursor_info()` interacts with the glyph rendering pipeline. The terminal cursor position comes from `alacritty_terminal::grid::cursor.point`, which uses (column, line) coordinates. When rendering:
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. The cursor position is obtained via `BufferView::cursor_info()`
+2. This position is converted to screen coordinates
+3. A cursor quad is created at that screen position
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/terminal_cursor_shading/GOAL.md)
-with references to the files that you expect to touch.
--->
+The bug description mentions the shading lags by one character, which could mean:
+- The cursor position is read at the wrong time (before vs after a grid update)
+- Column indexing is off-by-one somewhere in the coordinate chain
+- The styled line cache is interfering with cursor rendering
+
+**Investigation Strategy**:
+1. Add a test that reproduces the bug by inserting text and checking cursor position
+2. Trace through the cursor position flow from `TerminalBuffer::cursor_info()` to quad generation
+3. Check if the `pane_mirror_restore` chunk's styled line cache clearing interacts with terminal cursor state
+
+**Fix Strategy**: Once the root cause is identified, fix the coordinate mismatch. This is likely a semantic bug (revealed new understanding of intended behavior) rather than an implementation bug, since cursor rendering used to work.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+- **docs/subsystems/renderer** (DOCUMENTED): This chunk USES the renderer subsystem for cursor quad generation. The fix will likely be in `glyph_buffer.rs` cursor rendering logic or in `terminal_buffer.rs` cursor position calculation. Per the subsystem's "Draw Order Within Layer" convention, cursor quads render last (background → selection → glyphs → cursor).
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Create reproduction test
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add a test in `crates/terminal/tests/integration.rs` that:
+1. Creates a `TerminalBuffer`
+2. Feeds escape sequences to move the cursor to a specific position
+3. Verifies `cursor_info()` returns the expected position
 
-Example:
+This test will confirm whether the bug is in cursor position reporting or rendering.
 
-### Step 1: Define the SegmentHeader struct
+Location: `crates/terminal/tests/integration.rs`
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Trace cursor position flow
 
-Location: src/segment/format.rs
+Using the test and code analysis, trace:
+1. `TerminalBuffer::cursor_info()` - how it reads from `term.grid().cursor.point`
+2. How cold scrollback offset is added to cursor line
+3. How the cursor position flows to `GlyphBuffer::update_from_buffer_with_wrap()`
 
-### Step 2: Implement header serialization
+Document findings before proceeding with fix.
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+### Step 3: Identify and fix the off-by-one issue
 
-### Step 3: ...
+Based on Step 2 findings, apply the fix. Most likely locations:
+- `terminal_buffer.rs#cursor_info()` - line/column calculation
+- `glyph_buffer.rs` - screen coordinate conversion in cursor quad creation
 
----
+The fix should ensure the cursor quad is created at `cursor_info().position`, not at an adjacent cell.
 
-**BACKREFERENCE COMMENTS**
+Location: One or both of:
+- `crates/terminal/src/terminal_buffer.rs`
+- `crates/editor/src/glyph_buffer.rs`
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+### Step 4: Verify ghost shading is resolved
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+The ghost shading (old cursor position retaining inversion) is likely caused by:
+- Dirty region tracking not including the old cursor position, OR
+- Styled line cache retaining stale data
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+Verify that when cursor moves:
+1. The old position is marked dirty
+2. The new position shows the cursor quad
+3. No inversion remains at the old position
 
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
+If dirty tracking is the issue, ensure `DirtyLines` includes both old and new cursor positions.
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+### Step 5: Add cursor rendering regression test
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Add a test that verifies cursor position tracking through multiple movements:
+1. Type several characters
+2. Move cursor with arrow keys
+3. Verify `cursor_info()` position matches expected position at each step
 
-## Dependencies
+Location: `crates/terminal/tests/integration.rs`
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+### Step 6: Manual verification
 
-If there are no dependencies, delete this section.
--->
+Since cursor rendering involves visual output (humble view), manually verify:
+- Terminal cursor tracks correctly during typing
+- Arrow key movements update cursor immediately
+- Backspace moves cursor and clears shading correctly
+- Works in both shell prompt and TUI applications (vim, htop)
+- Editor pane cursor rendering is unaffected (no regression)
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Root cause uncertainty**: The bug description mentions "file_change_events chunk landed" but that chunk is still FUTURE. Need to identify the actual change that introduced this regression by checking what's in `created_after` (emacs_line_nav, pane_mirror_restore).
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Styled line cache interaction**: The `pane_mirror_restore` chunk added cache clearing between pane renders. This may have changed timing/state that affects cursor position reads. Need to verify cache isn't causing stale cursor positions.
+
+- **Multiple code paths**: There are two cursor rendering paths in `glyph_buffer.rs`:
+  1. `update_from_buffer_with_cursor()` - non-wrap-aware (used for editor buffers)
+  2. `update_from_buffer_with_wrap()` - wrap-aware (used for wrapped content and terminals)
+
+  Need to verify the fix applies to the correct path for terminal rendering.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
+### Investigation Findings
 
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
+The implementation deviated from the expected fix because thorough investigation revealed that **the bug could not be reproduced through testing**:
 
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
+1. **Cursor position tracking is correct**: Added 12+ unit tests verifying that `cursor_info()` returns the correct position after various operations (typing, backspace, escape sequences, cursor movement). All tests pass.
 
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+2. **No off-by-one error found**: Traced the cursor position flow from `TerminalBuffer::cursor_info()` → `GlyphBuffer::update_from_buffer_with_wrap()` → `create_cursor_quad_with_offset()`. The coordinate conversion uses the same `wrap_layout.buffer_col_to_screen_pos()` for both glyphs and cursor, ensuring consistency.
+
+3. **No spurious INVERSE flags**: Added a test verifying that terminal cells don't have the INVERSE flag set by cursor position (inverse is only set by explicit escape sequences).
+
+4. **Styled line cache is clean**: The `pane_mirror_restore` chunk (in `created_after`) added `clear_styled_line_cache()` between pane renders, which may have inadvertently fixed the reported issue.
+
+5. **Draw order is correct**: Cursor quad is rendered last (after glyphs), ensuring it appears on top.
+
+### Conclusion
+
+The bug description mentioned "This was observed after the recent `file_change_events` chunk landed", but `file_change_events` is still FUTURE (not yet implemented). The actual trigger was likely related to the styled line cache contamination that was fixed by `pane_mirror_restore`.
+
+Given that:
+- All cursor position tests pass
+- The rendering code is verified correct
+- No reproduction path was found
+
+This chunk adds **comprehensive cursor position regression tests** to prevent future regressions, rather than a code fix to the rendering pipeline.

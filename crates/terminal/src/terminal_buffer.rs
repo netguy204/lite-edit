@@ -935,6 +935,19 @@ impl BufferView for TerminalBuffer {
     }
 }
 
+impl TerminalBuffer {
+    // Chunk: docs/chunks/terminal_cursor_shading - Test helper for feeding raw bytes
+    /// Feeds raw bytes directly to the terminal emulator.
+    ///
+    /// This is a test helper that bypasses the PTY, allowing tests to verify
+    /// terminal state after processing escape sequences and text.
+    #[cfg(test)]
+    pub fn feed_bytes(&mut self, data: &[u8]) {
+        self.processor.advance(&mut self.term, data);
+        self.dirty = DirtyLines::FromLineToEnd(0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1217,5 +1230,258 @@ mod tests {
         // Without calling spawn_*, there's no PTY, so poll_events returns Idle
         let result = terminal.poll_events();
         assert_eq!(result, PollResult::Idle);
+    }
+
+    // =========================================================================
+    // Cursor Position Tests
+    // Chunk: docs/chunks/terminal_cursor_shading - Cursor position tracking tests
+    // =========================================================================
+
+    #[test]
+    fn test_cursor_position_after_typing_one_char() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+        // Initial cursor at (0, 0)
+        let cursor = terminal.cursor_info().unwrap();
+        assert_eq!(cursor.position.col, 0, "Initial cursor should be at column 0");
+
+        // Feed one character
+        terminal.feed_bytes(b"A");
+
+        // Cursor should now be at column 1 (after the typed character)
+        let cursor = terminal.cursor_info().unwrap();
+        assert_eq!(cursor.position.col, 1, "Cursor should be at column 1 after typing 'A'");
+    }
+
+    #[test]
+    fn test_cursor_position_after_typing_multiple_chars() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+        // Feed 5 characters
+        terminal.feed_bytes(b"Hello");
+
+        // Cursor should be at column 5
+        let cursor = terminal.cursor_info().unwrap();
+        assert_eq!(cursor.position.col, 5, "Cursor should be at column 5 after typing 'Hello'");
+    }
+
+    #[test]
+    fn test_cursor_position_after_newline() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+        // In terminal emulation, \n (LF) only moves cursor down, doesn't reset column.
+        // To move to column 0, we need \r (CR).
+        terminal.feed_bytes(b"Hello\r\n");
+
+        // Cursor should be at line 1, column 0
+        let cursor = terminal.cursor_info().unwrap();
+        assert_eq!(cursor.position.line, 1, "Cursor should be at line 1 after CRLF");
+        assert_eq!(cursor.position.col, 0, "Cursor should be at column 0 after CRLF");
+    }
+
+    #[test]
+    fn test_cursor_position_after_carriage_return_newline() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+        // Feed text with CRLF (common in terminal output)
+        terminal.feed_bytes(b"Hello\r\n");
+
+        // Cursor should be at line 1, column 0
+        let cursor = terminal.cursor_info().unwrap();
+        assert_eq!(cursor.position.line, 1, "Cursor should be at line 1 after CRLF");
+        assert_eq!(cursor.position.col, 0, "Cursor should be at column 0 after CRLF");
+    }
+
+    #[test]
+    fn test_cursor_position_after_cursor_movement_escape() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+        // Feed text to move cursor to column 10
+        terminal.feed_bytes(b"0123456789");
+        assert_eq!(terminal.cursor_info().unwrap().position.col, 10);
+
+        // Move cursor left 3 positions using escape sequence ESC[3D
+        terminal.feed_bytes(b"\x1b[3D");
+        let cursor = terminal.cursor_info().unwrap();
+        assert_eq!(cursor.position.col, 7, "Cursor should move left 3 to column 7");
+
+        // Move cursor right 2 positions using escape sequence ESC[2C
+        terminal.feed_bytes(b"\x1b[2C");
+        let cursor = terminal.cursor_info().unwrap();
+        assert_eq!(cursor.position.col, 9, "Cursor should move right 2 to column 9");
+    }
+
+    #[test]
+    fn test_cursor_position_absolute_movement() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+        // Move cursor to absolute position (5, 10) using ESC[row;colH
+        // Note: Terminal escape sequences use 1-based indices
+        terminal.feed_bytes(b"\x1b[5;10H");
+        let cursor = terminal.cursor_info().unwrap();
+        assert_eq!(cursor.position.line, 4, "Cursor should be at line 4 (0-indexed from row 5)");
+        assert_eq!(cursor.position.col, 9, "Cursor should be at column 9 (0-indexed from col 10)");
+    }
+
+    #[test]
+    fn test_content_and_cursor_alignment() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+        // Feed "ABC" - cursor should end up AFTER the 'C' at column 3
+        terminal.feed_bytes(b"ABC");
+
+        // Verify content
+        let line = terminal.styled_line(0).unwrap();
+        let text: String = line.spans.iter().map(|s| &s.text[..]).collect();
+        assert!(text.starts_with("ABC"), "Line should start with 'ABC', got: {:?}", text);
+
+        // Verify cursor position is at column 3 (after 'C')
+        // The cursor should be AFTER the last typed character, not ON it
+        let cursor = terminal.cursor_info().unwrap();
+        assert_eq!(
+            cursor.position.col, 3,
+            "Cursor should be at column 3 (after 'ABC'), but is at column {}",
+            cursor.position.col
+        );
+
+        // The character at cursor position should be space (empty)
+        // Characters at positions 0, 1, 2 are 'A', 'B', 'C'
+        // Character at position 3 (cursor position) should be space
+        let chars: Vec<char> = text.chars().collect();
+        if cursor.position.col < chars.len() {
+            let char_at_cursor = chars[cursor.position.col];
+            assert_eq!(
+                char_at_cursor, ' ',
+                "Character at cursor position {} should be space, got {:?}",
+                cursor.position.col, char_at_cursor
+            );
+        }
+    }
+
+    // Chunk: docs/chunks/terminal_cursor_shading - Verify cells don't have spurious INVERSE flags
+    #[test]
+    fn test_cells_have_no_cursor_inverse_flags() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+        // Type some text
+        terminal.feed_bytes(b"Hello");
+
+        // Get the styled line
+        let line = terminal.styled_line(0).unwrap();
+
+        // Check that no spans have inverse flag set
+        // (inverse should only be set by explicit escape sequences, not by cursor position)
+        for span in &line.spans {
+            assert!(
+                !span.style.inverse,
+                "Span '{}' has inverse flag set unexpectedly",
+                span.text
+            );
+        }
+
+        // Cursor should be at column 5
+        let cursor = terminal.cursor_info().unwrap();
+        assert_eq!(cursor.position.col, 5);
+    }
+
+    // Chunk: docs/chunks/terminal_cursor_shading - Test cursor position after backspace
+    #[test]
+    fn test_cursor_position_after_backspace() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+        // Type "ABC"
+        terminal.feed_bytes(b"ABC");
+        assert_eq!(terminal.cursor_info().unwrap().position.col, 3);
+
+        // Send backspace (BS = 0x08)
+        terminal.feed_bytes(b"\x08");
+        let cursor = terminal.cursor_info().unwrap();
+        assert_eq!(cursor.position.col, 2, "Cursor should move left to column 2 after backspace");
+
+        // The character at column 2 should still be 'C' (backspace only moves cursor)
+        let line = terminal.styled_line(0).unwrap();
+        let text: String = line.spans.iter().map(|s| &s.text[..]).collect();
+        assert!(text.starts_with("ABC"), "Content should still be 'ABC...' after backspace");
+    }
+
+    // Chunk: docs/chunks/terminal_cursor_shading - Test cursor position with shell prompt simulation
+    #[test]
+    fn test_cursor_position_shell_prompt() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+        // Simulate a simple shell prompt: "$ " followed by user input "ls"
+        terminal.feed_bytes(b"$ ls");
+        let cursor = terminal.cursor_info().unwrap();
+        assert_eq!(cursor.position.col, 4, "Cursor should be at column 4 after '$ ls'");
+
+        // Verify content
+        let line = terminal.styled_line(0).unwrap();
+        let text: String = line.spans.iter().map(|s| &s.text[..]).collect();
+        assert!(text.starts_with("$ ls"), "Line should start with '$ ls'");
+    }
+
+    // Chunk: docs/chunks/terminal_cursor_shading - Comprehensive cursor position tracking test
+    #[test]
+    fn test_cursor_position_comprehensive_sequence() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+        // Phase 1: Type characters
+        terminal.feed_bytes(b"Hello");
+        assert_eq!(terminal.cursor_info().unwrap().position.col, 5,
+            "After 'Hello', cursor should be at col 5");
+
+        // Phase 2: Move cursor left
+        terminal.feed_bytes(b"\x1b[2D"); // Move left 2 positions
+        assert_eq!(terminal.cursor_info().unwrap().position.col, 3,
+            "After moving left 2, cursor should be at col 3");
+
+        // Phase 3: Type in the middle (overwrites)
+        terminal.feed_bytes(b"X");
+        assert_eq!(terminal.cursor_info().unwrap().position.col, 4,
+            "After typing 'X', cursor should be at col 4");
+
+        // Verify content: should be "HelXo" (X overwrote 'l')
+        let line = terminal.styled_line(0).unwrap();
+        let text: String = line.spans.iter().map(|s| &s.text[..]).collect();
+        assert!(text.starts_with("HelXo"),
+            "Content should be 'HelXo...', got '{}'", text);
+
+        // Phase 4: Move to end of line and type
+        terminal.feed_bytes(b"\x1b[C"); // Move right 1 position
+        assert_eq!(terminal.cursor_info().unwrap().position.col, 5,
+            "After moving right 1, cursor should be at col 5");
+
+        terminal.feed_bytes(b"!");
+        assert_eq!(terminal.cursor_info().unwrap().position.col, 6,
+            "After typing '!', cursor should be at col 6");
+
+        // Verify final content: should be "HelXo!"
+        let line = terminal.styled_line(0).unwrap();
+        let text: String = line.spans.iter().map(|s| &s.text[..]).collect();
+        assert!(text.starts_with("HelXo!"),
+            "Final content should be 'HelXo!...', got '{}'", text);
+    }
+
+    // Chunk: docs/chunks/terminal_cursor_shading - Verify cursor always at content boundary
+    #[test]
+    fn test_cursor_at_content_boundary() {
+        // Test that after typing N characters, cursor is at column N
+        // This verifies the cursor is positioned correctly relative to content
+        for len in 1..=10 {
+            let mut terminal = TerminalBuffer::new(80, 24, 1000);
+            let input = "a".repeat(len);
+            terminal.feed_bytes(input.as_bytes());
+
+            let cursor = terminal.cursor_info().unwrap();
+            assert_eq!(cursor.position.col, len,
+                "After typing {} chars, cursor should be at col {}, but is at {}",
+                len, len, cursor.position.col);
+
+            // Verify content matches
+            let line = terminal.styled_line(0).unwrap();
+            let text: String = line.spans.iter().map(|s| &s.text[..]).collect();
+            assert!(text.starts_with(&input),
+                "Content should start with '{}', got '{}'", input, text);
+        }
     }
 }
