@@ -8,153 +8,106 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+Apply the established C++ highlight query layering pattern to TypeScript and TSX.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The codebase already solves this exact problem for C++: at `registry.rs` lines 69-87, the C++ configuration combines `tree_sitter_c::HIGHLIGHT_QUERY` with `tree_sitter_cpp::HIGHLIGHT_QUERY` because the C++ grammar's query only covers C++-specific constructs while fundamental constructs (types, keywords, functions) are defined in C.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+TypeScript has the same relationship with JavaScript. The TypeScript grammar's `HIGHLIGHTS_QUERY` covers only TypeScript-specific constructs (type annotations, interfaces, generics, enums), while JavaScript's `HIGHLIGHT_QUERY` covers fundamentals (`const`, `let`, `function`, string literals, operators, etc.).
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/typescript_highlight_layering/GOAL.md)
-with references to the files that you expect to touch.
--->
+**Implementation:**
+1. Replace the single `tree_sitter_typescript::HIGHLIGHTS_QUERY` with a combined query: `tree_sitter_javascript::HIGHLIGHT_QUERY + "\n" + tree_sitter_typescript::HIGHLIGHTS_QUERY`
+2. Apply this to both `.ts` (TypeScript) and `.tsx` (TSX) configurations
+3. Use the same `Box::leak(format!(...).into_boxed_str())` pattern used for C++, which produces a `&'static str` from the combined query
+
+**Testing approach (per TESTING_PHILOSOPHY.md):**
+- Write a TDD-style test that parses a TypeScript snippet and asserts highlights for JavaScript-level constructs (keywords like `const`, string literals)
+- The test should demonstrate that these constructs receive styled spans, which they currently do not
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+This chunk references `subsystem_id: syntax_highlighting` with relationship `implements` in its frontmatter. However, `docs/subsystems/syntax_highlighting/OVERVIEW.md` does not exist yet. The syntax highlighting functionality is documented via chunk backreferences in `crates/syntax/src/registry.rs` and `crates/syntax/src/highlighter.rs`.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Since no formal subsystem documentation exists, this chunk follows the established patterns visible in the existing code (C++ query layering) rather than documented subsystem invariants.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing test for TypeScript JavaScript-level highlighting
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create a test in `crates/syntax/src/registry.rs` (in the `#[cfg(test)]` module) that:
 
-Example:
+1. Creates a `SyntaxHighlighter` for a TypeScript snippet containing JavaScript constructs: `const message: string = "hello";`
+2. Highlights the line and checks that `const` receives a non-default style (keyword highlighting)
+3. Checks that the string literal `"hello"` receives a non-default style
 
-### Step 1: Define the SegmentHeader struct
+This test will **fail** initially because the current TypeScript config only uses `tree_sitter_typescript::HIGHLIGHTS_QUERY`, which doesn't define captures for JavaScript keywords or string literals.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Location: `crates/syntax/src/registry.rs` tests module
 
-Location: src/segment/format.rs
+### Step 2: Update TypeScript config to use combined highlight query
 
-### Step 2: Implement header serialization
+Modify the TypeScript configuration (around line 107-114 in `registry.rs`) to use a combined query:
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+// TypeScript needs the JavaScript highlight query as a base, with TypeScript-specific
+// additions layered on top. Same pattern as C/C++.
+let ts_combined_query: &'static str = Box::leak(
+    format!("{}\n{}", tree_sitter_javascript::HIGHLIGHT_QUERY, tree_sitter_typescript::HIGHLIGHTS_QUERY)
+        .into_boxed_str(),
+);
+let typescript_config = LanguageConfig::new(
+    tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+    ts_combined_query,
+    "",
+    tree_sitter_typescript::LOCALS_QUERY,
+);
+configs.insert("ts", typescript_config);
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+### Step 3: Update TSX config to use combined highlight query
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Apply the same fix to the TSX configuration (around line 117-123), sharing the combined query:
+
+```rust
+// TSX also needs the JavaScript base (it extends TypeScript which extends JavaScript)
+let tsx_config = LanguageConfig::new(
+    tree_sitter_typescript::LANGUAGE_TSX.into(),
+    ts_combined_query,  // Reuse the combined query
+    "",
+    tree_sitter_typescript::LOCALS_QUERY,
+);
+configs.insert("tsx", tsx_config);
+```
+
+### Step 4: Run the test to confirm it passes
+
+Execute `cargo test -p lite-edit-syntax` to verify:
+1. The new TypeScript highlighting test passes
+2. Existing tests continue to pass
+
+### Step 5: Add backreference comment
+
+Add a comment above the TypeScript config section documenting this chunk's contribution, following the existing pattern for C++:
+
+```rust
+// Chunk: docs/chunks/typescript_highlight_layering - Combined JS/TS highlight queries
+```
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+None. All required dependencies are already present:
+- `tree_sitter_javascript` crate (already used for `.js`/`.jsx`/`.mjs` configs)
+- `tree_sitter_typescript` crate (already used for `.ts`/`.tsx` configs)
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+**Low risk:** This is a direct application of an existing pattern (C++ query layering) to an analogous situation (TypeScript/JavaScript). The pattern is proven in production.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+**Potential query conflict:** JavaScript and TypeScript may define captures for the same AST node types. Tree-sitter's query system handles this by returning all matching captures. The highlighter already handles overlapping captures (see `build_line_from_captures` which skips already-covered bytes). The TypeScript-specific captures will take precedence for TypeScript-specific constructs because they appear later in the combined query and will match more specific node types.
+
+**Memory overhead:** The `Box::leak` pattern creates a static string allocation. This is acceptable because:
+1. It only runs once at `LanguageRegistry::new()` time
+2. The combined query is a few KB, same as the C++ case
+3. The registry lives for the lifetime of the process
 
 ## Deviations
 

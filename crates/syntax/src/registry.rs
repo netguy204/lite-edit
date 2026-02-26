@@ -104,19 +104,25 @@ impl LanguageRegistry {
         );
         configs.insert("py", python_config);
 
-        // TypeScript (uses HIGHLIGHTS_QUERY)
+        // Chunk: docs/chunks/typescript_highlight_layering - Combined JS/TS highlight queries
+        // TypeScript needs the JavaScript highlight query as a base, with TypeScript-specific
+        // additions layered on top. Same pattern as C/C++.
+        let ts_combined_query: &'static str = Box::leak(
+            format!("{}\n{}", tree_sitter_javascript::HIGHLIGHT_QUERY, tree_sitter_typescript::HIGHLIGHTS_QUERY)
+                .into_boxed_str(),
+        );
         let typescript_config = LanguageConfig::new(
             tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            tree_sitter_typescript::HIGHLIGHTS_QUERY,
+            ts_combined_query,
             "",
             tree_sitter_typescript::LOCALS_QUERY,
         );
         configs.insert("ts", typescript_config);
 
-        // TSX (TypeScript JSX, uses HIGHLIGHTS_QUERY)
+        // TSX also needs the JavaScript base (it extends TypeScript which extends JavaScript)
         let tsx_config = LanguageConfig::new(
             tree_sitter_typescript::LANGUAGE_TSX.into(),
-            tree_sitter_typescript::HIGHLIGHTS_QUERY,
+            ts_combined_query,  // Reuse the combined query
             "",
             tree_sitter_typescript::LOCALS_QUERY,
         );
@@ -362,5 +368,103 @@ mod tests {
         let count = registry.supported_extensions().count();
         // We have 24 extension mappings (some languages have multiple extensions)
         assert!(count >= 20, "Expected at least 20 extension mappings, got {}", count);
+    }
+
+    // Chunk: docs/chunks/typescript_highlight_layering - TypeScript/JS highlight query layering tests
+
+    #[test]
+    fn test_typescript_highlights_javascript_keywords() {
+        use crate::highlighter::SyntaxHighlighter;
+        use crate::theme::SyntaxTheme;
+        use lite_edit_buffer::Color;
+
+        let registry = LanguageRegistry::new();
+        let config = registry.config_for_extension("ts").expect("TypeScript should be supported");
+        let theme = SyntaxTheme::catppuccin_mocha();
+
+        // TypeScript source containing JavaScript-level constructs
+        let source = r#"const message: string = "hello";"#;
+        let hl = SyntaxHighlighter::new(config, source, theme)
+            .expect("Should create highlighter");
+
+        let styled = hl.highlight_line(0);
+
+        // Check that "const" keyword is highlighted (not default color)
+        let const_span = styled.spans.iter().find(|span| span.text.contains("const"));
+        assert!(
+            const_span.is_some(),
+            "Should have a span containing 'const', got spans: {:?}",
+            styled.spans.iter().map(|s| &s.text).collect::<Vec<_>>()
+        );
+        let const_span = const_span.unwrap();
+        assert!(
+            !matches!(const_span.style.fg, Color::Default),
+            "'const' keyword should be styled, not default. Span: {:?}",
+            const_span
+        );
+    }
+
+    #[test]
+    fn test_typescript_highlights_string_literals() {
+        use crate::highlighter::SyntaxHighlighter;
+        use crate::theme::SyntaxTheme;
+        use lite_edit_buffer::Color;
+
+        let registry = LanguageRegistry::new();
+        let config = registry.config_for_extension("ts").expect("TypeScript should be supported");
+        let theme = SyntaxTheme::catppuccin_mocha();
+
+        // TypeScript source with a string literal
+        let source = r#"const message: string = "hello";"#;
+        let hl = SyntaxHighlighter::new(config, source, theme)
+            .expect("Should create highlighter");
+
+        let styled = hl.highlight_line(0);
+
+        // Check that the string literal is highlighted
+        let string_span = styled.spans.iter().find(|span| span.text.contains("hello"));
+        assert!(
+            string_span.is_some(),
+            "Should have a span containing 'hello', got spans: {:?}",
+            styled.spans.iter().map(|s| &s.text).collect::<Vec<_>>()
+        );
+        let string_span = string_span.unwrap();
+        assert!(
+            !matches!(string_span.style.fg, Color::Default),
+            "String literal should be styled, not default. Span: {:?}",
+            string_span
+        );
+    }
+
+    #[test]
+    fn test_tsx_highlights_javascript_keywords() {
+        use crate::highlighter::SyntaxHighlighter;
+        use crate::theme::SyntaxTheme;
+        use lite_edit_buffer::Color;
+
+        let registry = LanguageRegistry::new();
+        let config = registry.config_for_extension("tsx").expect("TSX should be supported");
+        let theme = SyntaxTheme::catppuccin_mocha();
+
+        // TSX source containing JavaScript-level constructs
+        let source = r#"const Component = () => { return <div>hello</div>; };"#;
+        let hl = SyntaxHighlighter::new(config, source, theme)
+            .expect("Should create highlighter");
+
+        let styled = hl.highlight_line(0);
+
+        // Check that "const" keyword is highlighted
+        let const_span = styled.spans.iter().find(|span| span.text.contains("const"));
+        assert!(
+            const_span.is_some(),
+            "Should have a span containing 'const', got spans: {:?}",
+            styled.spans.iter().map(|s| &s.text).collect::<Vec<_>>()
+        );
+        let const_span = const_span.unwrap();
+        assert!(
+            !matches!(const_span.style.fg, Color::Default),
+            "'const' keyword should be styled in TSX, not default. Span: {:?}",
+            const_span
+        );
     }
 }

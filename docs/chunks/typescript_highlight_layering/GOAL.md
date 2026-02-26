@@ -1,20 +1,25 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/syntax/src/registry.rs
 code_references: []
 narrative: null
 investigation: null
 subsystems:
-  - subsystem_id: "syntax_highlighting"
-    relationship: implements
+- subsystem_id: syntax_highlighting
+  relationship: implements
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["base_snapshot_reload", "conflict_mode_lifecycle", "deletion_rename_handling", "file_change_events", "three_way_merge"]
+created_after:
+- base_snapshot_reload
+- conflict_mode_lifecycle
+- deletion_rename_handling
+- file_change_events
+- three_way_merge
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
