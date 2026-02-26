@@ -1,3 +1,4 @@
+// Chunk: docs/chunks/metal_surface - BACKGROUND_COLOR constant (#1e1e2e)
 // Chunk: docs/chunks/renderer_decomposition - Color constants and uniforms extracted from renderer.rs
 
 //! Color constants and uniform types for the renderer.
