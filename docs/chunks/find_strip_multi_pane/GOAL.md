@@ -1,5 +1,5 @@
 ---
-status: FUTURE
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths: []
@@ -10,9 +10,9 @@ subsystems: []
 friction_entries: []
 bug_type: implementation
 depends_on: []
-created_after: ["fallback_glyph_metrics"]
+created_after:
+- fallback_glyph_metrics
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
