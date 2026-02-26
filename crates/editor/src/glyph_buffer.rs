@@ -277,6 +277,9 @@ pub struct GlyphBuffer {
     // Chunk: docs/chunks/content_tab_bar - Content area y offset for tab bar
     /// Vertical offset for content area (e.g., for tab bar)
     y_offset: f32,
+    /// Timing of the last styled_line collection pass (perf-instrumentation only).
+    #[cfg(feature = "perf-instrumentation")]
+    last_styled_line_timing: Option<(std::time::Duration, usize)>,
 }
 
 impl GlyphBuffer {
@@ -297,6 +300,8 @@ impl GlyphBuffer {
             cursor_range: QuadRange::default(),
             x_offset: 0.0,
             y_offset: 0.0,
+            #[cfg(feature = "perf-instrumentation")]
+            last_styled_line_timing: None,
         }
     }
 
@@ -326,6 +331,12 @@ impl GlyphBuffer {
     /// Returns the current vertical offset
     pub fn y_offset(&self) -> f32 {
         self.y_offset
+    }
+
+    /// Takes the last styled_line timing measurement, if any (perf-instrumentation only).
+    #[cfg(feature = "perf-instrumentation")]
+    pub fn take_styled_line_timing(&mut self) -> Option<(std::time::Duration, usize)> {
+        self.last_styled_line_timing.take()
     }
 
     /// Returns the vertex buffer, if any
@@ -1210,9 +1221,18 @@ impl GlyphBuffer {
         estimated_quads += 1; // cursor
 
         // Pre-collect styled lines for all rendered buffer lines
+        #[cfg(feature = "perf-instrumentation")]
+        let styled_line_start = std::time::Instant::now();
+
         let styled_lines: Vec<Option<_>> = rendered_buffer_lines.iter()
             .map(|&line| view.styled_line(line))
             .collect();
+
+        #[cfg(feature = "perf-instrumentation")]
+        {
+            let elapsed = styled_line_start.elapsed();
+            self.last_styled_line_timing = Some((elapsed, rendered_buffer_lines.len()));
+        }
 
         // Reset quad ranges
         // Chunk: docs/chunks/terminal_styling_fidelity - Added background and underline ranges

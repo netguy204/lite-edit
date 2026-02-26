@@ -61,6 +61,9 @@ pub struct EventDrainLoop {
     receiver: EventReceiver,
     /// The event sender (for clearing wakeup pending flag)
     sender: EventSender,
+    /// Performance statistics collector (perf-instrumentation feature only)
+    #[cfg(feature = "perf-instrumentation")]
+    perf_stats: crate::perf_stats::PerfStats,
 }
 
 impl EventDrainLoop {
@@ -86,6 +89,8 @@ impl EventDrainLoop {
             last_window_title: String::new(),
             receiver,
             sender,
+            #[cfg(feature = "perf-instrumentation")]
+            perf_stats: crate::perf_stats::PerfStats::new(),
         }
     }
 
@@ -133,6 +138,9 @@ impl EventDrainLoop {
     /// bounded by the cost of processing input events, not by accumulated
     /// terminal output.
     pub fn process_pending_events(&mut self) {
+        #[cfg(feature = "perf-instrumentation")]
+        self.perf_stats.mark_frame_start();
+
         let mut had_pty_wakeup = false;
 
         // Drain all events from the channel into a Vec first to avoid borrow issues.
@@ -423,6 +431,9 @@ impl EventDrainLoop {
             // Take the dirty region
             let _dirty = self.state.take_dirty_region();
 
+            #[cfg(feature = "perf-instrumentation")]
+            self.perf_stats.record_dirty_region(&_dirty);
+
             // Render based on current focus mode
             match self.state.focus {
                 EditorFocus::Selector => {
@@ -482,6 +493,30 @@ impl EventDrainLoop {
 
             // Update cursor regions after rendering
             self.update_cursor_regions();
+
+            // Record styled_line timing from the renderer
+            #[cfg(feature = "perf-instrumentation")]
+            if let Some((duration, line_count)) = self.renderer.take_styled_line_timing() {
+                self.perf_stats.record_styled_line_batch(duration, line_count);
+            }
+
+            // Mark the frame complete for latency measurement
+            #[cfg(feature = "perf-instrumentation")]
+            self.perf_stats.mark_frame_end();
+        }
+
+        // Auto-report and on-demand dump (outside the is_dirty block so
+        // frame_end is always recorded, but reporting can happen even on
+        // skipped frames).
+        #[cfg(feature = "perf-instrumentation")]
+        {
+            if self.perf_stats.should_auto_report() {
+                eprint!("{}", self.perf_stats.report());
+            }
+            if self.state.dump_perf_stats {
+                self.state.dump_perf_stats = false;
+                eprint!("{}", self.perf_stats.report());
+            }
         }
     }
 

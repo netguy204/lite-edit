@@ -426,6 +426,12 @@ impl Renderer {
         self.cursor_visible = visible;
     }
 
+    /// Takes the last styled_line timing from the glyph buffer (perf-instrumentation only).
+    #[cfg(feature = "perf-instrumentation")]
+    pub fn take_styled_line_timing(&mut self) -> Option<(std::time::Duration, usize)> {
+        self.glyph_buffer.take_styled_line_timing()
+    }
+
     // Chunk: docs/chunks/workspace_model - Content area x offset for left rail
     /// Sets the content area horizontal offset.
     ///
