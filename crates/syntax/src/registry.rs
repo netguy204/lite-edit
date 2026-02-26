@@ -24,6 +24,10 @@ pub struct LanguageConfig {
     /// The locals query (for scope-based highlighting)
     #[allow(dead_code)] // Reserved for future locals support
     pub locals_query: &'static str,
+    // Chunk: docs/chunks/highlight_injection - Language name for same-language injection filtering
+    /// The canonical language name (e.g., "rust", "python", "javascript").
+    /// Used to skip redundant same-language injections.
+    pub language_name: &'static str,
 }
 
 impl LanguageConfig {
@@ -33,12 +37,14 @@ impl LanguageConfig {
         highlights_query: &'static str,
         injections_query: &'static str,
         locals_query: &'static str,
+        language_name: &'static str,
     ) -> Self {
         Self {
             language,
             highlights_query,
             injections_query,
             locals_query,
+            language_name,
         }
     }
 }
@@ -74,6 +80,7 @@ impl LanguageRegistry {
             tree_sitter_rust::HIGHLIGHTS_QUERY,
             tree_sitter_rust::INJECTIONS_QUERY,
             "",
+            "rust",
         );
         configs.insert("rs", rust_config);
 
@@ -90,6 +97,7 @@ impl LanguageRegistry {
             cpp_combined_query,
             "",
             "",
+            "cpp",
         );
         configs.insert("cpp", cpp_config.clone());
         configs.insert("cc", cpp_config.clone());
@@ -103,6 +111,7 @@ impl LanguageRegistry {
             tree_sitter_c::HIGHLIGHT_QUERY,
             "",
             "",
+            "c",
         );
         configs.insert("c", c_config);
 
@@ -112,6 +121,7 @@ impl LanguageRegistry {
             tree_sitter_python::HIGHLIGHTS_QUERY,
             "",
             "",
+            "python",
         );
         configs.insert("py", python_config);
 
@@ -127,6 +137,7 @@ impl LanguageRegistry {
             ts_combined_query,
             "",
             tree_sitter_typescript::LOCALS_QUERY,
+            "typescript",
         );
         configs.insert("ts", typescript_config);
 
@@ -136,6 +147,7 @@ impl LanguageRegistry {
             ts_combined_query,  // Reuse the combined query
             "",
             tree_sitter_typescript::LOCALS_QUERY,
+            "tsx",
         );
         configs.insert("tsx", tsx_config);
 
@@ -145,6 +157,7 @@ impl LanguageRegistry {
             tree_sitter_javascript::HIGHLIGHT_QUERY,
             tree_sitter_javascript::INJECTIONS_QUERY,
             tree_sitter_javascript::LOCALS_QUERY,
+            "javascript",
         );
         configs.insert("js", javascript_config.clone());
         configs.insert("jsx", javascript_config.clone());
@@ -156,6 +169,7 @@ impl LanguageRegistry {
             tree_sitter_go::HIGHLIGHTS_QUERY,
             "",
             "",
+            "go",
         );
         configs.insert("go", go_config);
 
@@ -165,6 +179,7 @@ impl LanguageRegistry {
             tree_sitter_json::HIGHLIGHTS_QUERY,
             "",
             "",
+            "json",
         );
         configs.insert("json", json_config);
 
@@ -174,6 +189,7 @@ impl LanguageRegistry {
             tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
             "",
             "",
+            "toml",
         );
         configs.insert("toml", toml_config);
 
@@ -183,6 +199,7 @@ impl LanguageRegistry {
             tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
             tree_sitter_md::INJECTION_QUERY_BLOCK,
             "",
+            "markdown",
         );
         configs.insert("md", md_config.clone());
         configs.insert("markdown", md_config);
@@ -193,6 +210,7 @@ impl LanguageRegistry {
             tree_sitter_html::HIGHLIGHTS_QUERY,
             tree_sitter_html::INJECTIONS_QUERY,
             "",
+            "html",
         );
         configs.insert("html", html_config.clone());
         configs.insert("htm", html_config);
@@ -203,6 +221,7 @@ impl LanguageRegistry {
             tree_sitter_css::HIGHLIGHTS_QUERY,
             "",
             "",
+            "css",
         );
         configs.insert("css", css_config);
 
@@ -212,6 +231,7 @@ impl LanguageRegistry {
             tree_sitter_bash::HIGHLIGHT_QUERY,
             "",
             "",
+            "bash",
         );
         configs.insert("sh", bash_config.clone());
         configs.insert("bash", bash_config.clone());
@@ -305,6 +325,7 @@ impl Clone for LanguageConfig {
             highlights_query: self.highlights_query,
             injections_query: self.injections_query,
             locals_query: self.locals_query,
+            language_name: self.language_name,
         }
     }
 }
