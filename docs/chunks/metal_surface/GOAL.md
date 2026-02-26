@@ -24,11 +24,11 @@ code_references:
     implements: "Retina-aware drawable sizing"
   - ref: crates/editor/src/metal_view.rs#get_default_metal_device
     implements: "MTLDevice acquisition"
-  - ref: crates/editor/src/renderer.rs#Renderer
+  - ref: crates/editor/src/renderer/mod.rs#Renderer
     implements: "Metal rendering pipeline with command queue"
-  - ref: crates/editor/src/renderer.rs#Renderer::render
+  - ref: crates/editor/src/renderer/mod.rs#Renderer::render
     implements: "Frame rendering with clear-to-background-color render pass"
-  - ref: crates/editor/src/renderer.rs#BACKGROUND_COLOR
+  - ref: crates/editor/src/renderer/constants.rs#BACKGROUND_COLOR
     implements: "Editor background color constant (#1e1e2e)"
   - ref: crates/editor/build.rs#main
     implements: "Framework linking for AppKit, Metal, QuartzCore, Foundation"

@@ -330,6 +330,7 @@ impl EventDrainLoop {
     }
 
     /// Handles a scroll event by forwarding to the editor state.
+    // Chunk: docs/chunks/viewport_scrolling - Scroll event forwarding to state
     fn handle_scroll(&mut self, delta: ScrollDelta) {
         self.state.handle_scroll(delta);
         self.poll_after_input();
@@ -583,6 +584,7 @@ impl EventDrainLoop {
         }
     }
 
+    // Chunk: docs/chunks/cursor_pointer_ui_hints - Calculates cursor regions based on current UI layout
     /// Calculates and sets cursor regions for the current UI state.
     fn update_cursor_regions(&self) {
         let frame = self.metal_view.frame();

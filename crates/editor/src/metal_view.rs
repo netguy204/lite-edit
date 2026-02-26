@@ -995,6 +995,7 @@ impl MetalView {
         })
     }
 
+    // Chunk: docs/chunks/scroll_wheel_speed - Line height constant for scroll conversion
     /// Default line height for mouse wheel scroll conversion.
     /// Mouse wheel events report line-based deltas; we convert to pixels
     /// using this constant. Matches typical editor line heights.

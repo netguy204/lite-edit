@@ -12,7 +12,7 @@ code_references:
     implements: "Collection of cursor regions for different UI areas"
   - ref: crates/editor/src/metal_view.rs#MetalView::set_cursor_regions
     implements: "API to update cursor regions and trigger recalculation"
-  - ref: crates/editor/src/main.rs#EditorController::update_cursor_regions
+  - ref: crates/editor/src/drain_loop.rs#EventDrainLoop::update_cursor_regions
     implements: "Calculates cursor regions based on current UI layout"
 narrative: null
 investigation: null
