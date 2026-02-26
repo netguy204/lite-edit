@@ -251,6 +251,12 @@ impl Renderer {
             // Unfocused pane: static cursor (always visible) - provides clear visual feedback
             let pane_cursor_visible = if is_focused { self.cursor_visible } else { true };
 
+            // Chunk: docs/chunks/pane_mirror_restore - Clear styled line cache between pane renders
+            // The styled line cache is indexed by line number, not by pane. Without clearing
+            // it between pane renders, a cached line from pane A (e.g., line 5) could be
+            // incorrectly served when rendering pane B's line 5, causing content mirroring.
+            self.clear_styled_line_cache();
+
             // Update glyph buffer from tab's buffer with pane-specific cursor visibility
             if tab.is_agent_tab() {
                 if let Some(terminal) = workspace.agent_terminal() {

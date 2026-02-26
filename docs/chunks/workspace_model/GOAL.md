@@ -66,11 +66,11 @@ code_references:
     implements: "Left rail click detection and workspace switching"
   - ref: crates/editor/src/editor_state.rs#EditorState::window_title
     implements: "Window title with workspace label when multiple workspaces"
-  - ref: crates/editor/src/renderer.rs#Renderer::render_with_editor
+  - ref: crates/editor/src/renderer/mod.rs#Renderer::render_with_editor
     implements: "Main render entry point with left rail and content area"
-  - ref: crates/editor/src/renderer.rs#Renderer::draw_left_rail
+  - ref: crates/editor/src/renderer/left_rail.rs#Renderer::draw_left_rail
     implements: "Left rail rendering with background, tiles, status indicators, and labels"
-  - ref: crates/editor/src/renderer.rs#Renderer::set_content_x_offset
+  - ref: crates/editor/src/renderer/mod.rs#Renderer::set_content_x_offset
     implements: "Content area horizontal offset for left rail"
   - ref: crates/editor/src/glyph_buffer.rs#GlyphBuffer::set_x_offset
     implements: "Content area x offset storage"

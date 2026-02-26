@@ -288,6 +288,7 @@ impl AppDelegate {
     /// Sets up the main window with Metal rendering
     // Chunk: docs/chunks/startup_workspace_dialog - Directory selection before window creation
     // Chunk: docs/chunks/pty_wakeup_reentrant - Unified event queue setup
+    // Chunk: docs/chunks/workspace_session_persistence - Session restoration or directory picker on startup
     fn setup_window(&self, mtm: MainThreadMarker) {
         // Activate the application and create the window BEFORE showing the
         // directory picker. This ensures the app has a visible presence on the

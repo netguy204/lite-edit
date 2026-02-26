@@ -3,7 +3,6 @@ status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
-- crates/editor/src/renderer.rs
 - crates/editor/src/renderer/mod.rs
 - crates/editor/src/renderer/constants.rs
 - crates/editor/src/renderer/scissor.rs

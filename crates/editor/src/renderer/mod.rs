@@ -602,16 +602,16 @@ impl Renderer {
         // Chunk: docs/chunks/renderer_polymorphic_buffer - Get BufferView from Editor
         // Chunk: docs/chunks/syntax_highlighting - Use HighlightedBufferView for syntax coloring
         // Chunk: docs/chunks/pane_scroll_isolation - Configure viewport before updating glyph buffer
-        // Update glyph buffer from active tab's BufferView with syntax highlighting
+        // Chunk: docs/chunks/pane_mirror_restore - Only update glyph buffer for single-pane mode
+        // In multi-pane mode, render_pane handles glyph buffer updates for each pane.
+        // Running this early update would waste work and could cause cache contamination.
         if let Some(ws) = editor.active_workspace() {
-            if let Some(tab) = ws.active_tab() {
-                // Chunk: docs/chunks/pane_scroll_isolation - Configure viewport for single-pane mode
-                // For single-pane mode, configure viewport from the active tab before rendering.
-                // This mirrors what render_pane does for multi-pane mode.
-                // Note: We check pane_count() to detect single-pane mode.
-                // This is evaluated here rather than in the later branch because
-                // update_glyph_buffer needs the correct viewport configuration.
-                if ws.pane_root.pane_count() <= 1 {
+            // Only run early glyph buffer update in single-pane mode
+            if ws.pane_root.pane_count() <= 1 {
+                if let Some(tab) = ws.active_tab() {
+                    // Chunk: docs/chunks/pane_scroll_isolation - Configure viewport for single-pane mode
+                    // For single-pane mode, configure viewport from the active tab before rendering.
+                    // This mirrors what render_pane does for multi-pane mode.
                     let frame = view.frame();
                     let scale = view.scale_factor();
                     let view_width = (frame.size.width * scale) as f32;
@@ -619,23 +619,23 @@ impl Renderer {
                     let content_height = view_height - TAB_BAR_HEIGHT;
                     let content_width = view_width - RAIL_WIDTH;
                     self.configure_viewport_for_pane(&tab.viewport, content_height, content_width);
-                }
 
-                if tab.is_agent_tab() {
-                    // AgentTerminal is a placeholder - get the actual buffer from workspace
-                    if let Some(terminal) = ws.agent_terminal() {
-                        self.update_glyph_buffer(terminal);
+                    if tab.is_agent_tab() {
+                        // AgentTerminal is a placeholder - get the actual buffer from workspace
+                        if let Some(terminal) = ws.agent_terminal() {
+                            self.update_glyph_buffer(terminal);
+                        }
+                    } else if let Some(text_buffer) = tab.as_text_buffer() {
+                        // File tab: use HighlightedBufferView for syntax highlighting
+                        let highlighted_view = HighlightedBufferView::new(
+                            text_buffer,
+                            tab.highlighter(),
+                        );
+                        self.update_glyph_buffer(&highlighted_view);
+                    } else {
+                        // Terminal or other buffer type
+                        self.update_glyph_buffer(tab.buffer());
                     }
-                } else if let Some(text_buffer) = tab.as_text_buffer() {
-                    // File tab: use HighlightedBufferView for syntax highlighting
-                    let highlighted_view = HighlightedBufferView::new(
-                        text_buffer,
-                        tab.highlighter(),
-                    );
-                    self.update_glyph_buffer(&highlighted_view);
-                } else {
-                    // Terminal or other buffer type
-                    self.update_glyph_buffer(tab.buffer());
                 }
             }
         }
@@ -870,11 +870,14 @@ impl Renderer {
         self.set_content_x_offset(RAIL_WIDTH);
         self.set_content_y_offset(TAB_BAR_HEIGHT);
 
-        // Update glyph buffer from active tab's BufferView with syntax highlighting
+        // Chunk: docs/chunks/pane_mirror_restore - Only update glyph buffer for single-pane mode
+        // In multi-pane mode, render_pane handles glyph buffer updates for each pane.
+        // Running this early update would waste work and could cause cache contamination.
         if let Some(ws) = editor.active_workspace() {
-            if let Some(tab) = ws.active_tab() {
-                // For single-pane mode, configure viewport from the active tab before rendering.
-                if ws.pane_root.pane_count() <= 1 {
+            // Only run early glyph buffer update in single-pane mode
+            if ws.pane_root.pane_count() <= 1 {
+                if let Some(tab) = ws.active_tab() {
+                    // For single-pane mode, configure viewport from the active tab before rendering.
                     let frame = view.frame();
                     let scale = view.scale_factor();
                     let view_width = (frame.size.width * scale) as f32;
@@ -882,20 +885,20 @@ impl Renderer {
                     let content_height = view_height - TAB_BAR_HEIGHT;
                     let content_width = view_width - RAIL_WIDTH;
                     self.configure_viewport_for_pane(&tab.viewport, content_height, content_width);
-                }
 
-                if tab.is_agent_tab() {
-                    if let Some(terminal) = ws.agent_terminal() {
-                        self.update_glyph_buffer(terminal);
+                    if tab.is_agent_tab() {
+                        if let Some(terminal) = ws.agent_terminal() {
+                            self.update_glyph_buffer(terminal);
+                        }
+                    } else if let Some(text_buffer) = tab.as_text_buffer() {
+                        let highlighted_view = HighlightedBufferView::new(
+                            text_buffer,
+                            tab.highlighter(),
+                        );
+                        self.update_glyph_buffer(&highlighted_view);
+                    } else {
+                        self.update_glyph_buffer(tab.buffer());
                     }
-                } else if let Some(text_buffer) = tab.as_text_buffer() {
-                    let highlighted_view = HighlightedBufferView::new(
-                        text_buffer,
-                        tab.highlighter(),
-                    );
-                    self.update_glyph_buffer(&highlighted_view);
-                } else {
-                    self.update_glyph_buffer(tab.buffer());
                 }
             }
         }

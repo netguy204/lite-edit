@@ -649,6 +649,21 @@ impl Workspace {
         gen_pane_id(&mut self.next_pane_id)
     }
 
+    // Chunk: docs/chunks/pane_mirror_restore - next_pane_id synchronization
+    /// Sets the next pane ID counter.
+    ///
+    /// This is used during session restoration to synchronize the counter with
+    /// the IDs of restored panes. Without this, newly created panes could get
+    /// IDs that collide with restored panes, causing input duplication and
+    /// render mirroring bugs.
+    ///
+    /// # Arguments
+    ///
+    /// * `next_id` - The value to set. Should be greater than all restored pane IDs.
+    pub fn set_next_pane_id(&mut self, next_id: u64) {
+        self.next_pane_id = next_id;
+    }
+
     // =========================================================================
     // Pane accessors (Chunk: docs/chunks/tiling_workspace_integration)
     // =========================================================================
