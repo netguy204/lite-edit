@@ -1,8 +1,16 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/editor/src/focus.rs
+  - crates/editor/src/global_shortcuts.rs
+  - crates/editor/src/selector_target.rs
+  - crates/editor/src/find_target.rs
+  - crates/editor/src/confirm_dialog_target.rs
+  - crates/editor/src/editor_state.rs
+  - crates/editor/src/drain_loop.rs
+  - crates/editor/src/buffer_target.rs
 code_references: []
 narrative: null
 investigation: null
@@ -10,9 +18,9 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["typescript_highlight_layering"]
+created_after:
+- typescript_highlight_layering
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

@@ -17,7 +17,7 @@
 //! the hit-testing walks buffer lines to find which one owns the clicked screen row.
 
 use crate::context::EditorContext;
-use crate::focus::{FocusTarget, Handled};
+use crate::focus::{FocusLayer, FocusTarget, Handled};
 use crate::font::FontMetrics;
 use crate::input::{Key, KeyEvent, MouseEvent, MouseEventKind, ScrollDelta};
 use crate::viewport::Viewport;
@@ -575,6 +575,11 @@ impl BufferFocusTarget {
 }
 
 impl FocusTarget for BufferFocusTarget {
+    // Chunk: docs/chunks/focus_stack - Buffer focus target layer identification
+    fn layer(&self) -> FocusLayer {
+        FocusLayer::Buffer
+    }
+
     fn handle_key(&mut self, event: KeyEvent, ctx: &mut EditorContext) -> Handled {
         match resolve_command(&event) {
             Some(cmd) => {
