@@ -599,46 +599,10 @@ impl Renderer {
         // Chunk: docs/chunks/content_tab_bar - Content area y offset for tab bar
         self.set_content_y_offset(TAB_BAR_HEIGHT);
 
-        // Chunk: docs/chunks/renderer_polymorphic_buffer - Get BufferView from Editor
-        // Chunk: docs/chunks/syntax_highlighting - Use HighlightedBufferView for syntax coloring
-        // Chunk: docs/chunks/pane_scroll_isolation - Configure viewport before updating glyph buffer
-        // Chunk: docs/chunks/pane_mirror_restore - Only update glyph buffer for single-pane mode
-        // In multi-pane mode, render_pane handles glyph buffer updates for each pane.
-        // Running this early update would waste work and could cause cache contamination.
-        if let Some(ws) = editor.active_workspace() {
-            // Only run early glyph buffer update in single-pane mode
-            if ws.pane_root.pane_count() <= 1 {
-                if let Some(tab) = ws.active_tab() {
-                    // Chunk: docs/chunks/pane_scroll_isolation - Configure viewport for single-pane mode
-                    // For single-pane mode, configure viewport from the active tab before rendering.
-                    // This mirrors what render_pane does for multi-pane mode.
-                    let frame = view.frame();
-                    let scale = view.scale_factor();
-                    let view_width = (frame.size.width * scale) as f32;
-                    let view_height = (frame.size.height * scale) as f32;
-                    let content_height = view_height - TAB_BAR_HEIGHT;
-                    let content_width = view_width - RAIL_WIDTH;
-                    self.configure_viewport_for_pane(&tab.viewport, content_height, content_width);
-
-                    if tab.is_agent_tab() {
-                        // AgentTerminal is a placeholder - get the actual buffer from workspace
-                        if let Some(terminal) = ws.agent_terminal() {
-                            self.update_glyph_buffer(terminal);
-                        }
-                    } else if let Some(text_buffer) = tab.as_text_buffer() {
-                        // File tab: use HighlightedBufferView for syntax highlighting
-                        let highlighted_view = HighlightedBufferView::new(
-                            text_buffer,
-                            tab.highlighter(),
-                        );
-                        self.update_glyph_buffer(&highlighted_view);
-                    } else {
-                        // Terminal or other buffer type
-                        self.update_glyph_buffer(tab.buffer());
-                    }
-                }
-            }
-        }
+        // Chunk: docs/chunks/terminal_single_pane_refresh - Glyph buffer update moved to content rendering
+        // The glyph buffer update for single-pane mode is now done inside the content rendering
+        // block (after Metal drawable is acquired), matching the multi-pane render_pane() behavior.
+        // This ensures terminal content is read at the correct time during the render pass.
         let metal_layer = view.metal_layer();
 
         // Get the next drawable from the layer
@@ -756,6 +720,42 @@ impl Renderer {
                 let scroll = editor.welcome_scroll_offset_px();
                 self.draw_welcome_screen(&encoder, view, scroll);
             } else {
+                // Chunk: docs/chunks/terminal_single_pane_refresh - Update glyph buffer during render pass
+                // For single-pane mode, update glyph buffer here (during the render pass) rather than
+                // at the start of render_with_editor. This ensures terminal content is read at the
+                // correct time, matching the multi-pane render_pane() behavior.
+                if let Some(ws) = editor.active_workspace() {
+                    if let Some(tab) = ws.active_tab() {
+                        let content_height = view_height - TAB_BAR_HEIGHT;
+                        let content_width = view_width - RAIL_WIDTH;
+                        self.configure_viewport_for_pane(&tab.viewport, content_height, content_width);
+
+                        // Chunk: docs/chunks/terminal_single_pane_refresh - Clear styled line cache for terminals
+                        // Terminal tabs don't track dirty_lines like text buffers do, so we must clear
+                        // the styled line cache to ensure fresh terminal content is rendered. This mirrors
+                        // what render_pane() does for multi-pane mode (line ~258).
+                        let is_terminal_tab = tab.is_agent_tab() || !tab.as_text_buffer().is_some();
+                        if is_terminal_tab {
+                            self.clear_styled_line_cache();
+                        }
+
+                        if tab.is_agent_tab() {
+                            if let Some(terminal) = ws.agent_terminal() {
+                                self.update_glyph_buffer(terminal);
+                            }
+                        } else if let Some(text_buffer) = tab.as_text_buffer() {
+                            let highlighted_view = HighlightedBufferView::new(
+                                text_buffer,
+                                tab.highlighter(),
+                            );
+                            self.update_glyph_buffer(&highlighted_view);
+                        } else {
+                            // Terminal or other buffer type
+                            self.update_glyph_buffer(tab.buffer());
+                        }
+                    }
+                }
+
                 // Render editor text content (offset by RAIL_WIDTH and TAB_BAR_HEIGHT)
                 if self.glyph_buffer.index_count() > 0 {
                     self.render_text(&encoder, view);
@@ -870,38 +870,10 @@ impl Renderer {
         self.set_content_x_offset(RAIL_WIDTH);
         self.set_content_y_offset(TAB_BAR_HEIGHT);
 
-        // Chunk: docs/chunks/pane_mirror_restore - Only update glyph buffer for single-pane mode
-        // In multi-pane mode, render_pane handles glyph buffer updates for each pane.
-        // Running this early update would waste work and could cause cache contamination.
-        if let Some(ws) = editor.active_workspace() {
-            // Only run early glyph buffer update in single-pane mode
-            if ws.pane_root.pane_count() <= 1 {
-                if let Some(tab) = ws.active_tab() {
-                    // For single-pane mode, configure viewport from the active tab before rendering.
-                    let frame = view.frame();
-                    let scale = view.scale_factor();
-                    let view_width = (frame.size.width * scale) as f32;
-                    let view_height = (frame.size.height * scale) as f32;
-                    let content_height = view_height - TAB_BAR_HEIGHT;
-                    let content_width = view_width - RAIL_WIDTH;
-                    self.configure_viewport_for_pane(&tab.viewport, content_height, content_width);
-
-                    if tab.is_agent_tab() {
-                        if let Some(terminal) = ws.agent_terminal() {
-                            self.update_glyph_buffer(terminal);
-                        }
-                    } else if let Some(text_buffer) = tab.as_text_buffer() {
-                        let highlighted_view = HighlightedBufferView::new(
-                            text_buffer,
-                            tab.highlighter(),
-                        );
-                        self.update_glyph_buffer(&highlighted_view);
-                    } else {
-                        self.update_glyph_buffer(tab.buffer());
-                    }
-                }
-            }
-        }
+        // Chunk: docs/chunks/terminal_single_pane_refresh - Glyph buffer update moved to content rendering
+        // The glyph buffer update for single-pane mode is now done inside the content rendering
+        // block (after Metal drawable is acquired), matching the multi-pane render_pane() behavior.
+        // This ensures terminal content is read at the correct time during the render pass.
         let metal_layer = view.metal_layer();
 
         // Get the next drawable from the layer
@@ -1008,6 +980,42 @@ impl Renderer {
                 let scroll = editor.welcome_scroll_offset_px();
                 self.draw_welcome_screen(&encoder, view, scroll);
             } else {
+                // Chunk: docs/chunks/terminal_single_pane_refresh - Update glyph buffer during render pass
+                // For single-pane mode, update glyph buffer here (during the render pass) rather than
+                // at the start of render_with_confirm_dialog. This ensures terminal content is read at the
+                // correct time, matching the multi-pane render_pane() behavior.
+                if let Some(ws) = editor.active_workspace() {
+                    if let Some(tab) = ws.active_tab() {
+                        let content_height = view_height - TAB_BAR_HEIGHT;
+                        let content_width = view_width - RAIL_WIDTH;
+                        self.configure_viewport_for_pane(&tab.viewport, content_height, content_width);
+
+                        // Chunk: docs/chunks/terminal_single_pane_refresh - Clear styled line cache for terminals
+                        // Terminal tabs don't track dirty_lines like text buffers do, so we must clear
+                        // the styled line cache to ensure fresh terminal content is rendered. This mirrors
+                        // what render_pane() does for multi-pane mode (line ~258).
+                        let is_terminal_tab = tab.is_agent_tab() || !tab.as_text_buffer().is_some();
+                        if is_terminal_tab {
+                            self.clear_styled_line_cache();
+                        }
+
+                        if tab.is_agent_tab() {
+                            if let Some(terminal) = ws.agent_terminal() {
+                                self.update_glyph_buffer(terminal);
+                            }
+                        } else if let Some(text_buffer) = tab.as_text_buffer() {
+                            let highlighted_view = HighlightedBufferView::new(
+                                text_buffer,
+                                tab.highlighter(),
+                            );
+                            self.update_glyph_buffer(&highlighted_view);
+                        } else {
+                            // Terminal or other buffer type
+                            self.update_glyph_buffer(tab.buffer());
+                        }
+                    }
+                }
+
                 if self.glyph_buffer.index_count() > 0 {
                     self.render_text(&encoder, view);
                 }

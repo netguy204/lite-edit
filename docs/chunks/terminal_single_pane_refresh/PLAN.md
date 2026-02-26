@@ -8,170 +8,162 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The root cause is a rendering path divergence: in single-pane mode, the glyph buffer is updated *before* the Metal drawable is acquired (lines 608-641 in `render_with_editor`), while in multi-pane mode, each pane's glyph buffer is updated inside `render_pane()` (which happens *after* the drawable is acquired).
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+When a terminal tab is spawned in single-pane mode:
+1. The early glyph buffer update runs with the terminal's *current* content (likely empty or minimal)
+2. PTY wakeup signals arrive via the event channel, triggering `poll_agents()` which returns `DirtyRegion::FullViewport`
+3. `render_if_dirty()` calls `render_with_editor()` again
+4. The early glyph buffer update runs again, but uses `tab.buffer()` which returns a *stale* reference to the terminal content
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+The multi-pane path works correctly because `render_pane()` updates the glyph buffer *during* the render pass, always using the current tab state.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/terminal_single_pane_refresh/GOAL.md)
-with references to the files that you expect to touch.
--->
+**Fix Strategy**: Mirror the multi-pane rendering behavior in the single-pane path. Move the glyph buffer update for single-pane mode to occur *after* the Metal drawable is acquired and *within* the content rendering block, just like `render_pane()` does. This ensures the terminal content is read at the correct time during the render pass.
+
+This follows the renderer subsystem's layering contract (docs/subsystems/renderer): rendering phases should access content at a consistent point in the frame.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+- **docs/subsystems/renderer** (DOCUMENTED): This chunk USES the renderer subsystem's glyph buffer update pattern. The multi-pane code path in `render_pane()` demonstrates the correct pattern: configure viewport, then update glyph buffer, then render text — all within the render pass. We are aligning single-pane mode to follow this same pattern.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/0001-validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/0002-error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/0001-validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+- **docs/subsystems/viewport_scroll** (DOCUMENTED): This chunk USES the viewport subsystem's `configure_viewport_for_pane()` method. No changes to viewport scroll logic are needed.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Analyze the current rendering flow
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Before making changes, trace the exact code path:
 
-Example:
+1. `render_with_editor()` (mod.rs:589) is called
+2. Lines 608-641: Early glyph buffer update for single-pane mode
+   - Gets the active tab
+   - Calls `configure_viewport_for_pane()` with tab's viewport
+   - Calls `update_glyph_buffer()` with tab's buffer
+3. Lines 642+: Acquires Metal drawable, creates encoder
+4. Lines 745-763: Single-pane rendering block
+   - Draws tab bar
+   - Sets scissor rect
+   - Calls `render_text()` using the *already updated* glyph buffer
 
-### Step 1: Define the SegmentHeader struct
+The problem: glyph buffer is updated in step 2 using terminal content that may have changed by step 4.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Remove early glyph buffer update for single-pane mode
 
-Location: src/segment/format.rs
+**Location**: `crates/editor/src/renderer/mod.rs`, lines 608-641
 
-### Step 2: Implement header serialization
+Remove the early `if ws.pane_root.pane_count() <= 1` block that calls `configure_viewport_for_pane()` and `update_glyph_buffer()`. This code was added by `pane_mirror_restore` to prevent cache contamination in multi-pane mode, but the single-pane path should not use early buffer updates at all.
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+After this change, the early block only needs to remain for multi-pane mode (which skips this block anyway since `pane_count() > 1`).
 
-### Step 3: ...
+### Step 3: Add glyph buffer update inside single-pane content rendering
 
----
+**Location**: `crates/editor/src/renderer/mod.rs`, single-pane rendering block (lines 745-778)
 
-**BACKREFERENCE COMMENTS**
+Inside the `if pane_rects.len() <= 1` block, after drawing the tab bar and setting the scissor rect, add glyph buffer update logic similar to what `render_pane()` does:
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+```rust
+// Single-pane case: render as before (global tab bar, no dividers)
+self.draw_tab_bar(&encoder, view, editor);
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+// Clip buffer content to area below tab bar
+let content_scissor = buffer_content_scissor_rect(TAB_BAR_HEIGHT, view_width, view_height);
+encoder.setScissorRect(content_scissor);
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+// Check for welcome screen or normal buffer rendering
+if editor.should_show_welcome_screen() {
+    let scroll = editor.welcome_scroll_offset_px();
+    self.draw_welcome_screen(&encoder, view, scroll);
+} else {
+    // Chunk: docs/chunks/terminal_single_pane_refresh - Update glyph buffer during render pass
+    // For single-pane mode, update glyph buffer here (during the render pass) rather than
+    // at the start of render_with_editor. This ensures terminal content is read at the
+    // correct time, matching the multi-pane render_pane() behavior.
+    if let Some(ws) = editor.active_workspace() {
+        if let Some(tab) = ws.active_tab() {
+            let content_height = view_height - TAB_BAR_HEIGHT;
+            let content_width = view_width - RAIL_WIDTH;
+            self.configure_viewport_for_pane(&tab.viewport, content_height, content_width);
 
-Format (place immediately before the symbol):
+            if tab.is_agent_tab() {
+                if let Some(terminal) = ws.agent_terminal() {
+                    self.update_glyph_buffer(terminal);
+                }
+            } else if let Some(text_buffer) = tab.as_text_buffer() {
+                let highlighted_view = HighlightedBufferView::new(
+                    text_buffer,
+                    tab.highlighter(),
+                );
+                self.update_glyph_buffer(&highlighted_view);
+            } else {
+                // Terminal or other buffer type
+                self.update_glyph_buffer(tab.buffer());
+            }
+        }
+    }
+
+    // Render editor text content
+    if self.glyph_buffer.index_count() > 0 {
+        self.render_text(&encoder, view);
+    }
+}
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+### Step 4: Ensure styled line cache is cleared appropriately
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+The styled line cache may contain stale data from a previous render. In `render_pane()`, `clear_styled_line_cache()` is called between pane renders. For single-pane mode, this isn't needed *between* panes (there's only one), but we should verify the cache invalidation logic in `render_if_dirty()` handles terminal content updates correctly.
+
+**Location**: `crates/editor/src/drain_loop.rs`, `render_if_dirty()` method
+
+Review the existing logic that calls `renderer.invalidate_styled_lines(&dirty_lines)`. For terminal tabs, verify that `dirty_lines` is populated correctly when PTY output arrives. If terminal tabs don't track dirty lines the same way text buffers do, we may need to call `clear_styled_line_cache()` for terminal tabs.
+
+### Step 5: Write tests
+
+**Location**: `crates/editor/src/editor_state.rs` (test module)
+
+Per the testing philosophy, we can't directly test GPU rendering, but we can test that:
+1. Terminal tabs produce dirty regions when PTY output arrives (existing test)
+2. The terminal buffer has content after polling (existing test)
+
+Add a test that specifically validates the single-pane rendering scenario:
+- Create a single-pane workspace
+- Spawn a terminal tab (Cmd+Shift+T simulation)
+- Poll for PTY events
+- Verify dirty region is FullViewport
+- Verify terminal has non-empty content after polling
+
+This test validates the preconditions for successful rendering; the actual rendering behavior must be verified visually.
+
+### Step 6: Manual visual verification
+
+1. Launch the editor
+2. Ensure a single-pane workspace (no splits)
+3. Press Cmd+Shift+T to spawn a terminal tab
+4. Verify the shell prompt renders immediately (within one frame of PTY output)
+5. Type commands, verify output appears correctly
+6. Split into multiple panes (Cmd+D)
+7. Create another terminal tab
+8. Verify both terminals render correctly
+9. Close one pane, verify the remaining terminal still updates correctly
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+None. This chunk builds on existing infrastructure from:
+- `terminal_tab_initial_render` (ACTIVE) - Fixed blank screens from visible_rows=0
+- `terminal_viewport_init` (ACTIVE) - Fixed scroll_to_bottom computing wrong offsets
+- `pane_mirror_restore` (ACTIVE) - Added early glyph buffer update logic (which this chunk modifies)
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Styled line cache contamination**: Moving the glyph buffer update inside the render pass changes when the cache is populated. Need to verify cache invalidation still works correctly for terminal tabs.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Performance regression**: The early glyph buffer update was potentially done to avoid work during the Metal drawable wait. However, since the multi-pane path already does this without issues, this should be acceptable.
+
+3. **Welcome screen edge case**: The welcome screen rendering path uses different logic. Need to verify this still works correctly when there's an empty file buffer in single-pane mode.
+
+4. **Agent terminal special case**: The `is_agent_tab()` check and `ws.agent_terminal()` lookup is a workaround for agent terminal tabs. Need to preserve this behavior.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->
