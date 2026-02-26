@@ -1,177 +1,146 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk fixes a class of bug where typed characters are invisible until a
+different action triggers a highlighter sync. The root cause is twofold:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Architectural**: `HighlightedBufferView::styled_line()` delegates text
+   retrieval entirely to `SyntaxHighlighter::highlight_line()`, which reads
+   from the highlighter's internal `self.source` field. When the buffer is
+   mutated without syncing the highlighter, the renderer draws **stale text**
+   from the highlighter while the cursor position comes from the current buffer.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **Missing sync calls**: Four buffer mutation paths don't call
+   `sync_active_tab_highlighter()`:
+   - `handle_insert_text()` — regular keyboard input
+   - `handle_set_marked_text()` — IME composition
+   - `handle_unmark_text()` — IME cancellation
+   - `handle_file_drop()` — drag-and-drop file path insertion
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/highlight_text_source/GOAL.md)
-with references to the files that you expect to touch.
--->
+**Strategy:**
+
+We implement both parts of the fix:
+
+1. **Architectural fix**: Modify `HighlightedBufferView::styled_line()` to read
+   line text from the `TextBuffer` (always current), then apply style spans from
+   the highlighter. This makes rendering resilient to highlighter sync gaps —
+   the worst case becomes slightly stale colors for one frame rather than
+   invisible text.
+
+2. **Sync coverage fix**: Add `sync_active_tab_highlighter()` calls to all four
+   missing mutation paths. This keeps highlight colors current. Even with the
+   architectural fix, this is needed — without it, syntax colors would remain
+   stale until the next `handle_key` action.
+
+This follows the testing philosophy's "humble view" pattern: the text content
+is always correct (from the buffer), and the styling is a visual enhancement
+that gracefully degrades when stale.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+- **docs/subsystems/renderer** (DOCUMENTED): This chunk USES the renderer
+  subsystem. The renderer consumes `BufferView` for content access. Our changes
+  to `HighlightedBufferView` stay within the existing `BufferView` contract —
+  `styled_line()` still returns `Option<StyledLine>`. No deviation introduced.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add a method to SyntaxHighlighter to return style spans for a line
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create a new method `highlight_spans_for_line(line_idx, line_text) -> Vec<Span>`
+that returns only the styled spans for a given line, without including the text
+content. This method will:
 
-Example:
+1. Look up the byte range for the line in the highlighter's source
+2. Collect captures that intersect this line
+3. Build spans using the **passed-in** `line_text` instead of reading from
+   `self.source`
 
-### Step 1: Define the SegmentHeader struct
+If the highlighter's source is out of sync (different line count or byte range),
+return a single plain span covering the entire `line_text` as graceful fallback.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Location: `crates/syntax/src/highlighter.rs`
 
-Location: src/segment/format.rs
+### Step 2: Modify HighlightedBufferView::styled_line to read text from buffer
 
-### Step 2: Implement header serialization
+Update `styled_line()` in both `HighlightedBufferView` and
+`HighlightedBufferViewMut` to:
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+1. Read the line text from `self.buffer.line_content(line)` (always current)
+2. If highlighter is Some, call the new `highlight_spans_for_line()` with the
+   buffer's text
+3. Build a `StyledLine` from the returned spans
 
-### Step 3: ...
+This decouples text content from the highlighter's internal source copy.
 
----
+Location: `crates/editor/src/highlighted_buffer.rs`
 
-**BACKREFERENCE COMMENTS**
+### Step 3: Add sync_active_tab_highlighter calls to the four mutation paths
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+Add `self.sync_active_tab_highlighter()` at the end of each mutation path that
+modifies the buffer but was missing the sync:
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+1. `handle_insert_text()` — after the buffer insert for file tabs
+2. `handle_set_marked_text()` — after setting marked text
+3. `handle_unmark_text()` — after clearing marked text
+4. `handle_file_drop()` — after inserting text for file tabs
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+Location: `crates/editor/src/editor_state.rs`
 
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
+### Step 4: Write tests for the architectural fix
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Add tests to `crates/syntax/src/highlighter.rs` that verify:
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+1. `highlight_spans_for_line()` returns correct spans when highlighter is in sync
+2. When highlighter source is stale (different content), the method returns a
+   plain span covering the passed-in text without panicking
+3. Total character count of returned spans equals the input text length
+
+### Step 5: Write integration test for styled_line with stale highlighter
+
+Add a test to `crates/editor/src/highlighted_buffer.rs` that:
+
+1. Creates a `TextBuffer` and a `SyntaxHighlighter` from the same source
+2. Modifies the buffer WITHOUT syncing the highlighter
+3. Creates `HighlightedBufferView` and calls `styled_line()`
+4. Asserts that the rendered text matches the buffer's content (not the stale
+   highlighter source)
+
+This is the key semantic assertion that the architectural fix works.
+
+### Step 6: Update GOAL.md code_paths
+
+Update the chunk's GOAL.md frontmatter with the files touched.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+- `buffer_file_watching` (ACTIVE) — per `created_after` in GOAL.md frontmatter
+- `highlight_injection` (ACTIVE) — per `created_after` in GOAL.md frontmatter
 
-If there are no dependencies, delete this section.
--->
+Both are already complete, so no blocking dependencies.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Span alignment when highlighter is stale**: When the highlighter's source
+  differs from the buffer, byte offsets won't align. The fallback (plain span)
+  handles this gracefully, but syntax colors will be incorrect for that frame.
+  This is acceptable per the success criteria: "correct text, potentially with
+  slightly outdated syntax colors."
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Performance**: The new `highlight_spans_for_line()` method adds minimal
+  overhead — it reuses the existing capture collection and only changes where
+  the text content comes from. Viewport caching in the highlighter remains
+  effective.
+
+- **Injection highlighting**: The architectural change must also work with
+  injection highlighting (e.g., Markdown code blocks). The existing injection
+  capture logic operates on byte ranges, which may need adjustment if the
+  highlighter source and buffer source diverge. The graceful fallback to plain
+  spans should cover this case.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

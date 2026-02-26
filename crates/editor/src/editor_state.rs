@@ -2837,6 +2837,9 @@ impl EditorState {
 
             // Mark the tab as dirty (unsaved changes)
             tab.dirty = true;
+
+            // Chunk: docs/chunks/highlight_text_source - Sync highlighter after file drop insertion
+            self.sync_active_tab_highlighter();
         }
 
         // Other tab types (AgentOutput, Diff): no-op
@@ -2898,6 +2901,9 @@ impl EditorState {
 
             tab.dirty = true;
         }
+
+        // Chunk: docs/chunks/highlight_text_source - Sync highlighter after text insertion
+        self.sync_active_tab_highlighter();
     }
 
     /// Handles IME marked text (composition in progress).
@@ -2935,6 +2941,9 @@ impl EditorState {
         }
 
         // Terminal tabs don't support marked text - IME sends final text directly
+
+        // Chunk: docs/chunks/highlight_text_source - Sync highlighter after setting marked text
+        self.sync_active_tab_highlighter();
     }
 
     /// Handles IME composition cancellation.
@@ -2964,6 +2973,9 @@ impl EditorState {
             // Chunk: docs/chunks/invalidation_separation - Content invalidation for text clearing
             self.invalidation.merge(InvalidationKind::Content(dirty));
         }
+
+        // Chunk: docs/chunks/highlight_text_source - Sync highlighter after clearing marked text
+        self.sync_active_tab_highlighter();
     }
 
     // Chunk: docs/chunks/invalidation_separation - Updated to use InvalidationKind
