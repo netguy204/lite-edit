@@ -1277,6 +1277,210 @@ impl SyntaxHighlighter {
         &self.source
     }
 
+    // Chunk: docs/chunks/highlight_text_source - Buffer-sourced span generation
+    /// Returns style spans for a line using externally-provided text content.
+    ///
+    /// This method decouples text content from the highlighter's internal source copy.
+    /// The caller provides the authoritative line text (from the buffer), and this
+    /// method returns spans with styling information applied.
+    ///
+    /// # Arguments
+    ///
+    /// * `line_idx` - The 0-indexed line number for looking up byte ranges
+    /// * `line_text` - The authoritative text content for this line (from the buffer)
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<Span>` with styling applied. If the highlighter's source is stale
+    /// (different line count or byte offsets don't align), returns a single plain
+    /// span covering the entire `line_text` as a graceful fallback.
+    ///
+    /// # Design
+    ///
+    /// The key invariant is that the returned spans' text concatenated equals
+    /// exactly `line_text`. When the highlighter is in sync, spans will have
+    /// syntax coloring. When stale, the text is still correct but unstyled.
+    pub fn highlight_spans_for_line(&self, line_idx: usize, line_text: &str) -> Vec<Span> {
+        if line_text.is_empty() {
+            return Vec::new();
+        }
+
+        // Get the byte range for this line in the highlighter's source
+        let (line_start, line_end) = match self.line_byte_range(line_idx) {
+            Some(range) => range,
+            None => {
+                // Line doesn't exist in highlighter - return plain text
+                return vec![Span::plain(line_text)];
+            }
+        };
+
+        // Check if the highlighter's line length matches the provided text
+        // If they differ, the highlighter is stale - return plain text as fallback
+        let highlighter_line_len = line_end - line_start;
+        if highlighter_line_len != line_text.len() {
+            return vec![Span::plain(line_text)];
+        }
+
+        // Refresh injection regions and collect captures for this line
+        self.refresh_injection_regions();
+        self.collect_captures_in_range(line_start, line_end);
+        self.collect_injection_captures(line_start, line_end);
+
+        // Build spans using the provided line text
+        self.build_spans_with_external_text(line_idx, line_text, line_start, line_end)
+    }
+
+    /// Builds spans for a line using externally-provided text content.
+    ///
+    /// This is similar to `build_line_from_captures` but uses the provided
+    /// `line_text` instead of reading from `self.source`. The captures are
+    /// still looked up using the highlighter's byte ranges.
+    fn build_spans_with_external_text(
+        &self,
+        _line_idx: usize,
+        line_text: &str,
+        line_start: usize,
+        line_end: usize,
+    ) -> Vec<Span> {
+        let captures = self.captures_buffer.borrow();
+        let injection_captures = self.injection_captures_buffer.borrow();
+
+        // Binary search to find first capture that could overlap this line
+        let first_relevant = captures.partition_point(|(_, cap_end, _)| *cap_end <= line_start);
+        let first_injection = injection_captures.partition_point(|(_, end, _)| *end <= line_start);
+
+        // Build injection regions for overlap checking
+        let mut injection_regions: Vec<(usize, usize)> = Vec::new();
+        if let Some(ref layer) = self.injection_layer {
+            let layer = layer.borrow();
+            for region in &layer.regions {
+                if region.byte_range.end > line_start && region.byte_range.start < line_end {
+                    injection_regions.push((region.byte_range.start, region.byte_range.end));
+                }
+            }
+        }
+
+        let overlaps_injection = |start: usize, end: usize, regions: &[(usize, usize)]| {
+            regions.iter().any(|(s, e)| start < *e && end > *s)
+        };
+
+        let mut spans = Vec::new();
+        let mut covered_until = line_start;
+
+        // Merge host and injection captures
+        let mut host_iter = captures[first_relevant..].iter().peekable();
+        let mut inj_iter = injection_captures[first_injection..].iter().peekable();
+
+        loop {
+            let next_host = host_iter.peek().filter(|(start, _, _)| *start < line_end);
+            let next_inj = inj_iter.peek().filter(|(start, _, _)| *start < line_end);
+
+            let (cap_start, cap_end, style_result) = match (next_host, next_inj) {
+                (None, None) => break,
+                (Some(host_cap), None) => {
+                    let (hs, he, hi) = **host_cap;
+                    host_iter.next();
+                    let host_clamped_start = hs.max(line_start);
+                    let host_clamped_end = he.min(line_end);
+                    if overlaps_injection(host_clamped_start, host_clamped_end, &injection_regions) {
+                        continue;
+                    }
+                    let style = self.query.capture_names()
+                        .get(hi as usize)
+                        .and_then(|name| self.theme.style_for_capture(name).cloned());
+                    (hs, he, style)
+                }
+                (None, Some(inj_cap)) => {
+                    let (is, ie, ref name) = **inj_cap;
+                    inj_iter.next();
+                    let style = self.theme.style_for_capture(name).cloned();
+                    (is, ie, style)
+                }
+                (Some(host_cap), Some(inj_cap)) => {
+                    let (hs, he, hi) = **host_cap;
+                    let (is, ie, ref name) = **inj_cap;
+                    let host_clamped_start = hs.max(line_start);
+                    let host_clamped_end = he.min(line_end);
+                    let host_overlaps_inj = overlaps_injection(host_clamped_start, host_clamped_end, &injection_regions);
+
+                    if is <= hs || host_overlaps_inj {
+                        inj_iter.next();
+                        let style = self.theme.style_for_capture(name).cloned();
+                        (is, ie, style)
+                    } else {
+                        host_iter.next();
+                        let style = self.query.capture_names()
+                            .get(hi as usize)
+                            .and_then(|n| self.theme.style_for_capture(n).cloned());
+                        (hs, he, style)
+                    }
+                }
+            };
+
+            let actual_start = cap_start.max(line_start);
+            let actual_end = cap_end.min(line_end);
+
+            if actual_start >= actual_end {
+                continue;
+            }
+
+            if actual_start < covered_until {
+                if actual_end > covered_until {
+                    // Extract text from line_text using relative offset
+                    let rel_start = covered_until - line_start;
+                    let rel_end = actual_end - line_start;
+                    let tail = &line_text[rel_start..rel_end];
+                    if !tail.is_empty() {
+                        spans.push(Span::plain(tail));
+                    }
+                    covered_until = actual_end;
+                }
+                continue;
+            }
+
+            // Fill gap before this capture with unstyled text
+            if actual_start > covered_until {
+                let rel_start = covered_until - line_start;
+                let rel_end = actual_start - line_start;
+                let gap_text = &line_text[rel_start..rel_end];
+                if !gap_text.is_empty() {
+                    spans.push(Span::plain(gap_text));
+                }
+            }
+
+            // Add this capture with its style
+            let rel_start = actual_start - line_start;
+            let rel_end = actual_end - line_start;
+            let capture_text = &line_text[rel_start..rel_end];
+            if !capture_text.is_empty() {
+                if let Some(style) = style_result {
+                    spans.push(Span::new(capture_text, style));
+                } else {
+                    spans.push(Span::plain(capture_text));
+                }
+            }
+
+            covered_until = actual_end;
+        }
+
+        // Fill remaining line with unstyled text
+        if covered_until < line_end {
+            let rel_start = covered_until - line_start;
+            let remaining = &line_text[rel_start..];
+            if !remaining.is_empty() {
+                spans.push(Span::plain(remaining));
+            }
+        }
+
+        // If no spans were created, return plain text
+        if spans.is_empty() {
+            return vec![Span::plain(line_text)];
+        }
+
+        // Merge adjacent spans with the same style
+        merge_spans(spans)
+    }
+
     /// Updates the highlighter with new source content.
     ///
     /// This performs a full re-parse rather than incremental update.
@@ -2158,5 +2362,117 @@ let x = 1;
         let styled = hl.highlight_line(1);
         let rendered: String = styled.spans.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(rendered, "```", "Line 1 should be the closing fence");
+    }
+
+    // ==================== highlight_spans_for_line tests ====================
+    // Chunk: docs/chunks/highlight_text_source - Tests for buffer-sourced span generation
+
+    #[test]
+    fn test_highlight_spans_for_line_returns_correct_spans_when_synced() {
+        // When the highlighter is in sync with the buffer, spans should have styling
+        let source = "fn main() {}";
+        let hl = make_rust_highlighter(source).unwrap();
+
+        let spans = hl.highlight_spans_for_line(0, source);
+
+        // The concatenated text should match the input
+        let rendered: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(rendered, source, "Rendered text should match input");
+
+        // Should have styling for the keyword
+        let has_styled_fn = spans.iter().any(|s| {
+            s.text == "fn" && !matches!(s.style.fg, Color::Default)
+        });
+        assert!(has_styled_fn, "fn keyword should be styled when highlighter is in sync");
+    }
+
+    #[test]
+    fn test_highlight_spans_for_line_returns_plain_when_stale() {
+        // When the highlighter's source differs from the provided text,
+        // return a plain span covering the entire input text
+        let source = "fn main() {}";
+        let hl = make_rust_highlighter(source).unwrap();
+
+        // Provide different text (simulating stale highlighter)
+        let different_text = "fn main() { x }"; // Different length
+        let spans = hl.highlight_spans_for_line(0, different_text);
+
+        // Should return plain text (no styling)
+        assert_eq!(spans.len(), 1, "Should return single plain span when stale");
+        assert_eq!(spans[0].text, different_text, "Plain span should contain the input text");
+    }
+
+    #[test]
+    fn test_highlight_spans_for_line_total_chars_match_input() {
+        // The total character count of returned spans must equal the input text length
+        let source = "let x = 42;\nlet y = 100;";
+        let hl = make_rust_highlighter(source).unwrap();
+
+        for (line_idx, line) in source.lines().enumerate() {
+            let spans = hl.highlight_spans_for_line(line_idx, line);
+            let total_chars: usize = spans.iter().map(|s| s.text.len()).sum();
+            assert_eq!(
+                total_chars, line.len(),
+                "Line {}: total span chars ({}) should match input length ({})",
+                line_idx, total_chars, line.len()
+            );
+        }
+    }
+
+    #[test]
+    fn test_highlight_spans_for_line_out_of_bounds_returns_plain() {
+        // When the line index doesn't exist in the highlighter, return plain text
+        let source = "fn main() {}";
+        let hl = make_rust_highlighter(source).unwrap();
+
+        // Ask for a line that doesn't exist in highlighter
+        let spans = hl.highlight_spans_for_line(100, "some text");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].text, "some text");
+    }
+
+    #[test]
+    fn test_highlight_spans_for_line_empty_text() {
+        // Empty text should return empty spans
+        let source = "fn main() {\n\n}";
+        let hl = make_rust_highlighter(source).unwrap();
+
+        // Line 1 is empty in the source
+        let spans = hl.highlight_spans_for_line(1, "");
+        assert!(spans.is_empty(), "Empty input should return empty spans");
+    }
+
+    #[test]
+    fn test_highlight_spans_for_line_multiline_source() {
+        // Test with multiple lines
+        let source = "fn main() {\n    let x = 42;\n}";
+        let hl = make_rust_highlighter(source).unwrap();
+
+        // Check line 1: "    let x = 42;"
+        let line1 = "    let x = 42;";
+        let spans = hl.highlight_spans_for_line(1, line1);
+        let rendered: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(rendered, line1, "Line 1 should render correctly");
+
+        // Should have styling for the let keyword
+        let has_styled_let = spans.iter().any(|s| {
+            s.text == "let" && !matches!(s.style.fg, Color::Default)
+        });
+        assert!(has_styled_let, "let keyword should be styled");
+    }
+
+    #[test]
+    fn test_highlight_spans_for_line_graceful_length_mismatch() {
+        // When byte length differs but line index is valid, return plain text
+        let source = "fn main() {}";
+        let hl = make_rust_highlighter(source).unwrap();
+
+        // Same line index but different content (e.g., user typed more characters)
+        let modified_text = "fn main() { println!(); }";
+        let spans = hl.highlight_spans_for_line(0, modified_text);
+
+        // Should get plain text since lengths don't match
+        let rendered: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(rendered, modified_text, "Should return the modified text even when stale");
     }
 }
