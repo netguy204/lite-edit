@@ -1,19 +1,19 @@
 # Review Feedback
 
-**Iteration:** 1
+**Iteration:** 2
 **Decision:** FEEDBACK
 
 ## Summary
 
-Core infrastructure is correct but EventSender is not propagated to Editor, so workspaces never receive file change callbacks
+Prior feedback not addressed: EventSender still not propagated from EditorState to Editor, so workspaces never receive file change callbacks. All infrastructure is in place (EditorEvent::FileChanged, EventSender::send_file_changed, FileIndex::start_with_callback, debouncing, self-write suppression) but the wiring is broken because EditorState::set_event_sender() does not call self.editor.set_event_sender().
 
 ## Issues to Address
 
 ### Issue 1: crates/editor/src/editor_state.rs:443-445
 
-**Concern:** EditorState::set_event_sender() does not call self.editor.set_event_sender(). Editor::event_sender is always None, so all workspaces are created via FileIndex::start() without callback.
+**Concern:** EditorState::set_event_sender() stores the event sender only on EditorState.event_sender (for PTY wakeups) but does NOT propagate to self.editor.set_event_sender(). As a result, Editor.event_sender is always None, and all workspaces are created via FileIndex::start() (without callback) instead of FileIndex::start_with_callback(). This is a recurring issue from iteration 1.
 
-**Suggestion:** Add self.editor.set_event_sender(sender.clone()); to EditorState::set_event_sender()
+**Suggestion:** Add self.editor.set_event_sender(sender.clone()); to EditorState::set_event_sender() to ensure Editor.event_sender is set, enabling file change callbacks for workspaces.
 
 
 ---
