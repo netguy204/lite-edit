@@ -319,6 +319,12 @@ pub struct WelcomeScreenGlyphBuffer {
     /// Layout calculator for glyph positioning
     layout: GlyphLayout,
 
+    // Chunk: docs/chunks/quad_buffer_prealloc - Persistent vertex/index buffers to avoid per-frame allocations
+    /// Persistent vertex buffer reused across frames
+    persistent_vertices: Vec<GlyphVertex>,
+    /// Persistent index buffer reused across frames
+    persistent_indices: Vec<u32>,
+
     // Quad ranges for different draw phases
     /// Logo text glyphs (multiple colors)
     logo_range: QuadRange,
@@ -330,12 +336,15 @@ pub struct WelcomeScreenGlyphBuffer {
 
 impl WelcomeScreenGlyphBuffer {
     /// Creates a new empty welcome screen glyph buffer.
+    // Chunk: docs/chunks/quad_buffer_prealloc - Initialize persistent buffers as empty Vecs
     pub fn new(layout: GlyphLayout) -> Self {
         Self {
             vertex_buffer: None,
             index_buffer: None,
             index_count: 0,
             layout,
+            persistent_vertices: Vec::new(),
+            persistent_indices: Vec::new(),
             logo_range: QuadRange::default(),
             title_range: QuadRange::default(),
             hotkey_range: QuadRange::default(),
@@ -373,6 +382,7 @@ impl WelcomeScreenGlyphBuffer {
     }
 
     // Chunk: docs/chunks/welcome_screen - Generates glyph quads for logo, title, and hotkey table with colored text
+    // Chunk: docs/chunks/quad_buffer_prealloc - Use persistent buffers to avoid per-frame allocations
     /// Updates the buffers with welcome screen content.
     ///
     /// # Arguments
@@ -396,8 +406,15 @@ impl WelcomeScreenGlyphBuffer {
             .sum();
         let estimated_quads = logo_chars + name_chars + hotkey_chars;
 
-        let mut vertices: Vec<GlyphVertex> = Vec::with_capacity(estimated_quads * 4);
-        let mut indices: Vec<u32> = Vec::with_capacity(estimated_quads * 6);
+        // Chunk: docs/chunks/quad_buffer_prealloc - Clear and reserve persistent buffers instead of allocating new ones
+        self.persistent_vertices.clear();
+        self.persistent_indices.clear();
+        if self.persistent_vertices.capacity() < estimated_quads * 4 {
+            self.persistent_vertices.reserve(estimated_quads * 4 - self.persistent_vertices.capacity());
+        }
+        if self.persistent_indices.capacity() < estimated_quads * 6 {
+            self.persistent_indices.reserve(estimated_quads * 6 - self.persistent_indices.capacity());
+        }
         let mut vertex_offset: u32 = 0;
 
         // Reset ranges
@@ -408,7 +425,7 @@ impl WelcomeScreenGlyphBuffer {
         let mut current_line: usize = 0;
 
         // ==================== Phase 1: Logo ====================
-        let logo_start = indices.len();
+        let logo_start = self.persistent_indices.len();
 
         // Calculate logo centering offset within content area
         let logo_width = FEATHER_LOGO.iter().map(|(s, _)| s.len()).max().unwrap_or(0);
@@ -418,10 +435,11 @@ impl WelcomeScreenGlyphBuffer {
             let color = LOGO_GRADIENT.get(*color_idx).copied().unwrap_or(COLOR_LAVENDER);
             let line_x_offset = logo_x_offset;
 
-            self.emit_line(
-                &mut vertices,
-                &mut indices,
+            Self::emit_line_static(
+                &mut self.persistent_vertices,
+                &mut self.persistent_indices,
                 &mut vertex_offset,
+                &self.layout,
                 atlas,
                 geometry,
                 line_text,
@@ -432,20 +450,21 @@ impl WelcomeScreenGlyphBuffer {
             current_line += 1;
         }
 
-        self.logo_range = QuadRange::new(logo_start, indices.len() - logo_start);
+        self.logo_range = QuadRange::new(logo_start, self.persistent_indices.len() - logo_start);
 
         // ==================== Phase 2: Title (Name + Tagline) ====================
-        let title_start = indices.len();
+        let title_start = self.persistent_indices.len();
 
         // Gap after logo
         current_line += LOGO_NAME_GAP;
 
         // Editor name (centered, bright white)
         let name_x_offset = (geometry.content_width_chars.saturating_sub(EDITOR_NAME.len())) / 2;
-        self.emit_line(
-            &mut vertices,
-            &mut indices,
+        Self::emit_line_static(
+            &mut self.persistent_vertices,
+            &mut self.persistent_indices,
             &mut vertex_offset,
+            &self.layout,
             atlas,
             geometry,
             EDITOR_NAME,
@@ -460,10 +479,11 @@ impl WelcomeScreenGlyphBuffer {
 
         // Tagline (centered, dimmed)
         let tagline_x_offset = (geometry.content_width_chars.saturating_sub(TAGLINE.len())) / 2;
-        self.emit_line(
-            &mut vertices,
-            &mut indices,
+        Self::emit_line_static(
+            &mut self.persistent_vertices,
+            &mut self.persistent_indices,
             &mut vertex_offset,
+            &self.layout,
             atlas,
             geometry,
             TAGLINE,
@@ -473,10 +493,10 @@ impl WelcomeScreenGlyphBuffer {
         );
         current_line += 1;
 
-        self.title_range = QuadRange::new(title_start, indices.len() - title_start);
+        self.title_range = QuadRange::new(title_start, self.persistent_indices.len() - title_start);
 
         // ==================== Phase 3: Hotkey Table ====================
-        let hotkey_start = indices.len();
+        let hotkey_start = self.persistent_indices.len();
 
         // Gap after tagline
         current_line += TAGLINE_HOTKEYS_GAP;
@@ -487,10 +507,11 @@ impl WelcomeScreenGlyphBuffer {
 
         for (i, (category, hotkeys)) in HOTKEYS.iter().enumerate() {
             // Category header (overlay color)
-            self.emit_line(
-                &mut vertices,
-                &mut indices,
+            Self::emit_line_static(
+                &mut self.persistent_vertices,
+                &mut self.persistent_indices,
                 &mut vertex_offset,
+                &self.layout,
                 atlas,
                 geometry,
                 category,
@@ -503,10 +524,11 @@ impl WelcomeScreenGlyphBuffer {
             // Hotkey entries
             for (key, desc) in *hotkeys {
                 // Key combo (blue)
-                self.emit_line(
-                    &mut vertices,
-                    &mut indices,
+                Self::emit_line_static(
+                    &mut self.persistent_vertices,
+                    &mut self.persistent_indices,
                     &mut vertex_offset,
+                    &self.layout,
                     atlas,
                     geometry,
                     key,
@@ -516,10 +538,11 @@ impl WelcomeScreenGlyphBuffer {
                 );
 
                 // Description (dimmed)
-                self.emit_line(
-                    &mut vertices,
-                    &mut indices,
+                Self::emit_line_static(
+                    &mut self.persistent_vertices,
+                    &mut self.persistent_indices,
                     &mut vertex_offset,
+                    &self.layout,
                     atlas,
                     geometry,
                     desc,
@@ -536,10 +559,10 @@ impl WelcomeScreenGlyphBuffer {
             }
         }
 
-        self.hotkey_range = QuadRange::new(hotkey_start, indices.len() - hotkey_start);
+        self.hotkey_range = QuadRange::new(hotkey_start, self.persistent_indices.len() - hotkey_start);
 
         // ==================== Create GPU Buffers ====================
-        if vertices.is_empty() {
+        if self.persistent_vertices.is_empty() {
             self.vertex_buffer = None;
             self.index_buffer = None;
             self.index_count = 0;
@@ -547,9 +570,9 @@ impl WelcomeScreenGlyphBuffer {
         }
 
         // Create the vertex buffer
-        let vertex_data_size = vertices.len() * VERTEX_SIZE;
+        let vertex_data_size = self.persistent_vertices.len() * VERTEX_SIZE;
         let vertex_ptr =
-            NonNull::new(vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
+            NonNull::new(self.persistent_vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
 
         let vertex_buffer = unsafe {
             device
@@ -562,9 +585,9 @@ impl WelcomeScreenGlyphBuffer {
         };
 
         // Create the index buffer
-        let index_data_size = indices.len() * std::mem::size_of::<u32>();
+        let index_data_size = self.persistent_indices.len() * std::mem::size_of::<u32>();
         let index_ptr =
-            NonNull::new(indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
+            NonNull::new(self.persistent_indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
 
         let index_buffer = unsafe {
             device
@@ -578,16 +601,17 @@ impl WelcomeScreenGlyphBuffer {
 
         self.vertex_buffer = Some(vertex_buffer);
         self.index_buffer = Some(index_buffer);
-        self.index_count = indices.len();
+        self.index_count = self.persistent_indices.len();
     }
 
-    /// Emits glyphs for a line of text.
+    // Chunk: docs/chunks/quad_buffer_prealloc - Static method to emit glyphs into persistent buffers
+    /// Emits glyphs for a line of text into the provided buffers.
     #[allow(clippy::too_many_arguments)]
-    fn emit_line(
-        &self,
+    fn emit_line_static(
         vertices: &mut Vec<GlyphVertex>,
         indices: &mut Vec<u32>,
         vertex_offset: &mut u32,
+        _layout: &GlyphLayout,
         atlas: &GlyphAtlas,
         geometry: &WelcomeScreenGeometry,
         text: &str,
@@ -605,7 +629,7 @@ impl WelcomeScreenGlyphBuffer {
                 let x = geometry.content_x + (x_offset_chars + col) as f32 * geometry.glyph_width;
                 let y = geometry.content_y + line as f32 * geometry.line_height;
 
-                let quad = self.create_glyph_quad_at(x, y, glyph, color);
+                let quad = Self::create_glyph_quad_at_static(x, y, glyph, color);
                 vertices.extend_from_slice(&quad);
                 Self::push_quad_indices(indices, *vertex_offset);
                 *vertex_offset += 4;
@@ -614,7 +638,7 @@ impl WelcomeScreenGlyphBuffer {
     }
 
     /// Creates a glyph quad at an absolute position with the specified color.
-    fn create_glyph_quad_at(&self, x: f32, y: f32, glyph: &GlyphInfo, color: [f32; 4]) -> [GlyphVertex; 4] {
+    fn create_glyph_quad_at_static(x: f32, y: f32, glyph: &GlyphInfo, color: [f32; 4]) -> [GlyphVertex; 4] {
         let (u0, v0) = glyph.uv_min;
         let (u1, v1) = glyph.uv_max;
 

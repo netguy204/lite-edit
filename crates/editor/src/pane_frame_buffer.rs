@@ -277,6 +277,12 @@ pub struct PaneFrameBuffer {
     /// Total number of indices
     index_count: usize,
 
+    // Chunk: docs/chunks/quad_buffer_prealloc - Persistent CPU-side buffers to avoid per-frame allocation
+    /// Persistent vertex buffer reused across frames
+    persistent_vertices: Vec<GlyphVertex>,
+    /// Persistent index buffer reused across frames
+    persistent_indices: Vec<u32>,
+
     // Quad ranges for different draw phases
     /// Divider line quads
     divider_range: QuadRange,
@@ -291,6 +297,9 @@ impl PaneFrameBuffer {
             vertex_buffer: None,
             index_buffer: None,
             index_count: 0,
+            // Chunk: docs/chunks/quad_buffer_prealloc - Initialize persistent buffers
+            persistent_vertices: Vec::new(),
+            persistent_indices: Vec::new(),
             divider_range: QuadRange::default(),
             focus_border_range: QuadRange::default(),
         }
@@ -361,14 +370,17 @@ impl PaneFrameBuffer {
             return;
         }
 
-        let mut vertices: Vec<GlyphVertex> = Vec::with_capacity(total_quads * 4);
-        let mut indices: Vec<u32> = Vec::with_capacity(total_quads * 6);
+        // Chunk: docs/chunks/quad_buffer_prealloc - Reuse persistent buffers instead of allocating
+        self.persistent_vertices.clear();
+        self.persistent_indices.clear();
+        self.persistent_vertices.reserve(total_quads * 4);
+        self.persistent_indices.reserve(total_quads * 6);
         let mut vertex_offset: u32 = 0;
 
         let solid_glyph = atlas.solid_glyph();
 
         // ==================== Divider Lines ====================
-        let divider_start = indices.len();
+        let divider_start = self.persistent_indices.len();
         for line in &divider_lines {
             let quad = create_rect_quad(
                 line.x,
@@ -378,14 +390,14 @@ impl PaneFrameBuffer {
                 solid_glyph,
                 divider_color,
             );
-            vertices.extend_from_slice(&quad);
-            push_quad_indices(&mut indices, vertex_offset);
+            self.persistent_vertices.extend_from_slice(&quad);
+            push_quad_indices(&mut self.persistent_indices, vertex_offset);
             vertex_offset += 4;
         }
-        self.divider_range = QuadRange::new(divider_start, indices.len() - divider_start);
+        self.divider_range = QuadRange::new(divider_start, self.persistent_indices.len() - divider_start);
 
         // ==================== Focus Border ====================
-        let border_start = indices.len();
+        let border_start = self.persistent_indices.len();
         if let Some(rect) = focused_rect {
             // Only draw focus border when there are multiple panes
             if pane_rects.len() > 1 {
@@ -399,16 +411,16 @@ impl PaneFrameBuffer {
                         solid_glyph,
                         focus_color,
                     );
-                    vertices.extend_from_slice(&quad);
-                    push_quad_indices(&mut indices, vertex_offset);
+                    self.persistent_vertices.extend_from_slice(&quad);
+                    push_quad_indices(&mut self.persistent_indices, vertex_offset);
                     vertex_offset += 4;
                 }
             }
         }
-        self.focus_border_range = QuadRange::new(border_start, indices.len() - border_start);
+        self.focus_border_range = QuadRange::new(border_start, self.persistent_indices.len() - border_start);
 
         // ==================== Create GPU Buffers ====================
-        if vertices.is_empty() {
+        if self.persistent_vertices.is_empty() {
             self.vertex_buffer = None;
             self.index_buffer = None;
             self.index_count = 0;
@@ -416,9 +428,9 @@ impl PaneFrameBuffer {
         }
 
         // Create the vertex buffer
-        let vertex_data_size = vertices.len() * VERTEX_SIZE;
+        let vertex_data_size = self.persistent_vertices.len() * VERTEX_SIZE;
         let vertex_ptr =
-            NonNull::new(vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
+            NonNull::new(self.persistent_vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
 
         let vertex_buffer = unsafe {
             device
@@ -431,9 +443,9 @@ impl PaneFrameBuffer {
         };
 
         // Create the index buffer
-        let index_data_size = indices.len() * std::mem::size_of::<u32>();
+        let index_data_size = self.persistent_indices.len() * std::mem::size_of::<u32>();
         let index_ptr =
-            NonNull::new(indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
+            NonNull::new(self.persistent_indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
 
         let index_buffer = unsafe {
             device
@@ -447,7 +459,7 @@ impl PaneFrameBuffer {
 
         self.vertex_buffer = Some(vertex_buffer);
         self.index_buffer = Some(index_buffer);
-        self.index_count = indices.len();
+        self.index_count = self.persistent_indices.len();
     }
 }
 

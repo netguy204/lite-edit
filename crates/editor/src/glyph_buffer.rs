@@ -248,6 +248,7 @@ impl QuadRange {
 
 /// Manages vertex and index buffers for rendering text
 // Chunk: docs/chunks/renderer_styled_content - Extended with background and underline ranges
+// Chunk: docs/chunks/quad_buffer_prealloc - Persistent vertex/index buffers to eliminate per-frame allocations
 pub struct GlyphBuffer {
     /// The vertex buffer containing glyph quad vertices
     vertex_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
@@ -277,11 +278,19 @@ pub struct GlyphBuffer {
     // Chunk: docs/chunks/content_tab_bar - Content area y offset for tab bar
     /// Vertical offset for content area (e.g., for tab bar)
     y_offset: f32,
+    // Chunk: docs/chunks/quad_buffer_prealloc - Persistent buffers to avoid per-frame heap allocations
+    /// Persistent vertex data buffer, reused across frames
+    persistent_vertices: Vec<GlyphVertex>,
+    /// Persistent index data buffer, reused across frames
+    persistent_indices: Vec<u32>,
+    /// Persistent buffer for tracking which buffer lines are rendered
+    rendered_buffer_lines: Vec<usize>,
 }
 
 impl GlyphBuffer {
     /// Creates a new empty glyph buffer
     // Chunk: docs/chunks/renderer_styled_content - ColorPalette for styled text
+    // Chunk: docs/chunks/quad_buffer_prealloc - Initialize persistent buffers
     pub fn new(metrics: &FontMetrics) -> Self {
         Self {
             vertex_buffer: None,
@@ -297,6 +306,9 @@ impl GlyphBuffer {
             cursor_range: QuadRange::default(),
             x_offset: 0.0,
             y_offset: 0.0,
+            persistent_vertices: Vec::new(),
+            persistent_indices: Vec::new(),
+            rendered_buffer_lines: Vec::new(),
         }
     }
 
@@ -390,6 +402,7 @@ impl GlyphBuffer {
     /// * `lines` - The text lines to render
     // Chunk: docs/chunks/renderer_styled_content - Uses default text color
     // Chunk: docs/chunks/terminal_background_box_drawing - Mutable atlas for on-demand glyph addition
+    // Chunk: docs/chunks/quad_buffer_prealloc - Use persistent buffers to avoid per-frame allocations
     pub fn update(
         &mut self,
         device: &ProtocolObject<dyn MTLDevice>,
@@ -410,9 +423,18 @@ impl GlyphBuffer {
         // Use default text color for this simple API
         let text_color = self.palette.default_foreground();
 
-        // Allocate vertex and index data
-        let mut vertices: Vec<GlyphVertex> = Vec::with_capacity(char_count * 4);
-        let mut indices: Vec<u32> = Vec::with_capacity(char_count * 6);
+        // Chunk: docs/chunks/quad_buffer_prealloc - Reuse persistent buffers instead of allocating new ones
+        // Clear and reserve capacity in persistent buffers
+        self.persistent_vertices.clear();
+        self.persistent_indices.clear();
+        let estimated_vertices = char_count * 4;
+        let estimated_indices = char_count * 6;
+        if self.persistent_vertices.capacity() < estimated_vertices {
+            self.persistent_vertices.reserve(estimated_vertices - self.persistent_vertices.capacity());
+        }
+        if self.persistent_indices.capacity() < estimated_indices {
+            self.persistent_indices.reserve(estimated_indices - self.persistent_indices.capacity());
+        }
 
         let mut vertex_offset: u32 = 0;
 
@@ -442,17 +464,17 @@ impl GlyphBuffer {
 
                 // Generate the quad vertices
                 let quad = self.layout.quad_vertices(row, col, glyph, text_color);
-                vertices.extend_from_slice(&quad);
+                self.persistent_vertices.extend_from_slice(&quad);
 
                 // Generate indices for two triangles
                 // Triangle 1: top-left, top-right, bottom-right
                 // Triangle 2: top-left, bottom-right, bottom-left
-                indices.push(vertex_offset);
-                indices.push(vertex_offset + 1);
-                indices.push(vertex_offset + 2);
-                indices.push(vertex_offset);
-                indices.push(vertex_offset + 2);
-                indices.push(vertex_offset + 3);
+                self.persistent_indices.push(vertex_offset);
+                self.persistent_indices.push(vertex_offset + 1);
+                self.persistent_indices.push(vertex_offset + 2);
+                self.persistent_indices.push(vertex_offset);
+                self.persistent_indices.push(vertex_offset + 2);
+                self.persistent_indices.push(vertex_offset + 3);
 
                 vertex_offset += 4;
                 // Advance by character display width (2 for wide chars like CJK/emoji)
@@ -460,7 +482,7 @@ impl GlyphBuffer {
             }
         }
 
-        if vertices.is_empty() {
+        if self.persistent_vertices.is_empty() {
             self.vertex_buffer = None;
             self.index_buffer = None;
             self.index_count = 0;
@@ -468,9 +490,9 @@ impl GlyphBuffer {
         }
 
         // Create the vertex buffer
-        let vertex_data_size = vertices.len() * VERTEX_SIZE;
+        let vertex_data_size = self.persistent_vertices.len() * VERTEX_SIZE;
         let vertex_ptr =
-            NonNull::new(vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
+            NonNull::new(self.persistent_vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
 
         // SAFETY: We're passing valid vertex data to create a buffer
         let vertex_buffer = unsafe {
@@ -484,9 +506,9 @@ impl GlyphBuffer {
         };
 
         // Create the index buffer
-        let index_data_size = indices.len() * std::mem::size_of::<u32>();
+        let index_data_size = self.persistent_indices.len() * std::mem::size_of::<u32>();
         let index_ptr =
-            NonNull::new(indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
+            NonNull::new(self.persistent_indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
 
         // SAFETY: We're passing valid index data to create a buffer
         let index_buffer = unsafe {
@@ -501,7 +523,7 @@ impl GlyphBuffer {
 
         self.vertex_buffer = Some(vertex_buffer);
         self.index_buffer = Some(index_buffer);
-        self.index_count = indices.len();
+        self.index_count = self.persistent_indices.len();
     }
 
     /// Updates the buffers with content from a BufferView, rendering only visible lines
@@ -604,9 +626,19 @@ impl GlyphBuffer {
             return;
         }
 
-        // Allocate vertex and index data
-        let mut vertices: Vec<GlyphVertex> = Vec::with_capacity(total_estimated * 4);
-        let mut indices: Vec<u32> = Vec::with_capacity(total_estimated * 6);
+        // Chunk: docs/chunks/quad_buffer_prealloc - Reuse persistent buffers instead of allocating new ones
+        // Clear and reserve capacity in persistent buffers
+        self.persistent_vertices.clear();
+        self.persistent_indices.clear();
+        let estimated_vertices = total_estimated * 4;
+        let estimated_indices = total_estimated * 6;
+        if self.persistent_vertices.capacity() < estimated_vertices {
+            self.persistent_vertices.reserve(estimated_vertices - self.persistent_vertices.capacity());
+        }
+        if self.persistent_indices.capacity() < estimated_indices {
+            self.persistent_indices.reserve(estimated_indices - self.persistent_indices.capacity());
+        }
+
         let mut vertex_offset: u32 = 0;
 
         // Copy the solid glyph info to avoid borrowing atlas during later mutable operations
@@ -621,7 +653,7 @@ impl GlyphBuffer {
         // ==================== Phase 1: Background Quads ====================
         // Chunk: docs/chunks/renderer_styled_content - Background quads for per-span bg colors
         // Chunk: docs/chunks/terminal_multibyte_rendering - Width-aware column counting for wide characters
-        let background_start_index = indices.len();
+        let background_start_index = self.persistent_indices.len();
 
         for (idx, buffer_line) in visible_range.clone().enumerate() {
             let screen_row = buffer_line - first_visible;
@@ -644,14 +676,14 @@ impl GlyphBuffer {
                         let quad = self.create_selection_quad_with_offset(
                             screen_row, col, end_col, &solid_glyph, y_offset, bg
                         );
-                        vertices.extend_from_slice(&quad);
+                        self.persistent_vertices.extend_from_slice(&quad);
 
-                        indices.push(vertex_offset);
-                        indices.push(vertex_offset + 1);
-                        indices.push(vertex_offset + 2);
-                        indices.push(vertex_offset);
-                        indices.push(vertex_offset + 2);
-                        indices.push(vertex_offset + 3);
+                        self.persistent_indices.push(vertex_offset);
+                        self.persistent_indices.push(vertex_offset + 1);
+                        self.persistent_indices.push(vertex_offset + 2);
+                        self.persistent_indices.push(vertex_offset);
+                        self.persistent_indices.push(vertex_offset + 2);
+                        self.persistent_indices.push(vertex_offset + 3);
 
                         vertex_offset += 4;
                     }
@@ -661,11 +693,11 @@ impl GlyphBuffer {
             }
         }
 
-        let background_index_count = indices.len() - background_start_index;
+        let background_index_count = self.persistent_indices.len() - background_start_index;
         self.background_range = QuadRange::new(background_start_index, background_index_count);
 
         // ==================== Phase 2: Selection Quads ====================
-        let selection_start_index = indices.len();
+        let selection_start_index = self.persistent_indices.len();
 
         if let Some((sel_start, sel_end)) = view.selection_range() {
             for buffer_line in visible_range.clone() {
@@ -694,26 +726,26 @@ impl GlyphBuffer {
                 let quad = self.create_selection_quad_with_offset(
                     screen_row, start_col, end_col, &solid_glyph, y_offset, selection_color
                 );
-                vertices.extend_from_slice(&quad);
+                self.persistent_vertices.extend_from_slice(&quad);
 
-                indices.push(vertex_offset);
-                indices.push(vertex_offset + 1);
-                indices.push(vertex_offset + 2);
-                indices.push(vertex_offset);
-                indices.push(vertex_offset + 2);
-                indices.push(vertex_offset + 3);
+                self.persistent_indices.push(vertex_offset);
+                self.persistent_indices.push(vertex_offset + 1);
+                self.persistent_indices.push(vertex_offset + 2);
+                self.persistent_indices.push(vertex_offset);
+                self.persistent_indices.push(vertex_offset + 2);
+                self.persistent_indices.push(vertex_offset + 3);
 
                 vertex_offset += 4;
             }
         }
 
-        let selection_index_count = indices.len() - selection_start_index;
+        let selection_index_count = self.persistent_indices.len() - selection_start_index;
         self.selection_range = QuadRange::new(selection_start_index, selection_index_count);
 
         // ==================== Phase 3: Glyph Quads ====================
         // Chunk: docs/chunks/renderer_styled_content - Per-span foreground colors
         // Chunk: docs/chunks/terminal_multibyte_rendering - Width-aware column advancement for wide characters
-        let glyph_start_index = indices.len();
+        let glyph_start_index = self.persistent_indices.len();
 
         for (idx, buffer_line) in visible_range.clone().enumerate() {
             let screen_row = buffer_line - first_visible;
@@ -758,14 +790,14 @@ impl GlyphBuffer {
                         // causing glyphs to render without the left rail offset (x_offset).
                         let effective_y_offset = y_offset - self.y_offset;
                         let quad = self.layout.quad_vertices_with_xy_offset(screen_row, col, glyph, self.x_offset, effective_y_offset, fg);
-                        vertices.extend_from_slice(&quad);
+                        self.persistent_vertices.extend_from_slice(&quad);
 
-                        indices.push(vertex_offset);
-                        indices.push(vertex_offset + 1);
-                        indices.push(vertex_offset + 2);
-                        indices.push(vertex_offset);
-                        indices.push(vertex_offset + 2);
-                        indices.push(vertex_offset + 3);
+                        self.persistent_indices.push(vertex_offset);
+                        self.persistent_indices.push(vertex_offset + 1);
+                        self.persistent_indices.push(vertex_offset + 2);
+                        self.persistent_indices.push(vertex_offset);
+                        self.persistent_indices.push(vertex_offset + 2);
+                        self.persistent_indices.push(vertex_offset + 3);
 
                         vertex_offset += 4;
                         // Advance by character display width (2 for wide chars like CJK/emoji)
@@ -775,13 +807,13 @@ impl GlyphBuffer {
             }
         }
 
-        let glyph_index_count = indices.len() - glyph_start_index;
+        let glyph_index_count = self.persistent_indices.len() - glyph_start_index;
         self.glyph_range = QuadRange::new(glyph_start_index, glyph_index_count);
 
         // ==================== Phase 4: Underline Quads ====================
         // Chunk: docs/chunks/renderer_styled_content - Underline rendering
         // Chunk: docs/chunks/terminal_multibyte_rendering - Width-aware column counting for wide characters
-        let underline_start_index = indices.len();
+        let underline_start_index = self.persistent_indices.len();
 
         for (idx, buffer_line) in visible_range.clone().enumerate() {
             let screen_row = buffer_line - first_visible;
@@ -808,14 +840,14 @@ impl GlyphBuffer {
                         let quad = self.create_underline_quad(
                             screen_row, col, end_col, &solid_glyph, y_offset, underline_color
                         );
-                        vertices.extend_from_slice(&quad);
+                        self.persistent_vertices.extend_from_slice(&quad);
 
-                        indices.push(vertex_offset);
-                        indices.push(vertex_offset + 1);
-                        indices.push(vertex_offset + 2);
-                        indices.push(vertex_offset);
-                        indices.push(vertex_offset + 2);
-                        indices.push(vertex_offset + 3);
+                        self.persistent_indices.push(vertex_offset);
+                        self.persistent_indices.push(vertex_offset + 1);
+                        self.persistent_indices.push(vertex_offset + 2);
+                        self.persistent_indices.push(vertex_offset);
+                        self.persistent_indices.push(vertex_offset + 2);
+                        self.persistent_indices.push(vertex_offset + 3);
 
                         vertex_offset += 4;
                     }
@@ -825,12 +857,12 @@ impl GlyphBuffer {
             }
         }
 
-        let underline_index_count = indices.len() - underline_start_index;
+        let underline_index_count = self.persistent_indices.len() - underline_start_index;
         self.underline_range = QuadRange::new(underline_start_index, underline_index_count);
 
         // ==================== Phase 5: Cursor Quad ====================
         // Chunk: docs/chunks/renderer_styled_content - Cursor shape rendering
-        let cursor_start_index = indices.len();
+        let cursor_start_index = self.persistent_indices.len();
 
         if cursor_visible {
             if let Some(cursor_info) = view.cursor_info() {
@@ -846,24 +878,24 @@ impl GlyphBuffer {
                             y_offset,
                             cursor_color,
                         );
-                        vertices.extend_from_slice(&cursor_quad);
+                        self.persistent_vertices.extend_from_slice(&cursor_quad);
 
-                        indices.push(vertex_offset);
-                        indices.push(vertex_offset + 1);
-                        indices.push(vertex_offset + 2);
-                        indices.push(vertex_offset);
-                        indices.push(vertex_offset + 2);
-                        indices.push(vertex_offset + 3);
+                        self.persistent_indices.push(vertex_offset);
+                        self.persistent_indices.push(vertex_offset + 1);
+                        self.persistent_indices.push(vertex_offset + 2);
+                        self.persistent_indices.push(vertex_offset);
+                        self.persistent_indices.push(vertex_offset + 2);
+                        self.persistent_indices.push(vertex_offset + 3);
                     }
                 }
             }
         }
 
-        let cursor_index_count = indices.len() - cursor_start_index;
+        let cursor_index_count = self.persistent_indices.len() - cursor_start_index;
         self.cursor_range = QuadRange::new(cursor_start_index, cursor_index_count);
 
         // ==================== Create GPU Buffers ====================
-        if vertices.is_empty() {
+        if self.persistent_vertices.is_empty() {
             self.vertex_buffer = None;
             self.index_buffer = None;
             self.index_count = 0;
@@ -871,9 +903,9 @@ impl GlyphBuffer {
         }
 
         // Create the vertex buffer
-        let vertex_data_size = vertices.len() * VERTEX_SIZE;
+        let vertex_data_size = self.persistent_vertices.len() * VERTEX_SIZE;
         let vertex_ptr =
-            NonNull::new(vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
+            NonNull::new(self.persistent_vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
 
         let vertex_buffer = unsafe {
             device
@@ -886,9 +918,9 @@ impl GlyphBuffer {
         };
 
         // Create the index buffer
-        let index_data_size = indices.len() * std::mem::size_of::<u32>();
+        let index_data_size = self.persistent_indices.len() * std::mem::size_of::<u32>();
         let index_ptr =
-            NonNull::new(indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
+            NonNull::new(self.persistent_indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
 
         let index_buffer = unsafe {
             device
@@ -902,7 +934,7 @@ impl GlyphBuffer {
 
         self.vertex_buffer = Some(vertex_buffer);
         self.index_buffer = Some(index_buffer);
-        self.index_count = indices.len();
+        self.index_count = self.persistent_indices.len();
     }
 
     /// Creates an underline quad at the baseline of the given row
@@ -1186,10 +1218,11 @@ impl GlyphBuffer {
             );
 
         // Chunk: docs/chunks/glyph_single_styled_line - Pre-collect styled lines to avoid redundant calls
+        // Chunk: docs/chunks/quad_buffer_prealloc - Use persistent rendered_buffer_lines to avoid per-frame allocations
         // Determine which buffer lines will be rendered, then pre-collect styled lines once.
         // Previously, styled_line() was called 3 times per visible buffer line (in background,
         // glyph, and underline phases). This optimization collects once and references in each phase.
-        let mut rendered_buffer_lines: Vec<usize> = Vec::new();
+        self.rendered_buffer_lines.clear();
         let mut estimated_quads = 0;
         {
             let mut screen_row: usize = 0;
@@ -1198,7 +1231,7 @@ impl GlyphBuffer {
                 if screen_row >= max_screen_rows {
                     break;
                 }
-                rendered_buffer_lines.push(buffer_line);
+                self.rendered_buffer_lines.push(buffer_line);
                 let line_len = view.line_len(buffer_line);
                 let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
                 let start_row_offset = if is_first_buffer_line { screen_row_offset_in_line } else { 0 };
@@ -1210,7 +1243,7 @@ impl GlyphBuffer {
         estimated_quads += 1; // cursor
 
         // Pre-collect styled lines for all rendered buffer lines
-        let styled_lines: Vec<Option<_>> = rendered_buffer_lines.iter()
+        let styled_lines: Vec<Option<_>> = self.rendered_buffer_lines.iter()
             .map(|&line| view.styled_line(line))
             .collect();
 
@@ -1238,25 +1271,24 @@ impl GlyphBuffer {
             return;
         }
 
-        // Allocate vertex and index data
-        let mut vertices: Vec<GlyphVertex> = Vec::with_capacity(estimated_quads * 4);
-        let mut indices: Vec<u32> = Vec::with_capacity(estimated_quads * 6);
-        let mut vertex_offset: u32 = 0;
+        // Chunk: docs/chunks/quad_buffer_prealloc - Reuse persistent buffers instead of allocating new ones
+        // Clear and reserve capacity in persistent buffers
+        self.persistent_vertices.clear();
+        self.persistent_indices.clear();
+        let estimated_vertices = estimated_quads * 4;
+        let estimated_indices = estimated_quads * 6;
+        if self.persistent_vertices.capacity() < estimated_vertices {
+            self.persistent_vertices.reserve(estimated_vertices - self.persistent_vertices.capacity());
+        }
+        if self.persistent_indices.capacity() < estimated_indices {
+            self.persistent_indices.reserve(estimated_indices - self.persistent_indices.capacity());
+        }
 
-        // Helper to push quad indices
-        let push_quad_indices = |indices: &mut Vec<u32>, vertex_offset: &mut u32| {
-            indices.push(*vertex_offset);
-            indices.push(*vertex_offset + 1);
-            indices.push(*vertex_offset + 2);
-            indices.push(*vertex_offset);
-            indices.push(*vertex_offset + 2);
-            indices.push(*vertex_offset + 3);
-            *vertex_offset += 4;
-        };
+        let mut vertex_offset: u32 = 0;
 
         // ==================== Phase 1: Background Quads ====================
         // Chunk: docs/chunks/terminal_styling_fidelity - Per-span background colors for terminal styling
-        let background_start_index = indices.len();
+        let background_start_index = self.persistent_indices.len();
 
         {
             let solid_glyph = atlas.solid_glyph();
@@ -1264,7 +1296,8 @@ impl GlyphBuffer {
             let mut cumulative_screen_row: usize = 0;
             let mut is_first_buffer_line = true;
 
-            for (idx, &buffer_line) in rendered_buffer_lines.iter().enumerate() {
+            for idx in 0..self.rendered_buffer_lines.len() {
+                let buffer_line = self.rendered_buffer_lines[idx];
                 if cumulative_screen_row >= max_screen_rows {
                     break;
                 }
@@ -1334,8 +1367,14 @@ impl GlyphBuffer {
                                         y_offset,
                                         bg,
                                     );
-                                    vertices.extend_from_slice(&quad);
-                                    push_quad_indices(&mut indices, &mut vertex_offset);
+                                    self.persistent_vertices.extend_from_slice(&quad);
+                                    self.persistent_indices.push(vertex_offset);
+                                    self.persistent_indices.push(vertex_offset + 1);
+                                    self.persistent_indices.push(vertex_offset + 2);
+                                    self.persistent_indices.push(vertex_offset);
+                                    self.persistent_indices.push(vertex_offset + 2);
+                                    self.persistent_indices.push(vertex_offset + 3);
+                                    vertex_offset += 4;
                                 }
                             }
                         }
@@ -1348,12 +1387,12 @@ impl GlyphBuffer {
             }
         }
 
-        let background_index_count = indices.len() - background_start_index;
+        let background_index_count = self.persistent_indices.len() - background_start_index;
         self.background_range = QuadRange::new(background_start_index, background_index_count);
 
         // ==================== Phase 2: Selection Quads ====================
         // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Fixed screen row tracking
-        let selection_start_index = indices.len();
+        let selection_start_index = self.persistent_indices.len();
 
         if let Some((sel_start, sel_end)) = view.selection_range() {
             let solid_glyph = atlas.solid_glyph();
@@ -1428,8 +1467,14 @@ impl GlyphBuffer {
                                     y_offset,
                                     selection_color,
                                 );
-                                vertices.extend_from_slice(&quad);
-                                push_quad_indices(&mut indices, &mut vertex_offset);
+                                self.persistent_vertices.extend_from_slice(&quad);
+                                self.persistent_indices.push(vertex_offset);
+                                self.persistent_indices.push(vertex_offset + 1);
+                                self.persistent_indices.push(vertex_offset + 2);
+                                self.persistent_indices.push(vertex_offset);
+                                self.persistent_indices.push(vertex_offset + 2);
+                                self.persistent_indices.push(vertex_offset + 3);
+                                vertex_offset += 4;
                             }
                         }
                     }
@@ -1440,12 +1485,12 @@ impl GlyphBuffer {
             }
         }
 
-        let selection_index_count = indices.len() - selection_start_index;
+        let selection_index_count = self.persistent_indices.len() - selection_start_index;
         self.selection_range = QuadRange::new(selection_start_index, selection_index_count);
 
         // ==================== Phase 2: Border Quads ====================
         // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Fixed screen row tracking
-        let border_start_index = indices.len();
+        let border_start_index = self.persistent_indices.len();
 
         {
             let solid_glyph = atlas.solid_glyph();
@@ -1479,28 +1524,34 @@ impl GlyphBuffer {
                     }
 
                     let quad = self.create_border_quad(screen_row, solid_glyph, y_offset, border_color);
-                    vertices.extend_from_slice(&quad);
-                    push_quad_indices(&mut indices, &mut vertex_offset);
+                    self.persistent_vertices.extend_from_slice(&quad);
+                    self.persistent_indices.push(vertex_offset);
+                    self.persistent_indices.push(vertex_offset + 1);
+                    self.persistent_indices.push(vertex_offset + 2);
+                    self.persistent_indices.push(vertex_offset);
+                    self.persistent_indices.push(vertex_offset + 2);
+                    self.persistent_indices.push(vertex_offset + 3);
+                    vertex_offset += 4;
                 }
 
                 cumulative_screen_row += rows_for_line - start_row_offset;
             }
         }
 
-        let border_index_count = indices.len() - border_start_index;
+        let border_index_count = self.persistent_indices.len() - border_start_index;
         self.border_range = QuadRange::new(border_start_index, border_index_count);
 
         // ==================== Phase 3: Glyph Quads ====================
         // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Fixed screen row tracking
         // Chunk: docs/chunks/terminal_styling_fidelity - Per-span foreground colors for terminal styling
-        let glyph_start_index = indices.len();
+        let glyph_start_index = self.persistent_indices.len();
 
         {
             let mut cumulative_screen_row: usize = 0;
             let mut is_first_buffer_line = true;
             let cols_per_row = wrap_layout.cols_per_row();
 
-            for (idx, &_buffer_line) in rendered_buffer_lines.iter().enumerate() {
+            for idx in 0..self.rendered_buffer_lines.len() {
                 if cumulative_screen_row >= max_screen_rows {
                     break;
                 }
@@ -1596,8 +1647,14 @@ impl GlyphBuffer {
                             effective_y_offset,
                             fg,
                         );
-                        vertices.extend_from_slice(&quad);
-                        push_quad_indices(&mut indices, &mut vertex_offset);
+                        self.persistent_vertices.extend_from_slice(&quad);
+                        self.persistent_indices.push(vertex_offset);
+                        self.persistent_indices.push(vertex_offset + 1);
+                        self.persistent_indices.push(vertex_offset + 2);
+                        self.persistent_indices.push(vertex_offset);
+                        self.persistent_indices.push(vertex_offset + 2);
+                        self.persistent_indices.push(vertex_offset + 3);
+                        vertex_offset += 4;
 
                         // Advance by character display width (2 for wide chars like CJK/emoji)
                         col += char_width;
@@ -1608,12 +1665,12 @@ impl GlyphBuffer {
             }
         }
 
-        let glyph_index_count = indices.len() - glyph_start_index;
+        let glyph_index_count = self.persistent_indices.len() - glyph_start_index;
         self.glyph_range = QuadRange::new(glyph_start_index, glyph_index_count);
 
         // ==================== Phase 4: Underline Quads ====================
         // Chunk: docs/chunks/terminal_styling_fidelity - Underline rendering for terminal styling
-        let underline_start_index = indices.len();
+        let underline_start_index = self.persistent_indices.len();
 
         {
             let solid_glyph = atlas.solid_glyph();
@@ -1621,7 +1678,8 @@ impl GlyphBuffer {
             let mut cumulative_screen_row: usize = 0;
             let mut is_first_buffer_line = true;
 
-            for (idx, &buffer_line) in rendered_buffer_lines.iter().enumerate() {
+            for idx in 0..self.rendered_buffer_lines.len() {
+                let buffer_line = self.rendered_buffer_lines[idx];
                 if cumulative_screen_row >= max_screen_rows {
                     break;
                 }
@@ -1694,8 +1752,14 @@ impl GlyphBuffer {
                                         y_offset,
                                         underline_color,
                                     );
-                                    vertices.extend_from_slice(&quad);
-                                    push_quad_indices(&mut indices, &mut vertex_offset);
+                                    self.persistent_vertices.extend_from_slice(&quad);
+                                    self.persistent_indices.push(vertex_offset);
+                                    self.persistent_indices.push(vertex_offset + 1);
+                                    self.persistent_indices.push(vertex_offset + 2);
+                                    self.persistent_indices.push(vertex_offset);
+                                    self.persistent_indices.push(vertex_offset + 2);
+                                    self.persistent_indices.push(vertex_offset + 3);
+                                    vertex_offset += 4;
                                 }
                             }
                         }
@@ -1708,12 +1772,12 @@ impl GlyphBuffer {
             }
         }
 
-        let underline_index_count = indices.len() - underline_start_index;
+        let underline_index_count = self.persistent_indices.len() - underline_start_index;
         self.underline_range = QuadRange::new(underline_start_index, underline_index_count);
 
         // ==================== Phase 5: Cursor Quad ====================
         // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Fixed cursor positioning
-        let cursor_start_index = indices.len();
+        let cursor_start_index = self.persistent_indices.len();
 
         if cursor_visible {
             if let Some(cursor_info) = view.cursor_info() {
@@ -1767,8 +1831,14 @@ impl GlyphBuffer {
                                     y_offset,
                                     cursor_color,
                                 );
-                                vertices.extend_from_slice(&cursor_quad);
-                                push_quad_indices(&mut indices, &mut vertex_offset);
+                                self.persistent_vertices.extend_from_slice(&cursor_quad);
+                                self.persistent_indices.push(vertex_offset);
+                                self.persistent_indices.push(vertex_offset + 1);
+                                self.persistent_indices.push(vertex_offset + 2);
+                                self.persistent_indices.push(vertex_offset);
+                                self.persistent_indices.push(vertex_offset + 2);
+                                self.persistent_indices.push(vertex_offset + 3);
+                                vertex_offset += 4;
                                 found_cursor = true;
                             }
                             break;
@@ -1778,16 +1848,17 @@ impl GlyphBuffer {
                     }
 
                     let _ = found_cursor; // Suppress unused warning
+                    let _ = vertex_offset; // Suppress unused warning
                 }
                 } // end else (cursor not hidden)
             }
         }
 
-        let cursor_index_count = indices.len() - cursor_start_index;
+        let cursor_index_count = self.persistent_indices.len() - cursor_start_index;
         self.cursor_range = QuadRange::new(cursor_start_index, cursor_index_count);
 
         // ==================== Create GPU Buffers ====================
-        if vertices.is_empty() {
+        if self.persistent_vertices.is_empty() {
             self.vertex_buffer = None;
             self.index_buffer = None;
             self.index_count = 0;
@@ -1795,9 +1866,9 @@ impl GlyphBuffer {
         }
 
         // Create the vertex buffer
-        let vertex_data_size = vertices.len() * VERTEX_SIZE;
+        let vertex_data_size = self.persistent_vertices.len() * VERTEX_SIZE;
         let vertex_ptr =
-            NonNull::new(vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
+            NonNull::new(self.persistent_vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
 
         let vertex_buffer = unsafe {
             device
@@ -1810,9 +1881,9 @@ impl GlyphBuffer {
         };
 
         // Create the index buffer
-        let index_data_size = indices.len() * std::mem::size_of::<u32>();
+        let index_data_size = self.persistent_indices.len() * std::mem::size_of::<u32>();
         let index_ptr =
-            NonNull::new(indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
+            NonNull::new(self.persistent_indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
 
         let index_buffer = unsafe {
             device
@@ -1826,7 +1897,7 @@ impl GlyphBuffer {
 
         self.vertex_buffer = Some(vertex_buffer);
         self.index_buffer = Some(index_buffer);
-        self.index_count = indices.len();
+        self.index_count = self.persistent_indices.len();
     }
 
     /// Returns whether the last rendered content includes a cursor

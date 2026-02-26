@@ -553,6 +553,12 @@ pub struct TabBarGlyphBuffer {
     /// Layout calculator for glyph positioning
     layout: GlyphLayout,
 
+    // Chunk: docs/chunks/quad_buffer_prealloc - Persistent CPU-side buffers to avoid per-frame allocation
+    /// Persistent vertex buffer reused across frames
+    persistent_vertices: Vec<GlyphVertex>,
+    /// Persistent index buffer reused across frames
+    persistent_indices: Vec<u32>,
+
     // Quad ranges for different draw phases
     /// Tab bar background rect
     background_range: QuadRange,
@@ -570,12 +576,15 @@ pub struct TabBarGlyphBuffer {
 
 impl TabBarGlyphBuffer {
     /// Creates a new empty tab bar glyph buffer.
+    // Chunk: docs/chunks/quad_buffer_prealloc - Initialize persistent buffers
     pub fn new(layout: GlyphLayout) -> Self {
         Self {
             vertex_buffer: None,
             index_buffer: None,
             index_count: 0,
             layout,
+            persistent_vertices: Vec::new(),
+            persistent_indices: Vec::new(),
             background_range: QuadRange::default(),
             tab_background_range: QuadRange::default(),
             active_tab_range: QuadRange::default(),
@@ -646,6 +655,7 @@ impl TabBarGlyphBuffer {
     /// * `atlas` - The glyph atlas for text rendering
     /// * `tabs` - Tab information for each tab
     /// * `geometry` - The computed tab bar geometry
+    // Chunk: docs/chunks/quad_buffer_prealloc - Reuse persistent buffers to avoid per-frame allocation
     pub fn update(
         &mut self,
         device: &ProtocolObject<dyn MTLDevice>,
@@ -658,8 +668,15 @@ impl TabBarGlyphBuffer {
         let tab_count = geometry.tab_rects.len();
         let estimated_quads = 1 + tab_count * 3 + label_chars; // bg + tabs + indicators + close + labels
 
-        let mut vertices: Vec<GlyphVertex> = Vec::with_capacity(estimated_quads * 4);
-        let mut indices: Vec<u32> = Vec::with_capacity(estimated_quads * 6);
+        // Chunk: docs/chunks/quad_buffer_prealloc - Clear and reserve persistent buffers
+        self.persistent_vertices.clear();
+        self.persistent_indices.clear();
+        if self.persistent_vertices.capacity() < estimated_quads * 4 {
+            self.persistent_vertices.reserve(estimated_quads * 4 - self.persistent_vertices.capacity());
+        }
+        if self.persistent_indices.capacity() < estimated_quads * 6 {
+            self.persistent_indices.reserve(estimated_quads * 6 - self.persistent_indices.capacity());
+        }
         let mut vertex_offset: u32 = 0;
 
         // Reset ranges
@@ -673,7 +690,7 @@ impl TabBarGlyphBuffer {
         let solid_glyph = atlas.solid_glyph();
 
         // ==================== Phase 1: Tab Bar Background ====================
-        let bg_start = indices.len();
+        let bg_start = self.persistent_indices.len();
         {
             let quad = self.create_rect_quad(
                 geometry.x,
@@ -683,15 +700,15 @@ impl TabBarGlyphBuffer {
                 solid_glyph,
                 TAB_BAR_BACKGROUND_COLOR,
             );
-            vertices.extend_from_slice(&quad);
-            Self::push_quad_indices(&mut indices, vertex_offset);
+            self.persistent_vertices.extend_from_slice(&quad);
+            Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
             vertex_offset += 4;
         }
-        self.background_range = QuadRange::new(bg_start, indices.len() - bg_start);
+        self.background_range = QuadRange::new(bg_start, self.persistent_indices.len() - bg_start);
 
         // ==================== Phase 2: Inactive Tab Backgrounds ====================
         // Chunk: docs/chunks/unsaved_tab_tint - Use dirty tint for unsaved tabs
-        let tab_bg_start = indices.len();
+        let tab_bg_start = self.persistent_indices.len();
         for tab_rect in &geometry.tab_rects {
             let tab_info = &tabs[tab_rect.tab_index];
             if tab_info.is_active {
@@ -713,15 +730,15 @@ impl TabBarGlyphBuffer {
                 solid_glyph,
                 bg_color,
             );
-            vertices.extend_from_slice(&quad);
-            Self::push_quad_indices(&mut indices, vertex_offset);
+            self.persistent_vertices.extend_from_slice(&quad);
+            Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
             vertex_offset += 4;
         }
-        self.tab_background_range = QuadRange::new(tab_bg_start, indices.len() - tab_bg_start);
+        self.tab_background_range = QuadRange::new(tab_bg_start, self.persistent_indices.len() - tab_bg_start);
 
         // ==================== Phase 3: Active Tab Highlight ====================
         // Chunk: docs/chunks/unsaved_tab_tint - Use dirty tint for unsaved tabs
-        let active_start = indices.len();
+        let active_start = self.persistent_indices.len();
         for tab_rect in &geometry.tab_rects {
             let tab_info = &tabs[tab_rect.tab_index];
             if !tab_info.is_active {
@@ -743,15 +760,15 @@ impl TabBarGlyphBuffer {
                 solid_glyph,
                 bg_color,
             );
-            vertices.extend_from_slice(&quad);
-            Self::push_quad_indices(&mut indices, vertex_offset);
+            self.persistent_vertices.extend_from_slice(&quad);
+            Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
             vertex_offset += 4;
         }
-        self.active_tab_range = QuadRange::new(active_start, indices.len() - active_start);
+        self.active_tab_range = QuadRange::new(active_start, self.persistent_indices.len() - active_start);
 
         // ==================== Phase 4: Dirty/Unread/Conflict Indicators ====================
         // Chunk: docs/chunks/conflict_mode_lifecycle - Conflict indicator has highest priority
-        let indicator_start = indices.len();
+        let indicator_start = self.persistent_indices.len();
         for tab_rect in &geometry.tab_rects {
             let tab_info = &tabs[tab_rect.tab_index];
 
@@ -781,15 +798,15 @@ impl TabBarGlyphBuffer {
                     solid_glyph,
                     color,
                 );
-                vertices.extend_from_slice(&quad);
-                Self::push_quad_indices(&mut indices, vertex_offset);
+                self.persistent_vertices.extend_from_slice(&quad);
+                Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
                 vertex_offset += 4;
             }
         }
-        self.indicator_range = QuadRange::new(indicator_start, indices.len() - indicator_start);
+        self.indicator_range = QuadRange::new(indicator_start, self.persistent_indices.len() - indicator_start);
 
         // ==================== Phase 5: Close Buttons ====================
-        let close_start = indices.len();
+        let close_start = self.persistent_indices.len();
         for tab_rect in &geometry.tab_rects {
             // Draw close button as an "×" character
             let close_rect = &tab_rect.close_button;
@@ -801,15 +818,15 @@ impl TabBarGlyphBuffer {
                 let glyph_y = close_rect.y + (close_rect.size - glyph.height) / 2.0;
 
                 let quad = self.create_glyph_quad_at(glyph_x, glyph_y, glyph, CLOSE_BUTTON_COLOR);
-                vertices.extend_from_slice(&quad);
-                Self::push_quad_indices(&mut indices, vertex_offset);
+                self.persistent_vertices.extend_from_slice(&quad);
+                Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
                 vertex_offset += 4;
             }
         }
-        self.close_button_range = QuadRange::new(close_start, indices.len() - close_start);
+        self.close_button_range = QuadRange::new(close_start, self.persistent_indices.len() - close_start);
 
         // ==================== Phase 6: Tab Labels ====================
-        let label_start = indices.len();
+        let label_start = self.persistent_indices.len();
         for tab_rect in &geometry.tab_rects {
             let tab_info = &tabs[tab_rect.tab_index];
 
@@ -859,16 +876,17 @@ impl TabBarGlyphBuffer {
                 if let Some(glyph) = atlas.get_glyph(c) {
                     let x = label_x + char_idx as f32 * self.layout.glyph_width;
                     let quad = self.create_glyph_quad_at(x, label_y, glyph, TAB_LABEL_COLOR);
-                    vertices.extend_from_slice(&quad);
-                    Self::push_quad_indices(&mut indices, vertex_offset);
+                    self.persistent_vertices.extend_from_slice(&quad);
+                    Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
                     vertex_offset += 4;
                 }
             }
         }
-        self.label_range = QuadRange::new(label_start, indices.len() - label_start);
+        self.label_range = QuadRange::new(label_start, self.persistent_indices.len() - label_start);
 
         // ==================== Create GPU Buffers ====================
-        if vertices.is_empty() {
+        // Chunk: docs/chunks/quad_buffer_prealloc - Use persistent buffers for GPU upload
+        if self.persistent_vertices.is_empty() {
             self.vertex_buffer = None;
             self.index_buffer = None;
             self.index_count = 0;
@@ -876,9 +894,9 @@ impl TabBarGlyphBuffer {
         }
 
         // Create the vertex buffer
-        let vertex_data_size = vertices.len() * VERTEX_SIZE;
+        let vertex_data_size = self.persistent_vertices.len() * VERTEX_SIZE;
         let vertex_ptr =
-            NonNull::new(vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
+            NonNull::new(self.persistent_vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
 
         let vertex_buffer = unsafe {
             device
@@ -891,9 +909,9 @@ impl TabBarGlyphBuffer {
         };
 
         // Create the index buffer
-        let index_data_size = indices.len() * std::mem::size_of::<u32>();
+        let index_data_size = self.persistent_indices.len() * std::mem::size_of::<u32>();
         let index_ptr =
-            NonNull::new(indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
+            NonNull::new(self.persistent_indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
 
         let index_buffer = unsafe {
             device
@@ -907,7 +925,7 @@ impl TabBarGlyphBuffer {
 
         self.vertex_buffer = Some(vertex_buffer);
         self.index_buffer = Some(index_buffer);
-        self.index_count = indices.len();
+        self.index_count = self.persistent_indices.len();
     }
 
     /// Creates a solid rectangle quad at the given position.

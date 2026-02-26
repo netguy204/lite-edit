@@ -289,6 +289,7 @@ pub fn calculate_left_rail_geometry(view_height: f32, workspace_count: usize) ->
 ///
 /// This is analogous to `GlyphBuffer` and `SelectorGlyphBuffer` but specialized
 /// for the workspace rail UI.
+// Chunk: docs/chunks/quad_buffer_prealloc - Persistent buffers to eliminate per-frame allocations
 pub struct LeftRailGlyphBuffer {
     /// The vertex buffer containing quad vertices
     vertex_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
@@ -310,10 +311,17 @@ pub struct LeftRailGlyphBuffer {
     status_indicator_range: QuadRange,
     /// Workspace identicons (5×5 grid per workspace)
     identicon_range: QuadRange,
+
+    // Chunk: docs/chunks/quad_buffer_prealloc - Persistent buffers to avoid per-frame heap allocations
+    /// Persistent vertex data buffer, reused across frames
+    persistent_vertices: Vec<GlyphVertex>,
+    /// Persistent index data buffer, reused across frames
+    persistent_indices: Vec<u32>,
 }
 
 impl LeftRailGlyphBuffer {
     /// Creates a new empty left rail glyph buffer.
+    // Chunk: docs/chunks/quad_buffer_prealloc - Initialize persistent buffers
     pub fn new(layout: GlyphLayout) -> Self {
         Self {
             vertex_buffer: None,
@@ -325,6 +333,8 @@ impl LeftRailGlyphBuffer {
             active_tile_range: QuadRange::default(),
             status_indicator_range: QuadRange::default(),
             identicon_range: QuadRange::default(),
+            persistent_vertices: Vec::new(),
+            persistent_indices: Vec::new(),
         }
     }
 
@@ -394,8 +404,18 @@ impl LeftRailGlyphBuffer {
         let workspace_count = editor.workspace_count();
         let estimated_quads = 1 + workspace_count * 2 + workspace_count + workspace_count * 25;
 
-        let mut vertices: Vec<GlyphVertex> = Vec::with_capacity(estimated_quads * 4);
-        let mut indices: Vec<u32> = Vec::with_capacity(estimated_quads * 6);
+        // Chunk: docs/chunks/quad_buffer_prealloc - Reuse persistent buffers instead of allocating new ones
+        self.persistent_vertices.clear();
+        self.persistent_indices.clear();
+        let estimated_vertices = estimated_quads * 4;
+        let estimated_indices = estimated_quads * 6;
+        if self.persistent_vertices.capacity() < estimated_vertices {
+            self.persistent_vertices.reserve(estimated_vertices - self.persistent_vertices.capacity());
+        }
+        if self.persistent_indices.capacity() < estimated_indices {
+            self.persistent_indices.reserve(estimated_indices - self.persistent_indices.capacity());
+        }
+
         let mut vertex_offset: u32 = 0;
 
         // Reset ranges
@@ -409,7 +429,7 @@ impl LeftRailGlyphBuffer {
         let active_workspace = editor.active_workspace;
 
         // ==================== Phase 1: Rail Background ====================
-        let bg_start = indices.len();
+        let bg_start = self.persistent_indices.len();
         {
             let quad = self.create_rect_quad(
                 geometry.x,
@@ -419,14 +439,14 @@ impl LeftRailGlyphBuffer {
                 solid_glyph,
                 RAIL_BACKGROUND_COLOR,
             );
-            vertices.extend_from_slice(&quad);
-            Self::push_quad_indices(&mut indices, vertex_offset);
+            self.persistent_vertices.extend_from_slice(&quad);
+            Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
             vertex_offset += 4;
         }
-        self.background_range = QuadRange::new(bg_start, indices.len() - bg_start);
+        self.background_range = QuadRange::new(bg_start, self.persistent_indices.len() - bg_start);
 
         // ==================== Phase 2: Tile Backgrounds (inactive) ====================
-        let tile_bg_start = indices.len();
+        let tile_bg_start = self.persistent_indices.len();
         for (idx, tile_rect) in geometry.tile_rects.iter().enumerate() {
             if idx == active_workspace {
                 continue; // Skip active tile, it gets its own highlight
@@ -440,14 +460,14 @@ impl LeftRailGlyphBuffer {
                 solid_glyph,
                 TILE_BACKGROUND_COLOR,
             );
-            vertices.extend_from_slice(&quad);
-            Self::push_quad_indices(&mut indices, vertex_offset);
+            self.persistent_vertices.extend_from_slice(&quad);
+            Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
             vertex_offset += 4;
         }
-        self.tile_background_range = QuadRange::new(tile_bg_start, indices.len() - tile_bg_start);
+        self.tile_background_range = QuadRange::new(tile_bg_start, self.persistent_indices.len() - tile_bg_start);
 
         // ==================== Phase 3: Active Tile Highlight ====================
-        let active_start = indices.len();
+        let active_start = self.persistent_indices.len();
         if active_workspace < geometry.tile_rects.len() {
             let tile_rect = &geometry.tile_rects[active_workspace];
             let quad = self.create_rect_quad(
@@ -458,14 +478,14 @@ impl LeftRailGlyphBuffer {
                 solid_glyph,
                 TILE_ACTIVE_COLOR,
             );
-            vertices.extend_from_slice(&quad);
-            Self::push_quad_indices(&mut indices, vertex_offset);
+            self.persistent_vertices.extend_from_slice(&quad);
+            Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
             vertex_offset += 4;
         }
-        self.active_tile_range = QuadRange::new(active_start, indices.len() - active_start);
+        self.active_tile_range = QuadRange::new(active_start, self.persistent_indices.len() - active_start);
 
         // ==================== Phase 4: Status Indicators ====================
-        let status_start = indices.len();
+        let status_start = self.persistent_indices.len();
         for (idx, tile_rect) in geometry.tile_rects.iter().enumerate() {
             if idx >= editor.workspaces.len() {
                 break;
@@ -483,15 +503,15 @@ impl LeftRailGlyphBuffer {
                 solid_glyph,
                 status_color(&editor.workspaces[idx].status),
             );
-            vertices.extend_from_slice(&quad);
-            Self::push_quad_indices(&mut indices, vertex_offset);
+            self.persistent_vertices.extend_from_slice(&quad);
+            Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
             vertex_offset += 4;
         }
-        self.status_indicator_range = QuadRange::new(status_start, indices.len() - status_start);
+        self.status_indicator_range = QuadRange::new(status_start, self.persistent_indices.len() - status_start);
 
         // ==================== Phase 5: Workspace Identicons ====================
         // Chunk: docs/chunks/workspace_identicon - Workspace identicons
-        let identicon_start = indices.len();
+        let identicon_start = self.persistent_indices.len();
         for (idx, tile_rect) in geometry.tile_rects.iter().enumerate() {
             if idx >= editor.workspaces.len() {
                 break;
@@ -537,16 +557,16 @@ impl LeftRailGlyphBuffer {
                         solid_glyph,
                         color,
                     );
-                    vertices.extend_from_slice(&quad);
-                    Self::push_quad_indices(&mut indices, vertex_offset);
+                    self.persistent_vertices.extend_from_slice(&quad);
+                    Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
                     vertex_offset += 4;
                 }
             }
         }
-        self.identicon_range = QuadRange::new(identicon_start, indices.len() - identicon_start);
+        self.identicon_range = QuadRange::new(identicon_start, self.persistent_indices.len() - identicon_start);
 
         // ==================== Create GPU Buffers ====================
-        if vertices.is_empty() {
+        if self.persistent_vertices.is_empty() {
             self.vertex_buffer = None;
             self.index_buffer = None;
             self.index_count = 0;
@@ -554,9 +574,9 @@ impl LeftRailGlyphBuffer {
         }
 
         // Create the vertex buffer
-        let vertex_data_size = vertices.len() * VERTEX_SIZE;
+        let vertex_data_size = self.persistent_vertices.len() * VERTEX_SIZE;
         let vertex_ptr =
-            NonNull::new(vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
+            NonNull::new(self.persistent_vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
 
         let vertex_buffer = unsafe {
             device
@@ -569,9 +589,9 @@ impl LeftRailGlyphBuffer {
         };
 
         // Create the index buffer
-        let index_data_size = indices.len() * std::mem::size_of::<u32>();
+        let index_data_size = self.persistent_indices.len() * std::mem::size_of::<u32>();
         let index_ptr =
-            NonNull::new(indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
+            NonNull::new(self.persistent_indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
 
         let index_buffer = unsafe {
             device
@@ -585,7 +605,7 @@ impl LeftRailGlyphBuffer {
 
         self.vertex_buffer = Some(vertex_buffer);
         self.index_buffer = Some(index_buffer);
-        self.index_count = indices.len();
+        self.index_count = self.persistent_indices.len();
     }
 
     /// Returns the status colors for each visible workspace.

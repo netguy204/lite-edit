@@ -963,6 +963,7 @@ const PROMPT_TEXT_COLOR: [f32; 4] = [0.71, 0.75, 0.86, 1.0];
 /// 4. Abandon button (background + text)
 ///
 /// The selected button gets a highlighted background.
+// Chunk: docs/chunks/quad_buffer_prealloc - Persistent buffer fields
 pub struct ConfirmDialogGlyphBuffer {
     /// The vertex buffer containing quad vertices
     vertex_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
@@ -972,6 +973,12 @@ pub struct ConfirmDialogGlyphBuffer {
     index_count: usize,
     /// Layout calculator for glyph positioning
     layout: GlyphLayout,
+
+    // Chunk: docs/chunks/quad_buffer_prealloc - Persistent CPU-side buffers
+    /// Persistent vertex buffer to avoid per-frame allocations
+    persistent_vertices: Vec<GlyphVertex>,
+    /// Persistent index buffer to avoid per-frame allocations
+    persistent_indices: Vec<u32>,
 
     // Quad ranges for different draw phases (all rendered with same color in this impl)
     /// Panel background quad
@@ -990,12 +997,15 @@ pub struct ConfirmDialogGlyphBuffer {
 
 impl ConfirmDialogGlyphBuffer {
     /// Creates a new empty confirm dialog glyph buffer
+    // Chunk: docs/chunks/quad_buffer_prealloc - Initialize persistent buffers
     pub fn new(layout: GlyphLayout) -> Self {
         Self {
             vertex_buffer: None,
             index_buffer: None,
             index_count: 0,
             layout,
+            persistent_vertices: Vec::new(),
+            persistent_indices: Vec::new(),
             panel_range: QuadRange::default(),
             cancel_bg_range: QuadRange::default(),
             abandon_bg_range: QuadRange::default(),
@@ -1058,6 +1068,7 @@ impl ConfirmDialogGlyphBuffer {
     /// * `atlas` - The glyph atlas for text rendering
     /// * `dialog` - The confirm dialog state
     /// * `geometry` - The computed dialog geometry
+    // Chunk: docs/chunks/quad_buffer_prealloc - Use persistent buffers
     pub fn update(
         &mut self,
         device: &ProtocolObject<dyn MTLDevice>,
@@ -1072,8 +1083,15 @@ impl ConfirmDialogGlyphBuffer {
         let confirm_len = dialog.confirm_label.len();
         let estimated_quads = 3 + prompt_len + cancel_len + confirm_len;
 
-        let mut vertices: Vec<GlyphVertex> = Vec::with_capacity(estimated_quads * 4);
-        let mut indices: Vec<u32> = Vec::with_capacity(estimated_quads * 6);
+        // Chunk: docs/chunks/quad_buffer_prealloc - Clear and reserve persistent buffers
+        self.persistent_vertices.clear();
+        self.persistent_indices.clear();
+        if self.persistent_vertices.capacity() < estimated_quads * 4 {
+            self.persistent_vertices.reserve(estimated_quads * 4 - self.persistent_vertices.capacity());
+        }
+        if self.persistent_indices.capacity() < estimated_quads * 6 {
+            self.persistent_indices.reserve(estimated_quads * 6 - self.persistent_indices.capacity());
+        }
         let mut vertex_offset: u32 = 0;
 
         // Reset ranges
@@ -1087,7 +1105,7 @@ impl ConfirmDialogGlyphBuffer {
         let solid_glyph = atlas.solid_glyph();
 
         // ==================== Phase 1: Panel Background ====================
-        let panel_start = indices.len();
+        let panel_start = self.persistent_indices.len();
         {
             let quad = self.create_rect_quad(
                 geometry.panel_x,
@@ -1097,14 +1115,14 @@ impl ConfirmDialogGlyphBuffer {
                 solid_glyph,
                 PANEL_BACKGROUND_COLOR,
             );
-            vertices.extend_from_slice(&quad);
-            Self::push_quad_indices(&mut indices, vertex_offset);
+            self.persistent_vertices.extend_from_slice(&quad);
+            Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
             vertex_offset += 4;
         }
-        self.panel_range = QuadRange::new(panel_start, indices.len() - panel_start);
+        self.panel_range = QuadRange::new(panel_start, self.persistent_indices.len() - panel_start);
 
         // ==================== Phase 2: Cancel Button Background ====================
-        let cancel_bg_start = indices.len();
+        let cancel_bg_start = self.persistent_indices.len();
         {
             let color = if dialog.selected == ConfirmButton::Cancel {
                 BUTTON_SELECTED_COLOR
@@ -1119,14 +1137,14 @@ impl ConfirmDialogGlyphBuffer {
                 solid_glyph,
                 color,
             );
-            vertices.extend_from_slice(&quad);
-            Self::push_quad_indices(&mut indices, vertex_offset);
+            self.persistent_vertices.extend_from_slice(&quad);
+            Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
             vertex_offset += 4;
         }
-        self.cancel_bg_range = QuadRange::new(cancel_bg_start, indices.len() - cancel_bg_start);
+        self.cancel_bg_range = QuadRange::new(cancel_bg_start, self.persistent_indices.len() - cancel_bg_start);
 
         // ==================== Phase 3: Abandon Button Background ====================
-        let abandon_bg_start = indices.len();
+        let abandon_bg_start = self.persistent_indices.len();
         {
             let color = if dialog.selected == ConfirmButton::Abandon {
                 BUTTON_SELECTED_COLOR
@@ -1141,14 +1159,14 @@ impl ConfirmDialogGlyphBuffer {
                 solid_glyph,
                 color,
             );
-            vertices.extend_from_slice(&quad);
-            Self::push_quad_indices(&mut indices, vertex_offset);
+            self.persistent_vertices.extend_from_slice(&quad);
+            Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
             vertex_offset += 4;
         }
-        self.abandon_bg_range = QuadRange::new(abandon_bg_start, indices.len() - abandon_bg_start);
+        self.abandon_bg_range = QuadRange::new(abandon_bg_start, self.persistent_indices.len() - abandon_bg_start);
 
         // ==================== Phase 4: Prompt Text ====================
-        let prompt_start = indices.len();
+        let prompt_start = self.persistent_indices.len();
         {
             let glyph_width = self.layout.glyph_width;
             let mut x = geometry.prompt_x;
@@ -1162,18 +1180,18 @@ impl ConfirmDialogGlyphBuffer {
 
                 if let Some(glyph) = atlas.get_glyph(c) {
                     let quad = self.create_glyph_quad_at(x, y, glyph, PROMPT_TEXT_COLOR);
-                    vertices.extend_from_slice(&quad);
-                    Self::push_quad_indices(&mut indices, vertex_offset);
+                    self.persistent_vertices.extend_from_slice(&quad);
+                    Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
                     vertex_offset += 4;
                 }
                 x += glyph_width;
             }
         }
-        self.prompt_range = QuadRange::new(prompt_start, indices.len() - prompt_start);
+        self.prompt_range = QuadRange::new(prompt_start, self.persistent_indices.len() - prompt_start);
 
         // ==================== Phase 5: Cancel Button Text ====================
         // Chunk: docs/chunks/generic_yes_no_modal - Use dialog's actual cancel label
-        let cancel_text_start = indices.len();
+        let cancel_text_start = self.persistent_indices.len();
         {
             let glyph_width = self.layout.glyph_width;
             let text_width = dialog.cancel_label.len() as f32 * glyph_width;
@@ -1190,18 +1208,18 @@ impl ConfirmDialogGlyphBuffer {
 
                 if let Some(glyph) = atlas.get_glyph(c) {
                     let quad = self.create_glyph_quad_at(x, y, glyph, BUTTON_TEXT_COLOR);
-                    vertices.extend_from_slice(&quad);
-                    Self::push_quad_indices(&mut indices, vertex_offset);
+                    self.persistent_vertices.extend_from_slice(&quad);
+                    Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
                     vertex_offset += 4;
                 }
                 x += glyph_width;
             }
         }
-        self.cancel_text_range = QuadRange::new(cancel_text_start, indices.len() - cancel_text_start);
+        self.cancel_text_range = QuadRange::new(cancel_text_start, self.persistent_indices.len() - cancel_text_start);
 
         // ==================== Phase 6: Confirm Button Text ====================
         // Chunk: docs/chunks/generic_yes_no_modal - Use dialog's actual confirm label
-        let abandon_text_start = indices.len();
+        let abandon_text_start = self.persistent_indices.len();
         {
             let glyph_width = self.layout.glyph_width;
             let text_width = dialog.confirm_label.len() as f32 * glyph_width;
@@ -1218,18 +1236,19 @@ impl ConfirmDialogGlyphBuffer {
 
                 if let Some(glyph) = atlas.get_glyph(c) {
                     let quad = self.create_glyph_quad_at(x, y, glyph, BUTTON_TEXT_COLOR);
-                    vertices.extend_from_slice(&quad);
-                    Self::push_quad_indices(&mut indices, vertex_offset);
+                    self.persistent_vertices.extend_from_slice(&quad);
+                    Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
                     #[allow(unused_assignments)]
                     { vertex_offset += 4; }
                 }
                 x += glyph_width;
             }
         }
-        self.abandon_text_range = QuadRange::new(abandon_text_start, indices.len() - abandon_text_start);
+        self.abandon_text_range = QuadRange::new(abandon_text_start, self.persistent_indices.len() - abandon_text_start);
 
         // ==================== Create GPU Buffers ====================
-        if vertices.is_empty() {
+        // Chunk: docs/chunks/quad_buffer_prealloc - Use persistent buffers for GPU upload
+        if self.persistent_vertices.is_empty() {
             self.vertex_buffer = None;
             self.index_buffer = None;
             self.index_count = 0;
@@ -1237,9 +1256,9 @@ impl ConfirmDialogGlyphBuffer {
         }
 
         // Create the vertex buffer
-        let vertex_data_size = vertices.len() * VERTEX_SIZE;
+        let vertex_data_size = self.persistent_vertices.len() * VERTEX_SIZE;
         let vertex_ptr =
-            NonNull::new(vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
+            NonNull::new(self.persistent_vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
 
         let vertex_buffer = unsafe {
             device
@@ -1252,9 +1271,9 @@ impl ConfirmDialogGlyphBuffer {
         };
 
         // Create the index buffer
-        let index_data_size = indices.len() * std::mem::size_of::<u32>();
+        let index_data_size = self.persistent_indices.len() * std::mem::size_of::<u32>();
         let index_ptr =
-            NonNull::new(indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
+            NonNull::new(self.persistent_indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
 
         let index_buffer = unsafe {
             device
@@ -1268,7 +1287,7 @@ impl ConfirmDialogGlyphBuffer {
 
         self.vertex_buffer = Some(vertex_buffer);
         self.index_buffer = Some(index_buffer);
-        self.index_count = indices.len();
+        self.index_count = self.persistent_indices.len();
     }
 
     /// Creates a solid rectangle quad at the given position with the specified color
