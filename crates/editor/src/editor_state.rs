@@ -3621,8 +3621,26 @@ impl EditorState {
             return None;
         }
 
-        // Get the base content (required for merge)
-        let base_content = tab.base_content.clone()?;
+        // Chunk: docs/chunks/merge_conflict_render - Defensive handling for missing base_content
+        // Get the base content. If missing for a dirty buffer, this indicates a lifecycle bug.
+        // We log an error and use an empty string as the base, which triggers the two-way merge
+        // fallback in three_way_merge() - preserving common lines rather than failing silently.
+        let base_content = match &tab.base_content {
+            Some(content) => content.clone(),
+            None => {
+                // This shouldn't happen - dirty buffers should always have base_content set
+                // from when the file was opened/reloaded. Log for diagnostics.
+                eprintln!(
+                    "[merge_file_tab] WARNING: base_content is None for dirty buffer {:?}. \
+                     This indicates a lifecycle bug. Falling back to two-way merge.",
+                    path
+                );
+                // Use empty string as base - this triggers the two-way merge fallback
+                // in three_way_merge(), which preserves common lines between ours/theirs
+                // rather than treating everything as conflicting.
+                String::new()
+            }
+        };
 
         // Get current buffer content
         let buffer = tab.as_text_buffer()?;
