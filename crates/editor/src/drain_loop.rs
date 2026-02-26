@@ -192,7 +192,29 @@ impl EventDrainLoop {
             EditorEvent::FileDrop(paths) => {
                 self.handle_file_drop(paths);
             }
+            // Chunk: docs/chunks/file_change_events - External file modification handling
+            EditorEvent::FileChanged(path) => {
+                self.handle_file_changed(path);
+            }
         }
+    }
+
+    // Chunk: docs/chunks/file_change_events - File change event handler
+    /// Handles external file modification events.
+    ///
+    /// This method is called when the filesystem watcher detects that a file
+    /// within the workspace was modified by an external process.
+    ///
+    /// Currently a no-op placeholder - future chunks will implement reload/merge
+    /// behavior. The self-write suppression check happens before this method is
+    /// called, so we only arrive here for truly external modifications.
+    fn handle_file_changed(&mut self, _path: std::path::PathBuf) {
+        // Check if this is a self-triggered event (our own save)
+        if self.state.is_file_change_suppressed(&_path) {
+            // Ignore - this was our own write
+            return;
+        }
+        // Placeholder: future chunks will implement reload/merge behavior
     }
 
     /// Handles a key event by forwarding to the editor state.

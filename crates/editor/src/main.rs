@@ -55,6 +55,10 @@ mod editor_state;
 mod event_channel;
 // Chunk: docs/chunks/fuzzy_file_matcher - File index for fuzzy file matching
 pub mod file_index;
+// Chunk: docs/chunks/file_change_events - File change debouncing
+mod file_change_debouncer;
+// Chunk: docs/chunks/file_change_events - Self-write suppression
+mod file_change_suppression;
 mod focus;
 mod font;
 mod glyph_atlas;

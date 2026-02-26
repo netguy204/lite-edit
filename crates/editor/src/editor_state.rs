@@ -32,6 +32,8 @@ use crate::file_picker;
 use crate::dirty_region::DirtyRegion;
 // Chunk: docs/chunks/pty_wakeup_reentrant - EventSender for PTY wakeup
 use crate::event_channel::EventSender;
+// Chunk: docs/chunks/file_change_events - Self-write suppression
+use crate::file_change_suppression::FileChangeSuppression;
 use crate::focus::FocusTarget;
 use crate::font::FontMetrics;
 use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
@@ -147,6 +149,10 @@ pub struct EditorState {
     // Chunk: docs/chunks/syntax_highlighting - Language registry for extension lookup
     /// Language registry for syntax highlighting.
     language_registry: LanguageRegistry,
+    // Chunk: docs/chunks/file_change_events - Self-write suppression
+    /// Registry of paths whose file change events should be suppressed.
+    /// Prevents our own file saves from triggering reload/merge flows.
+    file_change_suppression: FileChangeSuppression,
 }
 
 // =============================================================================
@@ -273,6 +279,20 @@ impl EditorState {
             }
         }
     }
+
+    // Chunk: docs/chunks/file_change_events - Self-write suppression check
+    /// Checks if a file change event should be suppressed (was our own write).
+    ///
+    /// Call this when receiving a FileChanged event. If it returns true, the
+    /// event should be ignored (it was triggered by our own save operation).
+    /// The suppression entry is consumed (one-shot behavior).
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path from the FileChanged event (absolute)
+    pub fn is_file_change_suppressed(&mut self, path: &Path) -> bool {
+        self.file_change_suppression.check(path)
+    }
 }
 
 // =============================================================================
@@ -333,6 +353,8 @@ impl EditorState {
             event_sender: None,
             // Chunk: docs/chunks/syntax_highlighting - Initialize language registry
             language_registry: LanguageRegistry::new(),
+            // Chunk: docs/chunks/file_change_events - Initialize self-write suppression
+            file_change_suppression: FileChangeSuppression::new(),
         }
     }
 
@@ -381,6 +403,8 @@ impl EditorState {
             confirm_context: None,
             event_sender: None,
             language_registry: LanguageRegistry::new(),
+            // Chunk: docs/chunks/file_change_events - Initialize self-write suppression
+            file_change_suppression: FileChangeSuppression::new(),
         }
     }
 
@@ -2867,6 +2891,11 @@ impl EditorState {
             Some(p) => p.clone(),
             None => return, // No file associated - no-op
         };
+
+        // Chunk: docs/chunks/file_change_events - Suppress before write
+        // Mark this path for suppression before writing. This prevents the
+        // filesystem watcher from triggering a reload/merge flow for our own save.
+        self.file_change_suppression.suppress(path.clone());
 
         let content = self.buffer().content();
         if std::fs::write(&path, content.as_bytes()).is_ok() {

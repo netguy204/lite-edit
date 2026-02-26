@@ -34,6 +34,12 @@ mod font;
 // Chunk: docs/chunks/fuzzy_file_matcher - File index for fuzzy file matching
 pub mod file_index;
 
+// Chunk: docs/chunks/file_change_events - File change debouncing
+pub mod file_change_debouncer;
+
+// Chunk: docs/chunks/file_change_events - Self-write suppression
+pub mod file_change_suppression;
+
 // Chunk: docs/chunks/workspace_dir_picker - Directory picker for new workspaces
 mod dir_picker;
 

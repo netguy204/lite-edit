@@ -8,170 +8,282 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+Route file content-modification events from the existing `FileIndex` filesystem watcher to the editor event loop. The `FileIndex` already receives `Modify(Data(Content))` events from the `notify` crate (FSEvents on macOS) but discards them at `file_index.rs:529-531`. This chunk adds the infrastructure to:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. Forward those events to a new `EditorEvent::FileChanged(PathBuf)` variant
+2. Apply ~100ms debouncing to coalesce rapid successive writes
+3. Suppress self-triggered events when `save_file()` writes to disk
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+The investigation (`docs/investigations/concurrent_edit_sync/OVERVIEW.md`) confirmed that the existing `notify` watcher reliably delivers `Modify(Data(Content))` events with 2-61ms latency. No second watcher is needed.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/file_change_events/GOAL.md)
-with references to the files that you expect to touch.
--->
+**Key architectural points:**
+
+- The `FileIndex` lives in `Workspace`, which doesn't have direct access to `EventSender`. We'll add an optional callback (`on_file_changed: Option<Box<dyn Fn(PathBuf) + Send + Sync>>`) to `FileIndex` that the watcher thread invokes when content changes are detected.
+- `EditorState` will wire this callback to send `EditorEvent::FileChanged(PathBuf)` through the existing event channel.
+- Debouncing will be implemented in the watcher thread using a simple timer-based approach: track `(PathBuf, Instant)` of pending events and only forward after 100ms of quiet time.
+- Self-write suppression will use a short-lived set of paths stored in `EditorState`, populated before `save_file()` writes and cleared after a short timeout (or on the next event loop cycle).
+
+**Testing approach (per TESTING_PHILOSOPHY.md):**
+
+- Unit tests for the debouncing logic (pure time-based state machine, no filesystem)
+- Unit tests for the self-write suppression registry (pure HashSet operations)
+- Integration tests (marked `#[ignore]`) for end-to-end event flow (require filesystem events, which are slow/flaky in CI)
+- The drain loop handler will be a no-op placeholder, so no behavior to test there yet
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No existing subsystems are directly relevant to this work. The chunk establishes the foundation for concurrent-edit-sync but doesn't touch any cross-cutting patterns documented in `docs/subsystems/`.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add `EditorEvent::FileChanged(PathBuf)` variant
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add a new variant to `EditorEvent` in `crates/editor/src/editor_event.rs`:
 
-Example:
-
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+/// A file was modified externally (on disk)
+///
+/// This event is sent when the filesystem watcher detects that a file
+/// within the workspace was modified by an external process. The path
+/// is absolute.
+FileChanged(PathBuf),
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Update `is_priority_event()` to return `true` for `FileChanged` (external edits should be processed promptly, not delayed behind accumulated PTY output).
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Update `is_user_input()` to return `false` for `FileChanged` (it's not user input, so shouldn't reset cursor blink).
+
+Location: `crates/editor/src/editor_event.rs`
+
+### Step 2: Add `send_file_changed` method to `EventSender`
+
+Add a method to `EventSender` in `crates/editor/src/event_channel.rs`:
+
+```rust
+/// Sends a file-changed event to the channel.
+///
+/// This is called from the FileIndex watcher thread when an external
+/// content modification is detected.
+pub fn send_file_changed(&self, path: PathBuf) -> Result<(), SendError<EditorEvent>> {
+    let result = self.inner.sender.send(EditorEvent::FileChanged(path));
+    (self.inner.run_loop_waker)();
+    result
+}
+```
+
+Location: `crates/editor/src/event_channel.rs`
+
+### Step 3: Add no-op handler for `FileChanged` in the drain loop
+
+Add a match arm in `EventDrainLoop::process_single_event()`:
+
+```rust
+EditorEvent::FileChanged(_path) => {
+    // Placeholder: future chunks will implement reload/merge behavior
+}
+```
+
+This ensures the event type compiles and flows through the system, even though the handler does nothing yet.
+
+Location: `crates/editor/src/drain_loop.rs`
+
+### Step 4: Implement debounce state machine
+
+Create a new module `crates/editor/src/file_change_debouncer.rs` that implements a debouncing state machine:
+
+```rust
+/// Debounces file change events, coalescing rapid successive writes.
+///
+/// When a file change is registered, the debouncer waits 100ms for
+/// additional changes before emitting. If another change arrives for
+/// the same path within the window, the timer resets.
+pub struct FileChangeDebouncer {
+    /// Pending paths and when they were last changed
+    pending: HashMap<PathBuf, Instant>,
+    /// Debounce window duration
+    debounce_ms: u64,
+}
+
+impl FileChangeDebouncer {
+    pub fn new(debounce_ms: u64) -> Self;
+
+    /// Register a file change. Returns paths that should be emitted now
+    /// (i.e., paths whose debounce window has expired).
+    pub fn register(&mut self, path: PathBuf, now: Instant) -> Vec<PathBuf>;
+
+    /// Check for paths ready to emit (called periodically).
+    pub fn flush_ready(&mut self, now: Instant) -> Vec<PathBuf>;
+}
+```
+
+The debouncer is a pure data structure with no I/O, making it easy to test. The watcher thread will call `register()` on each event and periodically call `flush_ready()`.
+
+Location: `crates/editor/src/file_change_debouncer.rs`
+
+### Step 5: Add file change callback to `FileIndex`
+
+Modify `FileIndex` to accept an optional callback for file content changes:
+
+1. Add a new field to `EventSenderInner` (or a new inner struct):
+   ```rust
+   file_change_callback: Option<Arc<dyn Fn(PathBuf) + Send + Sync>>,
+   ```
+
+2. Add a method to set the callback:
+   ```rust
+   pub fn set_file_change_callback<F>(&mut self, callback: F)
+   where
+       F: Fn(PathBuf) + Send + Sync + 'static
+   ```
+
+3. Modify `handle_fs_event()` to invoke the callback (with debouncing) when `EventKind::Modify(ModifyKind::Data(DataChange::Content))` is detected.
+
+Actually, the callback needs to be set at construction time since `FileIndex::start()` spawns threads immediately. We'll modify `FileIndex::start()` to optionally accept the callback, or add a `start_with_callback()` variant.
+
+**Design decision:** Since the watcher thread is already running and we need the debouncer state to live there, the cleanest approach is:
+
+1. The callback is set at `FileIndex` construction time
+2. The watcher thread owns a `FileChangeDebouncer` instance
+3. On each `Modify(Data(Content))` event, the watcher thread calls `debouncer.register(path, Instant::now())`
+4. The watcher thread's main loop also calls `debouncer.flush_ready()` on each iteration and invokes the callback for ready paths
+
+Location: `crates/editor/src/file_index.rs`
+
+### Step 6: Wire up the file change callback in `Workspace`
+
+Modify `Workspace::new()` and `Workspace::with_empty_tab()` to accept an optional `EventSender` and wire up the file change callback:
+
+```rust
+pub fn new(id: WorkspaceId, label: String, root_path: PathBuf, event_sender: Option<EventSender>) -> Self {
+    let file_index = if let Some(sender) = event_sender {
+        FileIndex::start_with_callback(root_path.clone(), move |path| {
+            let _ = sender.send_file_changed(path);
+        })
+    } else {
+        FileIndex::start(root_path.clone())
+    };
+    // ...
+}
+```
+
+This requires threading `EventSender` through from `EditorState` where it's available.
+
+Location: `crates/editor/src/workspace.rs`, `crates/editor/src/editor_state.rs`
+
+### Step 7: Implement self-write suppression registry
+
+Add a self-write suppression mechanism to `EditorState`:
+
+```rust
+/// Paths to ignore for file change events (self-write suppression).
+///
+/// When save_file() writes to disk, it adds the path here. File change
+/// events for paths in this set are ignored. Paths are cleared after
+/// a short timeout or on the next event loop tick.
+suppress_file_changes: HashSet<PathBuf>,
+```
+
+Add methods:
+```rust
+/// Suppress file change events for this path temporarily.
+pub fn suppress_file_change(&mut self, path: PathBuf);
+
+/// Check if a path is suppressed, and if so, remove it from the set.
+/// Returns true if the path WAS suppressed (and should be ignored).
+pub fn is_file_change_suppressed(&mut self, path: &Path) -> bool;
+```
+
+Modify `save_file()` to call `suppress_file_change()` before writing.
+
+The suppression is cleared when `is_file_change_suppressed()` is called and returns true (single-use suppression), ensuring we don't permanently ignore a file.
+
+Location: `crates/editor/src/editor_state.rs`
+
+### Step 8: Update `FileChanged` handler to check suppression
+
+Update the `FileChanged` handler in the drain loop to check suppression:
+
+```rust
+EditorEvent::FileChanged(path) => {
+    // Check if this is a self-triggered event (our own save)
+    if self.state.is_file_change_suppressed(&path) {
+        // Ignore - this was our own write
+        return;
+    }
+    // Placeholder: future chunks will implement reload/merge behavior
+}
+```
+
+Location: `crates/editor/src/drain_loop.rs`
+
+### Step 9: Add unit tests for debouncer
+
+Write comprehensive unit tests for `FileChangeDebouncer`:
+
+- Test that a single event is not emitted immediately
+- Test that an event is emitted after the debounce window
+- Test that rapid successive writes to the same file coalesce into one event
+- Test that changes to different files are tracked independently
+- Test boundary conditions (empty state, multiple files, exact timing)
+
+Location: `crates/editor/src/file_change_debouncer.rs` (in `#[cfg(test)]` module)
+
+### Step 10: Add unit tests for self-write suppression
+
+Write unit tests for the suppression registry:
+
+- Test that suppressing a path causes `is_file_change_suppressed` to return true
+- Test that the path is removed after checking (single-use)
+- Test that unsuppressed paths return false
+- Test multiple paths can be suppressed independently
+
+Location: `crates/editor/src/editor_state.rs` (in `#[cfg(test)]` module)
+
+### Step 11: Add integration test for end-to-end event flow (ignored)
+
+Write an integration test (marked `#[ignore]`) that:
+
+1. Creates a `FileIndex` with a callback that captures emitted paths
+2. Writes to a file in the watched directory
+3. Waits for the debounce window + some margin
+4. Verifies the callback was invoked with the correct path
+
+This test is marked `#[ignore]` because FSEvents on macOS has variable latency and may not deliver events reliably in CI environments.
+
+Location: `crates/editor/src/file_index.rs` (in `#[cfg(test)]` module)
+
+### Step 12: Update GOAL.md code_paths
+
+Update the chunk's GOAL.md frontmatter with the files touched:
+
+```yaml
+code_paths:
+  - crates/editor/src/editor_event.rs
+  - crates/editor/src/event_channel.rs
+  - crates/editor/src/drain_loop.rs
+  - crates/editor/src/file_change_debouncer.rs
+  - crates/editor/src/file_index.rs
+  - crates/editor/src/workspace.rs
+  - crates/editor/src/editor_state.rs
+```
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- No external crate dependencies needed. The `notify` crate is already in use.
+- No other chunks need to complete first (this is the foundation chunk).
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Thread safety of callback invocation:** The callback is invoked from the watcher thread. Using `EventSender::send_file_changed()` is safe because `EventSender` is `Send + Sync` (it wraps an `Arc<Sender>`).
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Debounce timer implementation:** The watcher thread's main loop already polls with a 100ms timeout (`recv_timeout(Duration::from_millis(100))`). We can piggyback on this to also flush the debouncer, avoiding the need for a separate timer thread.
+
+3. **Path normalization:** The `notify` crate delivers absolute paths, which should match what we store in `Tab::associated_file`. May need to canonicalize both sides to handle symlinks. Defer this complexity unless issues arise.
+
+4. **Event ordering:** If a file is modified multiple times in rapid succession, the debouncer ensures we emit only one event. But what if the file is deleted before we emit? The delete event will arrive separately, and the `deletion_rename_handling` chunk will handle it. The content-change event can safely be a no-op if the file no longer exists when we try to reload.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

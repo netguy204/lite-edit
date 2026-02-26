@@ -16,6 +16,7 @@
 //! The `EventSender` wrapper provides typed convenience methods and implements
 //! `WakeupSignal` from the input crate for cross-crate PTY wakeup.
 
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, SendError, Sender};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -176,6 +177,17 @@ impl EventSender {
         (self.inner.run_loop_waker)();
         result
     }
+
+    // Chunk: docs/chunks/file_change_events - File change event sender
+    /// Sends a file-changed event to the channel.
+    ///
+    /// This is called from the FileIndex watcher thread when an external
+    /// content modification is detected. The path should be absolute.
+    pub fn send_file_changed(&self, path: PathBuf) -> Result<(), SendError<EditorEvent>> {
+        let result = self.inner.sender.send(EditorEvent::FileChanged(path));
+        (self.inner.run_loop_waker)();
+        result
+    }
 }
 
 // Implement WakeupSignal so EventSender can be used by the terminal crate
@@ -207,6 +219,7 @@ impl EventReceiver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::sync::atomic::AtomicUsize;
 
     #[test]
@@ -460,5 +473,29 @@ mod tests {
         }
         assert_eq!(count, 3, "All followup wakeups should be sent");
         assert_eq!(waker_called.load(Ordering::SeqCst), 3);
+    }
+
+    // Chunk: docs/chunks/file_change_events - Tests for send_file_changed
+    #[test]
+    fn test_send_file_changed() {
+        let waker_called = Arc::new(AtomicUsize::new(0));
+        let waker_called_clone = waker_called.clone();
+
+        let (sender, receiver) = create_event_channel(move || {
+            waker_called_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let path = PathBuf::from("/path/to/file.rs");
+        sender.send_file_changed(path.clone()).unwrap();
+
+        assert_eq!(waker_called.load(Ordering::SeqCst), 1, "Waker should be called after send_file_changed");
+
+        let event = receiver.try_recv().unwrap();
+        match event {
+            EditorEvent::FileChanged(received_path) => {
+                assert_eq!(received_path, path);
+            }
+            _ => panic!("Expected FileChanged event"),
+        }
     }
 }

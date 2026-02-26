@@ -9,6 +9,8 @@
 //! The event queue is drained by a single callback that owns the controller directly
 //! (no `Rc`, no `RefCell`), ensuring exclusive access during event processing.
 
+use std::path::PathBuf;
+
 use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
 
 /// Unified event type for all editor events.
@@ -47,6 +49,14 @@ pub enum EditorEvent {
     /// The paths are absolute and need shell escaping before insertion.
     // Chunk: docs/chunks/dragdrop_file_paste - File drop event for drag-and-drop
     FileDrop(Vec<String>),
+
+    // Chunk: docs/chunks/file_change_events - External file modification detection
+    /// A file was modified externally (on disk)
+    ///
+    /// This event is sent when the filesystem watcher detects that a file
+    /// within the workspace was modified by an external process. The path
+    /// is absolute.
+    FileChanged(PathBuf),
 }
 
 impl EditorEvent {
@@ -64,10 +74,12 @@ impl EditorEvent {
     }
 
     // Chunk: docs/chunks/terminal_flood_starvation - Input-first event partitioning
+    // Chunk: docs/chunks/file_change_events - FileChanged is a priority event
     /// Returns true if this event should be processed before PTY wakeup events.
     ///
     /// Priority events include all user input events plus Resize (window resize
-    /// should be responsive). CursorBlink is NOT included since it's cosmetic.
+    /// should be responsive) and FileChanged (external edits should be processed
+    /// promptly). CursorBlink is NOT included since it's cosmetic.
     /// This ensures input latency is bounded by the cost of processing priority
     /// events, not by accumulated terminal output.
     pub fn is_priority_event(&self) -> bool {
@@ -78,6 +90,7 @@ impl EditorEvent {
                 | EditorEvent::Scroll(_)
                 | EditorEvent::FileDrop(_)
                 | EditorEvent::Resize
+                | EditorEvent::FileChanged(_)
         )
     }
 
@@ -90,6 +103,7 @@ impl EditorEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use lite_edit_input::{KeyEvent, MouseEvent, MouseEventKind, Modifiers, ScrollDelta};
 
     // Chunk: docs/chunks/terminal_flood_starvation - Tests for is_priority_event
@@ -143,6 +157,19 @@ mod tests {
     fn test_cursor_blink_is_not_priority() {
         let event = EditorEvent::CursorBlink;
         assert!(!event.is_priority_event());
+    }
+
+    // Chunk: docs/chunks/file_change_events - Tests for FileChanged event
+    #[test]
+    fn test_file_changed_is_priority() {
+        let event = EditorEvent::FileChanged(PathBuf::from("/path/to/file.rs"));
+        assert!(event.is_priority_event());
+    }
+
+    #[test]
+    fn test_file_changed_is_not_user_input() {
+        let event = EditorEvent::FileChanged(PathBuf::from("/path/to/file.rs"));
+        assert!(!event.is_user_input());
     }
 
     #[test]

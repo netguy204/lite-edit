@@ -13,6 +13,7 @@
 
 use std::path::PathBuf;
 
+use crate::event_channel::EventSender;
 use crate::file_index::FileIndex;
 use crate::pane_layout::{gen_pane_id, Pane, PaneId, PaneLayoutNode};
 use crate::viewport::Viewport;
@@ -524,11 +525,35 @@ impl Workspace {
     ///
     /// The workspace is initialized with a single empty pane (a `Leaf` node).
     // Chunk: docs/chunks/workspace_dir_picker - Initialize FileIndex for workspace
+    // Chunk: docs/chunks/file_change_events - Optional EventSender for file change callbacks
     pub fn new(id: WorkspaceId, label: String, root_path: PathBuf) -> Self {
+        Self::new_with_event_sender(id, label, root_path, None)
+    }
+
+    // Chunk: docs/chunks/file_change_events - File change event wiring
+    /// Creates a new workspace with no tabs, with an optional EventSender for file change events.
+    ///
+    /// If an EventSender is provided, the FileIndex will forward file content changes
+    /// to the event channel, enabling the editor to detect external file modifications.
+    pub fn new_with_event_sender(
+        id: WorkspaceId,
+        label: String,
+        root_path: PathBuf,
+        event_sender: Option<EventSender>,
+    ) -> Self {
         let mut next_pane_id = 0u64;
         let pane_id = gen_pane_id(&mut next_pane_id);
         let pane = Pane::new(pane_id, id);
-        let file_index = FileIndex::start(root_path.clone());
+
+        // Start FileIndex with or without the file change callback
+        let file_index = if let Some(sender) = event_sender {
+            FileIndex::start_with_callback(root_path.clone(), move |path| {
+                // Ignore send errors (channel might be closed during shutdown)
+                let _ = sender.send_file_changed(path);
+            })
+        } else {
+            FileIndex::start(root_path.clone())
+        };
 
         Self {
             id,
@@ -549,7 +574,23 @@ impl Workspace {
     /// The workspace is initialized with a single pane containing one empty file tab.
     // Chunk: docs/chunks/workspace_dir_picker - Initialize FileIndex for workspace
     pub fn with_empty_tab(id: WorkspaceId, tab_id: TabId, label: String, root_path: PathBuf, line_height: f32) -> Self {
-        let mut ws = Self::new(id, label, root_path);
+        Self::with_empty_tab_and_event_sender(id, tab_id, label, root_path, line_height, None)
+    }
+
+    // Chunk: docs/chunks/file_change_events - File change event wiring
+    /// Creates a new workspace with a single empty tab and an optional EventSender.
+    ///
+    /// If an EventSender is provided, the FileIndex will forward file content changes
+    /// to the event channel, enabling the editor to detect external file modifications.
+    pub fn with_empty_tab_and_event_sender(
+        id: WorkspaceId,
+        tab_id: TabId,
+        label: String,
+        root_path: PathBuf,
+        line_height: f32,
+        event_sender: Option<EventSender>,
+    ) -> Self {
+        let mut ws = Self::new_with_event_sender(id, label, root_path, event_sender);
         let tab = Tab::empty_file(tab_id, line_height);
         // Add to the active pane
         if let Some(pane) = ws.pane_root.get_pane_mut(ws.active_pane_id) {
@@ -988,7 +1029,7 @@ impl std::fmt::Debug for Workspace {
 ///
 /// This struct manages the workspace collection and provides methods for
 /// workspace creation, switching, and closing.
-#[derive(Debug)]
+// Chunk: docs/chunks/file_change_events - EventSender for file change callbacks
 pub struct Editor {
     /// The workspaces in the editor
     pub workspaces: Vec<Workspace>,
@@ -1000,6 +1041,21 @@ pub struct Editor {
     next_tab_id: u64,
     /// Line height for creating new tabs (cached from font metrics)
     line_height: f32,
+    /// Event sender for file change callbacks (cloned to each workspace's FileIndex)
+    event_sender: Option<EventSender>,
+}
+
+impl std::fmt::Debug for Editor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Editor")
+            .field("workspaces", &self.workspaces)
+            .field("active_workspace", &self.active_workspace)
+            .field("next_workspace_id", &self.next_workspace_id)
+            .field("next_tab_id", &self.next_tab_id)
+            .field("line_height", &self.line_height)
+            .field("event_sender", &self.event_sender.as_ref().map(|_| "<EventSender>"))
+            .finish()
+    }
 }
 
 impl Editor {
@@ -1011,6 +1067,7 @@ impl Editor {
             next_workspace_id: 0,
             next_tab_id: 0,
             line_height,
+            event_sender: None,
         };
 
         // Create an initial empty workspace
@@ -1038,7 +1095,22 @@ impl Editor {
             next_workspace_id: 0,
             next_tab_id: 0,
             line_height,
+            event_sender: None,
         }
+    }
+
+    // Chunk: docs/chunks/file_change_events - Set event sender for file change callbacks
+    /// Sets the event sender for file change callbacks.
+    ///
+    /// When set, new workspaces will receive a clone of this sender, enabling
+    /// their FileIndex to forward file content changes to the event channel.
+    /// Existing workspaces are not affected (they were created before the
+    /// sender was available).
+    ///
+    /// This should be called early in application startup, before creating
+    /// the workspaces that need file change events.
+    pub fn set_event_sender(&mut self, sender: EventSender) {
+        self.event_sender = Some(sender);
     }
 
     /// Generates a new unique workspace ID.
@@ -1055,14 +1127,23 @@ impl Editor {
         id
     }
 
+    // Chunk: docs/chunks/file_change_events - Pass EventSender to workspaces
     /// Internal method to create a workspace.
     fn new_workspace_internal(&mut self, label: String, root_path: PathBuf, with_tab: bool) -> WorkspaceId {
         let ws_id = self.gen_workspace_id();
+        let event_sender = self.event_sender.clone();
         let workspace = if with_tab {
             let tab_id = self.gen_tab_id();
-            Workspace::with_empty_tab(ws_id, tab_id, label, root_path, self.line_height)
+            Workspace::with_empty_tab_and_event_sender(
+                ws_id,
+                tab_id,
+                label,
+                root_path,
+                self.line_height,
+                event_sender,
+            )
         } else {
-            Workspace::new(ws_id, label, root_path)
+            Workspace::new_with_event_sender(ws_id, label, root_path, event_sender)
         };
         self.workspaces.push(workspace);
         ws_id
