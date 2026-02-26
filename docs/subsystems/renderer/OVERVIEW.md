@@ -52,6 +52,8 @@ chunks:
   relationship: implements
 - chunk_id: font_fallback_rendering
   relationship: implements
+- chunk_id: find_strip_multi_pane
+  relationship: implements
 created_after:
 - viewport_scroll
 ---
