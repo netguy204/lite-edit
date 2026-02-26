@@ -1,12 +1,17 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/editor/src/renderer.rs
+- crates/editor/src/drain_loop.rs
+- crates/editor/src/selector_overlay.rs
 code_references: []
 narrative: null
 investigation: null
-subsystems: []
+subsystems:
+- subsystem_id: renderer
+  relationship: implements
 friction_entries: []
 bug_type: implementation
 depends_on: []
