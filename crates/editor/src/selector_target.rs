@@ -65,6 +65,14 @@ impl SelectorFocusTarget {
     pub fn widget_mut(&mut self) -> &mut SelectorWidget {
         &mut self.widget
     }
+
+    // Chunk: docs/chunks/minibuffer_input - Text input delegation
+    /// Handles text input events (from IME, keyboard, paste).
+    ///
+    /// Delegates to the underlying SelectorWidget for query editing.
+    pub fn handle_text_input(&mut self, text: &str) {
+        self.widget.handle_text_input(text);
+    }
 }
 
 impl FocusTarget for SelectorFocusTarget {
@@ -227,5 +235,25 @@ mod tests {
     fn layer_is_selector() {
         let target = SelectorFocusTarget::new_empty();
         assert_eq!(target.layer(), FocusLayer::Selector);
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/minibuffer_input - handle_text_input tests
+    // =========================================================================
+
+    #[test]
+    fn test_handle_text_input_updates_widget_query() {
+        let mut target = SelectorFocusTarget::new_empty();
+
+        target.handle_text_input("foo");
+        assert_eq!(target.widget().query(), "foo");
+    }
+
+    #[test]
+    fn test_handle_text_input_unicode() {
+        let mut target = SelectorFocusTarget::new_empty();
+
+        target.handle_text_input("日本語");
+        assert_eq!(target.widget().query(), "日本語");
     }
 }

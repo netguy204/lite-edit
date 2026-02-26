@@ -8,170 +8,264 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+Route `TextInputEvent` through the focus system by adding a `handle_text_input()` method
+to `FocusTarget` and `FocusStack`, paralleling the existing `handle_key()` pattern.
+The fix removes the early return in `EditorState::handle_insert_text()` and instead
+dispatches to the focus stack when the active layer needs text input.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Strategy**: Extend the existing `FocusTarget` trait with text input handling. The
+`MiniBuffer` already provides character insertion via `handle_key()` with `KeyEvent::char()`,
+but on macOS, regular typing flows through `insertText:` → `TextInputEvent`, not `KeyEvent`.
+We need to bridge `TextInputEvent` to the minibuffer's `handle_key()` path.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+**Design choice**: Rather than adding a separate `handle_text_input()` method to
+`FocusTarget`, we'll convert `TextInputEvent` to synthetic `KeyEvent::char()` calls
+inside `EditorState::handle_insert_text()`. This is simpler and reuses existing
+minibuffer affordances. The decision about which target receives the text is made
+based on `FocusLayer`, not by full stack dispatch.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/minibuffer_input/GOAL.md)
-with references to the files that you expect to touch.
--->
-
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+**Testing approach**: Per TESTING_PHILOSOPHY.md's "humble view" architecture, the
+text input routing logic is testable without platform dependencies. We test by
+constructing state, calling `handle_insert_text()`, and asserting on results.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add text input method to MiniBuffer
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add a `handle_text_input(&mut self, text: &str)` method to `MiniBuffer` that converts
+the text string to synthetic `KeyEvent::char()` calls. This enables character-by-character
+insertion while reusing all existing affordances (cursor management, selection replacement).
 
-Example:
+**Location**: `crates/editor/src/mini_buffer.rs`
 
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+**Implementation**:
+```rust
+// Chunk: docs/chunks/minibuffer_input - Text input support for MiniBuffer
+/// Handles text input (from IME, keyboard, paste).
+///
+/// Converts the text string to character key events and inserts them.
+/// This reuses the existing key handling logic for cursor management,
+/// selection replacement, and dirty tracking.
+pub fn handle_text_input(&mut self, text: &str) {
+    for ch in text.chars() {
+        self.handle_key(KeyEvent::char(ch));
+    }
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+**Tests** (TDD - write first):
+- `test_handle_text_input_single_char`: `handle_text_input("a")` results in content "a"
+- `test_handle_text_input_string`: `handle_text_input("hello")` results in content "hello"
+- `test_handle_text_input_unicode`: `handle_text_input("日本語")` inserts correctly
+- `test_handle_text_input_replaces_selection`: select all, then `handle_text_input("x")` replaces
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 2: Add text input method to SelectorWidget
 
-## Dependencies
+Add `handle_text_input(&mut self, text: &str)` to `SelectorWidget` that delegates to its
+`MiniBuffer`. This is the entry point for text input when the selector is focused.
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+**Location**: `crates/editor/src/selector.rs`
 
-If there are no dependencies, delete this section.
--->
+**Implementation**:
+```rust
+// Chunk: docs/chunks/minibuffer_input - Text input support for selector
+/// Handles text input events (from IME, keyboard, paste).
+///
+/// Inserts text into the query field and resets selection to index 0
+/// if the query changed. Use this for macOS `insertText:` events.
+pub fn handle_text_input(&mut self, text: &str) {
+    let prev_query = self.mini_buffer.content();
+    self.mini_buffer.handle_text_input(text);
+    if self.mini_buffer.content() != prev_query {
+        self.selected_index = 0;
+    }
+}
+```
+
+**Tests** (TDD - write first):
+- `test_handle_text_input_updates_query`: `handle_text_input("foo")` updates `query()` to "foo"
+- `test_handle_text_input_resets_index`: with items, `handle_text_input("a")` resets selected_index to 0
+- `test_handle_text_input_filters_results`: integration test showing text input → query change → re-filter
+
+### Step 3: Add text input method to FindFocusTarget
+
+Add `handle_text_input(&mut self, text: &str)` to `FindFocusTarget` that delegates to its
+`MiniBuffer` and sets `query_changed` flag.
+
+**Location**: `crates/editor/src/find_target.rs`
+
+**Implementation**:
+```rust
+// Chunk: docs/chunks/minibuffer_input - Text input support for find strip
+/// Handles text input events (from IME, keyboard, paste).
+///
+/// Inserts text into the query field. Sets `query_changed` to true
+/// if the content changed, allowing live search to trigger.
+pub fn handle_text_input(&mut self, text: &str) {
+    let prev_content = self.mini_buffer.content();
+    self.mini_buffer.handle_text_input(text);
+    let new_content = self.mini_buffer.content();
+    self.query_changed = prev_content != new_content;
+}
+```
+
+**Tests** (TDD - write first):
+- `test_handle_text_input_updates_query`: `handle_text_input("search")` updates query
+- `test_handle_text_input_sets_changed_flag`: `handle_text_input("a")` sets `query_changed` to true
+- `test_handle_text_input_empty_string_no_change`: `handle_text_input("")` doesn't set changed flag
+
+### Step 4: Add text input method to SelectorFocusTarget
+
+Add `handle_text_input(&mut self, text: &str)` to `SelectorFocusTarget` that delegates to
+its underlying `SelectorWidget`.
+
+**Location**: `crates/editor/src/selector_target.rs`
+
+**Implementation**:
+```rust
+// Chunk: docs/chunks/minibuffer_input - Text input delegation
+/// Handles text input events (from IME, keyboard, paste).
+///
+/// Delegates to the underlying SelectorWidget for query editing.
+pub fn handle_text_input(&mut self, text: &str) {
+    self.widget.handle_text_input(text);
+}
+```
+
+**Tests**:
+- `test_handle_text_input_updates_widget_query`: verify delegation works correctly
+
+### Step 5: Modify EditorState::handle_insert_text() to route by focus
+
+Replace the early return with focus-aware routing. When focus is Selector or FindInFile,
+route text to the appropriate minibuffer. When focus is Buffer, route to buffer/terminal.
+
+**Location**: `crates/editor/src/editor_state.rs`
+
+**Current code** (lines ~2955-2959):
+```rust
+pub fn handle_insert_text(&mut self, event: lite_edit_input::TextInputEvent) {
+    // Only handle text input in Buffer focus mode
+    if self.focus != EditorFocus::Buffer {
+        return;
+    }
+    // ... buffer/terminal handling
+}
+```
+
+**New implementation**:
+```rust
+// Chunk: docs/chunks/minibuffer_input - Focus-aware text input routing
+pub fn handle_insert_text(&mut self, event: lite_edit_input::TextInputEvent) {
+    let text = &event.text;
+    if text.is_empty() {
+        return;
+    }
+
+    match self.focus {
+        EditorFocus::Selector => {
+            // Route to selector's minibuffer via focus stack
+            if let Some(target) = self.focus_stack.top_mut() {
+                if target.layer() == FocusLayer::Selector {
+                    // Downcast to SelectorFocusTarget and call handle_text_input
+                    // Alternative: use Any + downcast, or add method to FocusTarget trait
+                    // For now, directly route to active_selector
+                }
+            }
+            // Fallback: route to active_selector if it exists
+            if let Some(ref mut selector) = self.active_selector {
+                selector.widget_mut().handle_text_input(text);
+                // Trigger query re-evaluation (dirty marking)
+                self.invalidation.merge(InvalidationKind::Layout);
+            }
+        }
+        EditorFocus::FindInFile => {
+            // Route to find strip's minibuffer
+            if let Some(ref mut find_target) = self.find_target {
+                find_target.handle_text_input(text);
+                // Trigger live search if query changed
+                if find_target.query_changed() {
+                    self.run_live_find_search();
+                    find_target.clear_query_changed();
+                }
+                self.invalidation.merge(InvalidationKind::Layout);
+            }
+        }
+        EditorFocus::ConfirmDialog => {
+            // ConfirmDialog doesn't accept text input - ignore
+        }
+        EditorFocus::Buffer => {
+            // Existing buffer/terminal handling (unchanged)
+            // ... (keep existing code for ws/tab lookup, terminal check, buffer insert)
+        }
+    }
+}
+```
+
+**Note**: The exact implementation depends on whether `active_selector` is a `SelectorFocusTarget`
+or `SelectorWidget`. Need to check the current state field types.
+
+**Tests** (TDD - write first):
+- `test_text_input_selector_focus_updates_query`: with focus=Selector, text input goes to selector
+- `test_text_input_find_focus_updates_query`: with focus=FindInFile, text input goes to find strip
+- `test_text_input_find_focus_triggers_live_search`: verify `run_live_find_search()` is called
+- `test_text_input_buffer_focus_unchanged`: verify existing buffer behavior still works
+- `test_text_input_terminal_still_works`: verify terminal text input still works
+
+### Step 6: Update drain_loop to handle query change effects
+
+After `handle_insert_text()`, ensure the selector's item list is re-filtered if the query
+changed. This may already happen via existing patterns, but verify and add if needed.
+
+**Location**: `crates/editor/src/drain_loop.rs` or `crates/editor/src/editor_state.rs`
+
+**Check existing code**: The selector query filtering might already be triggered by
+invalidation marks. If not, add `sync_selector_items()` call after text input to selector.
+
+### Step 7: Write integration tests
+
+Add integration tests that verify the full flow works:
+
+**Location**: `crates/editor/tests/typing_test.rs` (or new file)
+
+**Tests**:
+- `test_typing_in_file_picker_filters_results`: Open file picker, type characters, verify
+  query updates and list filters
+- `test_typing_in_find_strip_searches`: Open find strip, type characters, verify search
+  matches update
+- `test_escape_still_dismisses_overlays`: Ensure modifier keys (Escape, Return, arrows)
+  still work through KeyEvent path
+- `test_ime_composition_in_selector`: Test IME marked text flow in selector (if applicable)
+
+### Step 8: Update GOAL.md code_paths
+
+Update the chunk's `code_paths` frontmatter with the files touched:
+
+```yaml
+code_paths:
+  - crates/editor/src/mini_buffer.rs
+  - crates/editor/src/selector.rs
+  - crates/editor/src/selector_target.rs
+  - crates/editor/src/find_target.rs
+  - crates/editor/src/editor_state.rs
+```
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **FocusStack vs direct field access**: The current implementation has both `focus_stack`
+   and direct fields like `active_selector`, `find_target`. Need to verify which is the
+   source of truth for routing. Based on code exploration, it appears the direct fields
+   are still used for state, while `focus_stack` is for event dispatch.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **IME marked text handling**: The goal mentions IME composition should work. Currently
+   `handle_set_marked_text()` also has an early return for non-Buffer focus. This chunk
+   might need to extend to handle IME in minibuffers, or that could be a follow-up chunk.
+   For MVP, focus on regular text input (`insertText:`).
 
-## Deviations
+3. **Paste handling**: Paste also goes through `TextInputEvent`. Verify that paste into
+   selector/find works after this fix. If paste has a separate code path, may need similar
+   routing.
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+4. **Terminal tab text input**: The existing terminal handling in `handle_insert_text()`
+   must continue to work. The new routing should only affect cases where focus is
+   Selector/FindInFile, not terminal tabs with focus=Buffer.

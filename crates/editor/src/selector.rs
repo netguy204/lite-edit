@@ -75,6 +75,7 @@ pub enum SelectorOutcome {
 /// - Confirmation (Enter) and cancellation (Escape)
 /// - Mouse selection and confirmation
 // Chunk: docs/chunks/file_picker_mini_buffer - MiniBuffer-backed query editing
+// Chunk: docs/chunks/selector_row_scroller - SelectorWidget with RowScroller replacing view_offset/visible_items
 pub struct SelectorWidget {
     /// Single-line MiniBuffer for query editing with full affordance set
     /// (word-jump, kill-line, shift-selection, clipboard, Emacs bindings).
@@ -135,6 +136,7 @@ impl SelectorWidget {
     }
 
     // Chunk: docs/chunks/file_picker_scroll - Setter for visible area height
+    // Chunk: docs/chunks/selector_row_scroller - Replaces set_visible_items with pixel-based sizing
     /// Updates the visible size from the pixel height of the list area.
     ///
     /// This forwards to `RowScroller::update_size(height_px, row_count)`, which computes
@@ -143,6 +145,7 @@ impl SelectorWidget {
         self.scroll.update_size(height_px, self.items.len());
     }
 
+    // Chunk: docs/chunks/selector_row_scroller - Row height adjustment with scroll state preservation
     /// Sets the row height (item height) in pixels.
     ///
     /// Call this when font metrics change.
@@ -156,6 +159,7 @@ impl SelectorWidget {
     }
 
     // Chunk: docs/chunks/file_picker_scroll - Clamps scroll offset when item list shrinks
+    // Chunk: docs/chunks/selector_row_scroller - Re-clamp scroll position on item list changes
     /// Replaces the item list and clamps the selected index and scroll offset to valid bounds.
     ///
     /// If the new list has fewer items than the current `selected_index`,
@@ -192,6 +196,7 @@ impl SelectorWidget {
     /// clipboard operations (Cmd+C/V/X), and Emacs-style bindings (Ctrl+A/E/K).
     // Chunk: docs/chunks/file_picker_mini_buffer - Key handling with MiniBuffer delegation
     // Chunk: docs/chunks/file_picker_scroll - Keeps selection visible when navigating
+    // Chunk: docs/chunks/selector_row_scroller - Arrow-key navigation using scroll.ensure_visible()
     pub fn handle_key(&mut self, event: &KeyEvent) -> SelectorOutcome {
         match &event.key {
             Key::Up => {
@@ -230,6 +235,7 @@ impl SelectorWidget {
     }
 
     // Chunk: docs/chunks/file_picker_scroll - Translates pixel deltas into scroll offset
+    // Chunk: docs/chunks/selector_row_scroller - Smooth pixel-based scroll accumulation via RowScroller
     /// Handles a scroll event by adjusting the scroll offset.
     ///
     /// # Arguments
@@ -247,6 +253,7 @@ impl SelectorWidget {
     }
 
     // Chunk: docs/chunks/file_picker_scroll - Maps visible row to actual item index
+    // Chunk: docs/chunks/selector_row_scroller - Hit-testing with fractional scroll offset correction
     /// Handles a mouse event and returns the appropriate outcome.
     ///
     /// # Parameters
@@ -313,6 +320,7 @@ impl SelectorWidget {
     // =========================================================================
 
     // Chunk: docs/chunks/file_picker_scroll - Accessor for first visible item index
+    // Chunk: docs/chunks/selector_row_scroller - Public accessor delegating to RowScroller
     /// Returns the index of the first visible item.
     ///
     /// Delegates to `RowScroller::first_visible_row()`.
@@ -320,6 +328,7 @@ impl SelectorWidget {
         self.scroll.first_visible_row()
     }
 
+    // Chunk: docs/chunks/selector_row_scroller - Public accessor for fractional scroll offset
     /// Returns the fractional pixel offset within the top row.
     ///
     /// Delegates to `RowScroller::scroll_fraction_px()`. Renderers use this
@@ -328,12 +337,26 @@ impl SelectorWidget {
         self.scroll.scroll_fraction_px()
     }
 
+    // Chunk: docs/chunks/selector_row_scroller - Public accessor for visible range
     /// Returns the range of items visible in the viewport.
     ///
     /// Delegates to `RowScroller::visible_range(item_count)`. The range
     /// includes partially visible items at the top and bottom.
     pub fn visible_item_range(&self) -> std::ops::Range<usize> {
         self.scroll.visible_range(self.items.len())
+    }
+
+    // Chunk: docs/chunks/minibuffer_input - Text input support for selector
+    /// Handles text input events (from IME, keyboard, paste).
+    ///
+    /// Inserts text into the query field and resets selection to index 0
+    /// if the query changed. Use this for macOS `insertText:` events.
+    pub fn handle_text_input(&mut self, text: &str) {
+        let prev_query = self.mini_buffer.content();
+        self.mini_buffer.handle_text_input(text);
+        if self.mini_buffer.content() != prev_query {
+            self.selected_index = 0;
+        }
     }
 }
 
@@ -2003,5 +2026,62 @@ mod tests {
             "Last item should be at draw_idx {} (bottom of viewport)",
             visible_rows - 1
         );
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/minibuffer_input - handle_text_input tests
+    // =========================================================================
+
+    #[test]
+    fn test_handle_text_input_updates_query() {
+        let mut widget = SelectorWidget::new();
+        widget.handle_text_input("foo");
+        assert_eq!(widget.query(), "foo");
+    }
+
+    #[test]
+    fn test_handle_text_input_resets_index() {
+        let mut widget = SelectorWidget::new();
+        widget.set_items(vec!["a".into(), "b".into(), "c".into(), "d".into(), "e".into()]);
+
+        // Navigate to index 3
+        widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
+        widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
+        widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
+        assert_eq!(widget.selected_index(), 3);
+
+        // Text input should reset index to 0
+        widget.handle_text_input("a");
+        assert_eq!(widget.selected_index(), 0);
+    }
+
+    #[test]
+    fn test_handle_text_input_unicode() {
+        let mut widget = SelectorWidget::new();
+        widget.handle_text_input("日本語");
+        assert_eq!(widget.query(), "日本語");
+    }
+
+    #[test]
+    fn test_handle_text_input_empty_string_no_reset() {
+        let mut widget = SelectorWidget::new();
+        widget.set_items(vec!["a".into(), "b".into(), "c".into()]);
+
+        // Navigate to index 2
+        widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
+        widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
+        assert_eq!(widget.selected_index(), 2);
+
+        // Empty text input should not reset index (query doesn't change)
+        widget.handle_text_input("");
+        assert_eq!(widget.selected_index(), 2);
+    }
+
+    #[test]
+    fn test_handle_text_input_multiple_calls() {
+        let mut widget = SelectorWidget::new();
+        widget.handle_text_input("hel");
+        widget.handle_text_input("lo");
+        assert_eq!(widget.query(), "hello");
     }
 }

@@ -104,6 +104,18 @@ impl FindFocusTarget {
     pub fn mini_buffer_mut(&mut self) -> &mut MiniBuffer {
         &mut self.mini_buffer
     }
+
+    // Chunk: docs/chunks/minibuffer_input - Text input support for find strip
+    /// Handles text input events (from IME, keyboard, paste).
+    ///
+    /// Inserts text into the query field. Sets `query_changed` to true
+    /// if the content changed, allowing live search to trigger.
+    pub fn handle_text_input(&mut self, text: &str) {
+        let prev_content = self.mini_buffer.content();
+        self.mini_buffer.handle_text_input(text);
+        let new_content = self.mini_buffer.content();
+        self.query_changed = prev_content != new_content;
+    }
 }
 
 impl FocusTarget for FindFocusTarget {
@@ -267,5 +279,60 @@ mod tests {
         let mini_buffer = MiniBuffer::new(test_font_metrics());
         let target = FindFocusTarget::new(mini_buffer);
         assert_eq!(target.layer(), FocusLayer::FindInFile);
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/minibuffer_input - handle_text_input tests
+    // =========================================================================
+
+    #[test]
+    fn test_handle_text_input_updates_query() {
+        let mini_buffer = MiniBuffer::new(test_font_metrics());
+        let mut target = FindFocusTarget::new(mini_buffer);
+
+        target.handle_text_input("search");
+        assert_eq!(target.query(), "search");
+    }
+
+    #[test]
+    fn test_handle_text_input_sets_changed_flag() {
+        let mini_buffer = MiniBuffer::new(test_font_metrics());
+        let mut target = FindFocusTarget::new(mini_buffer);
+
+        assert!(!target.query_changed());
+        target.handle_text_input("a");
+        assert!(target.query_changed());
+    }
+
+    #[test]
+    fn test_handle_text_input_empty_string_no_change() {
+        let mini_buffer = MiniBuffer::new(test_font_metrics());
+        let mut target = FindFocusTarget::new(mini_buffer);
+
+        target.handle_text_input("");
+        // Empty input doesn't change content, so query_changed should be false
+        assert!(!target.query_changed());
+    }
+
+    #[test]
+    fn test_handle_text_input_unicode() {
+        let mini_buffer = MiniBuffer::new(test_font_metrics());
+        let mut target = FindFocusTarget::new(mini_buffer);
+
+        target.handle_text_input("日本語");
+        assert_eq!(target.query(), "日本語");
+        assert!(target.query_changed());
+    }
+
+    #[test]
+    fn test_handle_text_input_multiple_calls() {
+        let mini_buffer = MiniBuffer::new(test_font_metrics());
+        let mut target = FindFocusTarget::new(mini_buffer);
+
+        target.handle_text_input("hel");
+        target.clear_query_changed();
+        target.handle_text_input("lo");
+        assert_eq!(target.query(), "hello");
+        assert!(target.query_changed());
     }
 }

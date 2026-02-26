@@ -2952,59 +2952,123 @@ impl EditorState {
     ///
     /// This is the final text to insert after any IME composition is complete.
     /// The text is inserted at the cursor position (or replaces the specified range).
+    // Chunk: docs/chunks/minibuffer_input - Focus-aware text input routing
     pub fn handle_insert_text(&mut self, event: lite_edit_input::TextInputEvent) {
-        // Only handle text input in Buffer focus mode
-        if self.focus != EditorFocus::Buffer {
-            return;
-        }
-
         let text = &event.text;
         if text.is_empty() {
             return;
         }
 
-        let ws = match self.editor.active_workspace_mut() {
-            Some(ws) => ws,
-            None => return,
-        };
+        match self.focus {
+            EditorFocus::Selector => {
+                // Route to selector's minibuffer and re-query file index
+                let line_height = self.font_metrics.line_height as f32;
+                let prev_query = self.active_selector.as_ref().map(|s| s.query());
 
-        let tab = match ws.active_tab_mut() {
-            Some(tab) => tab,
-            None => return,
-        };
+                if let Some(ref mut selector) = self.active_selector {
+                    selector.handle_text_input(text);
+                }
 
-        // Check for terminal tab
-        if let Some((terminal, _viewport)) = tab.terminal_and_viewport_mut() {
-            // Terminal tab: write text as raw UTF-8 (not paste-bracketed)
-            let bytes = text.as_bytes();
-            if !bytes.is_empty() {
-                let _ = terminal.write_input(bytes);
-            }
-            return;
-        }
-
-        // File tab: insert text into buffer
-        if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
-            // Clear any marked text first (IME commit replaces marked text)
-            buffer.clear_marked_text();
-
-            let dirty_lines = buffer.insert_str(text);
-            self.dirty_lines.merge(dirty_lines.clone());
-            let dirty = viewport.dirty_lines_to_region(&dirty_lines, buffer.line_count());
-            // Chunk: docs/chunks/invalidation_separation - Content invalidation for text insertion
-            self.invalidation.merge(InvalidationKind::Content(dirty));
-
-            // Ensure cursor is visible
-            let cursor_line = buffer.cursor_position().line;
-            if viewport.ensure_visible(cursor_line, buffer.line_count()) {
+                // Check if query changed and re-query file index if so
+                let current_query = self.active_selector.as_ref().map(|s| s.query());
+                if current_query != prev_query {
+                    if let Some(current_query) = current_query {
+                        // Re-query the file index with the new query
+                        // Chunk: docs/chunks/workspace_dir_picker - Use workspace's file index
+                        if let Some(workspace) = self.editor.active_workspace() {
+                            let results = workspace.file_index.query(&current_query);
+                            let cache_version = workspace.file_index.cache_version();
+                            let items: Vec<String> = results
+                                .iter()
+                                .map(|r| r.path.display().to_string())
+                                .collect();
+                            // Update selector items
+                            if let Some(ref mut sel) = self.active_selector {
+                                sel.set_items(items);
+                                // Recalculate visible_rows after set_items
+                                let new_geometry = calculate_overlay_geometry(
+                                    self.view_width,
+                                    self.view_height,
+                                    line_height,
+                                    sel.items().len(),
+                                );
+                                sel.set_item_height(new_geometry.item_height);
+                                sel.update_visible_size(
+                                    new_geometry.visible_items as f32 * new_geometry.item_height,
+                                );
+                            }
+                            // Update workspace's cache version
+                            if let Some(ws) = self.editor.active_workspace_mut() {
+                                ws.last_cache_version = cache_version;
+                            }
+                        }
+                    }
+                }
+                // Trigger layout invalidation for query field update
                 self.invalidation.merge(InvalidationKind::Layout);
             }
+            EditorFocus::FindInFile => {
+                // Route to find strip's minibuffer
+                if let Some(ref mut mini_buffer) = self.find_mini_buffer {
+                    let prev_content = mini_buffer.content();
+                    mini_buffer.handle_text_input(text);
+                    let new_content = mini_buffer.content();
+                    // If content changed, run live search
+                    if prev_content != new_content {
+                        self.run_live_search();
+                    }
+                    self.invalidation.merge(InvalidationKind::Layout);
+                }
+            }
+            EditorFocus::ConfirmDialog => {
+                // ConfirmDialog doesn't accept text input - ignore
+            }
+            EditorFocus::Buffer => {
+                // Existing buffer/terminal handling
+                let ws = match self.editor.active_workspace_mut() {
+                    Some(ws) => ws,
+                    None => return,
+                };
 
-            tab.dirty = true;
+                let tab = match ws.active_tab_mut() {
+                    Some(tab) => tab,
+                    None => return,
+                };
+
+                // Check for terminal tab
+                if let Some((terminal, _viewport)) = tab.terminal_and_viewport_mut() {
+                    // Terminal tab: write text as raw UTF-8 (not paste-bracketed)
+                    let bytes = text.as_bytes();
+                    if !bytes.is_empty() {
+                        let _ = terminal.write_input(bytes);
+                    }
+                    return;
+                }
+
+                // File tab: insert text into buffer
+                if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
+                    // Clear any marked text first (IME commit replaces marked text)
+                    buffer.clear_marked_text();
+
+                    let dirty_lines = buffer.insert_str(text);
+                    self.dirty_lines.merge(dirty_lines.clone());
+                    let dirty = viewport.dirty_lines_to_region(&dirty_lines, buffer.line_count());
+                    // Chunk: docs/chunks/invalidation_separation - Content invalidation for text insertion
+                    self.invalidation.merge(InvalidationKind::Content(dirty));
+
+                    // Ensure cursor is visible
+                    let cursor_line = buffer.cursor_position().line;
+                    if viewport.ensure_visible(cursor_line, buffer.line_count()) {
+                        self.invalidation.merge(InvalidationKind::Layout);
+                    }
+
+                    tab.dirty = true;
+                }
+
+                // Chunk: docs/chunks/highlight_text_source - Sync highlighter after text insertion
+                self.sync_active_tab_highlighter();
+            }
         }
-
-        // Chunk: docs/chunks/highlight_text_source - Sync highlighter after text insertion
-        self.sync_active_tab_highlighter();
     }
 
     /// Handles IME marked text (composition in progress).
@@ -5164,6 +5228,148 @@ mod tests {
         // Check query
         let query = state.active_selector.as_ref().unwrap().query();
         assert_eq!(query, "test");
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/minibuffer_input - TextInputEvent routing tests
+    // =========================================================================
+
+    #[test]
+    fn test_text_input_selector_focus_updates_query() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Open selector
+        let cmd_p = KeyEvent::new(
+            Key::Char('p'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_p);
+        assert_eq!(state.focus, EditorFocus::Selector);
+
+        // Send TextInputEvent (simulates macOS insertText:)
+        let event = lite_edit_input::TextInputEvent::new("hello");
+        state.handle_insert_text(event);
+
+        // Check that query was updated
+        let query = state.active_selector.as_ref().unwrap().query();
+        assert_eq!(query, "hello");
+    }
+
+    #[test]
+    fn test_text_input_find_focus_updates_query() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Open find strip
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_f);
+        assert_eq!(state.focus, EditorFocus::FindInFile);
+
+        // Send TextInputEvent (simulates macOS insertText:)
+        let event = lite_edit_input::TextInputEvent::new("search");
+        state.handle_insert_text(event);
+
+        // Check that query was updated
+        let query = state.find_mini_buffer.as_ref().unwrap().content();
+        assert_eq!(query, "search");
+    }
+
+    #[test]
+    fn test_text_input_buffer_focus_inserts_text() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Ensure we're in buffer focus (default)
+        assert_eq!(state.focus, EditorFocus::Buffer);
+
+        // Send TextInputEvent
+        let event = lite_edit_input::TextInputEvent::new("hello world");
+        state.handle_insert_text(event);
+
+        // Check that text was inserted into buffer
+        assert_eq!(state.buffer().content(), "hello world");
+    }
+
+    #[test]
+    fn test_text_input_selector_unicode() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Open selector
+        let cmd_p = KeyEvent::new(
+            Key::Char('p'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_p);
+
+        // Send Unicode text input
+        let event = lite_edit_input::TextInputEvent::new("日本語");
+        state.handle_insert_text(event);
+
+        // Check that query contains unicode
+        let query = state.active_selector.as_ref().unwrap().query();
+        assert_eq!(query, "日本語");
+    }
+
+    #[test]
+    fn test_text_input_confirm_dialog_ignored() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Set up a buffer with content so we can trigger dirty dialog
+        state.handle_key(KeyEvent::char('x'));
+
+        // Manually set focus to ConfirmDialog (normally done via dirty close flow)
+        state.focus = EditorFocus::ConfirmDialog;
+
+        // Send TextInputEvent - should be ignored
+        let event = lite_edit_input::TextInputEvent::new("ignored");
+        state.handle_insert_text(event);
+
+        // Buffer should still just have 'x' (text input was ignored)
+        assert_eq!(state.buffer().content(), "x");
+    }
+
+    #[test]
+    fn test_text_input_empty_string_is_noop() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Open selector
+        let cmd_p = KeyEvent::new(
+            Key::Char('p'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        state.handle_key(cmd_p);
+
+        // Type something first
+        state.handle_key(KeyEvent::char('x'));
+        let prev_query = state.active_selector.as_ref().unwrap().query();
+        assert_eq!(prev_query, "x");
+
+        // Send empty TextInputEvent - should be no-op
+        let event = lite_edit_input::TextInputEvent::new("");
+        state.handle_insert_text(event);
+
+        // Query should be unchanged
+        let query = state.active_selector.as_ref().unwrap().query();
+        assert_eq!(query, "x");
     }
 
     #[test]

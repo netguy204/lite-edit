@@ -178,6 +178,18 @@ impl MiniBuffer {
         self.buffer = TextBuffer::new();
         self.dirty_region = DirtyRegion::None;
     }
+
+    // Chunk: docs/chunks/minibuffer_input - Text input support for MiniBuffer
+    /// Handles text input (from IME, keyboard, paste).
+    ///
+    /// Converts the text string to character key events and inserts them.
+    /// This reuses the existing key handling logic for cursor management,
+    /// selection replacement, and dirty tracking.
+    pub fn handle_text_input(&mut self, text: &str) {
+        for ch in text.chars() {
+            self.handle_key(KeyEvent::char(ch));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -513,5 +525,67 @@ mod tests {
 
         mb.clear();
         assert_eq!(mb.cursor_col(), 0);
+    }
+
+    // ==================== handle_text_input() tests ====================
+    // Chunk: docs/chunks/minibuffer_input - Text input tests
+
+    #[test]
+    fn test_handle_text_input_single_char() {
+        let mut mb = MiniBuffer::new(test_font_metrics());
+        mb.handle_text_input("a");
+        assert_eq!(mb.content(), "a");
+    }
+
+    #[test]
+    fn test_handle_text_input_string() {
+        let mut mb = MiniBuffer::new(test_font_metrics());
+        mb.handle_text_input("hello");
+        assert_eq!(mb.content(), "hello");
+    }
+
+    #[test]
+    fn test_handle_text_input_unicode() {
+        let mut mb = MiniBuffer::new(test_font_metrics());
+        mb.handle_text_input("日本語");
+        assert_eq!(mb.content(), "日本語");
+    }
+
+    #[test]
+    fn test_handle_text_input_replaces_selection() {
+        let mut mb = MiniBuffer::new(test_font_metrics());
+        // Type "hello"
+        mb.handle_text_input("hello");
+        assert_eq!(mb.content(), "hello");
+
+        // Select all (Cmd+A)
+        mb.handle_key(KeyEvent::new(
+            Key::Char('a'),
+            Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        ));
+        assert!(mb.has_selection());
+
+        // Insert "x" via text input - should replace selection
+        mb.handle_text_input("x");
+        assert_eq!(mb.content(), "x");
+    }
+
+    #[test]
+    fn test_handle_text_input_empty_string() {
+        let mut mb = MiniBuffer::new(test_font_metrics());
+        mb.handle_text_input("hello");
+        mb.handle_text_input("");
+        // Empty input should be a no-op
+        assert_eq!(mb.content(), "hello");
+    }
+
+    #[test]
+    fn test_handle_text_input_cursor_position() {
+        let mut mb = MiniBuffer::new(test_font_metrics());
+        mb.handle_text_input("abc");
+        assert_eq!(mb.cursor_col(), 3);
     }
 }
