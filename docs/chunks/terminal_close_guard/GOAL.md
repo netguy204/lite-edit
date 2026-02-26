@@ -1,18 +1,28 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
-code_references: []
+code_paths:
+  - crates/editor/src/confirm_dialog.rs
+  - crates/editor/src/editor_state.rs
+code_references:
+  - ref: crates/editor/src/confirm_dialog.rs#ConfirmDialogContext::CloseActiveTerminal
+    implements: "Terminal close guard context variant"
+  - ref: crates/editor/src/editor_state.rs#EditorState::is_terminal_with_active_process
+    implements: "Process liveness detection"
+  - ref: crates/editor/src/editor_state.rs#EditorState::show_terminal_close_confirm
+    implements: "Terminal-specific confirmation dialog"
+  - ref: crates/editor/src/editor_state.rs#EditorState::kill_terminal_and_close_tab
+    implements: "Kill process and close tab on confirmation"
 narrative: null
 investigation: null
 subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["fallback_glyph_metrics"]
+created_after:
+- fallback_glyph_metrics
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
