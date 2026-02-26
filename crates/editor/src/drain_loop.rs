@@ -35,7 +35,8 @@ use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
 use crate::metal_view::{CursorRect, CursorRegions, MetalView};
 use crate::renderer::Renderer;
 use crate::confirm_dialog::calculate_confirm_dialog_geometry;
-use crate::selector_overlay::calculate_overlay_geometry;
+// Chunk: docs/chunks/find_strip_multi_pane - Import FindStripState for pane-aware rendering
+use crate::selector_overlay::{calculate_overlay_geometry, FindStripState};
 use crate::left_rail::RAIL_WIDTH;
 use crate::pane_layout::calculate_pane_rects;
 use crate::tab_bar::TAB_BAR_HEIGHT;
@@ -360,17 +361,30 @@ impl EventDrainLoop {
                         &self.state.editor,
                         self.state.active_selector.as_ref(),
                         self.state.overlay_cursor_visible,
+                        None, // No find strip when selector is active
                     );
                 }
+                // Chunk: docs/chunks/find_strip_multi_pane - Use render_with_editor for find strip
                 EditorFocus::FindInFile => {
                     self.renderer.set_cursor_visible(self.state.cursor_visible);
-                    if let Some(ref mini_buffer) = self.state.find_mini_buffer {
-                        self.renderer.render_with_find_strip(
+                    // Build the find strip state from the mini buffer
+                    // Note: We need to extract content into a local variable because
+                    // FindStripState borrows it, and content() returns an owned String.
+                    let find_strip = self.state.find_mini_buffer.as_ref().map(|mb| {
+                        let content = mb.content();
+                        (content, mb.cursor_col())
+                    });
+                    if let Some((ref query, cursor_col)) = find_strip {
+                        self.renderer.render_with_editor(
                             &self.metal_view,
                             &self.state.editor,
-                            &mini_buffer.content(),
-                            mini_buffer.cursor_col(),
-                            self.state.overlay_cursor_visible,
+                            None, // No selector when find is active
+                            self.state.cursor_visible,
+                            Some(FindStripState {
+                                query,
+                                cursor_col,
+                                cursor_visible: self.state.overlay_cursor_visible,
+                            }),
                         );
                     }
                 }
@@ -381,6 +395,7 @@ impl EventDrainLoop {
                         &self.state.editor,
                         None,
                         self.state.cursor_visible,
+                        None, // No find strip
                     );
                 }
                 // Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog rendering

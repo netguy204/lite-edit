@@ -608,6 +608,21 @@ impl SelectorGlyphBuffer {
 // Find Strip (Chunk: docs/chunks/find_in_file)
 // =============================================================================
 
+// Chunk: docs/chunks/find_strip_multi_pane - State passed to render_with_editor for find strip
+/// State needed to render the find strip overlay.
+///
+/// This is passed to render_with_editor to enable find strip rendering
+/// within pane bounds (rather than full viewport). This mirrors how
+/// `selector: Option<&SelectorWidget>` is passed to enable selector overlay.
+pub struct FindStripState<'a> {
+    /// The current query text
+    pub query: &'a str,
+    /// Cursor column position in the query
+    pub cursor_col: usize,
+    /// Whether the cursor is currently visible (for blinking)
+    pub cursor_visible: bool,
+}
+
 /// Horizontal padding for the find strip
 pub const FIND_STRIP_PADDING_X: f32 = 8.0;
 
@@ -678,6 +693,55 @@ pub fn calculate_find_strip_geometry(
         strip_x: 0.0,
         strip_y,
         strip_width: view_width,
+        strip_height,
+        label_x,
+        query_x,
+        text_y: strip_y + FIND_STRIP_PADDING_Y,
+        cursor_x,
+        glyph_width,
+        line_height,
+    }
+}
+
+// Chunk: docs/chunks/find_strip_multi_pane - Pane-aware geometry calculation
+/// Calculates the geometry for the find strip within a pane's bounds.
+///
+/// This function positions the find strip at the bottom of the given pane
+/// rather than at the bottom of the full viewport. Used for multi-pane layouts
+/// where the find strip should appear within the focused pane.
+///
+/// # Arguments
+/// * `pane_x` - X position of the pane's left edge
+/// * `pane_y` - Y position of the pane's top edge
+/// * `pane_width` - Width of the pane
+/// * `pane_height` - Height of the pane
+/// * `line_height` - The height of a text line in pixels
+/// * `glyph_width` - The width of a single glyph
+/// * `cursor_col` - The cursor column position in the query
+pub fn calculate_find_strip_geometry_in_pane(
+    pane_x: f32,
+    pane_y: f32,
+    pane_width: f32,
+    pane_height: f32,
+    line_height: f32,
+    glyph_width: f32,
+    cursor_col: usize,
+) -> FindStripGeometry {
+    let strip_height = line_height + 2.0 * FIND_STRIP_PADDING_Y;
+    // Position at bottom of pane (pane_y is the top, so add pane_height - strip_height)
+    let strip_y = pane_y + pane_height - strip_height;
+
+    // Label and query positions are relative to the pane's left edge
+    let label_x = pane_x + FIND_STRIP_PADDING_X;
+    let label_width = FIND_LABEL_TEXT.len() as f32 * glyph_width;
+    let query_x = label_x + label_width + glyph_width; // One space after label
+
+    let cursor_x = query_x + cursor_col as f32 * glyph_width;
+
+    FindStripGeometry {
+        strip_x: pane_x,
+        strip_y,
+        strip_width: pane_width,
         strip_height,
         label_x,
         query_x,
@@ -1107,5 +1171,131 @@ mod tests {
         let geom = calculate_overlay_geometry(1000.0, 800.0, 20.0, 5);
 
         assert_eq!(geom.item_height, 20.0);
+    }
+
+    // =========================================================================
+    // calculate_find_strip_geometry_in_pane tests
+    // Chunk: docs/chunks/find_strip_multi_pane - Tests for pane-aware geometry
+    // =========================================================================
+
+    #[test]
+    fn find_strip_in_pane_positions_at_pane_bottom() {
+        let geometry = calculate_find_strip_geometry_in_pane(
+            100.0,  // pane_x
+            50.0,   // pane_y
+            400.0,  // pane_width
+            300.0,  // pane_height
+            16.0,   // line_height
+            8.0,    // glyph_width
+            0,      // cursor_col
+        );
+
+        // strip_y should be at bottom of pane, not viewport
+        // pane bottom = pane_y + pane_height = 50 + 300 = 350
+        // strip_y = pane_bottom - strip_height
+        let expected_strip_y = 50.0 + 300.0 - geometry.strip_height;
+        assert_eq!(geometry.strip_y, expected_strip_y);
+
+        // strip_x should start at pane_x, not 0
+        assert_eq!(geometry.strip_x, 100.0);
+
+        // strip_width should be pane_width, not viewport width
+        assert_eq!(geometry.strip_width, 400.0);
+    }
+
+    #[test]
+    fn find_strip_in_pane_label_position() {
+        let geometry = calculate_find_strip_geometry_in_pane(
+            100.0,  // pane_x
+            50.0,   // pane_y
+            400.0,  // pane_width
+            300.0,  // pane_height
+            16.0,   // line_height
+            8.0,    // glyph_width
+            0,      // cursor_col
+        );
+
+        // label_x should be pane_x + padding, not just padding
+        assert_eq!(geometry.label_x, 100.0 + FIND_STRIP_PADDING_X);
+    }
+
+    #[test]
+    fn find_strip_in_pane_cursor_position() {
+        let geometry = calculate_find_strip_geometry_in_pane(
+            100.0,  // pane_x
+            50.0,   // pane_y
+            400.0,  // pane_width
+            300.0,  // pane_height
+            16.0,   // line_height
+            8.0,    // glyph_width
+            5,      // cursor at position 5
+        );
+
+        // Cursor should be at query_x + 5 * glyph_width
+        let expected_cursor_x = geometry.query_x + 5.0 * 8.0;
+        assert_eq!(geometry.cursor_x, expected_cursor_x);
+
+        // Cursor should be within pane bounds
+        assert!(geometry.cursor_x >= 100.0);
+        assert!(geometry.cursor_x < 100.0 + 400.0);
+    }
+
+    #[test]
+    fn find_strip_in_small_pane() {
+        // Test that geometry is correct even in a small pane (e.g., 1/4 of screen)
+        let geometry = calculate_find_strip_geometry_in_pane(
+            800.0,  // right side pane
+            0.0,
+            200.0,  // narrow pane
+            600.0,
+            16.0,
+            8.0,
+            5,      // cursor at position 5
+        );
+
+        // Verify strip is positioned at pane's left edge
+        assert_eq!(geometry.strip_x, 800.0);
+
+        // Verify strip width matches pane width
+        assert_eq!(geometry.strip_width, 200.0);
+
+        // Verify label_x is within pane bounds
+        assert!(geometry.label_x >= 800.0);
+        assert!(geometry.label_x < 1000.0);
+
+        // Verify cursor position is within pane bounds
+        assert!(geometry.cursor_x >= 800.0);
+        // Note: cursor_x might exceed pane bounds if query is long,
+        // but that's handled by scissor clipping
+    }
+
+    #[test]
+    fn find_strip_in_pane_vs_viewport_geometry_differs() {
+        // Verify that pane geometry produces different results than viewport geometry
+        let pane_geom = calculate_find_strip_geometry_in_pane(
+            100.0,  // pane_x (not at 0)
+            50.0,   // pane_y
+            400.0,  // pane_width
+            300.0,  // pane_height
+            16.0,
+            8.0,
+            0,
+        );
+
+        let viewport_geom = calculate_find_strip_geometry(
+            500.0,  // view_width
+            400.0,  // view_height
+            16.0,
+            8.0,
+            0,
+        );
+
+        // strip_x differs: pane starts at 100, viewport starts at 0
+        assert_ne!(pane_geom.strip_x, viewport_geom.strip_x);
+        assert_eq!(pane_geom.strip_x, 100.0);
+        assert_eq!(viewport_geom.strip_x, 0.0);
+
+        // strip_width differs: pane is 400, viewport is 500
+        assert_ne!(pane_geom.strip_width, viewport_geom.strip_width);
     }
 }
