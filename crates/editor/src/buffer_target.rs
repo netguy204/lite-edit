@@ -3376,10 +3376,12 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         {
+            // Chunk: docs/chunks/styled_line_cache - Pass dirty_lines for EditorContext
             let mut ctx = EditorContext::new(
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0, // Wide viewport, no wrapping
@@ -3415,10 +3417,12 @@ mod tests {
 
         // Scroll to max
         {
+            // Chunk: docs/chunks/styled_line_cache - Pass dirty_lines for EditorContext
             let mut ctx = EditorContext::new(
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0, // Wide viewport, no wrapping
@@ -5257,10 +5261,12 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         {
+            // Chunk: docs/chunks/styled_line_cache - Pass dirty_lines for EditorContext
             let mut ctx = EditorContext::new(
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 32.0,
                 800.0,
@@ -5291,10 +5297,12 @@ mod tests {
         let mut target = BufferFocusTarget::new();
 
         {
+            // Chunk: docs/chunks/styled_line_cache - Pass dirty_lines for EditorContext
             let mut ctx = EditorContext::new(
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 16.0,
                 800.0,
