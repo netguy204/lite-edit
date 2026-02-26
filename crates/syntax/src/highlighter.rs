@@ -1,5 +1,6 @@
 // Chunk: docs/chunks/syntax_highlighting - Core syntax highlighter with incremental parsing
 // Chunk: docs/chunks/syntax_highlight_perf - Viewport-batch highlighting for performance
+// Chunk: docs/chunks/highlight_injection - Tree-sitter injection-based highlighting
 
 //! Syntax highlighter with incremental parsing support.
 //!
@@ -19,10 +20,11 @@
 //! the cached parse tree, rather than re-parsing via `Highlighter::highlight()`.
 
 use crate::edit::EditEvent;
-use crate::registry::LanguageConfig;
+use crate::registry::{LanguageConfig, LanguageRegistry};
 use crate::theme::SyntaxTheme;
 use lite_edit_buffer::{Span, StyledLine};
 use std::cell::RefCell;
+use std::ops::Range;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor, Tree};
 
@@ -32,7 +34,51 @@ use tree_sitter::{Parser, Query, QueryCursor, Tree};
 /// The capture_index is a `u32` used to look up the capture name from `Query::capture_names()`.
 /// This avoids allocating a `String` for each capture, eliminating hundreds of heap allocations
 /// per viewport highlight.
+///
+/// For injection captures, the index is ORed with `INJECTION_CAPTURE_MARKER` to indicate
+/// that it should be resolved against an injection language's query rather than the host query.
 type CaptureEntry = (usize, usize, u32);
+
+// Chunk: docs/chunks/highlight_injection - Injection capture entry with resolved capture name
+/// A capture entry for injection highlights: (start_byte, end_byte, capture_name).
+///
+/// Unlike host captures which store a capture index, injection captures store the
+/// resolved capture name directly. This is necessary because injection captures
+/// come from different language queries and we can't store a reference to the query.
+type InjectionCaptureEntry = (usize, usize, String);
+
+// Chunk: docs/chunks/highlight_injection - Injection region management
+/// An identified region where another language is embedded.
+///
+/// For example, a fenced code block in Markdown with ` ```rust ` creates an
+/// injection region for the Rust language within the code block content.
+#[derive(Debug)]
+struct InjectionRegion {
+    /// Byte range in the host document
+    byte_range: Range<usize>,
+    /// Language name extracted from the injection query (e.g., "rust", "python")
+    language_name: String,
+    /// Parsed tree for this region (lazily populated when needed for highlighting)
+    tree: Option<Tree>,
+    /// Generation at which the tree was parsed (for cache invalidation)
+    tree_generation: u64,
+}
+
+// Chunk: docs/chunks/highlight_injection - Injection layer management
+/// Manages injection regions and their parse trees for embedded languages.
+///
+/// The injection layer holds the compiled injection query for the host language
+/// and tracks all injection regions found in the document. Regions are re-identified
+/// when the host tree changes, and their parse trees are lazily populated when
+/// needed for highlighting.
+struct InjectionLayer {
+    /// Compiled injection query for the host language
+    injection_query: Query,
+    /// Cached injection regions (re-identified when host tree changes)
+    regions: Vec<InjectionRegion>,
+    /// Generation at which regions were identified
+    regions_generation: u64,
+}
 
 /// Cache for viewport highlight results.
 ///
@@ -130,6 +176,13 @@ fn build_line_offsets(source: &str) -> Vec<usize> {
 /// Line lookups (`line_byte_range`, `line_count`) are O(1) using a precomputed
 /// offset index, enabling position-independent highlight performance.
 ///
+/// ## Injection Support
+///
+/// For languages with embedded content (Markdown fenced code blocks, HTML
+/// script/style tags), the highlighter uses tree-sitter injections to apply
+/// the correct highlighting to embedded regions. Injection trees are parsed
+/// lazily and cached alongside the host tree.
+///
 /// ## Thread Safety
 ///
 /// The highlighter uses `RefCell` for interior mutability of the cache,
@@ -159,6 +212,14 @@ pub struct SyntaxHighlighter {
     line_offsets: Vec<usize>,
     /// Reusable buffer for captures to avoid per-frame allocation.
     captures_buffer: RefCell<Vec<CaptureEntry>>,
+    // Chunk: docs/chunks/highlight_injection - Injection support fields
+    /// Injection layer for embedded language highlighting (e.g., Markdown code blocks)
+    injection_layer: Option<RefCell<InjectionLayer>>,
+    /// Language registry for looking up injected language configs (lazily created)
+    registry: RefCell<Option<LanguageRegistry>>,
+    /// Reusable buffer for injection captures (separate from host captures).
+    /// Stores (start_byte, end_byte, capture_name) tuples with resolved capture names.
+    injection_captures_buffer: RefCell<Vec<InjectionCaptureEntry>>,
 }
 
 impl SyntaxHighlighter {
@@ -174,6 +235,83 @@ impl SyntaxHighlighter {
     ///
     /// Returns `None` if the highlighter cannot be created (e.g., invalid language).
     pub fn new(config: &LanguageConfig, source: &str, theme: SyntaxTheme) -> Option<Self> {
+        // Always use the fast path - registry is lazily created only when needed
+        Self::new_without_injections(config, source, theme)
+    }
+
+    // Chunk: docs/chunks/highlight_injection - Optimized constructor with lazy registry
+    /// Creates a new syntax highlighter with lazy injection support.
+    ///
+    /// The injection query is compiled at creation time (if available), but the
+    /// `LanguageRegistry` is only created when we actually encounter injection
+    /// regions that need to be highlighted. This avoids the overhead of
+    /// initializing all language configs for files without embedded languages.
+    fn new_without_injections(
+        config: &LanguageConfig,
+        source: &str,
+        theme: SyntaxTheme,
+    ) -> Option<Self> {
+        let mut parser = Parser::new();
+        parser.set_language(&config.language).ok()?;
+
+        let tree = parser.parse(source, None)?;
+        let query = Query::new(&config.language, config.highlights_query).ok()?;
+        let line_offsets = build_line_offsets(source);
+
+        // Compile the injection query if available (cheap)
+        // Registry is created lazily when we find injection regions
+        let injection_layer = if !config.injections_query.is_empty() {
+            match Query::new(&config.language, config.injections_query) {
+                Ok(injection_query) => Some(RefCell::new(InjectionLayer {
+                    injection_query,
+                    regions: Vec::new(),
+                    regions_generation: u64::MAX, // Force initial identification
+                })),
+                Err(_) => None, // Invalid query, gracefully skip injections
+            }
+        } else {
+            None
+        };
+
+        Some(Self {
+            parser,
+            tree,
+            query,
+            theme,
+            source: source.to_string(),
+            generation: 0,
+            cache: RefCell::new(HighlightCache::new()),
+            line_offsets,
+            captures_buffer: RefCell::new(Vec::new()),
+            injection_layer,
+            registry: RefCell::new(None), // Lazy, created when needed
+            injection_captures_buffer: RefCell::new(Vec::new()),
+        })
+    }
+
+    // Chunk: docs/chunks/highlight_injection - Injection-aware constructor
+    /// Creates a new syntax highlighter with a custom language registry.
+    ///
+    /// This constructor allows sharing a `LanguageRegistry` across multiple
+    /// highlighters, enabling injection support for embedded languages like
+    /// Markdown fenced code blocks or HTML script/style tags.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The language configuration for the host language
+    /// * `source` - The initial source text
+    /// * `theme` - The syntax theme for styling
+    /// * `registry` - The language registry for resolving injected languages
+    ///
+    /// # Returns
+    ///
+    /// Returns `None` if the highlighter cannot be created (e.g., invalid language).
+    pub fn new_with_registry(
+        config: &LanguageConfig,
+        source: &str,
+        theme: SyntaxTheme,
+        registry: LanguageRegistry,
+    ) -> Option<Self> {
         let mut parser = Parser::new();
         parser.set_language(&config.language).ok()?;
 
@@ -186,6 +324,22 @@ impl SyntaxHighlighter {
         // Build line offset index for O(1) line lookups
         let line_offsets = build_line_offsets(source);
 
+        // Chunk: docs/chunks/highlight_injection - Compile injection query if available
+        // Try to compile the injection query if the language has one.
+        // This enables highlighting of embedded languages (e.g., code blocks in Markdown).
+        let injection_layer = if !config.injections_query.is_empty() {
+            match Query::new(&config.language, config.injections_query) {
+                Ok(injection_query) => Some(RefCell::new(InjectionLayer {
+                    injection_query,
+                    regions: Vec::new(),
+                    regions_generation: u64::MAX, // Force initial identification
+                })),
+                Err(_) => None, // Invalid query, gracefully skip injections
+            }
+        } else {
+            None
+        };
+
         Some(Self {
             parser,
             tree,
@@ -196,6 +350,9 @@ impl SyntaxHighlighter {
             cache: RefCell::new(HighlightCache::new()),
             line_offsets,
             captures_buffer: RefCell::new(Vec::new()),
+            injection_layer,
+            registry: RefCell::new(Some(registry)),
+            injection_captures_buffer: RefCell::new(Vec::new()),
         })
     }
 
@@ -272,6 +429,107 @@ impl SyntaxHighlighter {
         }
 
         self.line_offsets = new_offsets;
+    }
+
+    // Chunk: docs/chunks/highlight_injection - Lazy registry getter
+    /// Returns a reference to the language registry, creating it lazily if needed.
+    ///
+    /// The registry is only created when we actually need to look up a language
+    /// for an injection region, avoiding the overhead for files without injections.
+    fn get_registry(&self) -> std::cell::Ref<'_, LanguageRegistry> {
+        // Initialize lazily if needed
+        {
+            let mut reg = self.registry.borrow_mut();
+            if reg.is_none() {
+                *reg = Some(LanguageRegistry::new());
+            }
+        }
+        std::cell::Ref::map(self.registry.borrow(), |opt| opt.as_ref().unwrap())
+    }
+
+    // Chunk: docs/chunks/highlight_injection - Refresh injection regions
+    /// Refreshes the injection regions if they are stale.
+    ///
+    /// This method re-runs the injection query against the host tree when
+    /// the document has been edited since the last identification.
+    fn refresh_injection_regions(&self) {
+        if let Some(ref layer) = self.injection_layer {
+            let mut layer = layer.borrow_mut();
+            if layer.regions_generation != self.generation {
+                layer.regions = self.identify_injection_regions_impl(&layer.injection_query);
+                layer.regions_generation = self.generation;
+            }
+        }
+    }
+
+    /// Internal implementation of injection region identification.
+    ///
+    /// Takes the query by reference to avoid borrow conflicts.
+    fn identify_injection_regions_impl(&self, query: &Query) -> Vec<InjectionRegion> {
+        let mut regions = Vec::new();
+        let mut cursor = QueryCursor::new();
+        let source_bytes = self.source.as_bytes();
+        let root_node = self.tree.root_node();
+
+        // Capture indices for injection.content and injection.language
+        let content_idx = query
+            .capture_names()
+            .iter()
+            .position(|name| *name == "injection.content");
+        let language_idx = query
+            .capture_names()
+            .iter()
+            .position(|name| *name == "injection.language");
+
+        // Iterate over all matches
+        let mut matches_iter = cursor.matches(query, root_node, source_bytes);
+        while let Some(mat) = matches_iter.next() {
+            let mut content_node = None;
+            let mut language_name = None;
+
+            // Extract content and language from captures
+            for capture in mat.captures {
+                if Some(capture.index as usize) == content_idx {
+                    content_node = Some(capture.node);
+                } else if Some(capture.index as usize) == language_idx {
+                    // Language captured from a node (e.g., info_string in Markdown)
+                    let lang_text = &self.source[capture.node.start_byte()..capture.node.end_byte()];
+                    // Normalize: lowercase, trim, take first word (e.g., "rust" from "rust,ignore")
+                    let lang = lang_text.to_lowercase();
+                    let lang = lang.trim();
+                    let lang = lang.split([' ', ',', '\t']).next().unwrap_or("");
+                    if !lang.is_empty() {
+                        language_name = Some(lang.to_string());
+                    }
+                }
+            }
+
+            // Check for #set! injection.language predicate if no @injection.language capture
+            if language_name.is_none() {
+                for prop in query.property_settings(mat.pattern_index) {
+                    if prop.key.as_ref() == "injection.language" {
+                        if let Some(value) = &prop.value {
+                            language_name = Some(value.to_string());
+                        }
+                    }
+                }
+            }
+
+            // Create region if we have both content and language
+            if let (Some(node), Some(lang)) = (content_node, language_name) {
+                regions.push(InjectionRegion {
+                    byte_range: node.start_byte()..node.end_byte(),
+                    language_name: lang,
+                    tree: None,
+                    tree_generation: u64::MAX, // Force initial parse
+                });
+            }
+        }
+
+        // Sort by start byte for efficient lookup
+        regions.sort_by_key(|r| r.byte_range.start);
+
+        regions
     }
 
     /// Returns highlighted spans for a single line.
@@ -363,8 +621,15 @@ impl SyntaxHighlighter {
             .map(|(_, e)| e)
             .unwrap_or(self.source.len());
 
+        // Chunk: docs/chunks/highlight_injection - Refresh and collect injection captures
+        // Refresh injection regions before collecting captures
+        self.refresh_injection_regions();
+
         // Collect all captures in the viewport using QueryCursor (populates captures_buffer)
         self.collect_captures_in_range(viewport_start, viewport_end);
+
+        // Collect injection captures and merge with host captures
+        self.collect_injection_captures(viewport_start, viewport_end);
 
         // Build styled lines for each line in the viewport
         let mut lines = Vec::with_capacity(end_line - start_line);
@@ -407,10 +672,159 @@ impl SyntaxHighlighter {
         buffer.sort_by_key(|(start, _, _)| *start);
     }
 
+    // Chunk: docs/chunks/highlight_injection - Collect injection captures
+    /// Collects captures from injection regions that overlap the viewport.
+    ///
+    /// This method lazily parses injection trees for regions that intersect the
+    /// viewport byte range, runs the injected language's highlight query, and
+    /// stores the results in `self.injection_captures_buffer`.
+    ///
+    /// Injection captures are offset to host-document coordinates and resolved
+    /// to capture names at collection time (since each region may use a different
+    /// language query).
+    fn collect_injection_captures(&self, viewport_start: usize, viewport_end: usize) {
+        // Clear the injection captures buffer
+        self.injection_captures_buffer.borrow_mut().clear();
+
+        let injection_layer = match &self.injection_layer {
+            Some(layer) => layer,
+            None => return,
+        };
+
+        let mut layer = injection_layer.borrow_mut();
+        let mut injection_captures = self.injection_captures_buffer.borrow_mut();
+
+        for region in &mut layer.regions {
+            // Skip regions that don't overlap the viewport
+            if region.byte_range.end <= viewport_start || region.byte_range.start >= viewport_end {
+                continue;
+            }
+
+            // Skip empty regions
+            if region.byte_range.start >= region.byte_range.end {
+                continue;
+            }
+
+            // Lazily parse the injection tree
+            if !self.ensure_injection_tree_for_region(region) {
+                continue; // Unknown language or parse failure
+            }
+
+            // Get the language config for the highlight query
+            let registry = self.get_registry();
+            let config = match registry.config_for_language_name(&region.language_name) {
+                Some(c) => c,
+                None => continue,
+            };
+
+            // Compile the highlight query for the injected language
+            let query = match Query::new(&config.language, config.highlights_query) {
+                Ok(q) => q,
+                Err(_) => continue,
+            };
+
+            // Get the injection tree
+            let tree = match &region.tree {
+                Some(t) => t,
+                None => continue,
+            };
+
+            // Run the highlight query against the injection tree
+            let mut cursor = QueryCursor::new();
+
+            // Calculate the intersection of the viewport and region
+            let region_viewport_start = viewport_start.saturating_sub(region.byte_range.start);
+            let region_viewport_end = viewport_end.saturating_sub(region.byte_range.start)
+                .min(region.byte_range.end - region.byte_range.start);
+
+            cursor.set_byte_range(region_viewport_start..region_viewport_end);
+
+            let region_source = &self.source[region.byte_range.clone()];
+            let region_bytes = region_source.as_bytes();
+            let root_node = tree.root_node();
+
+            let mut captures_iter = cursor.captures(&query, root_node, region_bytes);
+            while let Some((mat, capture_idx)) = captures_iter.next() {
+                let capture = &mat.captures[*capture_idx];
+                let node = capture.node;
+
+                // Offset to host-document coordinates
+                let start_byte = node.start_byte() + region.byte_range.start;
+                let end_byte = node.end_byte() + region.byte_range.start;
+
+                // Resolve capture name now (can't store query reference)
+                let capture_name = query
+                    .capture_names()
+                    .get(capture.index as usize)
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+
+                if !capture_name.is_empty() {
+                    injection_captures.push((start_byte, end_byte, capture_name));
+                }
+            }
+        }
+
+        // Sort injection captures by start byte
+        injection_captures.sort_by_key(|(start, _, _)| *start);
+    }
+
+    /// Internal helper to ensure an injection tree is parsed.
+    ///
+    /// Separate from `ensure_injection_tree` to work with mutable borrows.
+    fn ensure_injection_tree_for_region(&self, region: &mut InjectionRegion) -> bool {
+        // Check if tree is already valid
+        if region.tree.is_some() && region.tree_generation == self.generation {
+            return true;
+        }
+
+        // Look up the language config
+        let registry = self.get_registry();
+        let config = match registry.config_for_language_name(&region.language_name) {
+            Some(c) => c,
+            None => {
+                region.tree = None;
+                return false;
+            }
+        };
+
+        // Create a parser for the injected language
+        let mut parser = Parser::new();
+        if parser.set_language(&config.language).is_err() {
+            region.tree = None;
+            return false;
+        }
+
+        // Extract the source for this region
+        if region.byte_range.end > self.source.len() {
+            region.tree = None;
+            return false;
+        }
+        let region_source = &self.source[region.byte_range.clone()];
+
+        // Parse the region
+        match parser.parse(region_source, None) {
+            Some(tree) => {
+                region.tree = Some(tree);
+                region.tree_generation = self.generation;
+                true
+            }
+            None => {
+                region.tree = None;
+                false
+            }
+        }
+    }
+
+    // Chunk: docs/chunks/highlight_injection - Injection-aware span building
     /// Builds a StyledLine for a specific line from pre-collected captures.
     ///
     /// Uses binary search to find the first relevant capture, reducing per-line
     /// iteration from O(total_captures) to O(overlapping_captures + log(total_captures)).
+    ///
+    /// When injection captures are present, they take precedence over host captures
+    /// within their byte ranges. This enables proper highlighting of embedded
+    /// languages in Markdown code blocks, HTML script tags, etc.
     fn build_line_from_captures(&self, line_idx: usize, captures: &[CaptureEntry]) -> StyledLine {
         let (line_start, line_end) = match self.line_byte_range(line_idx) {
             Some(range) => range,
@@ -422,30 +836,100 @@ impl SyntaxHighlighter {
             return StyledLine::empty();
         }
 
-        // Binary search to find first capture that could overlap this line.
-        // A capture at (cap_start, cap_end) overlaps if cap_end > line_start.
+        // Get injection captures for this line
+        let injection_captures = self.injection_captures_buffer.borrow();
+        let first_injection = injection_captures
+            .partition_point(|(_, end, _)| *end <= line_start);
+
+        // Build a list of injection regions that overlap this line (for quick lookup)
+        let mut injection_regions: Vec<(usize, usize)> = Vec::new();
+        if let Some(ref layer) = self.injection_layer {
+            let layer = layer.borrow();
+            for region in &layer.regions {
+                if region.byte_range.end > line_start && region.byte_range.start < line_end {
+                    injection_regions.push((region.byte_range.start, region.byte_range.end));
+                }
+            }
+        }
+
+        // Binary search to find first host capture that could overlap this line.
         let first_relevant = captures.partition_point(|(_, cap_end, _)| *cap_end <= line_start);
 
         // Find captures that overlap with this line
         let mut spans = Vec::new();
         let mut covered_until = line_start;
 
-        // Iterate only from the first relevant capture
-        for (cap_start, cap_end, cap_idx) in &captures[first_relevant..] {
-            // Early exit: captures are sorted by start, so once start >= line_end, no more overlap
-            if *cap_start >= line_end {
-                break;
-            }
+        // Merge host and injection captures
+        // Strategy: Process both lists in order, with injection captures taking precedence
+        let mut host_iter = captures[first_relevant..].iter().peekable();
+        let mut inj_iter = injection_captures[first_injection..].iter().peekable();
+
+        // Helper function to check if a byte offset is inside any injection region
+        let is_in_injection = |pos: usize, regions: &[(usize, usize)]| {
+            regions.iter().any(|(s, e)| pos >= *s && pos < *e)
+        };
+        let is_fully_inside_injection = |start: usize, end: usize, regions: &[(usize, usize)]| {
+            regions.iter().any(|(s, e)| start >= *s && end <= *e)
+        };
+
+        loop {
+            // Check if we're inside an injection region
+            let in_injection_region = is_in_injection(covered_until, &injection_regions);
+
+            // Determine next capture to process
+            let next_host = host_iter.peek().filter(|(start, _, _)| *start < line_end);
+            let next_inj = inj_iter.peek().filter(|(start, _, _)| *start < line_end);
+
+            // Choose the capture with the smaller start byte
+            // If in an injection region, prefer injection captures
+            let (cap_start, cap_end, style_result) = match (next_host, next_inj) {
+                (None, None) => break,
+                (Some(host_cap), None) => {
+                    let (hs, he, hi) = **host_cap;
+                    host_iter.next();
+                    // If we're in an injection region, skip host captures
+                    if in_injection_region && is_fully_inside_injection(hs, he, &injection_regions) {
+                        continue;
+                    }
+                    let style = self.query.capture_names()
+                        .get(hi as usize)
+                        .and_then(|name| self.theme.style_for_capture(name).cloned());
+                    (hs, he, style)
+                }
+                (None, Some(inj_cap)) => {
+                    let (is, ie, ref name) = **inj_cap;
+                    inj_iter.next();
+                    let style = self.theme.style_for_capture(name).cloned();
+                    (is, ie, style)
+                }
+                (Some(host_cap), Some(inj_cap)) => {
+                    let (hs, he, hi) = **host_cap;
+                    let (is, ie, ref name) = **inj_cap;
+                    // Both available - choose based on position and injection region
+                    if is <= hs || (in_injection_region && is_in_injection(hs, &injection_regions)) {
+                        // Use injection capture
+                        inj_iter.next();
+                        let style = self.theme.style_for_capture(name).cloned();
+                        (is, ie, style)
+                    } else {
+                        // Use host capture, but skip if it's inside an injection region
+                        host_iter.next();
+                        if is_fully_inside_injection(hs, he, &injection_regions) {
+                            continue;
+                        }
+                        let style = self.query.capture_names()
+                            .get(hi as usize)
+                            .and_then(|n| self.theme.style_for_capture(n).cloned());
+                        (hs, he, style)
+                    }
+                }
+            };
 
             // Clamp to line boundaries
-            let actual_start = (*cap_start).max(line_start);
-            let actual_end = (*cap_end).min(line_end);
+            let actual_start = cap_start.max(line_start);
+            let actual_end = cap_end.min(line_end);
 
-            // Handle captures that overlap with already-covered bytes.
-            // Tree-sitter can return multiple captures for overlapping nodes
-            // (e.g., combined C/C++ queries). When a skipped capture extends
-            // beyond the covered region, emit the uncovered tail as plain text
-            // so those characters don't become invisible.
+            // Handle captures that overlap with already-covered bytes
             if actual_start < covered_until {
                 if actual_end > covered_until {
                     let tail = &self.source[covered_until..actual_end];
@@ -465,15 +949,11 @@ impl SyntaxHighlighter {
                 }
             }
 
-            // Add this capture with its style (resolve capture name lazily)
+            // Add this capture with its style
             let capture_text = &self.source[actual_start..actual_end];
             if !capture_text.is_empty() {
-                if let Some(cap_name) = self.query.capture_names().get(*cap_idx as usize) {
-                    if let Some(style) = self.theme.style_for_capture(cap_name) {
-                        spans.push(Span::new(capture_text, *style));
-                    } else {
-                        spans.push(Span::plain(capture_text));
-                    }
+                if let Some(style) = style_result {
+                    spans.push(Span::new(capture_text, style));
                 } else {
                     spans.push(Span::plain(capture_text));
                 }
@@ -500,22 +980,124 @@ impl SyntaxHighlighter {
         StyledLine::new(merged)
     }
 
+    // Chunk: docs/chunks/highlight_injection - Injection-aware single-line highlighting
     /// Builds a StyledLine from QueryCursor for a single line.
+    ///
+    /// This fallback path is used when the line is not in the viewport cache.
+    /// It also handles injection highlighting for single-line requests.
     fn build_styled_line_from_query(&self, line_text: &str, line_start: usize, line_end: usize) -> StyledLine {
-        // Collect captures into the reusable buffer
+        // Refresh injection regions and collect captures
+        self.refresh_injection_regions();
         self.collect_captures_in_range(line_start, line_end);
+        self.collect_injection_captures(line_start, line_end);
+
+        // Delegate to build_line_from_captures which handles injection merging
+        // Note: We need to find the line index for this
+        let line_idx = self.line_offsets
+            .iter()
+            .position(|&off| off == line_start)
+            .unwrap_or(0);
+
         let captures = self.captures_buffer.borrow();
+        let styled = self.build_line_from_captures_impl(line_idx, &captures, line_start, line_end, line_text);
+        styled
+    }
+
+    /// Internal implementation of build_line_from_captures with explicit bounds.
+    fn build_line_from_captures_impl(
+        &self,
+        _line_idx: usize,
+        captures: &[CaptureEntry],
+        line_start: usize,
+        line_end: usize,
+        line_text: &str,
+    ) -> StyledLine {
+        if line_text.is_empty() {
+            return StyledLine::empty();
+        }
+
+        // Get injection captures for this line
+        let injection_captures = self.injection_captures_buffer.borrow();
+        let first_injection = injection_captures
+            .partition_point(|(_, end, _)| *end <= line_start);
+
+        // Build a list of injection regions that overlap this line
+        let mut injection_regions: Vec<(usize, usize)> = Vec::new();
+        if let Some(ref layer) = self.injection_layer {
+            let layer = layer.borrow();
+            for region in &layer.regions {
+                if region.byte_range.end > line_start && region.byte_range.start < line_end {
+                    injection_regions.push((region.byte_range.start, region.byte_range.end));
+                }
+            }
+        }
+
+        // Binary search to find first host capture that could overlap this line
+        let first_relevant = captures.partition_point(|(_, cap_end, _)| *cap_end <= line_start);
 
         let mut spans = Vec::new();
         let mut covered_until = line_start;
 
-        for (cap_start, cap_end, cap_idx) in captures.iter() {
-            // Clamp to line boundaries
-            let actual_start = (*cap_start).max(line_start);
-            let actual_end = (*cap_end).min(line_end);
+        // Helper functions for injection region checks
+        let is_in_injection = |pos: usize, regions: &[(usize, usize)]| {
+            regions.iter().any(|(s, e)| pos >= *s && pos < *e)
+        };
+        let is_fully_inside_injection = |start: usize, end: usize, regions: &[(usize, usize)]| {
+            regions.iter().any(|(s, e)| start >= *s && end <= *e)
+        };
 
-            // Handle captures that overlap with already-covered bytes.
-            // Emit the uncovered tail as plain text to prevent invisible spans.
+        // Merge host and injection captures
+        let mut host_iter = captures[first_relevant..].iter().peekable();
+        let mut inj_iter = injection_captures[first_injection..].iter().peekable();
+
+        loop {
+            let in_injection_region = is_in_injection(covered_until, &injection_regions);
+
+            let next_host = host_iter.peek().filter(|(start, _, _)| *start < line_end);
+            let next_inj = inj_iter.peek().filter(|(start, _, _)| *start < line_end);
+
+            let (cap_start, cap_end, style_result) = match (next_host, next_inj) {
+                (None, None) => break,
+                (Some(host_cap), None) => {
+                    let (hs, he, hi) = **host_cap;
+                    host_iter.next();
+                    if in_injection_region && is_fully_inside_injection(hs, he, &injection_regions) {
+                        continue;
+                    }
+                    let style = self.query.capture_names()
+                        .get(hi as usize)
+                        .and_then(|name| self.theme.style_for_capture(name).cloned());
+                    (hs, he, style)
+                }
+                (None, Some(inj_cap)) => {
+                    let (is, ie, ref name) = **inj_cap;
+                    inj_iter.next();
+                    let style = self.theme.style_for_capture(name).cloned();
+                    (is, ie, style)
+                }
+                (Some(host_cap), Some(inj_cap)) => {
+                    let (hs, he, hi) = **host_cap;
+                    let (is, ie, ref name) = **inj_cap;
+                    if is <= hs || (in_injection_region && is_in_injection(hs, &injection_regions)) {
+                        inj_iter.next();
+                        let style = self.theme.style_for_capture(name).cloned();
+                        (is, ie, style)
+                    } else {
+                        host_iter.next();
+                        if is_fully_inside_injection(hs, he, &injection_regions) {
+                            continue;
+                        }
+                        let style = self.query.capture_names()
+                            .get(hi as usize)
+                            .and_then(|n| self.theme.style_for_capture(n).cloned());
+                        (hs, he, style)
+                    }
+                }
+            };
+
+            let actual_start = cap_start.max(line_start);
+            let actual_end = cap_end.min(line_end);
+
             if actual_start < covered_until {
                 if actual_end > covered_until {
                     let tail = &self.source[covered_until..actual_end];
@@ -527,7 +1109,6 @@ impl SyntaxHighlighter {
                 continue;
             }
 
-            // Fill gap with unstyled text
             if actual_start > covered_until {
                 let gap_text = &self.source[covered_until..actual_start];
                 if !gap_text.is_empty() {
@@ -535,15 +1116,10 @@ impl SyntaxHighlighter {
                 }
             }
 
-            // Add capture with style (resolve capture name lazily)
             let capture_text = &self.source[actual_start..actual_end];
             if !capture_text.is_empty() {
-                if let Some(cap_name) = self.query.capture_names().get(*cap_idx as usize) {
-                    if let Some(style) = self.theme.style_for_capture(cap_name) {
-                        spans.push(Span::new(capture_text, *style));
-                    } else {
-                        spans.push(Span::plain(capture_text));
-                    }
+                if let Some(style) = style_result {
+                    spans.push(Span::new(capture_text, style));
                 } else {
                     spans.push(Span::plain(capture_text));
                 }
@@ -552,7 +1128,6 @@ impl SyntaxHighlighter {
             covered_until = actual_end;
         }
 
-        // Fill remaining line
         if covered_until < line_end {
             let remaining = &self.source[covered_until..line_end];
             if !remaining.is_empty() {

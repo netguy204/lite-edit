@@ -18,8 +18,8 @@ pub struct LanguageConfig {
     pub language: Language,
     /// The highlights query (tree-sitter query syntax)
     pub highlights_query: &'static str,
-    /// The injections query (for embedded languages)
-    #[allow(dead_code)] // Reserved for future injection support
+    // Chunk: docs/chunks/highlight_injection - Injection query now used for embedded language highlighting
+    /// The injections query (for embedded languages like Markdown code blocks, HTML script tags)
     pub injections_query: &'static str,
     /// The locals query (for scope-based highlighting)
     #[allow(dead_code)] // Reserved for future locals support
@@ -53,6 +53,17 @@ pub struct LanguageRegistry {
 }
 
 impl LanguageRegistry {
+    // Chunk: docs/chunks/highlight_injection - Empty registry for non-injection languages
+    /// Creates an empty language registry.
+    ///
+    /// This is used for languages that don't have injection support, avoiding
+    /// the overhead of initializing all language configs.
+    pub fn empty() -> Self {
+        Self {
+            configs: HashMap::new(),
+        }
+    }
+
     /// Creates a new language registry with all supported languages.
     pub fn new() -> Self {
         let mut configs = HashMap::new();
@@ -220,6 +231,63 @@ impl LanguageRegistry {
     /// Returns an iterator over all supported extensions.
     pub fn supported_extensions(&self) -> impl Iterator<Item = &str> {
         self.configs.keys().copied()
+    }
+
+    // Chunk: docs/chunks/highlight_injection - Language name lookup for injection support
+    /// Returns the language configuration for a language name.
+    ///
+    /// This method maps common language names (as used in fenced code blocks
+    /// and injection queries) to their corresponding `LanguageConfig`. This
+    /// enables injection support where the embedded language is identified
+    /// by name (e.g., "rust", "python") rather than file extension.
+    ///
+    /// # Supported mappings
+    ///
+    /// - "rust" → "rs"
+    /// - "python" → "py"
+    /// - "javascript", "js" → "js"
+    /// - "typescript", "ts" → "ts"
+    /// - "tsx" → "tsx"
+    /// - "json" → "json"
+    /// - "toml" → "toml"
+    /// - "html" → "html"
+    /// - "css" → "css"
+    /// - "bash", "shell", "sh" → "sh"
+    /// - "c" → "c"
+    /// - "cpp", "c++" → "cpp"
+    /// - "go", "golang" → "go"
+    /// - "markdown", "md" → "md"
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(&LanguageConfig)` if the language name is recognized,
+    /// `None` otherwise (unknown languages gracefully fall back to no highlighting).
+    pub fn config_for_language_name(&self, name: &str) -> Option<&LanguageConfig> {
+        // Normalize: lowercase and trim
+        let name = name.to_lowercase();
+        let name = name.trim();
+
+        // Map language name to extension
+        let ext = match name {
+            "rust" => "rs",
+            "python" => "py",
+            "javascript" | "js" => "js",
+            "typescript" | "ts" => "ts",
+            "tsx" => "tsx",
+            "json" => "json",
+            "toml" => "toml",
+            "html" => "html",
+            "css" => "css",
+            "bash" | "shell" | "sh" => "sh",
+            "c" => "c",
+            "cpp" | "c++" => "cpp",
+            "go" | "golang" => "go",
+            "markdown" | "md" => "md",
+            // Pass through extension names directly
+            other => other,
+        };
+
+        self.config_for_extension(ext)
     }
 }
 
@@ -434,6 +502,117 @@ mod tests {
             "String literal should be styled, not default. Span: {:?}",
             string_span
         );
+    }
+
+    // =========================================================================
+    // Language name lookup tests (Chunk: docs/chunks/highlight_injection)
+    // =========================================================================
+
+    #[test]
+    fn test_language_name_lookup_rust() {
+        let registry = LanguageRegistry::new();
+        // "rust" should return the same config as "rs"
+        let by_name = registry.config_for_language_name("rust");
+        let by_ext = registry.config_for_extension("rs");
+        assert!(by_name.is_some());
+        assert!(by_ext.is_some());
+        // Compare highlights_query pointers to verify same config
+        assert_eq!(
+            by_name.unwrap().highlights_query as *const str,
+            by_ext.unwrap().highlights_query as *const str
+        );
+    }
+
+    #[test]
+    fn test_language_name_lookup_javascript() {
+        let registry = LanguageRegistry::new();
+        // "javascript" and "js" should return the same config
+        let by_full_name = registry.config_for_language_name("javascript");
+        let by_short_name = registry.config_for_language_name("js");
+        let by_ext = registry.config_for_extension("js");
+        assert!(by_full_name.is_some());
+        assert!(by_short_name.is_some());
+        assert!(by_ext.is_some());
+        assert_eq!(
+            by_full_name.unwrap().highlights_query as *const str,
+            by_ext.unwrap().highlights_query as *const str
+        );
+        assert_eq!(
+            by_short_name.unwrap().highlights_query as *const str,
+            by_ext.unwrap().highlights_query as *const str
+        );
+    }
+
+    #[test]
+    fn test_language_name_lookup_python() {
+        let registry = LanguageRegistry::new();
+        let by_name = registry.config_for_language_name("python");
+        let by_ext = registry.config_for_extension("py");
+        assert!(by_name.is_some());
+        assert!(by_ext.is_some());
+        assert_eq!(
+            by_name.unwrap().highlights_query as *const str,
+            by_ext.unwrap().highlights_query as *const str
+        );
+    }
+
+    #[test]
+    fn test_language_name_lookup_bash_variants() {
+        let registry = LanguageRegistry::new();
+        let by_bash = registry.config_for_language_name("bash");
+        let by_shell = registry.config_for_language_name("shell");
+        let by_sh = registry.config_for_language_name("sh");
+        let by_ext = registry.config_for_extension("sh");
+        assert!(by_bash.is_some());
+        assert!(by_shell.is_some());
+        assert!(by_sh.is_some());
+        // All should map to the same config
+        assert_eq!(
+            by_bash.unwrap().highlights_query as *const str,
+            by_ext.unwrap().highlights_query as *const str
+        );
+        assert_eq!(
+            by_shell.unwrap().highlights_query as *const str,
+            by_ext.unwrap().highlights_query as *const str
+        );
+    }
+
+    #[test]
+    fn test_language_name_lookup_unknown() {
+        let registry = LanguageRegistry::new();
+        // "fortran" is not supported
+        assert!(registry.config_for_language_name("fortran").is_none());
+        assert!(registry.config_for_language_name("cobol").is_none());
+        assert!(registry.config_for_language_name("").is_none());
+    }
+
+    #[test]
+    fn test_language_name_lookup_case_insensitive() {
+        let registry = LanguageRegistry::new();
+        // Should be case insensitive
+        assert!(registry.config_for_language_name("RUST").is_some());
+        assert!(registry.config_for_language_name("Rust").is_some());
+        assert!(registry.config_for_language_name("JavaScript").is_some());
+        assert!(registry.config_for_language_name("PYTHON").is_some());
+    }
+
+    #[test]
+    fn test_language_name_lookup_with_whitespace() {
+        let registry = LanguageRegistry::new();
+        // Should trim whitespace
+        assert!(registry.config_for_language_name(" rust ").is_some());
+        assert!(registry.config_for_language_name("  python  ").is_some());
+    }
+
+    #[test]
+    fn test_rust_injections_query_length() {
+        let registry = LanguageRegistry::new();
+        let config = registry.config_for_extension("rs").unwrap();
+        eprintln!("Rust injections_query length: {}", config.injections_query.len());
+        eprintln!("Is empty: {}", config.injections_query.is_empty());
+        // The Rust injections query is NOT empty - it contains patterns for doc comments
+        // This is why we need to optimize the injection path
+        assert!(config.injections_query.len() > 0, "Expected non-empty injections query");
     }
 
     #[test]

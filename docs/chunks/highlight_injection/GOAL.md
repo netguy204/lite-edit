@@ -1,10 +1,11 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
 code_paths:
-  - crates/syntax/src/highlighter.rs
-  - crates/syntax/src/registry.rs
+- crates/syntax/src/highlighter.rs
+- crates/syntax/src/registry.rs
+- crates/editor/src/workspace.rs
 code_references: []
 narrative: null
 investigation: null
@@ -12,9 +13,9 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["terminal_cursor_shading"]
+created_after:
+- terminal_cursor_shading
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
