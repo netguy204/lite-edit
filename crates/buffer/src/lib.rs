@@ -63,5 +63,6 @@ mod types;
 pub use buffer_view::{
     BufferView, Color, CursorInfo, CursorShape, NamedColor, Span, Style, StyledLine, UnderlineStyle,
 };
-pub use text_buffer::TextBuffer;
+// Chunk: docs/chunks/unicode_ime_input - Export MarkedTextState for IME support
+pub use text_buffer::{MarkedTextState, TextBuffer};
 pub use types::{DirtyLines, Position};
