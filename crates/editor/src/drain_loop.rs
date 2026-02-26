@@ -59,6 +59,7 @@ pub struct EventDrainLoop {
     renderer: Renderer,
     metal_view: Retained<MetalView>,
     /// Last window title that was set, to avoid redundant updates
+    // Chunk: docs/chunks/file_save - Caches window title to avoid redundant NSWindow updates
     last_window_title: String,
     /// The event receiver (main thread only)
     receiver: EventReceiver,
@@ -604,6 +605,7 @@ impl EventDrainLoop {
     }
 
     /// Updates the window title if it has changed.
+    // Chunk: docs/chunks/file_save - Updates NSWindow title when associated file changes
     fn update_window_title_if_needed(&mut self) {
         let current_title = self.state.window_title();
         if current_title != self.last_window_title {

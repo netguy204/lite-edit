@@ -283,6 +283,7 @@ impl EditorState {
             .and_then(|tab| tab.as_text_buffer_mut())
     }
 
+    // Chunk: docs/chunks/terminal_active_tab_safety - Cheap check for non-file tabs
     /// Returns true if the active tab is a file tab (has a TextBuffer).
     ///
     /// This is a cheap check for code paths that need to early-return when

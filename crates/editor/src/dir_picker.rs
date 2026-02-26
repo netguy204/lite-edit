@@ -21,6 +21,7 @@ use objc2_app_kit::{NSModalResponseOK, NSOpenPanel};
 #[cfg(not(test))]
 use objc2_foundation::MainThreadMarker;
 
+// Chunk: docs/chunks/workspace_dir_picker - Opens macOS directory picker dialog
 /// Opens a directory picker dialog and returns the selected directory.
 ///
 /// Returns `Some(PathBuf)` with the selected directory, or `None` if the user

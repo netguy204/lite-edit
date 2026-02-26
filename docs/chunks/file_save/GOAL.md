@@ -5,6 +5,7 @@ parent_chunk: null
 code_paths:
   - crates/editor/src/editor_state.rs
   - crates/editor/src/main.rs
+  - crates/editor/src/drain_loop.rs
 code_references:
   - ref: crates/editor/src/editor_state.rs#EditorState::associated_file
     implements: "Getter method accessing the active tab's associated file path"
@@ -16,9 +17,9 @@ code_references:
     implements: "Writes buffer content to associated file path"
   - ref: crates/editor/src/editor_state.rs#EditorState::handle_selector_confirm
     implements: "Integrates file picker confirmation with associate_file"
-  - ref: crates/editor/src/main.rs#EditorController::update_window_title_if_needed
+  - ref: crates/editor/src/drain_loop.rs#EventDrainLoop::update_window_title_if_needed
     implements: "Updates NSWindow title when associated file changes"
-  - ref: crates/editor/src/main.rs#EditorController::last_window_title
+  - ref: crates/editor/src/drain_loop.rs#EventDrainLoop::last_window_title
     implements: "Caches window title to avoid redundant NSWindow updates"
 narrative: file_buffer_association
 investigation: null
