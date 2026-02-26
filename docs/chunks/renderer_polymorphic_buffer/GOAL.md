@@ -12,9 +12,7 @@ code_references:
   - ref: crates/editor/src/renderer.rs#Renderer::update_glyph_buffer
     implements: "Refactored to accept &dyn BufferView parameter for polymorphic rendering"
   - ref: crates/editor/src/renderer.rs#Renderer::render_with_editor
-    implements: "Main render entry point - fetches BufferView from Editor and passes through"
-  - ref: crates/editor/src/renderer.rs#Renderer::render_with_find_strip
-    implements: "Find-in-file render path - also uses polymorphic BufferView access"
+    implements: "Main render entry point - fetches BufferView from Editor and passes through (find strip rendering now integrated here)"
   - ref: crates/editor/src/renderer.rs#Renderer::apply_mutation
     implements: "Now accepts line_count parameter instead of reading from self.buffer"
 narrative: null
