@@ -211,6 +211,7 @@ pub struct SyntaxHighlighter {
     /// - line_offsets[0] == 0
     /// - For i > 0: line_offsets[i] == byte index immediately after the '\n' ending line i-1
     line_offsets: Vec<usize>,
+    // Chunk: docs/chunks/highlight_capture_alloc - Reusable buffer to avoid per-frame allocation
     /// Reusable buffer for captures to avoid per-frame allocation.
     captures_buffer: RefCell<Vec<CaptureEntry>>,
     // Chunk: docs/chunks/highlight_injection - Injection support fields
@@ -687,6 +688,7 @@ impl SyntaxHighlighter {
         self.cache.borrow_mut().update(start_line, end_line, lines, self.generation);
     }
 
+    // Chunk: docs/chunks/highlight_capture_alloc - Store u32 index, clear/reuse buffer
     /// Collects all captures in a byte range using QueryCursor.
     ///
     /// Populates `self.captures_buffer` with sorted (start_byte, end_byte, capture_index) tuples.
@@ -900,6 +902,7 @@ impl SyntaxHighlighter {
         }
     }
 
+    // Chunk: docs/chunks/highlight_capture_alloc - Binary search via partition_point, lazy name lookup
     // Chunk: docs/chunks/highlight_injection - Injection-aware span building
     /// Builds a StyledLine for a specific line from pre-collected captures.
     ///
@@ -1075,6 +1078,7 @@ impl SyntaxHighlighter {
         StyledLine::new(merged)
     }
 
+    // Chunk: docs/chunks/highlight_capture_alloc - Lazy name resolution via Query::capture_names()
     // Chunk: docs/chunks/highlight_injection - Injection-aware single-line highlighting
     /// Builds a StyledLine from QueryCursor for a single line.
     ///
