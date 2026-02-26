@@ -1333,8 +1333,8 @@ impl EditorState {
 
         match outcome {
             ConfirmOutcome::Cancelled => {
-                // User chose Cancel or pressed Escape - close dialog
-                self.close_confirm_dialog();
+                // User chose Cancel or pressed Escape - handle based on context
+                self.handle_confirm_dialog_cancelled();
             }
             ConfirmOutcome::Confirmed => {
                 // User confirmed - handle based on context
@@ -1375,6 +1375,27 @@ impl EditorState {
                     // User chose "Save" - recreate the file from buffer contents
                     self.save_buffer_to_path(&deleted_path);
                 }
+            }
+        }
+        self.close_confirm_dialog();
+    }
+
+    // Chunk: docs/chunks/deletion_rename_handling - Context-aware cancelled handling
+    /// Handles the cancelled outcome of the confirm dialog.
+    ///
+    /// For most dialogs, cancelling just closes the dialog. For `FileDeletedFromDisk`,
+    /// cancelling means "Abandon" which closes the tab (since the file no longer exists).
+    fn handle_confirm_dialog_cancelled(&mut self) {
+        // Take context to examine it (we'll need to close the dialog afterward)
+        if let Some(ctx) = self.confirm_context.take() {
+            match ctx {
+                // Chunk: docs/chunks/deletion_rename_handling - Abandon closes the tab
+                ConfirmDialogContext::FileDeletedFromDisk { pane_id, tab_idx, .. } => {
+                    // "Abandon" was selected - close the tab
+                    self.force_close_tab(pane_id, tab_idx);
+                }
+                // For all other contexts, cancelling just closes the dialog
+                _ => {}
             }
         }
         self.close_confirm_dialog();
