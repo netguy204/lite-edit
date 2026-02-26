@@ -43,8 +43,10 @@ use crate::metal_view::MetalView;
 use crate::selector::SelectorWidget;
 // Chunk: docs/chunks/renderer_styled_content - Per-vertex colors, overlay colors now in vertices
 // Chunk: docs/chunks/find_in_file - Find strip rendering
+// Chunk: docs/chunks/find_strip_multi_pane - Pane-aware find strip rendering
 use crate::selector_overlay::{
-    calculate_find_strip_geometry, calculate_overlay_geometry, FindStripGlyphBuffer,
+    calculate_find_strip_geometry, calculate_find_strip_geometry_in_pane,
+    calculate_overlay_geometry, FindStripGlyphBuffer, FindStripState,
     OverlayGeometry, SelectorGlyphBuffer,
 };
 // Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog rendering
@@ -1102,12 +1104,15 @@ impl Renderer {
     /// * `editor` - The Editor state containing workspace information
     /// * `selector` - Optional selector widget to render as an overlay
     /// * `selector_cursor_visible` - Whether the selector's query cursor should be visible
+    /// * `find_strip` - Optional find strip state for rendering find-in-file UI
+    // Chunk: docs/chunks/find_strip_multi_pane - Find strip parameter for pane-aware rendering
     pub fn render_with_editor(
         &mut self,
         view: &MetalView,
         editor: &Editor,
         selector: Option<&SelectorWidget>,
         selector_cursor_visible: bool,
+        find_strip: Option<FindStripState<'_>>,
     ) {
         // Set content area offset to account for left rail and tab bar
         self.set_content_x_offset(RAIL_WIDTH);
@@ -1251,11 +1256,44 @@ impl Renderer {
                     self.render_text(&encoder, view);
                 }
             }
+
+            // Chunk: docs/chunks/find_strip_multi_pane - Find strip rendering in single-pane mode
+            // Draw find strip at the bottom of the viewport (full width)
+            if let Some(ref find_state) = find_strip {
+                // Reset scissor for find strip (it draws over the content area)
+                let full_scissor = full_viewport_scissor_rect(view_width, view_height);
+                encoder.setScissorRect(full_scissor);
+                self.draw_find_strip(
+                    &encoder,
+                    view,
+                    find_state.query,
+                    find_state.cursor_col,
+                    find_state.cursor_visible,
+                );
+            }
         } else {
             // Multi-pane case: render each pane independently
             if let Some(ws) = editor.active_workspace() {
                 for pane_rect in &pane_rects {
                     self.render_pane(&encoder, view, ws, pane_rect, view_width, view_height);
+                }
+            }
+
+            // Chunk: docs/chunks/find_strip_multi_pane - Find strip rendering in multi-pane mode
+            // Draw find strip within the focused pane's bounds
+            if let Some(ref find_state) = find_strip {
+                // Find the focused pane's rect
+                if let Some(focused_rect) = pane_rects.iter().find(|r| r.pane_id == focused_pane_id) {
+                    self.draw_find_strip_in_pane(
+                        &encoder,
+                        view,
+                        find_state.query,
+                        find_state.cursor_col,
+                        find_state.cursor_visible,
+                        focused_rect,
+                        view_width,
+                        view_height,
+                    );
                 }
             }
 
@@ -1979,133 +2017,11 @@ impl Renderer {
     // Find Strip Rendering (Chunk: docs/chunks/find_in_file)
     // =========================================================================
 
-    /// Renders the editor with left rail and find strip (when find-in-file is active).
-    ///
-    /// This is similar to `render_with_editor` but draws the find strip at the bottom
-    /// instead of a selector overlay.
-    ///
-    /// # Arguments
-    /// * `view` - The Metal view to render to
-    /// * `editor` - The Editor state containing workspace information
-    /// * `find_query` - The current find query text
-    /// * `find_cursor_col` - The cursor column position in the query
-    /// * `find_cursor_visible` - Whether the find strip cursor should be visible
-    pub fn render_with_find_strip(
-        &mut self,
-        view: &MetalView,
-        editor: &Editor,
-        find_query: &str,
-        find_cursor_col: usize,
-        find_cursor_visible: bool,
-    ) {
-        // Set content area offset to account for left rail
-        self.set_content_x_offset(RAIL_WIDTH);
-
-        // Chunk: docs/chunks/renderer_polymorphic_buffer - Get BufferView from Editor
-        // Chunk: docs/chunks/syntax_highlighting - Use HighlightedBufferView for syntax coloring
-        // Chunk: docs/chunks/pane_scroll_isolation - Configure viewport before updating glyph buffer
-        // Update glyph buffer from active tab's BufferView with syntax highlighting
-        if let Some(ws) = editor.active_workspace() {
-            if let Some(tab) = ws.active_tab() {
-                // Chunk: docs/chunks/pane_scroll_isolation - Configure viewport for single-pane mode
-                // Find strip only appears in single-pane mode, so always configure viewport.
-                // Note: Find strip reduces content height, but we use full view height here
-                // since the find strip is rendered separately. The tab's viewport scroll
-                // position is correct for the content area.
-                let frame = view.frame();
-                let scale = view.scale_factor();
-                let view_width = (frame.size.width * scale) as f32;
-                let view_height = (frame.size.height * scale) as f32;
-                let content_height = view_height - TAB_BAR_HEIGHT;
-                let content_width = view_width - RAIL_WIDTH;
-                self.configure_viewport_for_pane(&tab.viewport, content_height, content_width);
-
-                if tab.is_agent_tab() {
-                    // AgentTerminal is a placeholder - get the actual buffer from workspace
-                    if let Some(terminal) = ws.agent_terminal() {
-                        self.update_glyph_buffer(terminal);
-                    }
-                } else if let Some(text_buffer) = tab.as_text_buffer() {
-                    // File tab: use HighlightedBufferView for syntax highlighting
-                    let highlighted_view = HighlightedBufferView::new(
-                        text_buffer,
-                        tab.highlighter(),
-                    );
-                    self.update_glyph_buffer(&highlighted_view);
-                } else {
-                    // Terminal or other buffer type
-                    self.update_glyph_buffer(tab.buffer());
-                }
-            }
-        }
-        let metal_layer = view.metal_layer();
-
-        // Get the next drawable from the layer
-        let drawable = match metal_layer.nextDrawable() {
-            Some(d) => d,
-            None => {
-                eprintln!("Failed to get next drawable");
-                return;
-            }
-        };
-
-        // Create a render pass descriptor
-        let render_pass_descriptor = MTLRenderPassDescriptor::new();
-
-        // Configure the color attachment
-        let color_attachments = render_pass_descriptor.colorAttachments();
-        let color_attachment = unsafe { color_attachments.objectAtIndexedSubscript(0) };
-
-        // Set the drawable's texture as the render target
-        color_attachment.setTexture(Some(drawable.texture().as_ref()));
-
-        // Clear to our background color
-        color_attachment.setLoadAction(MTLLoadAction::Clear);
-        color_attachment.setClearColor(BACKGROUND_COLOR);
-
-        // Store the result
-        color_attachment.setStoreAction(MTLStoreAction::Store);
-
-        // Create a command buffer
-        let command_buffer = match self.command_queue.commandBuffer() {
-            Some(cb) => cb,
-            None => {
-                eprintln!("Failed to create command buffer");
-                return;
-            }
-        };
-
-        // Create a render command encoder
-        let encoder =
-            match command_buffer.renderCommandEncoderWithDescriptor(&render_pass_descriptor) {
-                Some(e) => e,
-                None => {
-                    eprintln!("Failed to create render command encoder");
-                    return;
-                }
-            };
-
-        // Render left rail first (background layer)
-        self.draw_left_rail(&encoder, view, editor);
-
-        // Render editor text content (offset by RAIL_WIDTH)
-        if self.glyph_buffer.index_count() > 0 {
-            self.render_text(&encoder, view);
-        }
-
-        // Render find strip at the bottom
-        self.draw_find_strip(&encoder, view, find_query, find_cursor_col, find_cursor_visible);
-
-        // End encoding
-        encoder.endEncoding();
-
-        // Present the drawable
-        let mtl_drawable: &ProtocolObject<dyn MTLDrawable> = ProtocolObject::from_ref(&*drawable);
-        command_buffer.presentDrawable(mtl_drawable);
-
-        // Commit the command buffer
-        command_buffer.commit();
-    }
+    // Chunk: docs/chunks/find_strip_multi_pane - render_with_find_strip removed
+    // The render_with_find_strip method has been removed. Find strip rendering is now
+    // handled by render_with_editor with an optional FindStripState parameter.
+    // This fixes the multi-pane bug where the focused pane would expand to fill the
+    // entire window when find-in-file was active.
 
     /// Draws the find strip at the bottom of the viewport.
     ///
@@ -2177,6 +2093,170 @@ impl Renderer {
         }
 
         // Set uniforms (viewport size)
+        let uniforms = Uniforms {
+            viewport_size: [view_width, view_height],
+        };
+        let uniforms_ptr =
+            NonNull::new(&uniforms as *const Uniforms as *mut std::ffi::c_void).unwrap();
+        unsafe {
+            encoder.setVertexBytes_length_atIndex(
+                uniforms_ptr,
+                std::mem::size_of::<Uniforms>(),
+                1,
+            );
+        }
+
+        // Set the atlas texture
+        unsafe {
+            encoder.setFragmentTexture_atIndex(Some(self.atlas.texture()), 0);
+        }
+
+        // Draw background
+        let bg_range = find_strip_buffer.background_range();
+        if !bg_range.is_empty() {
+            let index_offset = bg_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    bg_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
+        // Draw label
+        let label_range = find_strip_buffer.label_range();
+        if !label_range.is_empty() {
+            let index_offset = label_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    label_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
+        // Draw query text
+        let query_range = find_strip_buffer.query_text_range();
+        if !query_range.is_empty() {
+            let index_offset = query_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    query_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+
+        // Draw cursor
+        let cursor_range = find_strip_buffer.cursor_range();
+        if !cursor_range.is_empty() {
+            let index_offset = cursor_range.start * std::mem::size_of::<u32>();
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    cursor_range.count,
+                    MTLIndexType::UInt32,
+                    index_buffer,
+                    index_offset,
+                );
+            }
+        }
+    }
+
+    // Chunk: docs/chunks/find_strip_multi_pane - Pane-constrained find strip rendering
+    /// Draws the find strip within a specific pane's bounds.
+    ///
+    /// This method is used for multi-pane layouts where the find strip should
+    /// appear within the focused pane rather than spanning the entire viewport.
+    /// It sets a scissor rect to clip rendering to the pane bounds.
+    ///
+    /// # Arguments
+    /// * `encoder` - The active render command encoder
+    /// * `view` - The Metal view (for viewport dimensions)
+    /// * `query` - The find query text
+    /// * `cursor_col` - The cursor column position in the query
+    /// * `cursor_visible` - Whether to render the cursor
+    /// * `pane_rect` - The bounds of the pane to render within
+    /// * `view_width` - Full viewport width (for uniforms)
+    /// * `view_height` - Full viewport height (for uniforms)
+    fn draw_find_strip_in_pane(
+        &mut self,
+        encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        _view: &MetalView, // Unused but kept for API consistency with draw_find_strip
+        query: &str,
+        cursor_col: usize,
+        cursor_visible: bool,
+        pane_rect: &PaneRect,
+        view_width: f32,
+        view_height: f32,
+    ) {
+        let line_height = self.font.metrics.line_height as f32;
+        let glyph_width = self.font.metrics.advance_width as f32;
+
+        // Calculate find strip geometry within the pane bounds
+        let geometry = calculate_find_strip_geometry_in_pane(
+            pane_rect.x,
+            pane_rect.y,
+            pane_rect.width,
+            pane_rect.height,
+            line_height,
+            glyph_width,
+            cursor_col,
+        );
+
+        // Set scissor rect to clip rendering to pane bounds
+        let pane_scissor = MTLScissorRect {
+            x: pane_rect.x as usize,
+            y: pane_rect.y as usize,
+            width: pane_rect.width as usize,
+            height: pane_rect.height as usize,
+        };
+        encoder.setScissorRect(pane_scissor);
+
+        // Ensure find strip buffer is initialized
+        if self.find_strip_buffer.is_none() {
+            let layout = GlyphLayout::from_metrics(&self.font.metrics);
+            self.find_strip_buffer = Some(FindStripGlyphBuffer::new(layout));
+        }
+
+        // Update the find strip buffer with current content
+        let find_strip_buffer = self.find_strip_buffer.as_mut().unwrap();
+        find_strip_buffer.update(
+            &self.device,
+            &self.atlas,
+            query,
+            &geometry,
+            cursor_visible,
+        );
+
+        // Get buffers
+        let vertex_buffer = match find_strip_buffer.vertex_buffer() {
+            Some(b) => b,
+            None => return,
+        };
+        let index_buffer = match find_strip_buffer.index_buffer() {
+            Some(b) => b,
+            None => return,
+        };
+
+        // Set the render pipeline state
+        encoder.setRenderPipelineState(self.pipeline.pipeline_state());
+
+        // Set the vertex buffer
+        unsafe {
+            encoder.setVertexBuffer_offset_atIndex(Some(vertex_buffer), 0, 0);
+        }
+
+        // Set uniforms (full viewport size - the scissor rect handles clipping)
         let uniforms = Uniforms {
             viewport_size: [view_width, view_height],
         };
