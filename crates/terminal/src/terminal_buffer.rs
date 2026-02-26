@@ -616,8 +616,10 @@ impl TerminalBuffer {
 
     // =========================================================================
     // Cold Scrollback Support
+    // Chunk: docs/chunks/terminal_file_backed_scrollback - Cold scrollback tiered storage
     // =========================================================================
 
+    // Chunk: docs/chunks/terminal_file_backed_scrollback - Scrollback overflow detection
     /// Checks for scrollback overflow and captures lines to cold storage.
     ///
     /// This is called after processing PTY events. When the hot scrollback
@@ -649,6 +651,7 @@ impl TerminalBuffer {
         self.last_history_size = history_size;
     }
 
+    // Chunk: docs/chunks/terminal_file_backed_scrollback - Capture oldest lines to cold storage
     /// Captures the oldest lines from hot scrollback to cold storage.
     fn capture_cold_lines(&mut self, count: usize) {
         // Initialize cold storage if needed
@@ -711,6 +714,7 @@ impl TerminalBuffer {
         self.cold_line_count
     }
 
+    // Chunk: docs/chunks/terminal_file_backed_scrollback - Retrieve lines from cold storage via page cache
     /// Gets a line from cold storage, using the page cache.
     fn get_cold_line(&self, line: usize) -> Option<StyledLine> {
         let mut cold_ref = self.cold_scrollback.borrow_mut();
@@ -718,6 +722,7 @@ impl TerminalBuffer {
         self.page_cache.borrow_mut().get(line, cold).ok()
     }
 
+    // Chunk: docs/chunks/terminal_file_backed_scrollback - Hot scrollback line retrieval
     /// Returns a styled line from the hot scrollback region.
     ///
     /// This handles lines in alacritty's in-memory scrollback and viewport.
