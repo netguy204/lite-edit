@@ -167,6 +167,7 @@ const KEY_COLUMN_WIDTH: usize = 16;
 // WelcomeScreenGeometry
 // =============================================================================
 
+// Chunk: docs/chunks/welcome_screen - Computed geometry struct for centering welcome content in viewport
 /// Computed geometry for the welcome screen content.
 ///
 /// All values are in screen coordinates (pixels).
@@ -201,6 +202,7 @@ pub struct WelcomeScreenGeometry {
 ///
 /// When `viewport_height >= content_height_px`, `max_scroll = 0` and any scroll
 /// offset is clamped to 0, preserving the centered layout exactly as before.
+// Chunk: docs/chunks/welcome_screen - Calculates centered positioning for welcome screen content
 // Chunk: docs/chunks/welcome_scroll - Welcome screen vertical scrolling
 pub fn calculate_welcome_geometry(
     viewport_width: f32,
@@ -301,6 +303,7 @@ fn calculate_hotkey_table_height() -> usize {
 // WelcomeScreenGlyphBuffer
 // =============================================================================
 
+// Chunk: docs/chunks/welcome_screen - Metal vertex/index buffer management for rendering welcome screen glyphs
 /// Manages vertex and index buffers for rendering the welcome screen.
 ///
 /// This is similar to `SelectorGlyphBuffer` but specialized for the welcome
@@ -369,6 +372,7 @@ impl WelcomeScreenGlyphBuffer {
         self.hotkey_range
     }
 
+    // Chunk: docs/chunks/welcome_screen - Generates glyph quads for logo, title, and hotkey table with colored text
     /// Updates the buffers with welcome screen content.
     ///
     /// # Arguments
