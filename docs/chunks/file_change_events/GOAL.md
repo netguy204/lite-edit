@@ -1,16 +1,16 @@
 ---
-status: IMPLEMENTING
+status: FUTURE
 ticket: null
 parent_chunk: null
 code_paths:
-  - crates/editor/src/editor_event.rs
-  - crates/editor/src/event_channel.rs
-  - crates/editor/src/drain_loop.rs
-  - crates/editor/src/file_change_debouncer.rs
-  - crates/editor/src/file_change_suppression.rs
-  - crates/editor/src/file_index.rs
-  - crates/editor/src/workspace.rs
-  - crates/editor/src/editor_state.rs
+- crates/editor/src/editor_event.rs
+- crates/editor/src/event_channel.rs
+- crates/editor/src/drain_loop.rs
+- crates/editor/src/file_change_debouncer.rs
+- crates/editor/src/file_change_suppression.rs
+- crates/editor/src/file_index.rs
+- crates/editor/src/workspace.rs
+- crates/editor/src/editor_state.rs
 code_references: []
 narrative: null
 investigation: concurrent_edit_sync

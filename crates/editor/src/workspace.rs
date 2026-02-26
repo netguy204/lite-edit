@@ -192,6 +192,7 @@ impl TabBuffer {
 // Chunk: docs/chunks/content_tab_bar - Per-tab model: kind, buffer ref, dirty flag, unread badge
 // Chunk: docs/chunks/syntax_highlighting - Added syntax highlighter field
 // Chunk: docs/chunks/welcome_scroll - Welcome screen scroll offset field
+// Chunk: docs/chunks/base_snapshot_reload - Base content snapshot for three-way merge
 /// A tab within a workspace.
 ///
 /// Each tab owns its own buffer and viewport (for independent scroll positions).
@@ -221,6 +222,16 @@ pub struct Tab {
     /// enforced by `set_welcome_scroll_offset_px`; the upper bound is clamped at
     /// render time by `calculate_welcome_geometry`.
     welcome_scroll_offset_px: f32,
+    /// The file content as last known on disk.
+    ///
+    /// Populated when a file is loaded (`associate_file()`) and when a file
+    /// is saved (`save_file()`). Used as the base version for three-way merge
+    /// when the file changes on disk while the buffer has unsaved edits.
+    ///
+    /// `None` for tabs that have never been associated with a file, or for
+    /// terminal tabs.
+    // Chunk: docs/chunks/base_snapshot_reload - Base version tracking for merge
+    pub base_content: Option<String>,
 }
 
 impl Tab {
@@ -237,6 +248,7 @@ impl Tab {
             associated_file: path,
             highlighter: None,
             welcome_scroll_offset_px: 0.0,
+            base_content: None,
         }
     }
 
@@ -261,6 +273,7 @@ impl Tab {
             associated_file: None,
             highlighter: None,
             welcome_scroll_offset_px: 0.0,
+            base_content: None,
         }
     }
 
@@ -277,6 +290,7 @@ impl Tab {
             associated_file: None,
             highlighter: None,
             welcome_scroll_offset_px: 0.0,
+            base_content: None,
         }
     }
 
@@ -806,6 +820,47 @@ impl Workspace {
         if let Some(pane) = self.active_pane_mut() {
             pane.tab_bar_view_offset = offset;
         }
+    }
+
+    // =========================================================================
+    // Tab lookup by path (Chunk: docs/chunks/base_snapshot_reload)
+    // =========================================================================
+
+    /// Find a tab by its associated file path.
+    ///
+    /// Searches all panes in this workspace for a tab with the given path.
+    /// Returns `None` if no tab has the given path, or if the path doesn't match
+    /// any open tab's `associated_file`.
+    // Chunk: docs/chunks/base_snapshot_reload - Tab lookup for file change handling
+    pub fn find_tab_by_path(&self, path: &std::path::Path) -> Option<TabId> {
+        for pane in self.pane_root.all_panes() {
+            for tab in &pane.tabs {
+                if let Some(ref associated) = tab.associated_file {
+                    if associated == path {
+                        return Some(tab.id);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Find a mutable tab by its associated file path.
+    ///
+    /// Searches all panes in this workspace for a tab with the given path.
+    /// Returns `None` if no tab has the given path.
+    // Chunk: docs/chunks/base_snapshot_reload - Tab lookup for file change handling
+    pub fn find_tab_mut_by_path(&mut self, path: &std::path::Path) -> Option<&mut Tab> {
+        for pane in self.pane_root.all_panes_mut() {
+            for tab in &mut pane.tabs {
+                if let Some(ref associated) = tab.associated_file {
+                    if associated == path {
+                        return Some(tab);
+                    }
+                }
+            }
+        }
+        None
     }
 
     // =========================================================================
@@ -1985,5 +2040,111 @@ mod tests {
         // The default editor creates an empty, unassociated tab
         // The welcome screen SHOULD be shown for this case
         assert!(editor.should_show_welcome_screen());
+    }
+
+    // =========================================================================
+    // find_tab_by_path Tests (Chunk: docs/chunks/base_snapshot_reload)
+    // =========================================================================
+
+    #[test]
+    fn test_find_tab_by_path_found() {
+        let mut ws = Workspace::with_empty_tab(1, 1, "test".to_string(), PathBuf::from("/test"), TEST_LINE_HEIGHT);
+
+        // Add a file-backed tab
+        let file_tab = Tab::new_file(
+            2,
+            TextBuffer::from_str("hello"),
+            "test.rs".to_string(),
+            Some(PathBuf::from("/test/test.rs")),
+            TEST_LINE_HEIGHT,
+        );
+        ws.add_tab(file_tab);
+
+        // Should find the tab
+        let result = ws.find_tab_by_path(&PathBuf::from("/test/test.rs"));
+        assert_eq!(result, Some(2)); // Tab ID 2
+    }
+
+    #[test]
+    fn test_find_tab_by_path_not_found() {
+        let ws = Workspace::with_empty_tab(1, 1, "test".to_string(), PathBuf::from("/test"), TEST_LINE_HEIGHT);
+
+        // Should not find a non-existent path
+        let result = ws.find_tab_by_path(&PathBuf::from("/test/nonexistent.rs"));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_find_tab_by_path_no_associated_file() {
+        let ws = Workspace::with_empty_tab(1, 1, "test".to_string(), PathBuf::from("/test"), TEST_LINE_HEIGHT);
+
+        // The default empty tab has no associated file
+        // Should not find it when searching by any path
+        let result = ws.find_tab_by_path(&PathBuf::from("/test/anything.rs"));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_find_tab_mut_by_path_found() {
+        let mut ws = Workspace::with_empty_tab(1, 1, "test".to_string(), PathBuf::from("/test"), TEST_LINE_HEIGHT);
+
+        // Add a file-backed tab
+        let file_tab = Tab::new_file(
+            2,
+            TextBuffer::from_str("hello"),
+            "test.rs".to_string(),
+            Some(PathBuf::from("/test/test.rs")),
+            TEST_LINE_HEIGHT,
+        );
+        ws.add_tab(file_tab);
+
+        // Should find the tab and be able to modify it
+        let result = ws.find_tab_mut_by_path(&PathBuf::from("/test/test.rs"));
+        assert!(result.is_some());
+        let tab = result.unwrap();
+        assert_eq!(tab.id, 2);
+
+        // Verify we can modify it
+        tab.dirty = true;
+        assert!(tab.dirty);
+    }
+
+    #[test]
+    fn test_find_tab_mut_by_path_not_found() {
+        let mut ws = Workspace::with_empty_tab(1, 1, "test".to_string(), PathBuf::from("/test"), TEST_LINE_HEIGHT);
+
+        // Should not find a non-existent path
+        let result = ws.find_tab_mut_by_path(&PathBuf::from("/test/nonexistent.rs"));
+        assert!(result.is_none());
+    }
+
+    // =========================================================================
+    // base_content field Tests (Chunk: docs/chunks/base_snapshot_reload)
+    // =========================================================================
+
+    #[test]
+    fn test_tab_base_content_initially_none() {
+        let tab = Tab::empty_file(1, TEST_LINE_HEIGHT);
+        assert!(tab.base_content.is_none());
+    }
+
+    #[test]
+    fn test_tab_new_file_base_content_is_none() {
+        let tab = Tab::new_file(
+            1,
+            TextBuffer::from_str("hello"),
+            "test.rs".to_string(),
+            Some(PathBuf::from("/test/test.rs")),
+            TEST_LINE_HEIGHT,
+        );
+        // base_content is None initially - it's set by associate_file or save_file
+        assert!(tab.base_content.is_none());
+    }
+
+    #[test]
+    fn test_tab_base_content_can_be_set() {
+        let mut tab = Tab::empty_file(1, TEST_LINE_HEIGHT);
+        tab.base_content = Some("file content".to_string());
+        assert_eq!(tab.base_content, Some("file content".to_string()));
     }
 }

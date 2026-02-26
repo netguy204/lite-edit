@@ -156,6 +156,28 @@ pub struct EditorState {
 }
 
 // =============================================================================
+// Helper functions
+// =============================================================================
+
+/// Clamp a cursor position to be valid within the given buffer.
+///
+/// The line is clamped to `[0, line_count - 1]` (or 0 for empty buffers).
+/// The column is clamped to `[0, line_length]` for the clamped line.
+// Chunk: docs/chunks/base_snapshot_reload - Cursor clamping after reload
+pub fn clamp_position_to_buffer(pos: Position, buffer: &TextBuffer) -> Position {
+    let line_count = buffer.line_count();
+    if line_count == 0 {
+        return Position::new(0, 0);
+    }
+
+    let line = pos.line.min(line_count - 1);
+    let line_len = buffer.line_len(line);
+    let col = pos.col.min(line_len);
+
+    Position::new(line, col)
+}
+
+// =============================================================================
 // Delegate accessors for backward compatibility
 // =============================================================================
 
@@ -2802,6 +2824,14 @@ impl EditorState {
                     self.buffer_mut().set_cursor(lite_edit_buffer::Position::new(0, 0));
                     let line_count = self.buffer().line_count();
                     self.viewport_mut().scroll_to(0, line_count);
+
+                    // Chunk: docs/chunks/base_snapshot_reload - Populate base on load
+                    // Store base content snapshot for three-way merge
+                    if let Some(ws) = self.editor.active_workspace_mut() {
+                        if let Some(tab) = ws.active_tab_mut() {
+                            tab.base_content = Some(contents.to_string());
+                        }
+                    }
                 }
                 Err(_) => {
                     // Silently ignore read errors (out of scope for this chunk)
@@ -2903,10 +2933,89 @@ impl EditorState {
             if let Some(ws) = self.editor.active_workspace_mut() {
                 if let Some(tab) = ws.active_tab_mut() {
                     tab.dirty = false;
+                    // Chunk: docs/chunks/base_snapshot_reload - Populate base on save
+                    // Update base content snapshot to match saved content
+                    tab.base_content = Some(content.clone());
                 }
             }
         }
         // Silently ignore write errors (out of scope for this chunk)
+    }
+
+    /// Reload a file tab's buffer from disk.
+    ///
+    /// This is called when `FileChanged` arrives for a tab with `dirty == false`.
+    /// It re-reads the file, replaces the buffer content, updates `base_content`,
+    /// preserves cursor position (clamped to buffer bounds), and re-applies
+    /// syntax highlighting.
+    ///
+    /// Returns `true` if the reload succeeded, `false` if the file couldn't be
+    /// read or no matching tab was found, or if the tab has unsaved changes.
+    // Chunk: docs/chunks/base_snapshot_reload - Clean buffer reload
+    pub fn reload_file_tab(&mut self, path: &Path) -> bool {
+        // Find the workspace and tab for this path
+        // We need to search all workspaces since the file could be open in any of them
+        let mut found_workspace_idx: Option<usize> = None;
+
+        for (ws_idx, ws) in self.editor.workspaces.iter().enumerate() {
+            if ws.find_tab_by_path(path).is_some() {
+                found_workspace_idx = Some(ws_idx);
+                break;
+            }
+        }
+
+        let ws_idx = match found_workspace_idx {
+            Some(idx) => idx,
+            None => return false, // No tab has this path
+        };
+
+        // Get the workspace and tab mutably
+        let ws = &mut self.editor.workspaces[ws_idx];
+        let tab = match ws.find_tab_mut_by_path(path) {
+            Some(t) => t,
+            None => return false, // Should not happen, but be defensive
+        };
+
+        // Only reload if the tab is clean (no unsaved changes)
+        if tab.dirty {
+            // Defer to three_way_merge chunk - do nothing for dirty buffers
+            return false;
+        }
+
+        // Read the file content
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(_) => return false, // File couldn't be read
+        };
+        let new_content = String::from_utf8_lossy(&bytes).to_string();
+
+        // Store old cursor position before replacing buffer
+        let old_cursor = tab.as_text_buffer()
+            .map(|buf| buf.cursor_position())
+            .unwrap_or(Position::new(0, 0));
+
+        // Replace buffer content
+        let buffer = match tab.as_text_buffer_mut() {
+            Some(buf) => buf,
+            None => return false, // Not a file tab
+        };
+        *buffer = TextBuffer::from_str(&new_content);
+
+        // Clamp cursor position to new buffer bounds
+        let new_cursor = clamp_position_to_buffer(old_cursor, buffer);
+        buffer.set_cursor(new_cursor);
+
+        // Update base_content
+        tab.base_content = Some(new_content);
+
+        // Re-apply syntax highlighting
+        let theme = SyntaxTheme::catppuccin_mocha();
+        tab.setup_highlighting(&self.language_registry, theme);
+
+        // Mark full viewport dirty
+        self.dirty_region.merge(DirtyRegion::FullViewport);
+
+        true
     }
 }
 
@@ -10527,5 +10636,52 @@ mod tests {
 
         assert_eq!(term_cols, expected_cols, "Terminal columns mismatch in single pane");
         assert_eq!(term_rows, expected_rows, "Terminal rows mismatch in single pane");
+    }
+
+    // =========================================================================
+    // Cursor clamping tests (Chunk: docs/chunks/base_snapshot_reload)
+    // =========================================================================
+
+    #[test]
+    fn test_clamp_position_empty_buffer() {
+        let buffer = TextBuffer::new();
+        let pos = clamp_position_to_buffer(Position::new(5, 10), &buffer);
+        assert_eq!(pos, Position::new(0, 0));
+    }
+
+    #[test]
+    fn test_clamp_position_line_beyond_buffer() {
+        let buffer = TextBuffer::from_str("line1\nline2");
+        let pos = clamp_position_to_buffer(Position::new(10, 0), &buffer);
+        assert_eq!(pos.line, 1); // clamped to last line
+    }
+
+    #[test]
+    fn test_clamp_position_col_beyond_line() {
+        let buffer = TextBuffer::from_str("abc");
+        let pos = clamp_position_to_buffer(Position::new(0, 10), &buffer);
+        assert_eq!(pos.col, 3); // clamped to end of line
+    }
+
+    #[test]
+    fn test_clamp_position_valid() {
+        let buffer = TextBuffer::from_str("hello\nworld");
+        let pos = clamp_position_to_buffer(Position::new(1, 3), &buffer);
+        assert_eq!(pos, Position::new(1, 3)); // unchanged
+    }
+
+    #[test]
+    fn test_clamp_position_last_valid_position() {
+        let buffer = TextBuffer::from_str("hello\nworld");
+        // Last valid position is (1, 5) - line 1, column 5
+        let pos = clamp_position_to_buffer(Position::new(1, 5), &buffer);
+        assert_eq!(pos, Position::new(1, 5)); // unchanged
+    }
+
+    #[test]
+    fn test_clamp_position_first_line() {
+        let buffer = TextBuffer::from_str("hello\nworld");
+        let pos = clamp_position_to_buffer(Position::new(0, 0), &buffer);
+        assert_eq!(pos, Position::new(0, 0)); // unchanged
     }
 }
