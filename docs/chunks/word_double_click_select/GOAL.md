@@ -3,12 +3,12 @@ status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
-  - crates/editor/src/input.rs
+  - crates/input/src/lib.rs
   - crates/editor/src/metal_view.rs
   - crates/editor/src/buffer_target.rs
   - crates/buffer/src/text_buffer.rs
 code_references:
-  - ref: crates/editor/src/input.rs#MouseEvent
+  - ref: crates/input/src/lib.rs#MouseEvent
     implements: "click_count field for double-click detection"
   - ref: crates/editor/src/metal_view.rs#MetalView::convert_mouse_event
     implements: "Extract NSEvent.clickCount and populate MouseEvent.click_count"
