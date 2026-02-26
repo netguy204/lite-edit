@@ -294,6 +294,7 @@ impl Viewport {
     /// * `line_count` - Total number of buffer lines
     /// * `wrap_layout` - The wrap layout for calculating screen rows
     /// * `line_len_fn` - Closure to get the character count of a buffer line
+    // Chunk: docs/chunks/line_wrap_rendering - Wrap-aware cursor visibility ensuring
     pub fn ensure_visible_wrapped<F>(
         &mut self,
         cursor_line: usize,

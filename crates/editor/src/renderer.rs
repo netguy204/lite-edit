@@ -903,6 +903,7 @@ impl Renderer {
     }
 
     /// Draws the selector overlay panel
+    // Chunk: docs/chunks/selector_rendering - Selector overlay rendering
     ///
     /// This method renders the selector as a floating panel overlay on top of
     /// the editor content. The panel contains:
@@ -2040,6 +2041,7 @@ impl Renderer {
     /// * `query` - The find query text
     /// * `cursor_col` - The cursor column position in the query
     /// * `cursor_visible` - Whether to render the cursor
+    // Chunk: docs/chunks/find_in_file - Find strip rendering
     fn draw_find_strip(
         &mut self,
         encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,

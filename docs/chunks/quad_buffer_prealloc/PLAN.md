@@ -8,153 +8,201 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The core issue is that `Vec<GlyphVertex>` and `Vec<u32>` buffers are created as local variables inside update methods each frame, causing heap allocation on every full-viewport redraw. The fix is to move these buffers to persistent struct fields and use `clear()` (which retains capacity) instead of creating new Vecs.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Strategy**:
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. For each glyph buffer type (`GlyphBuffer`, `SelectorGlyphBuffer`, `FindStripGlyphBuffer`, `LeftRailGlyphBuffer`, `TabBarGlyphBuffer`, `WelcomeScreenGlyphBuffer`, `PaneFrameBuffer`, `ConfirmDialogGlyphBuffer`), add `vertices: Vec<GlyphVertex>` and `indices: Vec<u32>` fields to the struct.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/quad_buffer_prealloc/GOAL.md)
-with references to the files that you expect to touch.
--->
+2. In each `update*` method, replace:
+   ```rust
+   let mut vertices: Vec<GlyphVertex> = Vec::with_capacity(estimated * 4);
+   let mut indices: Vec<u32> = Vec::with_capacity(estimated * 6);
+   ```
+   with:
+   ```rust
+   self.vertices.clear();
+   self.indices.clear();
+   // Use reserve_exact only if needed for capacity
+   if self.vertices.capacity() < estimated * 4 {
+       self.vertices.reserve(estimated * 4 - self.vertices.len());
+   }
+   ```
+
+3. After populating `self.vertices` and `self.indices`, create the Metal buffers from the persistent Vecs (this part remains the same — we still create new `MTLBuffer` objects each frame since Metal needs them, but the CPU-side Vec allocation is eliminated).
+
+**Note on Metal Buffers**: The `MTLBuffer` objects are still created fresh each frame from the vertex/index data. This is intentional — the optimization targets the CPU-side Vec allocation, not the GPU buffer creation. The Metal buffer creation uses `newBufferWithBytes` which copies data to GPU memory.
+
+**Testing approach**: Per TESTING_PHILOSOPHY.md, the GPU buffer creation is "humble view" code that can't be meaningfully unit-tested. However, we can:
+- Verify the optimization through allocation profiling (Instruments Allocations)
+- Add a compile-time assertion that `GlyphVertex` size matches `VERTEX_SIZE`
+- Ensure no visual artifacts through manual testing
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+- **docs/subsystems/renderer** (DOCUMENTED): This chunk IMPLEMENTS a performance optimization within the renderer subsystem. The subsystem documents the glyph buffer pattern (`GlyphBuffer`, `GlyphVertex`, quad ranges) that we're optimizing. This chunk adds persistent CPU-side buffers to avoid per-frame allocation while preserving the existing quad emission and Metal buffer creation patterns.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add persistent vertex/index buffers to GlyphBuffer
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add `vertices: Vec<GlyphVertex>` and `indices: Vec<u32>` fields to `GlyphBuffer` struct.
 
-Example:
+Location: `crates/editor/src/glyph_buffer.rs`
 
-### Step 1: Define the SegmentHeader struct
+Changes:
+- Add two new fields to `GlyphBuffer` struct
+- Update `GlyphBuffer::new()` to initialize with `Vec::new()` (zero allocation until first use)
+- Add backreference comment for this chunk
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Refactor GlyphBuffer::update_from_lines to use persistent buffers
 
-Location: src/segment/format.rs
+Modify `update_from_lines` to use `self.vertices.clear()` and `self.indices.clear()` instead of creating new Vecs.
 
-### Step 2: Implement header serialization
+Location: `crates/editor/src/glyph_buffer.rs` (~line 414-415)
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Changes:
+- Replace `let mut vertices: Vec<GlyphVertex> = Vec::with_capacity(...)` with `self.vertices.clear(); self.vertices.reserve(...)`
+- Replace `let mut indices: Vec<u32> = Vec::with_capacity(...)` with `self.indices.clear(); self.indices.reserve(...)`
+- Update references from `vertices` to `self.vertices` and `indices` to `self.indices`
+- At end, create Metal buffers from `self.vertices` and `self.indices`
 
-### Step 3: ...
+### Step 3: Refactor GlyphBuffer::update_from_buffer_with_cursor to use persistent buffers
 
----
+Same pattern as Step 2 for the more complex viewport-aware update method.
 
-**BACKREFERENCE COMMENTS**
+Location: `crates/editor/src/glyph_buffer.rs` (~line 608-609)
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+### Step 4: Refactor GlyphBuffer::update_from_buffer_wrapped to use persistent buffers
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+Same pattern for the line-wrap-aware update method.
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+Location: `crates/editor/src/glyph_buffer.rs` (~line 1242-1243)
 
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
+### Step 5: Add persistent buffers to SelectorGlyphBuffer
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Add `vertices: Vec<GlyphVertex>` and `indices: Vec<u32>` fields.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Location: `crates/editor/src/selector_overlay.rs`
+
+Changes:
+- Add fields to `SelectorGlyphBuffer` struct (~line 216)
+- Update `new()` to initialize fields
+- Refactor `update_from_widget()` (~line 342-343) to use `clear()` instead of new Vecs
+
+### Step 6: Add persistent buffers to FindStripGlyphBuffer
+
+Same pattern as Step 5.
+
+Location: `crates/editor/src/selector_overlay.rs`
+
+Changes:
+- Add fields to `FindStripGlyphBuffer` struct (~line 758)
+- Update `new()` to initialize fields
+- Refactor `update()` (~line 850) to use `clear()` instead of new Vecs
+
+### Step 7: Add persistent buffers to LeftRailGlyphBuffer
+
+Same pattern.
+
+Location: `crates/editor/src/left_rail.rs`
+
+Changes:
+- Add fields to `LeftRailGlyphBuffer` struct (~line 292)
+- Update `new()` to initialize fields
+- Refactor `update()` (~line 397-398) to use `clear()` instead of new Vecs
+
+### Step 8: Add persistent buffers to TabBarGlyphBuffer
+
+Same pattern.
+
+Location: `crates/editor/src/tab_bar.rs`
+
+Changes:
+- Add fields to `TabBarGlyphBuffer` struct
+- Update `new()` to initialize fields
+- Refactor `update()` (~line 661-662) to use `clear()` instead of new Vecs
+
+### Step 9: Add persistent buffers to WelcomeScreenGlyphBuffer
+
+Same pattern.
+
+Location: `crates/editor/src/welcome_screen.rs`
+
+Changes:
+- Add fields to `WelcomeScreenGlyphBuffer` struct (~line 312)
+- Update `new()` to initialize fields
+- Refactor `update()` (~line 399) to use `clear()` instead of new Vecs
+
+### Step 10: Add persistent buffers to PaneFrameBuffer
+
+Same pattern.
+
+Location: `crates/editor/src/pane_frame_buffer.rs`
+
+Changes:
+- Add fields to struct
+- Update `new()` to initialize fields
+- Refactor `update()` (~line 364) to use `clear()` instead of new Vecs
+
+### Step 11: Add persistent buffers to ConfirmDialogGlyphBuffer
+
+Same pattern.
+
+Location: `crates/editor/src/confirm_dialog.rs`
+
+Changes:
+- Add fields to `ConfirmDialogGlyphBuffer` struct
+- Update `new()` to initialize fields
+- Refactor `update()` (~line 1075) to use `clear()` instead of new Vecs
+
+### Step 12: Address rendered_buffer_lines Vec in GlyphBuffer
+
+The `update_from_buffer_wrapped` method also creates a local `rendered_buffer_lines: Vec<usize>` that grows during iteration.
+
+Location: `crates/editor/src/glyph_buffer.rs` (~line 1192)
+
+Changes:
+- Add `rendered_buffer_lines: Vec<usize>` field to `GlyphBuffer`
+- Use `self.rendered_buffer_lines.clear()` instead of creating new Vec
+
+### Step 13: Address positions Vec in GlyphBuffer
+
+There's also a `positions: Vec<usize>` at ~line 2179 that may need similar treatment.
+
+Location: `crates/editor/src/glyph_buffer.rs`
+
+Changes:
+- Evaluate if this is in a hot path; if so, add as persistent field
+- If it's only used rarely (e.g., one-time calculations), leave as-is
+
+### Step 14: Build and verify
+
+- Run `cargo build` to ensure all changes compile
+- Run `cargo test` to verify no regressions
+- Manual visual verification that rendering still works correctly
+
+### Step 15: Performance verification
+
+- Use Instruments Allocations to measure heap allocation reduction during steady-state rendering
+- Compare allocation counts for:
+  - Single character typing (should show minimal allocations)
+  - Full viewport redraw (resize) — should now reuse existing capacity
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+None. This is a pure refactoring of existing code with no external dependencies.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Memory growth bounding**: The persistent buffers will retain their high-water-mark capacity. If a user briefly views an extremely large viewport (e.g., during a resize animation), the buffers will grow and stay large. This should be acceptable since:
+   - Capacity is bounded by maximum viewport size (~200KB per buffer type)
+   - Memory is released when the `GlyphBuffer` is dropped
+   - If needed, we could add a `shrink_to_fit()` call on viewport resize events
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Borrow checker interactions**: The refactoring changes `vertices`/`indices` from local variables to `self` fields. Need to ensure no borrow conflicts arise when passing `&self.vertices` to Metal buffer creation while `self` is still mutable.
+
+3. **Thread safety**: `GlyphBuffer` and related types are currently not `Send`/`Sync` (due to `Retained<MTLBuffer>`). Adding persistent Vecs doesn't change this, but we should verify the render path remains single-threaded.
 
 ## Deviations
 

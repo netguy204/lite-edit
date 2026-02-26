@@ -1,5 +1,6 @@
 // Chunk: docs/chunks/terminal_emulator - Terminal emulator backed by alacritty_terminal
 // Chunk: docs/chunks/terminal_background_box_drawing - Background color and box-drawing character tests
+// Chunk: docs/chunks/terminal_styling_fidelity - Integration tests for styled terminal output (ANSI colors, indexed colors, RGB, attributes)
 //! Integration tests for the terminal crate.
 //!
 //! These tests verify that the terminal buffer works correctly with real

@@ -213,6 +213,7 @@ pub fn calculate_overlay_geometry(
 /// This is analogous to `GlyphBuffer` but specialized for the overlay UI.
 /// It maintains separate quad ranges for different visual elements, allowing
 /// the renderer to draw each with different colors.
+// Chunk: docs/chunks/quad_buffer_prealloc - Persistent buffers to eliminate per-frame allocations
 pub struct SelectorGlyphBuffer {
     /// The vertex buffer containing quad vertices
     vertex_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
@@ -236,10 +237,17 @@ pub struct SelectorGlyphBuffer {
     query_cursor_range: QuadRange,
     /// Item list glyphs
     item_text_range: QuadRange,
+
+    // Chunk: docs/chunks/quad_buffer_prealloc - Persistent buffers to avoid per-frame heap allocations
+    /// Persistent vertex data buffer, reused across frames
+    persistent_vertices: Vec<GlyphVertex>,
+    /// Persistent index data buffer, reused across frames
+    persistent_indices: Vec<u32>,
 }
 
 impl SelectorGlyphBuffer {
     /// Creates a new empty selector glyph buffer
+    // Chunk: docs/chunks/quad_buffer_prealloc - Initialize persistent buffers
     pub fn new(layout: GlyphLayout) -> Self {
         Self {
             vertex_buffer: None,
@@ -252,6 +260,8 @@ impl SelectorGlyphBuffer {
             query_text_range: QuadRange::default(),
             query_cursor_range: QuadRange::default(),
             item_text_range: QuadRange::default(),
+            persistent_vertices: Vec::new(),
+            persistent_indices: Vec::new(),
         }
     }
 
@@ -339,8 +349,18 @@ impl SelectorGlyphBuffer {
             .sum();
         let estimated_quads = 3 + query_len + 1 + item_chars;
 
-        let mut vertices: Vec<GlyphVertex> = Vec::with_capacity(estimated_quads * 4);
-        let mut indices: Vec<u32> = Vec::with_capacity(estimated_quads * 6);
+        // Chunk: docs/chunks/quad_buffer_prealloc - Reuse persistent buffers instead of allocating new ones
+        self.persistent_vertices.clear();
+        self.persistent_indices.clear();
+        let estimated_vertices = estimated_quads * 4;
+        let estimated_indices = estimated_quads * 6;
+        if self.persistent_vertices.capacity() < estimated_vertices {
+            self.persistent_vertices.reserve(estimated_vertices - self.persistent_vertices.capacity());
+        }
+        if self.persistent_indices.capacity() < estimated_indices {
+            self.persistent_indices.reserve(estimated_indices - self.persistent_indices.capacity());
+        }
+
         let mut vertex_offset: u32 = 0;
 
         // Reset ranges
@@ -358,7 +378,7 @@ impl SelectorGlyphBuffer {
         let text_color: [f32; 4] = [0.804, 0.839, 0.957, 1.0];
 
         // ==================== Phase 1: Background Rect ====================
-        let bg_start = indices.len();
+        let bg_start = self.persistent_indices.len();
         {
             let quad = self.create_rect_quad(
                 geometry.panel_x,
@@ -368,18 +388,18 @@ impl SelectorGlyphBuffer {
                 solid_glyph,
                 OVERLAY_BACKGROUND_COLOR,
             );
-            vertices.extend_from_slice(&quad);
-            Self::push_quad_indices(&mut indices, vertex_offset);
+            self.persistent_vertices.extend_from_slice(&quad);
+            Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
             vertex_offset += 4;
         }
-        self.background_range = QuadRange::new(bg_start, indices.len() - bg_start);
+        self.background_range = QuadRange::new(bg_start, self.persistent_indices.len() - bg_start);
 
         // ==================== Phase 2: Selection Highlight ====================
         // Chunk: docs/chunks/selector_smooth_render - Fractional scroll offset for smooth list scrolling
         // Compute list_y with fractional offset so items glide smoothly
         let list_y = geometry.list_origin_y - scroll_frac;
 
-        let sel_start = indices.len();
+        let sel_start = self.persistent_indices.len();
         if !widget.items().is_empty() && !visible_range.is_empty() {
             let selected = widget.selected_index();
             // Only render highlight if selected item is within visible range
@@ -395,15 +415,15 @@ impl SelectorGlyphBuffer {
                     solid_glyph,
                     OVERLAY_SELECTION_COLOR,
                 );
-                vertices.extend_from_slice(&quad);
-                Self::push_quad_indices(&mut indices, vertex_offset);
+                self.persistent_vertices.extend_from_slice(&quad);
+                Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
                 vertex_offset += 4;
             }
         }
-        self.selection_range = QuadRange::new(sel_start, indices.len() - sel_start);
+        self.selection_range = QuadRange::new(sel_start, self.persistent_indices.len() - sel_start);
 
         // ==================== Phase 3: Separator Line ====================
-        let sep_start = indices.len();
+        let sep_start = self.persistent_indices.len();
         {
             let quad = self.create_rect_quad(
                 geometry.panel_x + OVERLAY_PADDING_X,
@@ -413,14 +433,14 @@ impl SelectorGlyphBuffer {
                 solid_glyph,
                 OVERLAY_SEPARATOR_COLOR,
             );
-            vertices.extend_from_slice(&quad);
-            Self::push_quad_indices(&mut indices, vertex_offset);
+            self.persistent_vertices.extend_from_slice(&quad);
+            Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
             vertex_offset += 4;
         }
-        self.separator_range = QuadRange::new(sep_start, indices.len() - sep_start);
+        self.separator_range = QuadRange::new(sep_start, self.persistent_indices.len() - sep_start);
 
         // ==================== Phase 4: Query Text ====================
-        let query_start = indices.len();
+        let query_start = self.persistent_indices.len();
         let query_cursor_x;
         {
             let mut x = geometry.content_x;
@@ -441,18 +461,18 @@ impl SelectorGlyphBuffer {
 
                 if let Some(glyph) = atlas.get_glyph(c) {
                     let quad = self.create_glyph_quad_at(x, y, glyph, text_color);
-                    vertices.extend_from_slice(&quad);
-                    Self::push_quad_indices(&mut indices, vertex_offset);
+                    self.persistent_vertices.extend_from_slice(&quad);
+                    Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
                     vertex_offset += 4;
                 }
                 x += self.layout.glyph_width;
             }
             query_cursor_x = x;
         }
-        self.query_text_range = QuadRange::new(query_start, indices.len() - query_start);
+        self.query_text_range = QuadRange::new(query_start, self.persistent_indices.len() - query_start);
 
         // ==================== Phase 5: Query Cursor ====================
-        let cursor_start = indices.len();
+        let cursor_start = self.persistent_indices.len();
         if cursor_visible {
             // Only render cursor if it fits in content area
             if query_cursor_x + self.layout.glyph_width <= geometry.content_x + geometry.content_width
@@ -465,16 +485,16 @@ impl SelectorGlyphBuffer {
                     solid_glyph,
                     text_color, // Cursor uses text color
                 );
-                vertices.extend_from_slice(&quad);
-                Self::push_quad_indices(&mut indices, vertex_offset);
+                self.persistent_vertices.extend_from_slice(&quad);
+                Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
                 vertex_offset += 4;
             }
         }
-        self.query_cursor_range = QuadRange::new(cursor_start, indices.len() - cursor_start);
+        self.query_cursor_range = QuadRange::new(cursor_start, self.persistent_indices.len() - cursor_start);
 
         // ==================== Phase 6: Item Text ====================
         // Chunk: docs/chunks/selector_smooth_render - Fractional scroll offset for smooth list scrolling
-        let item_start = indices.len();
+        let item_start = self.persistent_indices.len();
         {
             let items = widget.items();
             let max_x = geometry.content_x + geometry.content_width;
@@ -499,18 +519,18 @@ impl SelectorGlyphBuffer {
 
                     if let Some(glyph) = atlas.get_glyph(c) {
                         let quad = self.create_glyph_quad_at(x, y, glyph, text_color);
-                        vertices.extend_from_slice(&quad);
-                        Self::push_quad_indices(&mut indices, vertex_offset);
+                        self.persistent_vertices.extend_from_slice(&quad);
+                        Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
                         vertex_offset += 4;
                     }
                     x += self.layout.glyph_width;
                 }
             }
         }
-        self.item_text_range = QuadRange::new(item_start, indices.len() - item_start);
+        self.item_text_range = QuadRange::new(item_start, self.persistent_indices.len() - item_start);
 
         // ==================== Create GPU Buffers ====================
-        if vertices.is_empty() {
+        if self.persistent_vertices.is_empty() {
             self.vertex_buffer = None;
             self.index_buffer = None;
             self.index_count = 0;
@@ -518,9 +538,9 @@ impl SelectorGlyphBuffer {
         }
 
         // Create the vertex buffer
-        let vertex_data_size = vertices.len() * VERTEX_SIZE;
+        let vertex_data_size = self.persistent_vertices.len() * VERTEX_SIZE;
         let vertex_ptr =
-            NonNull::new(vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
+            NonNull::new(self.persistent_vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
 
         let vertex_buffer = unsafe {
             device
@@ -533,9 +553,9 @@ impl SelectorGlyphBuffer {
         };
 
         // Create the index buffer
-        let index_data_size = indices.len() * std::mem::size_of::<u32>();
+        let index_data_size = self.persistent_indices.len() * std::mem::size_of::<u32>();
         let index_ptr =
-            NonNull::new(indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
+            NonNull::new(self.persistent_indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
 
         let index_buffer = unsafe {
             device
@@ -549,7 +569,7 @@ impl SelectorGlyphBuffer {
 
         self.vertex_buffer = Some(vertex_buffer);
         self.index_buffer = Some(index_buffer);
-        self.index_count = indices.len();
+        self.index_count = self.persistent_indices.len();
     }
 
     /// Creates a solid rectangle quad at the given position with the specified color
@@ -638,6 +658,7 @@ pub const FIND_LABEL_COLOR: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
 /// Computed geometry for the find strip (bottom-anchored, 1 line tall)
 ///
 /// All values are in screen coordinates (pixels).
+// Chunk: docs/chunks/find_in_file - Find-in-file geometry calculation
 #[derive(Debug, Clone, Copy)]
 pub struct FindStripGeometry {
     /// Left edge of the strip in screen coordinates
@@ -673,6 +694,7 @@ pub struct FindStripGeometry {
 /// * `line_height` - The height of a text line in pixels
 /// * `glyph_width` - The width of a single glyph
 /// * `cursor_col` - The cursor column position in the query
+// Chunk: docs/chunks/find_in_file - Find-in-file geometry calculation
 pub fn calculate_find_strip_geometry(
     view_width: f32,
     view_height: f32,
@@ -755,6 +777,8 @@ pub fn calculate_find_strip_geometry_in_pane(
 /// Manages vertex and index buffers for rendering the find strip
 ///
 /// Similar to `SelectorGlyphBuffer` but specialized for the find strip UI.
+// Chunk: docs/chunks/find_in_file - Find-in-file rendering
+// Chunk: docs/chunks/quad_buffer_prealloc - Persistent buffers to eliminate per-frame allocations
 pub struct FindStripGlyphBuffer {
     /// The vertex buffer containing quad vertices
     vertex_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
@@ -774,10 +798,17 @@ pub struct FindStripGlyphBuffer {
     query_text_range: QuadRange,
     /// Query cursor quad (if visible)
     cursor_range: QuadRange,
+
+    // Chunk: docs/chunks/quad_buffer_prealloc - Persistent buffers to avoid per-frame heap allocations
+    /// Persistent vertex data buffer, reused across frames
+    persistent_vertices: Vec<GlyphVertex>,
+    /// Persistent index data buffer, reused across frames
+    persistent_indices: Vec<u32>,
 }
 
 impl FindStripGlyphBuffer {
     /// Creates a new empty find strip glyph buffer
+    // Chunk: docs/chunks/quad_buffer_prealloc - Initialize persistent buffers
     pub fn new(layout: GlyphLayout) -> Self {
         Self {
             vertex_buffer: None,
@@ -788,6 +819,8 @@ impl FindStripGlyphBuffer {
             label_range: QuadRange::default(),
             query_text_range: QuadRange::default(),
             cursor_range: QuadRange::default(),
+            persistent_vertices: Vec::new(),
+            persistent_indices: Vec::new(),
         }
     }
 
@@ -847,8 +880,18 @@ impl FindStripGlyphBuffer {
         let query_len = query.chars().count();
         let estimated_quads = 1 + label_len + query_len + 1; // bg + label + query + cursor
 
-        let mut vertices: Vec<GlyphVertex> = Vec::with_capacity(estimated_quads * 4);
-        let mut indices: Vec<u32> = Vec::with_capacity(estimated_quads * 6);
+        // Chunk: docs/chunks/quad_buffer_prealloc - Reuse persistent buffers instead of allocating new ones
+        self.persistent_vertices.clear();
+        self.persistent_indices.clear();
+        let estimated_vertices = estimated_quads * 4;
+        let estimated_indices = estimated_quads * 6;
+        if self.persistent_vertices.capacity() < estimated_vertices {
+            self.persistent_vertices.reserve(estimated_vertices - self.persistent_vertices.capacity());
+        }
+        if self.persistent_indices.capacity() < estimated_indices {
+            self.persistent_indices.reserve(estimated_indices - self.persistent_indices.capacity());
+        }
+
         let mut vertex_offset: u32 = 0;
 
         // Reset ranges
@@ -863,7 +906,7 @@ impl FindStripGlyphBuffer {
         let text_color: [f32; 4] = [0.804, 0.839, 0.957, 1.0];
 
         // ==================== Phase 1: Background Rect ====================
-        let bg_start = indices.len();
+        let bg_start = self.persistent_indices.len();
         {
             let quad = self.create_rect_quad(
                 geometry.strip_x,
@@ -873,14 +916,14 @@ impl FindStripGlyphBuffer {
                 solid_glyph,
                 OVERLAY_BACKGROUND_COLOR,
             );
-            vertices.extend_from_slice(&quad);
-            Self::push_quad_indices(&mut indices, vertex_offset);
+            self.persistent_vertices.extend_from_slice(&quad);
+            Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
             vertex_offset += 4;
         }
-        self.background_range = QuadRange::new(bg_start, indices.len() - bg_start);
+        self.background_range = QuadRange::new(bg_start, self.persistent_indices.len() - bg_start);
 
         // ==================== Phase 2: "find:" Label ====================
-        let label_start = indices.len();
+        let label_start = self.persistent_indices.len();
         {
             let mut x = geometry.label_x;
             let y = geometry.text_y;
@@ -893,17 +936,17 @@ impl FindStripGlyphBuffer {
 
                 if let Some(glyph) = atlas.get_glyph(c) {
                     let quad = self.create_glyph_quad_at(x, y, glyph, FIND_LABEL_COLOR);
-                    vertices.extend_from_slice(&quad);
-                    Self::push_quad_indices(&mut indices, vertex_offset);
+                    self.persistent_vertices.extend_from_slice(&quad);
+                    Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
                     vertex_offset += 4;
                 }
                 x += geometry.glyph_width;
             }
         }
-        self.label_range = QuadRange::new(label_start, indices.len() - label_start);
+        self.label_range = QuadRange::new(label_start, self.persistent_indices.len() - label_start);
 
         // ==================== Phase 3: Query Text ====================
-        let query_start = indices.len();
+        let query_start = self.persistent_indices.len();
         {
             let mut x = geometry.query_x;
             let y = geometry.text_y;
@@ -916,17 +959,17 @@ impl FindStripGlyphBuffer {
 
                 if let Some(glyph) = atlas.get_glyph(c) {
                     let quad = self.create_glyph_quad_at(x, y, glyph, text_color);
-                    vertices.extend_from_slice(&quad);
-                    Self::push_quad_indices(&mut indices, vertex_offset);
+                    self.persistent_vertices.extend_from_slice(&quad);
+                    Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
                     vertex_offset += 4;
                 }
                 x += geometry.glyph_width;
             }
         }
-        self.query_text_range = QuadRange::new(query_start, indices.len() - query_start);
+        self.query_text_range = QuadRange::new(query_start, self.persistent_indices.len() - query_start);
 
         // ==================== Phase 4: Cursor ====================
-        let cursor_start = indices.len();
+        let cursor_start = self.persistent_indices.len();
         if cursor_visible {
             let quad = self.create_rect_quad(
                 geometry.cursor_x,
@@ -936,15 +979,15 @@ impl FindStripGlyphBuffer {
                 solid_glyph,
                 text_color, // Cursor uses text color
             );
-            vertices.extend_from_slice(&quad);
-            Self::push_quad_indices(&mut indices, vertex_offset);
+            self.persistent_vertices.extend_from_slice(&quad);
+            Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
             #[allow(unused_assignments)]
             { vertex_offset += 4; }
         }
-        self.cursor_range = QuadRange::new(cursor_start, indices.len() - cursor_start);
+        self.cursor_range = QuadRange::new(cursor_start, self.persistent_indices.len() - cursor_start);
 
         // ==================== Create GPU Buffers ====================
-        if vertices.is_empty() {
+        if self.persistent_vertices.is_empty() {
             self.vertex_buffer = None;
             self.index_buffer = None;
             self.index_count = 0;
@@ -952,9 +995,9 @@ impl FindStripGlyphBuffer {
         }
 
         // Create the vertex buffer
-        let vertex_data_size = vertices.len() * VERTEX_SIZE;
+        let vertex_data_size = self.persistent_vertices.len() * VERTEX_SIZE;
         let vertex_ptr =
-            NonNull::new(vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
+            NonNull::new(self.persistent_vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
 
         let vertex_buffer = unsafe {
             device
@@ -967,9 +1010,9 @@ impl FindStripGlyphBuffer {
         };
 
         // Create the index buffer
-        let index_data_size = indices.len() * std::mem::size_of::<u32>();
+        let index_data_size = self.persistent_indices.len() * std::mem::size_of::<u32>();
         let index_ptr =
-            NonNull::new(indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
+            NonNull::new(self.persistent_indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
 
         let index_buffer = unsafe {
             device
@@ -983,7 +1026,7 @@ impl FindStripGlyphBuffer {
 
         self.vertex_buffer = Some(vertex_buffer);
         self.index_buffer = Some(index_buffer);
-        self.index_count = indices.len();
+        self.index_count = self.persistent_indices.len();
     }
 
     /// Creates a solid rectangle quad at the given position with the specified color

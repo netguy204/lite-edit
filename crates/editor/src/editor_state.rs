@@ -3871,6 +3871,7 @@ impl EditorState {
     /// focus to that pane if necessary, and then activates the clicked tab.
     ///
     /// The mouse coordinates are in screen space (y=0 at top of window).
+    // Chunk: docs/chunks/content_tab_bar - Click-to-switch and close-button hit testing
     fn handle_tab_bar_click(&mut self, screen_x: f32, screen_y: f32) {
         use crate::pane_layout::calculate_pane_rects;
 

@@ -54,6 +54,8 @@ chunks:
   relationship: implements
 - chunk_id: find_strip_multi_pane
   relationship: implements
+- chunk_id: quad_buffer_prealloc
+  relationship: implements
 created_after:
 - viewport_scroll
 ---
