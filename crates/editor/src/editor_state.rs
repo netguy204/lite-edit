@@ -29,7 +29,7 @@ use crate::context::EditorContext;
 use crate::dir_picker;
 // Chunk: docs/chunks/file_open_picker - File picker for opening files via Cmd+O
 use crate::file_picker;
-use crate::dirty_region::DirtyRegion;
+use crate::dirty_region::{DirtyRegion, InvalidationKind};
 // Chunk: docs/chunks/pty_wakeup_reentrant - EventSender for PTY wakeup
 use crate::event_channel::EventSender;
 // Chunk: docs/chunks/file_change_events - Self-write suppression
@@ -100,8 +100,13 @@ pub enum EditorFocus {
 pub struct EditorState {
     /// The workspace/tab model containing all buffers and viewports
     pub editor: Editor,
-    /// Accumulated dirty region for the current event batch
-    pub dirty_region: DirtyRegion,
+    // Chunk: docs/chunks/invalidation_separation - Invalidation kind tracking
+    /// Accumulated invalidation for the current event batch.
+    ///
+    /// This replaces the previous `dirty_region` field to support distinct
+    /// Content, Layout, and Overlay invalidation kinds. The renderer uses
+    /// this to skip pane rect recalculation for Content-only frames.
+    pub invalidation: InvalidationKind,
     // Chunk: docs/chunks/styled_line_cache - Buffer-level dirty tracking for cache invalidation
     /// Accumulated buffer-level dirty lines for styled line cache invalidation.
     /// This tracks which buffer lines have changed since the last render, allowing
@@ -363,7 +368,8 @@ impl EditorState {
         // Chunk: docs/chunks/workspace_dir_picker - Per-workspace file index
         Self {
             editor,
-            dirty_region: DirtyRegion::None,
+            // Chunk: docs/chunks/invalidation_separation - Initialize invalidation
+            invalidation: InvalidationKind::None,
             dirty_lines: DirtyLines::None,
             // Chunk: docs/chunks/styled_line_cache - Initialize cache clear flag
             clear_styled_line_cache: false,
@@ -423,7 +429,8 @@ impl EditorState {
 
         Self {
             editor,
-            dirty_region: DirtyRegion::None,
+            // Chunk: docs/chunks/invalidation_separation - Initialize invalidation
+            invalidation: InvalidationKind::None,
             dirty_lines: DirtyLines::None,
             // Chunk: docs/chunks/styled_line_cache - Initialize cache clear flag
             clear_styled_line_cache: false,
@@ -473,7 +480,7 @@ impl EditorState {
 
         // Create the workspace with the selected directory
         self.editor.new_workspace(label, root_path);
-        self.dirty_region.merge(DirtyRegion::FullViewport);
+        self.invalidation.merge(InvalidationKind::Layout);
     }
 
     /// Returns the font metrics.
@@ -872,7 +879,7 @@ impl EditorState {
                         let result = workspace.move_active_tab(dir);
                         match result {
                             MoveResult::MovedToExisting { .. } | MoveResult::MovedToNew { .. } => {
-                                self.dirty_region.merge(DirtyRegion::FullViewport);
+                                self.invalidation.merge(InvalidationKind::Layout);
                             }
                             MoveResult::Rejected | MoveResult::SourceNotFound => {
                                 // No-op, no visual change
@@ -903,7 +910,7 @@ impl EditorState {
                 if let Some(dir) = direction {
                     if let Some(workspace) = self.editor.active_workspace_mut() {
                         if workspace.switch_focus(dir) {
-                            self.dirty_region.merge(DirtyRegion::FullViewport);
+                            self.invalidation.merge(InvalidationKind::Layout);
                         }
                     }
                     return;
@@ -1036,7 +1043,7 @@ impl EditorState {
         self.last_overlay_keystroke = Instant::now();
 
         // Mark full viewport dirty for overlay rendering
-        self.dirty_region.merge(DirtyRegion::FullViewport);
+        self.invalidation.merge(InvalidationKind::Layout);
     }
 
     /// Closes the active selector.
@@ -1050,7 +1057,7 @@ impl EditorState {
         self.cursor_visible = true;
         self.last_keystroke = Instant::now();
 
-        self.dirty_region.merge(DirtyRegion::FullViewport);
+        self.invalidation.merge(InvalidationKind::Layout);
     }
 
     // =========================================================================
@@ -1089,7 +1096,7 @@ impl EditorState {
                 self.last_overlay_keystroke = Instant::now();
 
                 // Mark full viewport dirty for overlay rendering
-                self.dirty_region.merge(DirtyRegion::FullViewport);
+                self.invalidation.merge(InvalidationKind::Layout);
             }
             EditorFocus::FindInFile => {
                 // No-op: Cmd+F while open does nothing
@@ -1118,7 +1125,7 @@ impl EditorState {
         self.cursor_visible = true;
         self.last_keystroke = Instant::now();
 
-        self.dirty_region.merge(DirtyRegion::FullViewport);
+        self.invalidation.merge(InvalidationKind::Layout);
     }
 
     /// Finds the next match for the query starting from start_pos.
@@ -1270,7 +1277,7 @@ impl EditorState {
                     }
 
                     // Mark dirty for any visual update
-                    self.dirty_region.merge(DirtyRegion::FullViewport);
+                    self.invalidation.merge(InvalidationKind::Layout);
                 }
             }
         }
@@ -1322,7 +1329,7 @@ impl EditorState {
                 let line_count = self.buffer().line_count();
                 let match_line = start.line;
                 if self.viewport_mut().ensure_visible_with_margin(match_line, line_count, 1) {
-                    self.dirty_region.merge(DirtyRegion::FullViewport);
+                    self.invalidation.merge(InvalidationKind::Layout);
                 }
             }
             None => {
@@ -1331,7 +1338,7 @@ impl EditorState {
             }
         }
 
-        self.dirty_region.merge(DirtyRegion::FullViewport);
+        self.invalidation.merge(InvalidationKind::Layout);
     }
 
     /// Advances the search to the next match (Enter in find mode).
@@ -1397,7 +1404,7 @@ impl EditorState {
             }
             ConfirmOutcome::Pending => {
                 // Dialog still open - just mark dirty for visual update
-                self.dirty_region.merge(DirtyRegion::FullViewport);
+                self.invalidation.merge(InvalidationKind::Layout);
             }
         }
     }
@@ -1462,7 +1469,7 @@ impl EditorState {
         self.confirm_dialog = None;
         self.confirm_context = None;
         self.focus = EditorFocus::Buffer;
-        self.dirty_region.merge(DirtyRegion::FullViewport);
+        self.invalidation.merge(InvalidationKind::Layout);
     }
 
     /// Shows a confirmation dialog for closing a dirty tab.
@@ -1474,7 +1481,7 @@ impl EditorState {
         self.confirm_dialog = Some(ConfirmDialog::new("Abandon unsaved changes?"));
         self.confirm_context = Some(ConfirmDialogContext::CloseDirtyTab { pane_id, tab_idx });
         self.focus = EditorFocus::ConfirmDialog;
-        self.dirty_region.merge(DirtyRegion::FullViewport);
+        self.invalidation.merge(InvalidationKind::Layout);
     }
 
     /// Shows a confirmation dialog for closing a terminal with an active process.
@@ -1490,7 +1497,7 @@ impl EditorState {
         ));
         self.confirm_context = Some(ConfirmDialogContext::CloseActiveTerminal { pane_id, tab_idx });
         self.focus = EditorFocus::ConfirmDialog;
-        self.dirty_region.merge(DirtyRegion::FullViewport);
+        self.invalidation.merge(InvalidationKind::Layout);
     }
 
     // Chunk: docs/chunks/deletion_rename_handling - File deleted event handler
@@ -1534,7 +1541,7 @@ impl EditorState {
             deleted_path,
         });
         self.focus = EditorFocus::ConfirmDialog;
-        self.dirty_region.merge(DirtyRegion::FullViewport);
+        self.invalidation.merge(InvalidationKind::Layout);
     }
 
     // Chunk: docs/chunks/deletion_rename_handling - File renamed event handler
@@ -1569,7 +1576,7 @@ impl EditorState {
                             }
 
                             // Mark dirty to refresh the UI
-                            self.dirty_region.merge(DirtyRegion::FullViewport);
+                            self.invalidation.merge(InvalidationKind::Layout);
                             return;
                         }
                     }
@@ -1683,7 +1690,7 @@ impl EditorState {
             }
         }
 
-        self.dirty_region.merge(DirtyRegion::FullViewport);
+        self.invalidation.merge(InvalidationKind::Layout);
     }
 
     /// Handles a key event when the selector is focused.
@@ -1764,7 +1771,7 @@ impl EditorState {
                     }
                 }
                 // Mark dirty for any visual update (selection, query, etc.)
-                self.dirty_region.merge(DirtyRegion::FullViewport);
+                self.invalidation.merge(InvalidationKind::Layout);
             }
             SelectorOutcome::Confirmed(idx) => {
                 // Resolve the path and handle confirmation
@@ -1879,7 +1886,8 @@ impl EditorState {
                     &lite_edit_buffer::DirtyLines::Single(cursor_line),
                     buffer.line_count(),
                 );
-                self.dirty_region.merge(dirty);
+                // Chunk: docs/chunks/invalidation_separation - Content invalidation for cursor
+                self.invalidation.merge(InvalidationKind::Content(dirty));
             }
 
             // Chunk: docs/chunks/viewport_scrolling - Snap-back viewport when cursor off-screen
@@ -1893,7 +1901,7 @@ impl EditorState {
                 let line_count = buffer.line_count();
                 if viewport.ensure_visible(cursor_line, line_count) {
                     // Viewport scrolled - mark full viewport dirty
-                    self.dirty_region.merge(DirtyRegion::FullViewport);
+                    self.invalidation.merge(InvalidationKind::Layout);
                 }
             }
 
@@ -1904,11 +1912,16 @@ impl EditorState {
             let content_height = self.view_height - TAB_BAR_HEIGHT;
             let content_width = self.view_width - RAIL_WIDTH;
 
+            // Chunk: docs/chunks/invalidation_separation - Use temporary DirtyRegion for EditorContext
+            // EditorContext accumulates buffer-level dirty regions. We convert to
+            // InvalidationKind::Content after handling.
+            let mut ctx_dirty_region = DirtyRegion::None;
+
             // Chunk: docs/chunks/styled_line_cache - Pass dirty_lines for cache invalidation
             let mut ctx = EditorContext::new(
                 buffer,
                 viewport,
-                &mut self.dirty_region,
+                &mut ctx_dirty_region,
                 &mut self.dirty_lines,
                 font_metrics,
                 content_height,
@@ -1917,6 +1930,11 @@ impl EditorState {
             self.focus_target.handle_key(event, &mut ctx);
             // Chunk: docs/chunks/dirty_bit_navigation - Capture content_mutated before ctx goes out of scope
             content_mutated = ctx.content_mutated;
+
+            // Chunk: docs/chunks/invalidation_separation - Convert to Content invalidation
+            if ctx_dirty_region.is_dirty() {
+                self.invalidation.merge(InvalidationKind::Content(ctx_dirty_region));
+            }
         } else if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
             // Chunk: docs/chunks/terminal_clipboard_selection - Terminal clipboard operations
             // Check for Cmd+C (copy) and Cmd+V (paste) first
@@ -1931,7 +1949,7 @@ impl EditorState {
                             terminal.clear_selection();
                         }
                         // No-op if no selection (don't send interrupt)
-                        self.dirty_region.merge(DirtyRegion::FullViewport);
+                        self.invalidation.merge(InvalidationKind::Layout);
                         return;
                     }
                     Key::Char('v') | Key::Char('V') => {
@@ -1972,7 +1990,7 @@ impl EditorState {
             }
 
             // Mark full viewport dirty since terminal output may change
-            self.dirty_region.merge(DirtyRegion::FullViewport);
+            self.invalidation.merge(InvalidationKind::Layout);
         }
         // Other tab types (AgentOutput, Diff): no-op
         } // End of borrow scope
@@ -2181,7 +2199,7 @@ impl EditorState {
         match outcome {
             SelectorOutcome::Pending => {
                 // Mark dirty for visual update
-                self.dirty_region.merge(DirtyRegion::FullViewport);
+                self.invalidation.merge(InvalidationKind::Layout);
             }
             SelectorOutcome::Confirmed(idx) => {
                 self.handle_selector_confirm(idx);
@@ -2237,7 +2255,7 @@ impl EditorState {
                     if let Some(ws) = self.editor.active_workspace_mut() {
                         if hit.pane_id != ws.active_pane_id {
                             ws.active_pane_id = hit.pane_id;
-                            self.dirty_region.merge(DirtyRegion::FullViewport);
+                            self.invalidation.merge(InvalidationKind::Layout);
                         }
                     }
                 }
@@ -2272,7 +2290,8 @@ impl EditorState {
                     &lite_edit_buffer::DirtyLines::Single(cursor_line),
                     buffer.line_count(),
                 );
-                self.dirty_region.merge(dirty);
+                // Chunk: docs/chunks/invalidation_separation - Content invalidation for cursor
+                self.invalidation.merge(InvalidationKind::Content(dirty));
             }
 
             // Create event with pane-local content coordinates
@@ -2303,17 +2322,25 @@ impl EditorState {
             // Create context and forward to focus target
             let font_metrics = self.font_metrics;
 
+            // Chunk: docs/chunks/invalidation_separation - Use temporary DirtyRegion for EditorContext
+            let mut ctx_dirty_region = DirtyRegion::None;
+
             // Chunk: docs/chunks/styled_line_cache - Pass dirty_lines for cache invalidation
             let mut ctx = EditorContext::new(
                 buffer,
                 viewport,
-                &mut self.dirty_region,
+                &mut ctx_dirty_region,
                 &mut self.dirty_lines,
                 font_metrics,
                 pane_content_height,
                 pane_content_width,
             );
             self.focus_target.handle_mouse(content_event, &mut ctx);
+
+            // Chunk: docs/chunks/invalidation_separation - Convert to Content invalidation
+            if ctx_dirty_region.is_dirty() {
+                self.invalidation.merge(InvalidationKind::Content(ctx_dirty_region));
+            }
         } else if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
             // Chunk: docs/chunks/terminal_mouse_offset - Fixed terminal mouse Y coordinate calculation
             // Chunk: docs/chunks/terminal_clipboard_selection - Terminal mouse selection
@@ -2399,7 +2426,7 @@ impl EditorState {
             }
 
             // Mark dirty since terminal may need redraw (e.g., selection)
-            self.dirty_region.merge(DirtyRegion::FullViewport);
+            self.invalidation.merge(InvalidationKind::Layout);
         }
         // Other tab types (AgentOutput, Diff): no-op
     }
@@ -2541,7 +2568,7 @@ impl EditorState {
                 let new_offset = (current + delta.dy as f32).max(0.0);
                 tab.set_welcome_scroll_offset_px(new_offset);
                 if (new_offset - current).abs() > 0.001 {
-                    self.dirty_region.merge(DirtyRegion::FullViewport);
+                    self.invalidation.merge(InvalidationKind::Layout);
                 }
                 return;
             }
@@ -2553,17 +2580,25 @@ impl EditorState {
             // Create context and forward to focus target
             let font_metrics = self.font_metrics;
 
+            // Chunk: docs/chunks/invalidation_separation - Use temporary DirtyRegion for EditorContext
+            let mut ctx_dirty_region = DirtyRegion::None;
+
             // Chunk: docs/chunks/styled_line_cache - Pass dirty_lines for cache invalidation
             let mut ctx = EditorContext::new(
                 buffer,
                 viewport,
-                &mut self.dirty_region,
+                &mut ctx_dirty_region,
                 &mut self.dirty_lines,
                 font_metrics,
                 content_height,
                 content_width,
             );
             self.focus_target.handle_scroll(delta, &mut ctx);
+
+            // Chunk: docs/chunks/invalidation_separation - Convert to Content invalidation
+            if ctx_dirty_region.is_dirty() {
+                self.invalidation.merge(InvalidationKind::Content(ctx_dirty_region));
+            }
         } else if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
             // Chunk: docs/chunks/terminal_scrollback_viewport - Terminal scrollback viewport handling
             // Terminal tab: handle scrolling based on terminal mode
@@ -2599,7 +2634,7 @@ impl EditorState {
 
                 // Mark dirty if scroll position changed
                 if (viewport.scroll_offset_px() - current_px).abs() > 0.001 {
-                    self.dirty_region.merge(DirtyRegion::FullViewport);
+                    self.invalidation.merge(InvalidationKind::Layout);
                 }
             }
         }
@@ -2632,7 +2667,7 @@ impl EditorState {
         selector.handle_scroll(delta.dy as f64);
 
         // Mark full viewport dirty for redraw
-        self.dirty_region.merge(DirtyRegion::FullViewport);
+        self.invalidation.merge(InvalidationKind::Layout);
     }
 
     // Chunk: docs/chunks/dragdrop_file_paste - File drop handling
@@ -2688,14 +2723,15 @@ impl EditorState {
         if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
             let dirty_lines = buffer.insert_str(&escaped_text);
             let dirty = viewport.dirty_lines_to_region(&dirty_lines, buffer.line_count());
-            self.dirty_region.merge(dirty);
+            // Chunk: docs/chunks/invalidation_separation - Content invalidation for text insertion
+            self.invalidation.merge(InvalidationKind::Content(dirty));
             // Chunk: docs/chunks/styled_line_cache - Track dirty lines for cache invalidation
             self.dirty_lines.merge(dirty_lines);
 
             // Ensure cursor is visible after insertion
             let cursor_line = buffer.cursor_position().line;
             if viewport.ensure_visible(cursor_line, buffer.line_count()) {
-                self.dirty_region.merge(DirtyRegion::FullViewport);
+                self.invalidation.merge(InvalidationKind::Layout);
             }
 
             // Mark the tab as dirty (unsaved changes)
@@ -2750,12 +2786,13 @@ impl EditorState {
 
             let dirty_lines = buffer.insert_str(text);
             let dirty = viewport.dirty_lines_to_region(&dirty_lines, buffer.line_count());
-            self.dirty_region.merge(dirty);
+            // Chunk: docs/chunks/invalidation_separation - Content invalidation for text insertion
+            self.invalidation.merge(InvalidationKind::Content(dirty));
 
             // Ensure cursor is visible
             let cursor_line = buffer.cursor_position().line;
             if viewport.ensure_visible(cursor_line, buffer.line_count()) {
-                self.dirty_region.merge(DirtyRegion::FullViewport);
+                self.invalidation.merge(InvalidationKind::Layout);
             }
 
             tab.dirty = true;
@@ -2785,12 +2822,13 @@ impl EditorState {
         if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
             let dirty_lines = buffer.set_marked_text(&event.text, event.selected_range);
             let dirty = viewport.dirty_lines_to_region(&dirty_lines, buffer.line_count());
-            self.dirty_region.merge(dirty);
+            // Chunk: docs/chunks/invalidation_separation - Content invalidation for marked text
+            self.invalidation.merge(InvalidationKind::Content(dirty));
 
             // Ensure cursor is visible (cursor moves to end of marked text)
             let cursor_line = buffer.cursor_position().line;
             if viewport.ensure_visible(cursor_line, buffer.line_count()) {
-                self.dirty_region.merge(DirtyRegion::FullViewport);
+                self.invalidation.merge(InvalidationKind::Layout);
             }
         }
 
@@ -2820,13 +2858,15 @@ impl EditorState {
         if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
             let dirty_lines = buffer.cancel_marked_text();
             let dirty = viewport.dirty_lines_to_region(&dirty_lines, buffer.line_count());
-            self.dirty_region.merge(dirty);
+            // Chunk: docs/chunks/invalidation_separation - Content invalidation for text clearing
+            self.invalidation.merge(InvalidationKind::Content(dirty));
         }
     }
 
-    /// Returns true if any screen region needs re-rendering.
+    // Chunk: docs/chunks/invalidation_separation - Updated to use InvalidationKind
+    /// Returns true if any invalidation is pending (screen needs re-rendering).
     pub fn is_dirty(&self) -> bool {
-        self.dirty_region.is_dirty()
+        self.invalidation.is_dirty()
     }
 
     /// Called periodically to check for streaming file index updates.
@@ -2928,11 +2968,24 @@ impl EditorState {
         (dirty, any_needs_rewakeup)
     }
 
-    /// Takes the dirty region, leaving `DirtyRegion::None` in its place.
+    // Chunk: docs/chunks/invalidation_separation - Updated to use InvalidationKind
+    /// Takes the invalidation kind, leaving `InvalidationKind::None` in its place.
     ///
     /// Call this after rendering to reset the dirty state.
+    pub fn take_invalidation(&mut self) -> InvalidationKind {
+        std::mem::take(&mut self.invalidation)
+    }
+
+    /// Takes the dirty region, leaving `DirtyRegion::None` in its place.
+    ///
+    /// **DEPRECATED**: Use `take_invalidation()` instead. This method exists
+    /// for backward compatibility with drain_loop rendering code.
     pub fn take_dirty_region(&mut self) -> DirtyRegion {
-        std::mem::take(&mut self.dirty_region)
+        match std::mem::take(&mut self.invalidation) {
+            InvalidationKind::None => DirtyRegion::None,
+            InvalidationKind::Content(region) => region,
+            InvalidationKind::Layout | InvalidationKind::Overlay => DirtyRegion::FullViewport,
+        }
     }
 
     // Chunk: docs/chunks/styled_line_cache - Take dirty lines for cache invalidation
@@ -3076,9 +3129,14 @@ impl EditorState {
         }
     }
 
-    /// Marks the full viewport as dirty (e.g., after buffer replacement).
+    // Chunk: docs/chunks/invalidation_separation - Layout invalidation for full rerender
+    /// Marks a full layout invalidation (e.g., after buffer replacement, resize).
+    ///
+    /// This signals Layout invalidation, which:
+    /// - Triggers pane rect recalculation
+    /// - Forces full content re-render
     pub fn mark_full_dirty(&mut self) {
-        self.dirty_region = DirtyRegion::FullViewport;
+        self.invalidation = InvalidationKind::Layout;
     }
 
     // =========================================================================
@@ -3144,7 +3202,7 @@ impl EditorState {
         // Sync viewport to ensure dirty region calculations work correctly
         // (handles case of file picker confirming into a newly created tab)
         self.sync_active_tab_viewport();
-        self.dirty_region.merge(DirtyRegion::FullViewport);
+        self.invalidation.merge(InvalidationKind::Layout);
     }
 
     // Chunk: docs/chunks/syntax_highlighting - Setup syntax highlighting helper
@@ -3395,7 +3453,7 @@ impl EditorState {
         tab.setup_highlighting(&self.language_registry, theme);
 
         // Mark full viewport dirty
-        self.dirty_region.merge(DirtyRegion::FullViewport);
+        self.invalidation.merge(InvalidationKind::Layout);
 
         true
     }
@@ -3495,7 +3553,7 @@ impl EditorState {
         tab.setup_highlighting(&self.language_registry, theme);
 
         // Mark full viewport dirty
-        self.dirty_region.merge(DirtyRegion::FullViewport);
+        self.invalidation.merge(InvalidationKind::Layout);
 
         Some(merge_result)
     }
@@ -3563,7 +3621,7 @@ impl EditorState {
             self.editor.new_workspace(label, selected_dir);
         }
 
-        self.dirty_region.merge(DirtyRegion::FullViewport);
+        self.invalidation.merge(InvalidationKind::Layout);
     }
 
     /// Closes the active workspace.
@@ -3572,7 +3630,7 @@ impl EditorState {
     pub fn close_active_workspace(&mut self) {
         if self.editor.workspace_count() > 1 {
             self.editor.close_workspace(self.editor.active_workspace);
-            self.dirty_region.merge(DirtyRegion::FullViewport);
+            self.invalidation.merge(InvalidationKind::Layout);
         }
     }
 
@@ -3582,7 +3640,7 @@ impl EditorState {
     pub fn switch_workspace(&mut self, index: usize) {
         if index < self.editor.workspace_count() && index != self.editor.active_workspace {
             self.editor.switch_workspace(index);
-            self.dirty_region.merge(DirtyRegion::FullViewport);
+            self.invalidation.merge(InvalidationKind::Layout);
         }
     }
 
@@ -3646,7 +3704,7 @@ impl EditorState {
             // Sync viewport to ensure dirty region calculations work correctly
             // (must be done after pane.switch_tab so active_tab is updated)
             self.sync_active_tab_viewport();
-            self.dirty_region.merge(DirtyRegion::FullViewport);
+            self.invalidation.merge(InvalidationKind::Layout);
             // Chunk: docs/chunks/styled_line_cache - Clear cache on tab switch
             // Mark that the styled line cache should be cleared to prevent stale
             // entries from the previous buffer causing visual artifacts.
@@ -3752,7 +3810,7 @@ impl EditorState {
                     }
                 }
             }
-            self.dirty_region.merge(DirtyRegion::FullViewport);
+            self.invalidation.merge(InvalidationKind::Layout);
         }
     }
 
@@ -3823,7 +3881,7 @@ impl EditorState {
 
         // Ensure the new tab is visible in the tab bar
         self.ensure_active_tab_visible();
-        self.dirty_region.merge(DirtyRegion::FullViewport);
+        self.invalidation.merge(InvalidationKind::Layout);
     }
 
     // Chunk: docs/chunks/terminal_tab_spawn - Cmd+Shift+T terminal spawning
@@ -3963,7 +4021,7 @@ impl EditorState {
 
         // Ensure the new tab is visible in the tab bar
         self.ensure_active_tab_visible();
-        self.dirty_region.merge(DirtyRegion::FullViewport);
+        self.invalidation.merge(InvalidationKind::Layout);
     }
 
     /// Scrolls the tab bar horizontally.
@@ -3977,7 +4035,7 @@ impl EditorState {
             let current_offset = workspace.tab_bar_view_offset();
             let new_offset = (current_offset + delta).max(0.0);
             workspace.set_tab_bar_view_offset(new_offset);
-            self.dirty_region.merge(DirtyRegion::FullViewport);
+            self.invalidation.merge(InvalidationKind::Layout);
         }
     }
 
@@ -4118,7 +4176,7 @@ impl EditorState {
                 if let Some(ws) = self.editor.active_workspace_mut() {
                     ws.active_pane_id = pane_id;
                 }
-                self.dirty_region.merge(DirtyRegion::FullViewport);
+                self.invalidation.merge(InvalidationKind::Layout);
             }
 
             // Now handle the tab click (close or switch)

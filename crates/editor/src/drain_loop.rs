@@ -28,6 +28,7 @@ use objc2::rc::Retained;
 use objc2_app_kit::NSApplication;
 use objc2_foundation::{MainThreadMarker, NSString};
 
+use crate::dirty_region::InvalidationKind;
 use crate::editor_event::EditorEvent;
 use crate::editor_state::{EditorFocus, EditorState};
 use crate::event_channel::{EventReceiver, EventSender};
@@ -344,7 +345,8 @@ impl EventDrainLoop {
     fn handle_pty_wakeup(&mut self) {
         let (terminal_dirty, needs_rewakeup) = self.state.poll_agents();
         if terminal_dirty.is_dirty() {
-            self.state.dirty_region.merge(terminal_dirty);
+            // Chunk: docs/chunks/invalidation_separation - Content invalidation for PTY output
+            self.state.invalidation.merge(InvalidationKind::Content(terminal_dirty));
         }
 
         // If any terminal hit its byte budget, schedule a follow-up wakeup
@@ -360,13 +362,15 @@ impl EventDrainLoop {
     fn handle_cursor_blink(&mut self) {
         let cursor_dirty = self.state.toggle_cursor_blink();
         if cursor_dirty.is_dirty() {
-            self.state.dirty_region.merge(cursor_dirty);
+            // Chunk: docs/chunks/invalidation_separation - Content invalidation for cursor blink
+            self.state.invalidation.merge(InvalidationKind::Content(cursor_dirty));
         }
 
         // Also poll PTY events on timer tick (backup for any missed wakeups)
         let (terminal_dirty, needs_rewakeup) = self.state.poll_agents();
         if terminal_dirty.is_dirty() {
-            self.state.dirty_region.merge(terminal_dirty);
+            // Chunk: docs/chunks/invalidation_separation - Content invalidation for PTY output
+            self.state.invalidation.merge(InvalidationKind::Content(terminal_dirty));
         }
         // Schedule follow-up if needed (same logic as handle_pty_wakeup)
         if needs_rewakeup {
@@ -376,7 +380,8 @@ impl EventDrainLoop {
         // Check for picker streaming updates
         let picker_dirty = self.state.tick_picker();
         if picker_dirty.is_dirty() {
-            self.state.dirty_region.merge(picker_dirty);
+            // Chunk: docs/chunks/invalidation_separation - Overlay invalidation for picker updates
+            self.state.invalidation.merge(InvalidationKind::Overlay);
         }
     }
 
@@ -433,7 +438,8 @@ impl EventDrainLoop {
     fn poll_after_input(&mut self) {
         let (terminal_dirty, needs_rewakeup) = self.state.poll_agents();
         if terminal_dirty.is_dirty() {
-            self.state.dirty_region.merge(terminal_dirty);
+            // Chunk: docs/chunks/invalidation_separation - Content invalidation for PTY output
+            self.state.invalidation.merge(InvalidationKind::Content(terminal_dirty));
         }
         // Schedule follow-up if needed (same logic as handle_pty_wakeup)
         if needs_rewakeup {
@@ -442,7 +448,8 @@ impl EventDrainLoop {
 
         let picker_dirty = self.state.tick_picker();
         if picker_dirty.is_dirty() {
-            self.state.dirty_region.merge(picker_dirty);
+            // Chunk: docs/chunks/invalidation_separation - Overlay invalidation for picker updates
+            self.state.invalidation.merge(InvalidationKind::Overlay);
         }
     }
 
@@ -455,6 +462,7 @@ impl EventDrainLoop {
 
     /// Renders if there's a dirty region.
     /// Chunk: docs/chunks/file_picker - Conditional render_with_selector when focus is Selector
+    // Chunk: docs/chunks/invalidation_separation - Conditional layout invalidation
     fn render_if_dirty(&mut self) {
         // Update window title if needed
         self.update_window_title_if_needed();
@@ -465,8 +473,23 @@ impl EventDrainLoop {
             // configure the viewport from the active tab's viewport before rendering.
             // This ensures each pane uses its own scroll state in multi-pane mode.
 
-            // Take the dirty region
-            let _dirty = self.state.take_dirty_region();
+            // Chunk: docs/chunks/invalidation_separation - Take invalidation kind and signal layout recalc
+            // Take the invalidation kind to determine whether layout recalculation is needed
+            let invalidation = self.state.take_invalidation();
+
+            // Tell the renderer whether it needs to recalculate pane layout
+            if invalidation.requires_layout_recalc() {
+                self.renderer.invalidate_pane_layout();
+            }
+
+            // Convert to dirty region for backward compatibility with perf-instrumentation
+            let _dirty = match &invalidation {
+                InvalidationKind::None => crate::dirty_region::DirtyRegion::None,
+                InvalidationKind::Content(region) => *region,
+                InvalidationKind::Layout | InvalidationKind::Overlay => {
+                    crate::dirty_region::DirtyRegion::FullViewport
+                }
+            };
 
             // Chunk: docs/chunks/styled_line_cache - Handle styled line cache invalidation
             // Check if the cache should be fully cleared (e.g., on tab switch)
@@ -547,6 +570,13 @@ impl EventDrainLoop {
             #[cfg(feature = "perf-instrumentation")]
             if let Some((duration, line_count)) = self.renderer.take_styled_line_timing() {
                 self.perf_stats.record_styled_line_batch(duration, line_count);
+            }
+
+            // Chunk: docs/chunks/invalidation_separation - Record layout recalc stats
+            #[cfg(feature = "perf-instrumentation")]
+            {
+                let (skipped, performed) = self.renderer.layout_recalc_counters();
+                self.perf_stats.update_layout_counters(skipped, performed);
             }
 
             // Mark the frame complete for latency measurement

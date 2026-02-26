@@ -8,170 +8,356 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The goal is to separate invalidation into three distinct kinds (Content, Layout, Overlay) so the renderer can skip work that hasn't changed. Currently all invalidation flows through `DirtyRegion`, and the renderer recomputes pane layout rects on every frame regardless of whether layout actually changed.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Strategy:**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. **Replace `DirtyRegion` with `InvalidationKind`**: Create a new enum that distinguishes Content, Layout, and Overlay invalidation kinds. The existing `DirtyRegion` (None, Lines, FullViewport) maps to the content-specific screen region tracking.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/invalidation_separation/GOAL.md)
-with references to the files that you expect to touch.
--->
+2. **Add cached pane rects**: Store the computed pane rects in the renderer and only recompute them when Layout invalidation is signaled. The current `calculate_pane_rects()` call happens unconditionally in `render_with_editor()` — we'll gate it behind a layout-dirty flag.
+
+3. **Signal invalidation kind from event handlers**: Update `drain_loop.rs` event handlers and `EditorState` methods to signal the appropriate invalidation kind:
+   - Content: typing, cursor movement, cursor blink, PTY output
+   - Layout: resize, split/unsplit, tab bar changes, workspace switch
+   - Overlay: find bar toggle, selector toggle, confirm dialog
+
+4. **Conditional layout recalculation in renderer**: Modify `render_with_editor()` and `render_with_confirm_dialog()` to only call `calculate_pane_rects()` when Layout invalidation is present. For Content-only frames, reuse the cached rects.
+
+**Testing approach:** Per TESTING_PHILOSOPHY.md, the invalidation logic is pure state manipulation that can be tested without a GPU. We'll write TDD-style tests for:
+- `InvalidationKind` merge semantics (Content + Layout = Layout, etc.)
+- Cached pane rect invalidation on Layout signal
+- Event handler → invalidation kind mapping
+
+The renderer's conditional behavior is "humble view" code and will be verified by manual QA (visual correctness) plus a measurability test: assert >90% of frames during typing skip pane rect recalculation.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+- **docs/subsystems/renderer** (DOCUMENTED): This chunk USES the renderer subsystem's `Renderer` struct and modifies its rendering orchestration to conditionally skip pane rect calculation. The change aligns with the subsystem's **Layering Contract** (overlays render on top of editor content) and doesn't violate any hard invariants.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+- **docs/subsystems/viewport_scroll** (referenced in `dirty_region.rs` backreference): The existing `DirtyRegion` belongs to this subsystem's scope. We'll preserve backward compatibility by embedding `DirtyRegion` within the new `InvalidationKind::Content` variant rather than replacing it entirely.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Define InvalidationKind enum
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create a new `InvalidationKind` enum in `crates/editor/src/dirty_region.rs` (alongside the existing `DirtyRegion`):
 
-Example:
+```rust
+/// Invalidation category for rendering optimization.
+///
+/// Different invalidation kinds allow the renderer to skip work:
+/// - Content-only frames skip pane rect recalculation
+/// - Layout frames trigger full pane rect recomputation
+/// - Overlay frames render overlay layer without re-rendering content (future optimization)
+// Chunk: docs/chunks/invalidation_separation - Separate invalidation kinds
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InvalidationKind {
+    /// No invalidation
+    #[default]
+    None,
+    /// Content changed within existing layout (typing, cursor blink, PTY output)
+    /// Contains the screen-space dirty region for partial redraw optimization
+    Content(DirtyRegion),
+    /// Layout changed (pane resize, split/unsplit, tab bar change, workspace switch)
+    /// Implies full content re-render after layout recalculation
+    Layout,
+    /// Overlay changed (find bar, selector, dialog appeared/changed)
+    /// Currently treated as Layout for simplicity; future optimization could
+    /// render overlay layer only
+    Overlay,
+}
+```
 
-### Step 1: Define the SegmentHeader struct
+Implement merge semantics:
+- `None` is identity
+- `Layout` absorbs everything (highest priority)
+- `Overlay` absorbs `Content` but yields to `Layout`
+- `Content` merges underlying `DirtyRegion` values
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Add helper methods: `is_none()`, `is_layout()`, `requires_layout_recalc()`, `content_region()`.
 
-Location: src/segment/format.rs
+**Tests** (TDD — write before implementation):
+- `merge_none_with_content()`: None + Content → Content
+- `merge_content_with_layout()`: Content + Layout → Layout
+- `merge_layout_with_overlay()`: Layout + Overlay → Layout
+- `merge_content_regions()`: Content(Lines{0,5}) + Content(Lines{3,8}) → Content(Lines{0,8})
+- `requires_layout_recalc_content()`: Content.requires_layout_recalc() == false
+- `requires_layout_recalc_layout()`: Layout.requires_layout_recalc() == true
 
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
+Location: `crates/editor/src/dirty_region.rs`
 
 ---
 
-**BACKREFERENCE COMMENTS**
+### Step 2: Add cached pane rects to Renderer
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+Add a cached pane rects field to the `Renderer` struct:
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+```rust
+// In crates/editor/src/renderer/mod.rs
+pub struct Renderer {
+    // ... existing fields ...
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
+    // Chunk: docs/chunks/invalidation_separation - Cached pane layout
+    /// Cached pane rectangles from the last layout calculation.
+    /// Only recomputed when Layout invalidation is signaled.
+    cached_pane_rects: Vec<PaneRect>,
+    /// Focused pane ID from the last layout calculation.
+    cached_focused_pane_id: PaneId,
+    /// Whether the cached pane rects are valid (false until first layout)
+    pane_rects_valid: bool,
+}
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+
+Initialize `pane_rects_valid = false` in `Renderer::new()`.
+
+Add a method to invalidate the cache:
+
+```rust
+/// Marks the cached pane rects as invalid, forcing recalculation on next render.
+// Chunk: docs/chunks/invalidation_separation - Layout cache invalidation
+pub fn invalidate_pane_layout(&mut self) {
+    self.pane_rects_valid = false;
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `crates/editor/src/renderer/mod.rs`
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+---
+
+### Step 3: Replace dirty_region with invalidation in EditorState
+
+Update `EditorState` to track `InvalidationKind` instead of raw `DirtyRegion`:
+
+```rust
+// In crates/editor/src/editor_state.rs
+pub struct EditorState {
+    // Change from:
+    // pub dirty_region: DirtyRegion,
+    // To:
+    /// Accumulated invalidation for the current event batch
+    // Chunk: docs/chunks/invalidation_separation - Invalidation kind tracking
+    pub invalidation: InvalidationKind,
+    // ... rest unchanged ...
+}
+```
+
+Update all existing `.dirty_region.merge(DirtyRegion::...)` call sites to use the new invalidation system:
+
+- **Content invalidation** (most common): `self.invalidation.merge(InvalidationKind::Content(DirtyRegion::...))`
+- **Layout invalidation**: `self.invalidation.merge(InvalidationKind::Layout)`
+- **Overlay invalidation**: `self.invalidation.merge(InvalidationKind::Overlay)`
+
+**Classification of existing call sites:**
+
+| Current call | New invalidation kind | Rationale |
+|--------------|----------------------|-----------|
+| Resize (`handle_resize`) | Layout | Pane rects change |
+| Tab switch | Layout | Tab bar content changes |
+| Workspace switch | Layout | Entire layout changes |
+| Split/unsplit (`move_active_tab`) | Layout | Pane structure changes |
+| Focus switch (`switch_focus`) | Layout | Focus border changes (could be Content if we track focus border separately) |
+| Selector open/close | Overlay | Overlay layer changes |
+| Find bar open/close | Overlay | Overlay layer changes |
+| Confirm dialog | Overlay | Overlay layer changes |
+| Cursor blink | Content | Glyph changes only |
+| PTY wakeup | Content | Terminal content changes |
+| Key input (typing) | Content | Buffer content changes |
+
+Update helper methods:
+- `is_dirty()` → checks `!self.invalidation.is_none()`
+- `take_dirty_region()` → becomes `take_invalidation()` returning `InvalidationKind`
+- `mark_full_dirty()` → `self.invalidation = InvalidationKind::Layout`
+
+Location: `crates/editor/src/editor_state.rs`
+
+---
+
+### Step 4: Update drain_loop to pass InvalidationKind to renderer
+
+Modify `render_if_dirty()` in `drain_loop.rs`:
+
+```rust
+fn render_if_dirty(&mut self) {
+    // Update window title if needed
+    self.update_window_title_if_needed();
+
+    if self.state.is_dirty() {
+        // Take the invalidation kind
+        let invalidation = self.state.take_invalidation();
+
+        // Chunk: docs/chunks/invalidation_separation - Conditional layout invalidation
+        // Tell the renderer whether it needs to recalculate pane layout
+        if invalidation.requires_layout_recalc() {
+            self.renderer.invalidate_pane_layout();
+        }
+
+        // ... rest of existing render logic ...
+        // The renderer will check its pane_rects_valid flag internally
+    }
+}
+```
+
+Location: `crates/editor/src/drain_loop.rs`
+
+---
+
+### Step 5: Conditional pane rect calculation in renderer
+
+Modify `render_with_editor()` and `render_with_confirm_dialog()` to use cached pane rects:
+
+```rust
+// In render_with_editor(), replace:
+//   pane_rects = calculate_pane_rects(bounds, &ws.pane_root);
+//   focused_pane_id = ws.active_pane_id;
+// With:
+
+// Chunk: docs/chunks/invalidation_separation - Conditional pane rect calculation
+if !self.pane_rects_valid {
+    // Layout invalidation or first render: recompute pane rects
+    let bounds = (
+        RAIL_WIDTH,
+        0.0,
+        view_width - RAIL_WIDTH,
+        view_height,
+    );
+    self.cached_pane_rects = calculate_pane_rects(bounds, &ws.pane_root);
+    self.cached_focused_pane_id = ws.active_pane_id;
+    self.pane_rects_valid = true;
+}
+let pane_rects = &self.cached_pane_rects;
+let focused_pane_id = self.cached_focused_pane_id;
+```
+
+**Important**: The cache must also be invalidated when:
+- Viewport size changes (`update_viewport_size()`) — already captured by Layout invalidation from resize
+- Active pane focus changes — need to track `active_pane_id` changes
+
+Add a check for focus changes in the render path:
+
+```rust
+// Focus border needs redraw if active pane changed
+if ws.active_pane_id != self.cached_focused_pane_id {
+    self.cached_focused_pane_id = ws.active_pane_id;
+    // Focus change requires redrawing pane frames but not recalculating rects
+    // This is handled by the rendering loop already
+}
+```
+
+Location: `crates/editor/src/renderer/mod.rs`
+
+---
+
+### Step 6: Update tests and add new tests
+
+**Update existing tests:**
+- Any test that references `dirty_region` needs to be updated to use `invalidation`
+- Tests in `dirty_region.rs` remain unchanged (they test `DirtyRegion` directly)
+
+**Add new tests for InvalidationKind** (in `crates/editor/src/dirty_region.rs`):
+
+```rust
+#[cfg(test)]
+mod invalidation_tests {
+    use super::*;
+
+    #[test]
+    fn merge_none_with_content() {
+        let mut inv = InvalidationKind::None;
+        inv.merge(InvalidationKind::Content(DirtyRegion::single_line(5)));
+        assert!(matches!(inv, InvalidationKind::Content(_)));
+    }
+
+    #[test]
+    fn merge_content_with_layout() {
+        let mut inv = InvalidationKind::Content(DirtyRegion::single_line(5));
+        inv.merge(InvalidationKind::Layout);
+        assert_eq!(inv, InvalidationKind::Layout);
+    }
+
+    #[test]
+    fn merge_layout_absorbs_all() {
+        let mut inv = InvalidationKind::Layout;
+        inv.merge(InvalidationKind::Content(DirtyRegion::FullViewport));
+        inv.merge(InvalidationKind::Overlay);
+        assert_eq!(inv, InvalidationKind::Layout);
+    }
+
+    #[test]
+    fn requires_layout_recalc() {
+        assert!(!InvalidationKind::None.requires_layout_recalc());
+        assert!(!InvalidationKind::Content(DirtyRegion::FullViewport).requires_layout_recalc());
+        assert!(InvalidationKind::Layout.requires_layout_recalc());
+        assert!(!InvalidationKind::Overlay.requires_layout_recalc()); // Overlay doesn't require layout recalc
+    }
+
+    #[test]
+    fn content_region_extraction() {
+        let inv = InvalidationKind::Content(DirtyRegion::Lines { from: 3, to: 7 });
+        assert_eq!(inv.content_region(), Some(DirtyRegion::Lines { from: 3, to: 7 }));
+
+        let layout = InvalidationKind::Layout;
+        assert_eq!(layout.content_region(), None);
+    }
+}
+```
+
+Location: `crates/editor/src/dirty_region.rs`
+
+---
+
+### Step 7: Measurability verification
+
+Add a debug/instrumentation counter to verify that pane rect calculation is being skipped:
+
+```rust
+// In Renderer (only with perf-instrumentation feature)
+#[cfg(feature = "perf-instrumentation")]
+layout_recalc_skipped: usize,
+#[cfg(feature = "perf-instrumentation")]
+layout_recalc_performed: usize,
+```
+
+Increment these counters in `render_with_editor()`:
+
+```rust
+#[cfg(feature = "perf-instrumentation")]
+if self.pane_rects_valid {
+    self.layout_recalc_skipped += 1;
+} else {
+    self.layout_recalc_performed += 1;
+}
+```
+
+Add a method to report the skip rate:
+
+```rust
+#[cfg(feature = "perf-instrumentation")]
+pub fn layout_skip_rate(&self) -> f64 {
+    let total = self.layout_recalc_skipped + self.layout_recalc_performed;
+    if total == 0 { 0.0 } else { self.layout_recalc_skipped as f64 / total as f64 }
+}
+```
+
+Include this in the perf stats report. Success criteria: >90% skip rate during normal editing.
+
+Location: `crates/editor/src/renderer/mod.rs`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+None. This chunk builds on the existing `DirtyRegion` infrastructure and the recently decomposed `renderer/` module structure from the `renderer_decomposition` chunk.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Stale pane rects after focus change**: If the user switches pane focus (Ctrl+W arrow) without triggering Layout invalidation, the `cached_focused_pane_id` will be stale. Mitigated by: detecting focus ID mismatch in render and updating the focus border rendering without full pane rect recalculation.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Viewport size change detection**: The viewport size change from resize events already triggers Layout invalidation via `handle_resize()`. However, if view dimensions change through another path (e.g., display scale change), the cache could become stale. Mitigated by: `update_viewport_size()` should also set `pane_rects_valid = false`.
+
+3. **Multi-pane tab bar changes**: Opening/closing tabs changes the tab bar appearance. Currently this triggers `FullViewport` dirty. The tab bar is rendered per-pane in multi-pane mode, but the pane rects themselves don't change. This is a Content invalidation, not Layout. We may need to distinguish "tab bar content changed" from "pane structure changed."
+
+4. **Overlay invalidation optimization not implemented**: The goal mentions "Overlay invalidation renders overlay layer without re-rendering underlying content (where possible)". This PLAN treats Overlay as equivalent to Content for now (it doesn't require layout recalc). The full optimization of skipping underlying content rendering is deferred — it requires tracking whether content has changed independently of overlay state, which adds complexity.
+
+5. **Breaking change to EditorState API**: Changing `dirty_region: DirtyRegion` to `invalidation: InvalidationKind` is a breaking change for any code that directly accesses `state.dirty_region`. A search shows this field is accessed in `drain_loop.rs` and internally in `EditorState`. The change is contained to the `editor` crate.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+(To be populated during implementation)

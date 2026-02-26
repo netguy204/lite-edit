@@ -134,6 +134,21 @@ pub struct Renderer {
     /// Both the renderer and click handler must use this same value when creating
     /// WrapLayout instances to ensure consistent `cols_per_row` calculations.
     content_width_px: f32,
+    // Chunk: docs/chunks/invalidation_separation - Cached pane layout
+    /// Cached pane rectangles from the last layout calculation.
+    /// Only recomputed when Layout invalidation is signaled.
+    cached_pane_rects: Vec<PaneRect>,
+    /// Focused pane ID from the last layout calculation.
+    cached_focused_pane_id: PaneId,
+    /// Whether the cached pane rects are valid (false until first layout)
+    pane_rects_valid: bool,
+    // Chunk: docs/chunks/invalidation_separation - Perf instrumentation counters
+    /// Counter for frames where layout recalculation was skipped
+    #[cfg(feature = "perf-instrumentation")]
+    layout_recalc_skipped: usize,
+    /// Counter for frames where layout recalculation was performed
+    #[cfg(feature = "perf-instrumentation")]
+    layout_recalc_performed: usize,
 }
 
 impl Renderer {
@@ -201,6 +216,14 @@ impl Renderer {
             confirm_dialog_buffer: None,
             viewport_width_px,
             content_width_px,
+            // Chunk: docs/chunks/invalidation_separation - Initialize cached pane layout
+            cached_pane_rects: Vec::new(),
+            cached_focused_pane_id: 0,
+            pane_rects_valid: false,
+            #[cfg(feature = "perf-instrumentation")]
+            layout_recalc_skipped: 0,
+            #[cfg(feature = "perf-instrumentation")]
+            layout_recalc_performed: 0,
         }
     }
 
@@ -250,12 +273,46 @@ impl Renderer {
     /// any spurious clamping until the sync occurs.
     // Chunk: docs/chunks/resize_click_alignment - Viewport update_size now takes line count
     // Chunk: docs/chunks/wrap_click_offset - Update content_width_px on resize
+    // Chunk: docs/chunks/invalidation_separation - Invalidate pane layout on resize
     pub fn update_viewport_size(&mut self, window_width: f32, window_height: f32) {
         // Use usize::MAX since scroll is synced externally from EditorState
         self.viewport.update_size(window_height, usize::MAX);
         self.viewport_width_px = window_width;
         // Content width is viewport minus the left rail
         self.content_width_px = (window_width - RAIL_WIDTH).max(0.0);
+        // Viewport size change invalidates cached pane rects
+        self.pane_rects_valid = false;
+    }
+
+    // Chunk: docs/chunks/invalidation_separation - Layout cache invalidation
+    /// Marks the cached pane rects as invalid, forcing recalculation on next render.
+    ///
+    /// Call this when Layout invalidation is signaled. The renderer will
+    /// recompute pane rects on the next frame.
+    pub fn invalidate_pane_layout(&mut self) {
+        self.pane_rects_valid = false;
+    }
+
+    // Chunk: docs/chunks/invalidation_separation - Perf instrumentation
+    /// Returns the layout skip rate (skipped / total frames).
+    ///
+    /// This measures how effectively the invalidation system is avoiding
+    /// unnecessary layout recalculations. A higher rate means more frames
+    /// are using cached pane rects. Target: >90% during normal editing.
+    #[cfg(feature = "perf-instrumentation")]
+    pub fn layout_skip_rate(&self) -> f64 {
+        let total = self.layout_recalc_skipped + self.layout_recalc_performed;
+        if total == 0 {
+            0.0
+        } else {
+            self.layout_recalc_skipped as f64 / total as f64
+        }
+    }
+
+    /// Returns the raw layout recalc counters (skipped, performed).
+    #[cfg(feature = "perf-instrumentation")]
+    pub fn layout_recalc_counters(&self) -> (usize, usize) {
+        (self.layout_recalc_skipped, self.layout_recalc_performed)
     }
 
     /// Sets cursor visibility
@@ -640,21 +697,46 @@ impl Renderer {
         self.draw_left_rail(&encoder, view, editor);
 
         // Chunk: docs/chunks/tiling_multi_pane_render - Calculate pane rects for multi-pane rendering
-        // Calculate pane rectangles for the active workspace
+        // Chunk: docs/chunks/invalidation_separation - Conditional pane rect calculation
+        // Only recalculate pane rectangles when the cache is invalid (Layout invalidation)
+        // or when the focused pane has changed. Content-only frames reuse cached rects.
+        //
+        // Note: We clone the cached rects to avoid borrow conflicts with &mut self methods
+        // called later (render_pane, draw_pane_frames). The clone is cheap (~3-4 PaneRects).
         let pane_rects: Vec<PaneRect>;
         let focused_pane_id: PaneId;
         if let Some(ws) = editor.active_workspace() {
-            // Bounds for the pane area: starts after left rail
-            // Note: For multi-pane, each pane has its own tab bar, so y=0
-            let bounds = (
-                RAIL_WIDTH,               // x: after left rail
-                0.0,                      // y: top of window
-                view_width - RAIL_WIDTH,  // width: remaining horizontal space
-                view_height,              // height: full height
-            );
-            pane_rects = calculate_pane_rects(bounds, &ws.pane_root);
+            // Check if we need to recalculate
+            let needs_recalc = !self.pane_rects_valid
+                || ws.active_pane_id != self.cached_focused_pane_id;
+
+            if needs_recalc {
+                // Bounds for the pane area: starts after left rail
+                // Note: For multi-pane, each pane has its own tab bar, so y=0
+                let bounds = (
+                    RAIL_WIDTH,               // x: after left rail
+                    0.0,                      // y: top of window
+                    view_width - RAIL_WIDTH,  // width: remaining horizontal space
+                    view_height,              // height: full height
+                );
+                self.cached_pane_rects = calculate_pane_rects(bounds, &ws.pane_root);
+                self.cached_focused_pane_id = ws.active_pane_id;
+                self.pane_rects_valid = true;
+                #[cfg(feature = "perf-instrumentation")]
+                {
+                    self.layout_recalc_performed += 1;
+                }
+            } else {
+                #[cfg(feature = "perf-instrumentation")]
+                {
+                    self.layout_recalc_skipped += 1;
+                }
+            }
+            // Clone to avoid borrow conflicts with &mut self methods below
+            pane_rects = self.cached_pane_rects.clone();
             focused_pane_id = ws.active_pane_id;
         } else {
+            // No active workspace - empty rects
             pane_rects = Vec::new();
             focused_pane_id = 0;
         }
@@ -873,19 +955,40 @@ impl Renderer {
         // Render left rail first (background layer)
         self.draw_left_rail(&encoder, view, editor);
 
-        // Calculate pane rectangles for the active workspace
+        // Chunk: docs/chunks/invalidation_separation - Conditional pane rect calculation
+        // Calculate pane rectangles for the active workspace (with caching)
+        // Clone cached rects to avoid borrow conflicts with &mut self methods below.
         let pane_rects: Vec<PaneRect>;
         let focused_pane_id: PaneId;
         if let Some(ws) = editor.active_workspace() {
-            let bounds = (
-                RAIL_WIDTH,
-                0.0,
-                view_width - RAIL_WIDTH,
-                view_height,
-            );
-            pane_rects = calculate_pane_rects(bounds, &ws.pane_root);
+            // Check if we need to recalculate
+            let needs_recalc = !self.pane_rects_valid
+                || ws.active_pane_id != self.cached_focused_pane_id;
+
+            if needs_recalc {
+                let bounds = (
+                    RAIL_WIDTH,
+                    0.0,
+                    view_width - RAIL_WIDTH,
+                    view_height,
+                );
+                self.cached_pane_rects = calculate_pane_rects(bounds, &ws.pane_root);
+                self.cached_focused_pane_id = ws.active_pane_id;
+                self.pane_rects_valid = true;
+                #[cfg(feature = "perf-instrumentation")]
+                {
+                    self.layout_recalc_performed += 1;
+                }
+            } else {
+                #[cfg(feature = "perf-instrumentation")]
+                {
+                    self.layout_recalc_skipped += 1;
+                }
+            }
+            pane_rects = self.cached_pane_rects.clone();
             focused_pane_id = ws.active_pane_id;
         } else {
+            // No active workspace - empty rects
             pane_rects = Vec::new();
             focused_pane_id = 0;
         }

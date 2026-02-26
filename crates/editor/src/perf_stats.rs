@@ -50,6 +50,11 @@ pub struct PerfStats {
     styled_cursor: usize,
     /// Whether the styled_line ring buffer has wrapped.
     styled_full: bool,
+    // Chunk: docs/chunks/invalidation_separation - Layout recalc counters
+    /// Number of frames where layout recalculation was skipped.
+    layout_skipped: u64,
+    /// Number of frames where layout recalculation was performed.
+    layout_performed: u64,
 }
 
 impl PerfStats {
@@ -67,6 +72,9 @@ impl PerfStats {
             styled_line_costs: Vec::with_capacity(RING_CAP),
             styled_cursor: 0,
             styled_full: false,
+            // Chunk: docs/chunks/invalidation_separation - Initialize layout counters
+            layout_skipped: 0,
+            layout_performed: 0,
         }
     }
 
@@ -106,6 +114,16 @@ impl PerfStats {
             &mut self.styled_full,
             (duration, line_count),
         );
+    }
+
+    // Chunk: docs/chunks/invalidation_separation - Record layout recalc stats from renderer
+    /// Updates layout recalc stats from the renderer's counters.
+    ///
+    /// This should be called after each render with the renderer's
+    /// `layout_recalc_counters()` values.
+    pub fn update_layout_counters(&mut self, skipped: usize, performed: usize) {
+        self.layout_skipped = skipped as u64;
+        self.layout_performed = performed as u64;
     }
 
     /// Returns `true` every `AUTO_REPORT_INTERVAL` frames.
@@ -169,6 +187,21 @@ impl PerfStats {
                 fmt_duration(p95),
                 fmt_duration(p99),
                 avg_lines,
+            ));
+        }
+
+        // Chunk: docs/chunks/invalidation_separation - Layout skip rate
+        // --- Layout recalculation ---
+        let total_layout = self.layout_skipped + self.layout_performed;
+        if total_layout == 0 {
+            out.push_str("  Layout recalc:         (no data)\n");
+        } else {
+            let skip_rate = (self.layout_skipped as f64 / total_layout as f64) * 100.0;
+            out.push_str(&format!(
+                "  Layout recalc:         skipped={} performed={} skip_rate={:.1}%\n",
+                self.layout_skipped,
+                self.layout_performed,
+                skip_rate,
             ));
         }
 
