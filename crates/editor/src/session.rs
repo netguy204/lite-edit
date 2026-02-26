@@ -430,6 +430,7 @@ impl SessionData {
                 .expect("workspace was just created");
 
             // Replace the default pane layout with the restored layout
+            // Chunk: docs/chunks/pane_mirror_restore - Track next_pane_id to avoid ID collisions
             let mut next_pane_id = 0u64;
             workspace.pane_root = ws_data.pane_root.into_node(
                 workspace.id,
@@ -437,6 +438,11 @@ impl SessionData {
                 line_height,
                 &mut next_tab_id,
             );
+            // Sync next_pane_id back to workspace to prevent ID collisions
+            // when creating new panes after session restore. Without this,
+            // new panes could get IDs that conflict with restored panes,
+            // causing input duplication and render mirroring bugs.
+            workspace.set_next_pane_id(next_pane_id);
 
             // Find the active pane ID if it exists in the restored tree
             if workspace.pane_root.contains_pane(ws_data.active_pane_id) {

@@ -1,8 +1,13 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/editor/src/session.rs
+- crates/editor/src/workspace.rs
+- crates/editor/src/renderer/panes.rs
+- crates/editor/src/renderer/mod.rs
+- crates/editor/tests/session_persistence.rs
 code_references: []
 narrative: null
 investigation: null
@@ -10,9 +15,15 @@ subsystems: []
 friction_entries: []
 bug_type: semantic
 depends_on: []
-created_after: ["focus_stack", "grapheme_cluster_awareness", "invalidation_separation", "quad_buffer_prealloc", "renderer_decomposition", "styled_line_cache", "unicode_ime_input"]
+created_after:
+- focus_stack
+- grapheme_cluster_awareness
+- invalidation_separation
+- quad_buffer_prealloc
+- renderer_decomposition
+- styled_line_cache
+- unicode_ime_input
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
