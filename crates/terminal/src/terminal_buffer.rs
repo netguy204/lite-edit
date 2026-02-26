@@ -691,7 +691,9 @@ impl TerminalBuffer {
             let cells: Vec<_> = (0..cols)
                 .map(|col| &row[alacritty_terminal::index::Column(col)])
                 .collect();
-            let styled = row_to_styled_line(cells.iter().copied(), cols);
+            // Cold storage: always strip INVERSE since these lines were in the
+            // viewport when cursor INVERSE may have been active.
+            let styled = row_to_styled_line(cells.iter().copied(), cols, true);
 
             if cold.append(&styled).is_err() {
                 // Stop on error
@@ -731,6 +733,12 @@ impl TerminalBuffer {
         let cols = self.size.0;
         let history_len = grid.history_size();
         let screen_lines = grid.screen_lines();
+        // Strip INVERSE when the terminal cursor is visible. Shells (zsh ZLE)
+        // use SGR 7 to mark the cursor position, which bakes INVERSE into cells.
+        // We render the cursor as a separate overlay quad (Phase 5), so we strip
+        // the shell's cursor INVERSE to avoid ghost highlights. TUI apps that use
+        // INVERSE legitimately always hide the cursor first (ESC[?25l).
+        let strip_inverse = self.term.mode().contains(TermMode::SHOW_CURSOR);
 
         // Adjust for the lines we've already captured to cold storage
         // The "hot" region starts after cold_line_count in the logical view
@@ -807,7 +815,7 @@ impl TerminalBuffer {
             let cells: Vec<_> = (0..cols)
                 .map(|col| &row[alacritty_terminal::index::Column(col)])
                 .collect();
-            Some(row_to_styled_line(cells.iter().copied(), cols))
+            Some(row_to_styled_line(cells.iter().copied(), cols, strip_inverse))
         } else {
             // This line is in the viewport
             let viewport_line = line - history_len;
@@ -818,7 +826,7 @@ impl TerminalBuffer {
             let cells: Vec<_> = (0..cols)
                 .map(|col| &row[alacritty_terminal::index::Column(col)])
                 .collect();
-            Some(row_to_styled_line(cells.iter().copied(), cols))
+            Some(row_to_styled_line(cells.iter().copied(), cols, strip_inverse))
         }
     }
 
@@ -827,6 +835,9 @@ impl TerminalBuffer {
         let grid = self.term.grid();
         let cols = self.size.0;
         let screen_lines = grid.screen_lines();
+        // Alt screen: TUI apps that use INVERSE hide the cursor, so only strip
+        // when SHOW_CURSOR is still active (unusual but possible).
+        let strip_inverse = self.term.mode().contains(TermMode::SHOW_CURSOR);
 
         if line >= screen_lines {
             return None;
@@ -835,7 +846,7 @@ impl TerminalBuffer {
         let cells: Vec<_> = (0..cols)
             .map(|col| &row[alacritty_terminal::index::Column(col)])
             .collect();
-        Some(row_to_styled_line(cells.iter().copied(), cols))
+        Some(row_to_styled_line(cells.iter().copied(), cols, strip_inverse))
     }
 }
 
@@ -1488,5 +1499,115 @@ mod tests {
             assert!(text.starts_with(&input),
                 "Content should start with '{}', got '{}'", input, text);
         }
+    }
+
+    /// Check cell backgrounds after typing and moving cursor to a new line.
+    /// This simulates what happens in a real shell session where after pressing
+    /// Enter, the cursor moves to the next line, leaving the previous line behind.
+    #[test]
+    fn test_cell_backgrounds_after_cursor_moves_away() {
+        use alacritty_terminal::term::cell::Flags;
+        use alacritty_terminal::index::Column;
+        use alacritty_terminal::vte::ansi::{Color as VteColor, NamedColor as VteNamedColor};
+
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+        // Type "hello" on line 0
+        terminal.feed_bytes(b"hello");
+
+        // Cursor should be at column 5 on line 0
+        let grid = terminal.term.grid();
+        let cursor = grid.cursor.point;
+        assert_eq!(cursor.column.0, 5);
+
+        // Check backgrounds of all cells on line 0, especially at cursor position
+        let row = &grid[cursor.line];
+        for col_idx in 0..10 {
+            let cell = &row[Column(col_idx)];
+            let is_default_bg = cell.bg == VteColor::Named(VteNamedColor::Background);
+            assert!(
+                is_default_bg,
+                "Cell at col {} has non-default bg={:?} (char='{}', flags={:?})",
+                col_idx, cell.bg, cell.c, cell.flags
+            );
+        }
+
+        // Now move to next line (simulating Enter)
+        terminal.feed_bytes(b"\r\n");
+
+        // Check that cells on the PREVIOUS line (line 0) still have default backgrounds
+        let grid = terminal.term.grid();
+        let row_line0 = &grid[alacritty_terminal::index::Line(0)];
+        for col_idx in 0..10 {
+            let cell = &row_line0[Column(col_idx)];
+            let is_default_bg = cell.bg == VteColor::Named(VteNamedColor::Background);
+            assert!(
+                is_default_bg,
+                "After newline: line 0, col {} has non-default bg={:?} (char='{}', flags={:?})",
+                col_idx, cell.bg, cell.c, cell.flags
+            );
+        }
+
+        // Type "world" on line 1
+        terminal.feed_bytes(b"world");
+
+        // Check line 0 again - should still have default backgrounds
+        let grid = terminal.term.grid();
+        let row_line0 = &grid[alacritty_terminal::index::Line(0)];
+        for col_idx in 0..10 {
+            let cell = &row_line0[Column(col_idx)];
+            let is_default_bg = cell.bg == VteColor::Named(VteNamedColor::Background);
+            assert!(
+                is_default_bg,
+                "After typing on line 1: line 0, col {} has non-default bg={:?} (char='{}', flags={:?})",
+                col_idx, cell.bg, cell.c, cell.flags
+            );
+        }
+    }
+
+    // =========================================================================
+    // Cursor Overlay Tests
+    // Chunk: docs/chunks/terminal_cursor_shading - INVERSE stripping for cursor overlay
+    // =========================================================================
+
+    #[test]
+    fn test_inverse_stripped_when_cursor_visible() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+        // Feed text with explicit SGR 7 (INVERSE) while cursor is visible (default)
+        terminal.feed_bytes(b"\x1b[7mINVERSE\x1b[0m");
+
+        // Cursor is visible by default (SHOW_CURSOR is on).
+        // INVERSE should be stripped because we render cursor as overlay.
+        let line = terminal.styled_line(0).unwrap();
+        for span in &line.spans {
+            if span.text.contains("INVERSE") {
+                assert!(
+                    !span.style.inverse,
+                    "INVERSE should be stripped when cursor is visible"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_inverse_preserved_when_cursor_hidden() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+        // Hide cursor first (like TUI apps do), then output INVERSE text
+        // \x1b[?25l = hide cursor, \x1b[7m = inverse, \x1b[0m = reset
+        terminal.feed_bytes(b"\x1b[?25l\x1b[7mINVERSE\x1b[0m");
+
+        // Cursor is hidden (SHOW_CURSOR is off).
+        // INVERSE should be preserved for TUI app styling.
+        let line = terminal.styled_line(0).unwrap();
+        let mut found = false;
+        for span in &line.spans {
+            if span.text.contains("INVERSE") && span.style.inverse {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "INVERSE should be preserved when cursor is hidden");
     }
 }

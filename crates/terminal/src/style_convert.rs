@@ -117,7 +117,12 @@ pub fn cell_to_style(cell: &Cell) -> Style {
 /// This function iterates through cells, coalescing adjacent cells with identical
 /// styles into spans. It handles wide characters (WIDE_CHAR flag) and skips
 /// the spacer cells that follow wide characters (WIDE_CHAR_SPACER flag).
-pub fn row_to_styled_line<'a, I>(cells: I, num_cols: usize) -> StyledLine
+///
+/// When `strip_inverse` is true, the INVERSE flag is cleared from all cells.
+/// This is used when the terminal cursor is visible (SHOW_CURSOR mode) so that
+/// cursor-related INVERSE from the shell (e.g. zsh ZLE) doesn't leak into
+/// rendered content. Our renderer draws the cursor as a separate overlay quad.
+pub fn row_to_styled_line<'a, I>(cells: I, num_cols: usize, strip_inverse: bool) -> StyledLine
 where
     I: IntoIterator<Item = &'a Cell>,
 {
@@ -139,7 +144,10 @@ where
             continue;
         }
 
-        let style = cell_to_style(cell);
+        let mut style = cell_to_style(cell);
+        if strip_inverse {
+            style.inverse = false;
+        }
         let ch = cell.c;
 
         // Get the character to render
@@ -310,7 +318,7 @@ mod tests {
     #[test]
     fn test_empty_row() {
         let cells: Vec<Cell> = Vec::new();
-        let line = row_to_styled_line(cells.iter(), 80);
+        let line = row_to_styled_line(cells.iter(), 80, false);
         assert!(line.is_empty());
     }
 
@@ -327,7 +335,7 @@ mod tests {
             })
             .collect();
 
-        let line = row_to_styled_line(cells.iter(), 80);
+        let line = row_to_styled_line(cells.iter(), 80, false);
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].text, "Hello");
     }
@@ -536,7 +544,7 @@ mod tests {
             cells.push(cell);
         }
 
-        let line = row_to_styled_line(cells.iter(), 80);
+        let line = row_to_styled_line(cells.iter(), 80, false);
 
         // Should have two spans with different styles
         assert_eq!(line.spans.len(), 2);
@@ -557,7 +565,7 @@ mod tests {
             cells.push(cell);
         }
 
-        let line = row_to_styled_line(cells.iter(), 80);
+        let line = row_to_styled_line(cells.iter(), 80, false);
 
         // Should have a single span
         assert_eq!(line.spans.len(), 1);
@@ -585,7 +593,7 @@ mod tests {
             })
             .collect();
 
-        let line = row_to_styled_line(cells.iter(), 80);
+        let line = row_to_styled_line(cells.iter(), 80, false);
 
         // Should have 4 spans (each character is different from the previous)
         assert_eq!(line.spans.len(), 4);
@@ -624,7 +632,7 @@ mod tests {
             cells.push(cell);
         }
 
-        let line = row_to_styled_line(cells.iter(), 80);
+        let line = row_to_styled_line(cells.iter(), 80, false);
 
         assert_eq!(line.spans.len(), 3);
         assert!(line.spans[0].style.bold);

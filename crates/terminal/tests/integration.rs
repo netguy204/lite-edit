@@ -496,9 +496,11 @@ fn test_bold_attribute_captured() {
 fn test_inverse_attribute_captured() {
     let mut terminal = TerminalBuffer::new(80, 24, 1000);
 
-    // Output inverse text: \e[7m sets inverse video, \e[0m resets
+    // Hide cursor first, then output inverse text.
+    // When SHOW_CURSOR is off (as in TUI apps), INVERSE is preserved.
+    // \e[?25l hides cursor, \e[7m sets inverse video, \e[0m resets.
     terminal
-        .spawn_command("printf", &["\\033[7mINVERSE\\033[0m"], Path::new("/tmp"))
+        .spawn_command("printf", &["\\033[?25l\\033[7mINVERSE\\033[0m"], Path::new("/tmp"))
         .unwrap();
 
     // Wait for output
