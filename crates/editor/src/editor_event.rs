@@ -57,6 +57,22 @@ pub enum EditorEvent {
     /// within the workspace was modified by an external process. The path
     /// is absolute.
     FileChanged(PathBuf),
+
+    // Chunk: docs/chunks/deletion_rename_handling - External file deletion detection
+    /// A file was deleted externally (from disk)
+    ///
+    /// This event is sent when the filesystem watcher detects that a file
+    /// with an open buffer was removed by an external process. The path
+    /// is absolute.
+    FileDeleted(PathBuf),
+
+    // Chunk: docs/chunks/deletion_rename_handling - External file rename detection
+    /// A file was renamed externally
+    ///
+    /// This event is sent when the filesystem watcher detects that a file
+    /// with an open buffer was renamed by an external process. Both paths
+    /// are absolute.
+    FileRenamed { from: PathBuf, to: PathBuf },
 }
 
 impl EditorEvent {
@@ -75,11 +91,13 @@ impl EditorEvent {
 
     // Chunk: docs/chunks/terminal_flood_starvation - Input-first event partitioning
     // Chunk: docs/chunks/file_change_events - FileChanged is a priority event
+    // Chunk: docs/chunks/deletion_rename_handling - FileDeleted and FileRenamed are priority events
     /// Returns true if this event should be processed before PTY wakeup events.
     ///
     /// Priority events include all user input events plus Resize (window resize
-    /// should be responsive) and FileChanged (external edits should be processed
-    /// promptly). CursorBlink is NOT included since it's cosmetic.
+    /// should be responsive) and file change events (external edits, deletions,
+    /// and renames should be processed promptly). CursorBlink is NOT included
+    /// since it's cosmetic.
     /// This ensures input latency is bounded by the cost of processing priority
     /// events, not by accumulated terminal output.
     pub fn is_priority_event(&self) -> bool {
@@ -91,6 +109,8 @@ impl EditorEvent {
                 | EditorEvent::FileDrop(_)
                 | EditorEvent::Resize
                 | EditorEvent::FileChanged(_)
+                | EditorEvent::FileDeleted(_)
+                | EditorEvent::FileRenamed { .. }
         )
     }
 
@@ -169,6 +189,38 @@ mod tests {
     #[test]
     fn test_file_changed_is_not_user_input() {
         let event = EditorEvent::FileChanged(PathBuf::from("/path/to/file.rs"));
+        assert!(!event.is_user_input());
+    }
+
+    // Chunk: docs/chunks/deletion_rename_handling - Tests for FileDeleted event
+    #[test]
+    fn test_file_deleted_is_priority() {
+        let event = EditorEvent::FileDeleted(PathBuf::from("/path/to/file.rs"));
+        assert!(event.is_priority_event());
+    }
+
+    #[test]
+    fn test_file_deleted_is_not_user_input() {
+        let event = EditorEvent::FileDeleted(PathBuf::from("/path/to/file.rs"));
+        assert!(!event.is_user_input());
+    }
+
+    // Chunk: docs/chunks/deletion_rename_handling - Tests for FileRenamed event
+    #[test]
+    fn test_file_renamed_is_priority() {
+        let event = EditorEvent::FileRenamed {
+            from: PathBuf::from("/path/to/old.rs"),
+            to: PathBuf::from("/path/to/new.rs"),
+        };
+        assert!(event.is_priority_event());
+    }
+
+    #[test]
+    fn test_file_renamed_is_not_user_input() {
+        let event = EditorEvent::FileRenamed {
+            from: PathBuf::from("/path/to/old.rs"),
+            to: PathBuf::from("/path/to/new.rs"),
+        };
         assert!(!event.is_user_input());
     }
 

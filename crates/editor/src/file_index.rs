@@ -41,6 +41,32 @@ use crate::file_change_debouncer::FileChangeDebouncer;
 /// a file within the workspace. The path is absolute.
 pub type FileChangeCallback = Box<dyn Fn(PathBuf) + Send + Sync>;
 
+// Chunk: docs/chunks/deletion_rename_handling - Callback types for deletion and rename events
+/// Type alias for the file deletion callback.
+///
+/// The callback is invoked immediately (no debouncing) when a file is deleted.
+/// The path is absolute.
+pub type FileDeletedCallback = Box<dyn Fn(PathBuf) + Send + Sync>;
+
+/// Type alias for the file rename callback.
+///
+/// The callback is invoked immediately (no debouncing) when a file is renamed.
+/// Both paths are absolute: `from` is the old path, `to` is the new path.
+pub type FileRenamedCallback = Box<dyn Fn(PathBuf, PathBuf) + Send + Sync>;
+
+// Chunk: docs/chunks/deletion_rename_handling - Bundle of file event callbacks
+/// Internal struct bundling all file event callbacks.
+///
+/// This is used to pass callbacks cleanly to the watcher thread.
+struct FileEventCallbacks {
+    /// Callback for content changes (debounced).
+    on_change: Option<Arc<FileChangeCallback>>,
+    /// Callback for file deletions (immediate).
+    on_delete: Option<Arc<FileDeletedCallback>>,
+    /// Callback for file renames (immediate).
+    on_rename: Option<Arc<FileRenamedCallback>>,
+}
+
 /// Maximum number of entries in the recency list.
 const MAX_RECENCY_ENTRIES: usize = 50;
 
@@ -88,7 +114,12 @@ impl FileIndex {
     /// Loads the persisted recency list from `<root>/.lite-edit-recent` if it exists.
     /// Returns immediately; the walk proceeds concurrently.
     pub fn start(root: PathBuf) -> Self {
-        Self::start_internal(root, None)
+        let callbacks = FileEventCallbacks {
+            on_change: None,
+            on_delete: None,
+            on_rename: None,
+        };
+        Self::start_internal(root, callbacks)
     }
 
     // Chunk: docs/chunks/file_change_events - File change callback support
@@ -109,11 +140,48 @@ impl FileIndex {
     where
         F: Fn(PathBuf) + Send + Sync + 'static,
     {
-        Self::start_internal(root, Some(Box::new(callback)))
+        let callbacks = FileEventCallbacks {
+            on_change: Some(Arc::new(Box::new(callback))),
+            on_delete: None,
+            on_rename: None,
+        };
+        Self::start_internal(root, callbacks)
     }
 
-    /// Internal constructor that handles both with and without callback.
-    fn start_internal(root: PathBuf, callback: Option<FileChangeCallback>) -> Self {
+    // Chunk: docs/chunks/deletion_rename_handling - File index with all event callbacks
+    /// Start indexing `root` with callbacks for file change, delete, and rename events.
+    ///
+    /// Like `start_with_callback()`, but also supports callbacks for file deletion
+    /// and rename events. Content changes are debounced (100ms), but deletions and
+    /// renames are delivered immediately.
+    ///
+    /// # Arguments
+    ///
+    /// * `root` - The root directory to index
+    /// * `on_change` - Called when a file's content is modified (debounced)
+    /// * `on_delete` - Called when a file is deleted (immediate)
+    /// * `on_rename` - Called when a file is renamed (immediate, from -> to)
+    pub fn start_with_callbacks<C, D, R>(
+        root: PathBuf,
+        on_change: Option<C>,
+        on_delete: Option<D>,
+        on_rename: Option<R>,
+    ) -> Self
+    where
+        C: Fn(PathBuf) + Send + Sync + 'static,
+        D: Fn(PathBuf) + Send + Sync + 'static,
+        R: Fn(PathBuf, PathBuf) + Send + Sync + 'static,
+    {
+        let callbacks = FileEventCallbacks {
+            on_change: on_change.map(|f| Arc::new(Box::new(f) as FileChangeCallback)),
+            on_delete: on_delete.map(|f| Arc::new(Box::new(f) as FileDeletedCallback)),
+            on_rename: on_rename.map(|f| Arc::new(Box::new(f) as FileRenamedCallback)),
+        };
+        Self::start_internal(root, callbacks)
+    }
+
+    /// Internal constructor that handles both with and without callbacks.
+    fn start_internal(root: PathBuf, callbacks: FileEventCallbacks) -> Self {
         let recency = load_recency(&root);
         let state = Arc::new(Mutex::new(SharedState {
             cache: Vec::new(),
@@ -176,8 +244,6 @@ impl FileIndex {
         let watcher_state = Arc::clone(&state);
         let watcher_version = Arc::clone(&version);
         let watcher_root = root.clone();
-        // Wrap callback in Arc for sharing with the watcher thread
-        let callback = callback.map(Arc::new);
 
         let watcher_handle = thread::spawn(move || {
             process_watcher_events(
@@ -186,7 +252,7 @@ impl FileIndex {
                 &watcher_version,
                 event_rx,
                 stop_rx,
-                callback,
+                callbacks,
             );
         });
 
@@ -493,18 +559,20 @@ fn walk_directory(
 // =============================================================================
 
 // Chunk: docs/chunks/file_change_events - File content change callback
+// Chunk: docs/chunks/deletion_rename_handling - File deletion and rename callbacks
 /// Processes filesystem watcher events.
 ///
 /// Handles path cache updates (create/delete/rename) and optionally forwards
-/// file content change events to a callback. Content changes are debounced to
-/// coalesce rapid successive writes.
+/// file events to callbacks:
+/// - Content changes are debounced (100ms) to coalesce rapid successive writes
+/// - Deletions and renames are delivered immediately (no debouncing)
 fn process_watcher_events(
     root: &Path,
     state: &Arc<Mutex<SharedState>>,
     version: &Arc<AtomicU64>,
     event_rx: Receiver<Event>,
     stop_rx: Receiver<()>,
-    callback: Option<Arc<FileChangeCallback>>,
+    callbacks: FileEventCallbacks,
 ) {
     // Debouncer for file content changes (only used if callback is provided)
     let mut debouncer = FileChangeDebouncer::with_default();
@@ -519,7 +587,7 @@ fn process_watcher_events(
         // The 100ms timeout also serves as our debounce flush interval
         match event_rx.recv_timeout(std::time::Duration::from_millis(100)) {
             Ok(event) => {
-                handle_fs_event(root, state, version, &event, &mut debouncer);
+                handle_fs_event(root, state, version, &event, &mut debouncer, &callbacks);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 // No event received, but we still need to flush the debouncer
@@ -528,7 +596,7 @@ fn process_watcher_events(
         }
 
         // Flush any debounced content changes that are ready
-        if let Some(ref cb) = callback {
+        if let Some(ref cb) = callbacks.on_change {
             let now = Instant::now();
             for path in debouncer.flush_ready(now) {
                 cb(path);
@@ -538,17 +606,20 @@ fn process_watcher_events(
 }
 
 // Chunk: docs/chunks/file_change_events - Handle content modification events
+// Chunk: docs/chunks/deletion_rename_handling - Handle deletion and rename events
 /// Handles a single filesystem event.
 ///
 /// Updates the path cache for create/delete/rename events. For content
 /// modification events (`Modify(Data(Content))`), registers the path with
-/// the debouncer for later emission.
+/// the debouncer for later emission. For deletion and rename events,
+/// immediately invokes the corresponding callback (if provided).
 fn handle_fs_event(
     root: &Path,
     state: &Arc<Mutex<SharedState>>,
     version: &Arc<AtomicU64>,
     event: &Event,
     debouncer: &mut FileChangeDebouncer,
+    callbacks: &FileEventCallbacks,
 ) {
     let mut changed = false;
 
@@ -578,24 +649,75 @@ fn handle_fs_event(
                 let mut state = state.lock().unwrap();
                 state.cache.retain(|p| p != &relative);
                 changed = true;
+
+                // Chunk: docs/chunks/deletion_rename_handling - Invoke deletion callback
+                // Invoke callback with absolute path (no debouncing)
+                if let Some(ref cb) = callbacks.on_delete {
+                    cb(path.clone());
+                }
             }
-            EventKind::Modify(ModifyKind::Name(_)) => {
-                // Rename: this is sent for both old and new paths
-                // We need to handle both add and remove
-                let mut state = state.lock().unwrap();
-                if path.exists() && path.is_file() {
-                    // New path (target of rename)
-                    if !state.cache.contains(&relative) {
-                        state.cache.push(relative.clone());
-                        state.cache.sort();
-                        changed = true;
+            // Chunk: docs/chunks/deletion_rename_handling - Handle rename events
+            // notify sends rename events in different modes depending on the platform:
+            // - RenameMode::Both: event.paths = [from, to] (ideal case, e.g., on Linux with inotify)
+            // - RenameMode::From/To/Any: separate events for source and target
+            EventKind::Modify(ModifyKind::Name(rename_mode)) => {
+                use notify::event::RenameMode;
+
+                match rename_mode {
+                    RenameMode::Both => {
+                        // RenameMode::Both: event.paths = [from, to]
+                        // This is the ideal case - we have both paths in one event
+                        if event.paths.len() >= 2 {
+                            let from_path = &event.paths[0];
+                            let to_path = &event.paths[1];
+
+                            // Update cache: remove old, add new
+                            if let (Ok(from_rel), Ok(to_rel)) =
+                                (from_path.strip_prefix(root), to_path.strip_prefix(root))
+                            {
+                                if !is_excluded(from_rel) || !is_excluded(to_rel) {
+                                    let mut state = state.lock().unwrap();
+                                    state.cache.retain(|p| p != from_rel);
+                                    if to_path.is_file() && !is_excluded(to_rel) &&
+                                       !state.cache.contains(&to_rel.to_path_buf()) {
+                                        state.cache.push(to_rel.to_path_buf());
+                                        state.cache.sort();
+                                    }
+                                    changed = true;
+                                }
+                            }
+
+                            // Invoke rename callback with both paths
+                            if let Some(ref cb) = callbacks.on_rename {
+                                cb(from_path.clone(), to_path.clone());
+                            }
+                        }
+                        // Skip the normal per-path loop processing since we handled both paths
+                        continue;
                     }
-                } else {
-                    // Old path (source of rename)
-                    let len_before = state.cache.len();
-                    state.cache.retain(|p| p != &relative);
-                    if state.cache.len() != len_before {
-                        changed = true;
+                    _ => {
+                        // RenameMode::From, To, or Any: separate events for source and target
+                        // We handle both add and remove based on whether the path exists
+                        let mut state = state.lock().unwrap();
+                        if path.exists() && path.is_file() {
+                            // New path (target of rename)
+                            if !state.cache.contains(&relative) {
+                                state.cache.push(relative.clone());
+                                state.cache.sort();
+                                changed = true;
+                            }
+                        } else {
+                            // Old path (source of rename)
+                            let len_before = state.cache.len();
+                            state.cache.retain(|p| p != &relative);
+                            if state.cache.len() != len_before {
+                                changed = true;
+                            }
+                        }
+                        // Note: For non-Both modes, we can't invoke the rename callback
+                        // because we don't have both paths in a single event.
+                        // The user will see a FileDeleted for the old path followed by
+                        // a Create for the new path (or vice versa depending on platform).
                     }
                 }
             }

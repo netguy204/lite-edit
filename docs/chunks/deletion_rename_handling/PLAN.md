@@ -8,170 +8,395 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk extends the `FileChanged` event infrastructure (from `file_change_events`) to handle two additional filesystem event types: file deletion and file rename. The implementation follows the existing patterns established by that chunk.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**For file deletion (`Remove` events):**
+- Add a new `EditorEvent::FileDeleted(PathBuf)` variant
+- Forward `Remove` events from the `FileIndex` watcher for files with open buffers
+- Show a confirm dialog with "Save" (recreate file) and "Abandon" (close tab) options
+- Reuse the existing `ConfirmDialog` infrastructure with custom button labels
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+**For file rename (`Modify(Name(_))` events):**
+- Add a new `EditorEvent::FileRenamed { from: PathBuf, to: PathBuf }` variant
+- Forward rename events from the `FileIndex` watcher with both old and new paths
+- Update `tab.associated_file` to the new path
+- Update the tab label to reflect the new filename
+- Re-evaluate syntax highlighting if the file extension changed
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/deletion_rename_handling/GOAL.md)
-with references to the files that you expect to touch.
--->
+**Key design decisions:**
+
+1. **Event routing**: Like `FileChanged`, these events are routed through the existing `EditorEvent` channel and drain loop. They are priority events (processed before PTY wakeup).
+
+2. **Buffer matching**: The drain loop will iterate over all workspaces and tabs to find any tab whose `associated_file` matches the affected path. Multiple tabs can show the same file, so all must be updated.
+
+3. **Confirm dialog**: For file deletion, we reuse the `ConfirmDialogContext` enum by adding a new `FileDeletedFromDisk` variant. The dialog uses `ConfirmDialog::with_labels()` for "Save"/"Abandon" button text.
+
+4. **Syntax re-evaluation**: When a file is renamed and the extension changes (e.g., `.txt` → `.rs`), we call `Tab::setup_highlighting()` to re-detect the language and create a new highlighter.
+
+**Testing approach (per TESTING_PHILOSOPHY.md):**
+
+- Unit tests for event variant construction and properties
+- Unit tests for the path-matching logic (finding tabs for a given path)
+- Unit tests for tab label update logic
+- Unit tests for extension change detection
+- Integration tests (marked `#[ignore]`) for end-to-end event flow
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No existing subsystems are directly relevant to this work. This chunk extends the file watcher infrastructure established by `file_change_events`.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add `FileDeleted` and `FileRenamed` event variants
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add two new variants to `EditorEvent` in `crates/editor/src/editor_event.rs`:
 
-Example:
+```rust
+// Chunk: docs/chunks/deletion_rename_handling - External file deletion detection
+/// A file was deleted externally (from disk)
+///
+/// This event is sent when the filesystem watcher detects that a file
+/// with an open buffer was removed by an external process. The path
+/// is absolute.
+FileDeleted(PathBuf),
 
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+// Chunk: docs/chunks/deletion_rename_handling - External file rename detection
+/// A file was renamed externally
+///
+/// This event is sent when the filesystem watcher detects that a file
+/// with an open buffer was renamed by an external process. Both paths
+/// are absolute.
+FileRenamed { from: PathBuf, to: PathBuf },
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Update `is_priority_event()` to return `true` for both (external file operations should be processed promptly).
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Update `is_user_input()` to return `false` for both (they're not user input).
+
+Add unit tests for the new variants' trait implementations.
+
+Location: `crates/editor/src/editor_event.rs`
+
+### Step 2: Add `send_file_deleted` and `send_file_renamed` methods to `EventSender`
+
+Add methods to `EventSender` in `crates/editor/src/event_channel.rs`:
+
+```rust
+/// Sends a file-deleted event to the channel.
+pub fn send_file_deleted(&self, path: PathBuf) -> Result<(), SendError<EditorEvent>> {
+    let result = self.inner.sender.send(EditorEvent::FileDeleted(path));
+    (self.inner.run_loop_waker)();
+    result
+}
+
+/// Sends a file-renamed event to the channel.
+pub fn send_file_renamed(&self, from: PathBuf, to: PathBuf) -> Result<(), SendError<EditorEvent>> {
+    let result = self.inner.sender.send(EditorEvent::FileRenamed { from, to });
+    (self.inner.run_loop_waker)();
+    result
+}
+```
+
+Location: `crates/editor/src/event_channel.rs`
+
+### Step 3: Add `FileDeletedFromDisk` context variant to `ConfirmDialogContext`
+
+Add a new variant to `ConfirmDialogContext` in `crates/editor/src/confirm_dialog.rs`:
+
+```rust
+// Chunk: docs/chunks/deletion_rename_handling - File deleted confirmation context
+/// File was deleted from disk while buffer was open.
+FileDeletedFromDisk {
+    /// The pane containing the affected tab.
+    pane_id: PaneId,
+    /// The index of the tab within the pane.
+    tab_idx: usize,
+    /// The path that was deleted (for recreating the file).
+    deleted_path: PathBuf,
+},
+```
+
+Add unit tests for the new context variant (pattern matching, Clone).
+
+Location: `crates/editor/src/confirm_dialog.rs`
+
+### Step 4: Extend `FileIndex` to forward `Remove` and `Modify(Name)` events
+
+Modify `handle_fs_event()` in `crates/editor/src/file_index.rs` to detect and forward these events:
+
+1. For `EventKind::Remove(_)`: If a callback is registered and the path matches a tracked file, invoke a deletion callback.
+
+2. For `EventKind::Modify(ModifyKind::Name(_))`: Track rename pairs (FSEvents delivers both old and new paths). When we have both, invoke a rename callback.
+
+**Rename detection strategy**: FSEvents delivers `Modify(Name(_))` events for both the old path (no longer exists) and new path (now exists). We can distinguish them by checking `path.exists()`:
+- If `!path.exists()` → this is the old path (source of rename)
+- If `path.exists()` → this is the new path (target of rename)
+
+Store the old path temporarily and emit the `FileRenamed` event when we see the new path arrive.
+
+Add two new callback types alongside the existing `file_change_callback`:
+- `on_file_deleted: Option<Arc<dyn Fn(PathBuf) + Send + Sync>>`
+- `on_file_renamed: Option<Arc<dyn Fn(PathBuf, PathBuf) + Send + Sync>>`
+
+Location: `crates/editor/src/file_index.rs`
+
+### Step 5: Wire up callbacks in `Workspace`
+
+Extend the callback wiring in `Workspace::new()` (and related constructors) to also set the file deleted and file renamed callbacks:
+
+```rust
+let sender_clone_del = sender.clone();
+let sender_clone_ren = sender.clone();
+
+file_index.set_file_deleted_callback(move |path| {
+    let _ = sender_clone_del.send_file_deleted(path);
+});
+
+file_index.set_file_renamed_callback(move |from, to| {
+    let _ = sender_clone_ren.send_file_renamed(from, to);
+});
+```
+
+Location: `crates/editor/src/workspace.rs`, `crates/editor/src/editor_state.rs`
+
+### Step 6: Implement drain loop handler for `FileDeleted`
+
+Add a handler in `EventDrainLoop::process_single_event()`:
+
+```rust
+EditorEvent::FileDeleted(path) => {
+    self.handle_file_deleted(path);
+}
+```
+
+Implement `handle_file_deleted()`:
+
+1. Check if the path is suppressed (self-write suppression for consistency)
+2. Search all workspaces and panes for tabs where `associated_file == Some(path)`
+3. For the first matching tab found:
+   - If `dirty == false`: Show confirm dialog with "Save" and "Abandon"
+   - If `dirty == true`: Show confirm dialog with "Save" and "Abandon" (same behavior - the user has content they might want to keep)
+4. Store the pane_id, tab_idx, and path in the `FileDeletedFromDisk` context
+
+Note: We only prompt for one tab at a time. If multiple tabs show the same deleted file, subsequent `FileDeleted` events will prompt for them (or the user will see them when they switch tabs).
+
+Location: `crates/editor/src/drain_loop.rs`
+
+### Step 7: Implement confirm outcome handler for `FileDeletedFromDisk`
+
+Add handling for `FileDeletedFromDisk` in `EditorState::handle_confirm_outcome()`:
+
+```rust
+ConfirmDialogContext::FileDeletedFromDisk { pane_id, tab_idx, deleted_path } => {
+    // Save was selected - recreate the file with buffer contents
+    self.save_file_to_path(pane_id, tab_idx, &deleted_path);
+}
+```
+
+For "Abandon" (cancelled in confirm dialog terms, but the user selected Abandon):
+- If the confirm outcome is `Confirmed` (Abandon button), close the tab via `force_close_tab()`
+- If the confirm outcome is `Cancelled` (Cancel button), also close the tab (the file is gone, there's no "keep editing")
+
+Wait - re-reading the success criteria: "If the user chooses Save, the file is written from the buffer and the tab continues normally. If the user chooses Abandon, the tab is closed."
+
+So the dialog should be:
+- **Save button**: Recreate the file from buffer, tab continues (clear dirty flag after save)
+- **Abandon button**: Close the tab without saving
+
+This means "Save" is the confirm action (right button), "Abandon" is the cancel action (left button). But that's backwards from the normal confirm dialog semantics where "Abandon" is the destructive action.
+
+**Design decision**: Use `ConfirmDialog::with_labels("File was deleted. Save to recreate?", "Abandon", "Save")`. The confirm button (right) will be "Save", and the cancel button (left) will be "Abandon". The handler:
+- `ConfirmOutcome::Confirmed` → Save the file, continue
+- `ConfirmOutcome::Cancelled` → Close the tab
+
+Location: `crates/editor/src/editor_state.rs`
+
+### Step 8: Implement drain loop handler for `FileRenamed`
+
+Add a handler in `EventDrainLoop::process_single_event()`:
+
+```rust
+EditorEvent::FileRenamed { from, to } => {
+    self.handle_file_renamed(from, to);
+}
+```
+
+Implement `handle_file_renamed()`:
+
+1. Search all workspaces and panes for tabs where `associated_file == Some(from)`
+2. For each matching tab:
+   - Update `tab.associated_file = Some(to.clone())`
+   - Update `tab.label` to the new filename (extract from `to.file_name()`)
+   - Check if the file extension changed:
+     - Extract extensions from `from` and `to`
+     - If different, call `tab.setup_highlighting()` to re-detect language
+   - Mark `dirty_region` as needing a full viewport refresh (tab bar changed)
+
+Location: `crates/editor/src/drain_loop.rs`
+
+### Step 9: Add helper method for extension comparison
+
+Add a helper method to `Tab` or a standalone function:
+
+```rust
+/// Returns true if the file extension changed between two paths.
+fn extension_changed(from: &Path, to: &Path) -> bool {
+    from.extension() != to.extension()
+}
+```
+
+Location: `crates/editor/src/workspace.rs` (or inline in drain_loop)
+
+### Step 10: Add unit tests for `FileDeleted` and `FileRenamed` event properties
+
+Add tests to `crates/editor/src/editor_event.rs`:
+
+```rust
+#[test]
+fn test_file_deleted_is_priority() {
+    let event = EditorEvent::FileDeleted(PathBuf::from("/path/to/file.rs"));
+    assert!(event.is_priority_event());
+}
+
+#[test]
+fn test_file_deleted_is_not_user_input() {
+    let event = EditorEvent::FileDeleted(PathBuf::from("/path/to/file.rs"));
+    assert!(!event.is_user_input());
+}
+
+#[test]
+fn test_file_renamed_is_priority() {
+    let event = EditorEvent::FileRenamed {
+        from: PathBuf::from("/path/to/old.rs"),
+        to: PathBuf::from("/path/to/new.rs"),
+    };
+    assert!(event.is_priority_event());
+}
+
+#[test]
+fn test_file_renamed_is_not_user_input() {
+    let event = EditorEvent::FileRenamed {
+        from: PathBuf::from("/path/to/old.rs"),
+        to: PathBuf::from("/path/to/new.rs"),
+    };
+    assert!(!event.is_user_input());
+}
+```
+
+Location: `crates/editor/src/editor_event.rs`
+
+### Step 11: Add unit tests for confirm dialog context
+
+Add tests to `crates/editor/src/confirm_dialog.rs`:
+
+```rust
+#[test]
+fn test_context_file_deleted_stores_pane_tab_and_path() {
+    let ctx = ConfirmDialogContext::FileDeletedFromDisk {
+        pane_id: 42,
+        tab_idx: 3,
+        deleted_path: PathBuf::from("/path/to/deleted.txt"),
+    };
+
+    match ctx {
+        ConfirmDialogContext::FileDeletedFromDisk { pane_id, tab_idx, deleted_path } => {
+            assert_eq!(pane_id, 42);
+            assert_eq!(tab_idx, 3);
+            assert_eq!(deleted_path, PathBuf::from("/path/to/deleted.txt"));
+        }
+        _ => panic!("Expected FileDeletedFromDisk variant"),
+    }
+}
+
+#[test]
+fn test_context_file_deleted_is_clone() {
+    let ctx = ConfirmDialogContext::FileDeletedFromDisk {
+        pane_id: 1,
+        tab_idx: 0,
+        deleted_path: PathBuf::from("/path"),
+    };
+    let cloned = ctx.clone();
+    // Verify both have same values...
+}
+```
+
+Location: `crates/editor/src/confirm_dialog.rs`
+
+### Step 12: Add unit tests for extension comparison logic
+
+```rust
+#[test]
+fn test_extension_changed_same_extension() {
+    assert!(!extension_changed(
+        Path::new("/a/foo.rs"),
+        Path::new("/b/bar.rs")
+    ));
+}
+
+#[test]
+fn test_extension_changed_different_extension() {
+    assert!(extension_changed(
+        Path::new("/a/foo.txt"),
+        Path::new("/a/foo.rs")
+    ));
+}
+
+#[test]
+fn test_extension_changed_no_extension_to_extension() {
+    assert!(extension_changed(
+        Path::new("/a/Makefile"),
+        Path::new("/a/Makefile.bak")
+    ));
+}
+
+#[test]
+fn test_extension_changed_extension_to_no_extension() {
+    assert!(extension_changed(
+        Path::new("/a/foo.rs"),
+        Path::new("/a/foo")
+    ));
+}
+```
+
+Location: `crates/editor/src/workspace.rs` or `drain_loop.rs`
+
+### Step 13: Update GOAL.md code_paths
+
+Update the chunk's GOAL.md frontmatter with the files touched:
+
+```yaml
+code_paths:
+  - crates/editor/src/editor_event.rs
+  - crates/editor/src/event_channel.rs
+  - crates/editor/src/confirm_dialog.rs
+  - crates/editor/src/file_index.rs
+  - crates/editor/src/workspace.rs
+  - crates/editor/src/drain_loop.rs
+  - crates/editor/src/editor_state.rs
+```
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **file_change_events** chunk must be complete. It provides:
+  - The `EditorEvent::FileChanged` infrastructure we're extending
+  - The `EventSender::send_file_changed()` pattern we'll follow
+  - The `FileIndex` callback mechanism for forwarding events
+  - The self-write suppression registry (which we reuse for consistency)
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Rename event ordering**: FSEvents delivers `Modify(Name(_))` events for both old and new paths, but the order is not guaranteed. We may need to buffer events and match them. If we see the new path first and the old path later, we need to handle that.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Rapid rename chains**: If a file is renamed multiple times quickly (e.g., `a.rs` → `b.rs` → `c.rs`), we may receive interleaved events. The debouncer from `file_change_events` helps, but we should consider whether rename events also need debouncing.
+
+3. **Path canonicalization**: Paths from FSEvents should be absolute, and `Tab::associated_file` stores absolute paths. However, symlinks could cause mismatches. We may need to canonicalize paths before comparison. Defer this unless issues arise.
+
+4. **Multiple tabs with same file**: If the same file is open in multiple tabs (perhaps in different panes), all tabs should be updated on rename. For deletion, we prompt for one tab at a time to avoid dialog overload.
+
+5. **Tab label extraction**: `PathBuf::file_name()` returns `Option<&OsStr>`. We need to handle the case where the path has no filename (unlikely for regular files, but defensive).
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

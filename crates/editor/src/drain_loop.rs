@@ -196,6 +196,14 @@ impl EventDrainLoop {
             EditorEvent::FileChanged(path) => {
                 self.handle_file_changed(path);
             }
+            // Chunk: docs/chunks/deletion_rename_handling - External file deletion handling
+            EditorEvent::FileDeleted(path) => {
+                self.handle_file_deleted(path);
+            }
+            // Chunk: docs/chunks/deletion_rename_handling - External file rename handling
+            EditorEvent::FileRenamed { from, to } => {
+                self.handle_file_renamed(from, to);
+            }
         }
     }
 
@@ -215,6 +223,30 @@ impl EventDrainLoop {
             return;
         }
         // Placeholder: future chunks will implement reload/merge behavior
+    }
+
+    // Chunk: docs/chunks/deletion_rename_handling - File deleted event handler
+    /// Handles external file deletion events.
+    ///
+    /// This method is called when the filesystem watcher detects that a file
+    /// with an open buffer was deleted by an external process.
+    ///
+    /// If a tab is open for this file, we show a confirm dialog asking the user
+    /// whether to "Save" (recreate the file) or "Abandon" (close the tab).
+    fn handle_file_deleted(&mut self, path: std::path::PathBuf) {
+        self.state.handle_file_deleted(path);
+    }
+
+    // Chunk: docs/chunks/deletion_rename_handling - File renamed event handler
+    /// Handles external file rename events.
+    ///
+    /// This method is called when the filesystem watcher detects that a file
+    /// with an open buffer was renamed by an external process.
+    ///
+    /// Updates the `associated_file` of any matching tab to the new path and
+    /// updates the tab label to reflect the new filename.
+    fn handle_file_renamed(&mut self, from: std::path::PathBuf, to: std::path::PathBuf) {
+        self.state.handle_file_renamed(from, to);
     }
 
     /// Handles a key event by forwarding to the editor state.

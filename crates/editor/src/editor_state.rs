@@ -1353,7 +1353,9 @@ impl EditorState {
     /// - `CloseDirtyTab`: Force-close the tab without saving
     /// - `QuitWithDirtyTabs`: Set the quit flag
     /// - `CloseActiveTerminal`: Kill the process and close the terminal tab
+    /// - `FileDeletedFromDisk`: Save the buffer to recreate the file
     // Chunk: docs/chunks/generic_yes_no_modal - Context-based outcome routing
+    // Chunk: docs/chunks/deletion_rename_handling - FileDeletedFromDisk handling
     fn handle_confirm_dialog_confirmed(&mut self) {
         if let Some(ctx) = self.confirm_context.take() {
             match ctx {
@@ -1367,6 +1369,11 @@ impl EditorState {
                 // Chunk: docs/chunks/terminal_close_guard - Kill process and close terminal
                 ConfirmDialogContext::CloseActiveTerminal { pane_id, tab_idx } => {
                     self.kill_terminal_and_close_tab(pane_id, tab_idx);
+                }
+                // Chunk: docs/chunks/deletion_rename_handling - Save to recreate deleted file
+                ConfirmDialogContext::FileDeletedFromDisk { pane_id: _, tab_idx: _, deleted_path } => {
+                    // User chose "Save" - recreate the file from buffer contents
+                    self.save_buffer_to_path(&deleted_path);
                 }
             }
         }
@@ -1408,6 +1415,92 @@ impl EditorState {
         self.confirm_context = Some(ConfirmDialogContext::CloseActiveTerminal { pane_id, tab_idx });
         self.focus = EditorFocus::ConfirmDialog;
         self.dirty_region.merge(DirtyRegion::FullViewport);
+    }
+
+    // Chunk: docs/chunks/deletion_rename_handling - File deleted event handler
+    /// Handles external file deletion events.
+    ///
+    /// Finds any open tabs associated with the deleted file and shows a confirm
+    /// dialog asking the user whether to "Save" (recreate the file from the
+    /// buffer's contents) or "Abandon" (close the tab).
+    ///
+    /// The dialog uses the `FileDeletedFromDisk` context variant.
+    pub fn handle_file_deleted(&mut self, path: std::path::PathBuf) {
+        // Find if any tab in the active workspace has this file open
+        if let Some(workspace) = self.editor.active_workspace() {
+            let pane_id = workspace.active_pane_id;
+            for (tab_idx, tab) in workspace.tabs().iter().enumerate() {
+                if let Some(ref associated) = tab.associated_file {
+                    if associated == &path {
+                        // Found a tab with this file - show confirm dialog
+                        self.show_file_deleted_confirm(pane_id, tab_idx, path);
+                        return;
+                    }
+                }
+            }
+        }
+        // No tab found for this file - ignore the event
+    }
+
+    /// Shows a confirmation dialog for a deleted file.
+    ///
+    /// Uses file-deleted-specific wording ("File deleted from disk") and offers
+    /// "Save" (recreate) as the confirm action and "Abandon" as the cancel action.
+    fn show_file_deleted_confirm(&mut self, pane_id: PaneId, tab_idx: usize, deleted_path: std::path::PathBuf) {
+        self.confirm_dialog = Some(ConfirmDialog::with_labels(
+            "File deleted from disk",
+            "Abandon",
+            "Save",
+        ));
+        self.confirm_context = Some(ConfirmDialogContext::FileDeletedFromDisk {
+            pane_id,
+            tab_idx,
+            deleted_path,
+        });
+        self.focus = EditorFocus::ConfirmDialog;
+        self.dirty_region.merge(DirtyRegion::FullViewport);
+    }
+
+    // Chunk: docs/chunks/deletion_rename_handling - File renamed event handler
+    /// Handles external file rename events.
+    ///
+    /// Updates the `associated_file` of any matching tab to the new path and
+    /// updates the tab label to reflect the new filename. If the file extension
+    /// changed, re-evaluates syntax highlighting for the new file type.
+    /// This is a silent operation - no dialog is shown.
+    pub fn handle_file_renamed(&mut self, from: std::path::PathBuf, to: std::path::PathBuf) {
+        // Check if extension changed for syntax highlighting re-evaluation
+        let extension_changed = from.extension() != to.extension();
+
+        if let Some(workspace) = self.editor.active_workspace_mut() {
+            // Check all panes for tabs with this file
+            for pane in workspace.all_panes_mut() {
+                for tab in &mut pane.tabs {
+                    if let Some(ref associated) = tab.associated_file {
+                        if associated == &from {
+                            // Update the associated file path
+                            tab.associated_file = Some(to.clone());
+
+                            // Update the tab label to the new filename
+                            if let Some(new_name) = to.file_name() {
+                                tab.label = new_name.to_string_lossy().to_string();
+                            }
+
+                            // Re-evaluate syntax highlighting if extension changed
+                            if extension_changed {
+                                let theme = SyntaxTheme::catppuccin_mocha();
+                                tab.setup_highlighting(&self.language_registry, theme);
+                            }
+
+                            // Mark dirty to refresh the UI
+                            self.dirty_region.merge(DirtyRegion::FullViewport);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        // No tab found for this file - ignore the event
     }
 
     /// Checks if the tab at `index` in `pane_id` is a terminal with an active process.
@@ -2899,6 +2992,33 @@ impl EditorState {
 
         let content = self.buffer().content();
         if std::fs::write(&path, content.as_bytes()).is_ok() {
+            // Clear dirty flag on successful save
+            if let Some(ws) = self.editor.active_workspace_mut() {
+                if let Some(tab) = ws.active_tab_mut() {
+                    tab.dirty = false;
+                }
+            }
+        }
+        // Silently ignore write errors (out of scope for this chunk)
+    }
+
+    // Chunk: docs/chunks/deletion_rename_handling - Save buffer to specific path
+    /// Saves the active buffer to the specified path, recreating the file.
+    ///
+    /// This is used when the user chooses "Save" in response to a file deletion
+    /// notification. It writes the buffer contents to the specified path,
+    /// suppresses the resulting file change event, and clears the dirty flag.
+    fn save_buffer_to_path(&mut self, path: &std::path::Path) {
+        // Save only makes sense for file tabs with a TextBuffer
+        if !self.active_tab_is_file() {
+            return;
+        }
+
+        // Suppress the file change event for our own write
+        self.file_change_suppression.suppress(path.to_path_buf());
+
+        let content = self.buffer().content();
+        if std::fs::write(path, content.as_bytes()).is_ok() {
             // Clear dirty flag on successful save
             if let Some(ws) = self.editor.active_workspace_mut() {
                 if let Some(tab) = ws.active_tab_mut() {

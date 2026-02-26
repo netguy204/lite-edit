@@ -188,6 +188,28 @@ impl EventSender {
         (self.inner.run_loop_waker)();
         result
     }
+
+    // Chunk: docs/chunks/deletion_rename_handling - File deletion event sender
+    /// Sends a file-deleted event to the channel.
+    ///
+    /// This is called from the FileIndex watcher thread when an external
+    /// file deletion is detected. The path should be absolute.
+    pub fn send_file_deleted(&self, path: PathBuf) -> Result<(), SendError<EditorEvent>> {
+        let result = self.inner.sender.send(EditorEvent::FileDeleted(path));
+        (self.inner.run_loop_waker)();
+        result
+    }
+
+    // Chunk: docs/chunks/deletion_rename_handling - File rename event sender
+    /// Sends a file-renamed event to the channel.
+    ///
+    /// This is called from the FileIndex watcher thread when an external
+    /// file rename is detected. Both paths should be absolute.
+    pub fn send_file_renamed(&self, from: PathBuf, to: PathBuf) -> Result<(), SendError<EditorEvent>> {
+        let result = self.inner.sender.send(EditorEvent::FileRenamed { from, to });
+        (self.inner.run_loop_waker)();
+        result
+    }
 }
 
 // Implement WakeupSignal so EventSender can be used by the terminal crate
@@ -496,6 +518,56 @@ mod tests {
                 assert_eq!(received_path, path);
             }
             _ => panic!("Expected FileChanged event"),
+        }
+    }
+
+    // Chunk: docs/chunks/deletion_rename_handling - Tests for send_file_deleted
+    #[test]
+    fn test_send_file_deleted() {
+        let waker_called = Arc::new(AtomicUsize::new(0));
+        let waker_called_clone = waker_called.clone();
+
+        let (sender, receiver) = create_event_channel(move || {
+            waker_called_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let path = PathBuf::from("/path/to/deleted.rs");
+        sender.send_file_deleted(path.clone()).unwrap();
+
+        assert_eq!(waker_called.load(Ordering::SeqCst), 1, "Waker should be called after send_file_deleted");
+
+        let event = receiver.try_recv().unwrap();
+        match event {
+            EditorEvent::FileDeleted(received_path) => {
+                assert_eq!(received_path, path);
+            }
+            _ => panic!("Expected FileDeleted event"),
+        }
+    }
+
+    // Chunk: docs/chunks/deletion_rename_handling - Tests for send_file_renamed
+    #[test]
+    fn test_send_file_renamed() {
+        let waker_called = Arc::new(AtomicUsize::new(0));
+        let waker_called_clone = waker_called.clone();
+
+        let (sender, receiver) = create_event_channel(move || {
+            waker_called_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let from = PathBuf::from("/path/to/old.rs");
+        let to = PathBuf::from("/path/to/new.rs");
+        sender.send_file_renamed(from.clone(), to.clone()).unwrap();
+
+        assert_eq!(waker_called.load(Ordering::SeqCst), 1, "Waker should be called after send_file_renamed");
+
+        let event = receiver.try_recv().unwrap();
+        match event {
+            EditorEvent::FileRenamed { from: received_from, to: received_to } => {
+                assert_eq!(received_from, from);
+                assert_eq!(received_to, to);
+            }
+            _ => panic!("Expected FileRenamed event"),
         }
     }
 }
