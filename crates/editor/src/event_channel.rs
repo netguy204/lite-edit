@@ -21,7 +21,7 @@ use std::sync::mpsc::{self, Receiver, SendError, Sender};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use lite_edit_input::{KeyEvent, MouseEvent, ScrollDelta, WakeupSignal};
+use lite_edit_input::{KeyEvent, MarkedTextEvent, MouseEvent, ScrollDelta, TextInputEvent, WakeupSignal};
 
 use crate::editor_event::EditorEvent;
 
@@ -207,6 +207,38 @@ impl EventSender {
     /// file rename is detected. Both paths should be absolute.
     pub fn send_file_renamed(&self, from: PathBuf, to: PathBuf) -> Result<(), SendError<EditorEvent>> {
         let result = self.inner.sender.send(EditorEvent::FileRenamed { from, to });
+        (self.inner.run_loop_waker)();
+        result
+    }
+
+    // Chunk: docs/chunks/unicode_ime_input - Text input event senders
+
+    /// Sends a text insertion event to the channel.
+    ///
+    /// This is called from the NSTextInputClient implementation when text
+    /// should be inserted (from keyboard, IME commit, paste, or dictation).
+    pub fn send_insert_text(&self, event: TextInputEvent) -> Result<(), SendError<EditorEvent>> {
+        let result = self.inner.sender.send(EditorEvent::InsertText(event));
+        (self.inner.run_loop_waker)();
+        result
+    }
+
+    /// Sends a set-marked-text event to the channel.
+    ///
+    /// This is called from the NSTextInputClient implementation when the
+    /// IME has in-progress composition text to display.
+    pub fn send_set_marked_text(&self, event: MarkedTextEvent) -> Result<(), SendError<EditorEvent>> {
+        let result = self.inner.sender.send(EditorEvent::SetMarkedText(event));
+        (self.inner.run_loop_waker)();
+        result
+    }
+
+    /// Sends an unmark-text event to the channel.
+    ///
+    /// This is called from the NSTextInputClient implementation when the
+    /// IME composition is canceled (e.g., user pressed Escape).
+    pub fn send_unmark_text(&self) -> Result<(), SendError<EditorEvent>> {
+        let result = self.inner.sender.send(EditorEvent::UnmarkText);
         (self.inner.run_loop_waker)();
         result
     }
