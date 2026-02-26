@@ -38,9 +38,9 @@ use crate::file_change_suppression::FileChangeSuppression;
 // Chunk: docs/chunks/focus_stack - FocusStack import for stack-based focus management
 use crate::focus::{FocusLayer, FocusStack, FocusTarget};
 // Chunk: docs/chunks/focus_stack - Focus target imports for stack integration
-use crate::global_shortcuts::{GlobalAction, GlobalShortcutTarget};
+use crate::global_shortcuts::GlobalShortcutTarget;
 use crate::selector_target::SelectorFocusTarget;
-use crate::find_target::{FindFocusTarget, FindOutcome};
+use crate::find_target::FindFocusTarget;
 use crate::confirm_dialog_target::ConfirmDialogFocusTarget;
 use crate::font::FontMetrics;
 use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
