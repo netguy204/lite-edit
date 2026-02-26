@@ -1,7 +1,7 @@
 ---
 status: DOCUMENTED
 code_references:
-- ref: crates/editor/src/renderer.rs#Renderer
+- ref: crates/editor/src/renderer/mod.rs#Renderer
   implements: Core Metal rendering orchestration
   compliance: COMPLIANT
 - ref: crates/editor/src/glyph_buffer.rs#GlyphBuffer
@@ -56,6 +56,8 @@ chunks:
   relationship: implements
 - chunk_id: quad_buffer_prealloc
   relationship: implements
+- chunk_id: renderer_decomposition
+  relationship: implements
 created_after:
 - viewport_scroll
 ---
@@ -107,9 +109,25 @@ The core problem is coordinating multiple rendering concerns (text content, sele
 
 ## Implementation Locations
 
-### Core Renderer (crates/editor/src/renderer.rs)
+### Core Renderer (crates/editor/src/renderer/)
 
-The `Renderer` struct is the canonical entry point for all rendering operations. It has the following responsibilities:
+The `Renderer` struct is the canonical entry point for all rendering operations. The renderer module is decomposed into focused sub-modules for maintainability:
+
+```
+renderer/
+├── mod.rs              // Renderer struct, public API, render_with_editor orchestration
+├── constants.rs        // Color constants, Uniforms struct
+├── scissor.rs          // Scissor rect helpers for viewport clipping
+├── content.rs          // Text buffer content rendering (update_glyph_buffer, render_text)
+├── tab_bar.rs          // Tab bar rendering (global and per-pane)
+├── left_rail.rs        // Left rail (workspace tiles) rendering
+├── overlay.rs          // Selector and confirm dialog overlays
+├── find_strip.rs       // Find-in-file strip rendering
+├── panes.rs            // Multi-pane layout rendering
+└── welcome.rs          // Welcome screen rendering
+```
+
+**Responsibilities:**
 
 - **Metal resource management**: Owning the command queue, device reference, and shader pipeline
 - **Glyph buffer orchestration**: Coordinating `update_glyph_buffer*` methods to construct vertex data
@@ -199,6 +217,10 @@ Many editor chunks implement rendering features within this subsystem:
 - **terminal_background_box_drawing**: Implemented on-demand glyph addition for terminal rendering
 - **terminal_multibyte_rendering**: Added non-BMP character support via UTF-16 surrogate pairs and width-aware column positioning for CJK/wide characters
 - **font_fallback_rendering**: Implemented Core Text font fallback for characters not in the primary font (hieroglyphs, emoji, math symbols) with U+FFFD replacement for truly missing glyphs
+
+### Maintainability/Organization
+
+- **renderer_decomposition**: Decomposed the monolithic renderer.rs (~3000 LOC) into focused sub-modules organized by rendering phase (constants, scissor, content, tab_bar, left_rail, overlay, find_strip, panes, welcome). This is a pure code-movement refactor with no logic changes, improving maintainability and potentially instruction cache locality.
 
 ## Known Deviations
 

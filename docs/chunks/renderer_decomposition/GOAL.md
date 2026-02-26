@@ -1,18 +1,32 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/editor/src/renderer.rs
+- crates/editor/src/renderer/mod.rs
+- crates/editor/src/renderer/constants.rs
+- crates/editor/src/renderer/scissor.rs
+- crates/editor/src/renderer/content.rs
+- crates/editor/src/renderer/tab_bar.rs
+- crates/editor/src/renderer/left_rail.rs
+- crates/editor/src/renderer/overlay.rs
+- crates/editor/src/renderer/find_strip.rs
+- crates/editor/src/renderer/panes.rs
+- crates/editor/src/renderer/welcome.rs
+- docs/subsystems/renderer/OVERVIEW.md
 code_references: []
 narrative: null
 investigation: null
-subsystems: []
+subsystems:
+- subsystem_id: renderer
+  relationship: implements
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["typescript_highlight_layering"]
+created_after:
+- typescript_highlight_layering
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

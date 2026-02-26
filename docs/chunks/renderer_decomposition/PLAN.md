@@ -8,170 +8,228 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This is a **pure code-movement refactor** — no logic changes. The goal is to break up
+`renderer.rs` (~3000 LOC, ~120KB) into focused modules organized by rendering phase,
+improving maintainability and potentially instruction cache locality.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Strategy**: Extract cohesive function groups into separate modules, leaving the
+`Renderer` struct definition and top-level orchestration in `mod.rs`. Each module
+will receive the functions that logically belong together, preserving all existing
+signatures and behaviors.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+**Module decomposition** (based on analysis of the existing code):
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/renderer_decomposition/GOAL.md)
-with references to the files that you expect to touch.
--->
+```
+renderer/
+├── mod.rs              // Renderer struct, new(), public API, render_with_editor() orchestration
+├── constants.rs        // Color constants (BACKGROUND_COLOR, TEXT_COLOR, etc.)
+├── content.rs          // render_text(), update_glyph_buffer*() - text line rendering
+├── tab_bar.rs          // draw_tab_bar(), draw_pane_tab_bar() - tab bar UI rendering
+├── left_rail.rs        // draw_left_rail() - workspace tiles rendering
+├── overlay.rs          // draw_selector_overlay(), draw_confirm_dialog() - modal overlays
+├── find_strip.rs       // draw_find_strip(), draw_find_strip_in_pane() - find-in-file UI
+├── panes.rs            // render_pane(), draw_pane_frames() - multi-pane layout rendering
+├── welcome.rs          // draw_welcome_screen(), draw_welcome_screen_in_pane()
+└── scissor.rs          // Scissor rect helpers (selector_list_scissor_rect, etc.)
+```
+
+**Key principles**:
+1. **No behavioral changes** — all existing public APIs remain identical
+2. **Preserve chunk backreferences** — move comments with their associated code
+3. **Internal visibility** — helper functions become `pub(super)` or `pub(crate)` as needed
+4. **Shared state via &mut self** — functions that mutate renderer state stay as methods
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+- **docs/subsystems/renderer** (DOCUMENTED): This chunk directly IMPLEMENTS the
+  renderer subsystem by reorganizing its core file structure. The subsystem documents
+  the rendering pipeline's invariants (Atlas Availability, Single Frame Contract,
+  Screen-Space Consistency, Layering Contract). This refactor preserves all invariants
+  — we're only changing file organization, not rendering logic.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+- The subsystem's `code_references` in its OVERVIEW.md frontmatter will need updating
+  after this refactor to reference `renderer/mod.rs#Renderer` instead of `renderer.rs#Renderer`.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Create the renderer module directory structure
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create `crates/editor/src/renderer/` directory with placeholder `mod.rs`.
 
-Example:
+Location: `crates/editor/src/renderer/mod.rs`
 
-### Step 1: Define the SegmentHeader struct
+### Step 2: Extract constants to constants.rs
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Move all color constants and the `Uniforms` struct to a dedicated constants module:
+- `BACKGROUND_COLOR`
+- `TEXT_COLOR`
+- `SELECTION_COLOR`
+- `BORDER_COLOR`
+- `PANE_DIVIDER_COLOR`
+- `FOCUSED_PANE_BORDER_COLOR`
+- `Uniforms` struct
 
-Location: src/segment/format.rs
+These are used across multiple rendering functions.
 
-### Step 2: Implement header serialization
+Location: `crates/editor/src/renderer/constants.rs`
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+### Step 3: Extract scissor rect helpers to scissor.rs
 
-### Step 3: ...
+Move the scissor rect utility functions:
+- `selector_list_scissor_rect()`
+- `full_viewport_scissor_rect()`
+- `buffer_content_scissor_rect()`
+- `pane_scissor_rect()`
+- `pane_content_scissor_rect()`
+
+Location: `crates/editor/src/renderer/scissor.rs`
+
+### Step 4: Extract text content rendering to content.rs
+
+Move functions related to buffer content rendering:
+- `update_glyph_buffer()`
+- `update_glyph_buffer_with_cursor_visible()`
+- `render_text()`
+- `set_content()` (if still used)
+- `render()` (the basic render without editor context)
+- `render_dirty()`
+- `apply_mutation()`
+
+These will need access to `&mut self` fields: `glyph_buffer`, `atlas`, `font`, `viewport`, `cursor_visible`.
+
+Location: `crates/editor/src/renderer/content.rs`
+
+### Step 5: Extract tab bar rendering to tab_bar.rs
+
+Move tab bar drawing functions:
+- `draw_tab_bar()`
+- `draw_pane_tab_bar()`
+
+Location: `crates/editor/src/renderer/tab_bar.rs`
+
+### Step 6: Extract left rail rendering to left_rail.rs
+
+Move left rail (workspace tiles) rendering:
+- `draw_left_rail()`
+- `left_rail_width()` (accessor method)
+
+Location: `crates/editor/src/renderer/left_rail.rs`
+
+### Step 7: Extract overlay rendering to overlay.rs
+
+Move overlay/modal rendering functions:
+- `draw_selector_overlay()`
+- `draw_confirm_dialog()`
+- `render_with_selector()` (if separate from main orchestration)
+- `render_with_confirm_dialog()`
+
+Location: `crates/editor/src/renderer/overlay.rs`
+
+### Step 8: Extract find strip rendering to find_strip.rs
+
+Move find-in-file UI rendering:
+- `draw_find_strip()`
+- `draw_find_strip_in_pane()`
+
+Location: `crates/editor/src/renderer/find_strip.rs`
+
+### Step 9: Extract pane rendering to panes.rs
+
+Move multi-pane layout rendering:
+- `render_pane()`
+- `draw_pane_frames()`
+- `configure_viewport_for_pane()`
+
+Location: `crates/editor/src/renderer/panes.rs`
+
+### Step 10: Extract welcome screen rendering to welcome.rs
+
+Move welcome screen rendering:
+- `draw_welcome_screen()`
+- `draw_welcome_screen_in_pane()`
+
+Location: `crates/editor/src/renderer/welcome.rs`
+
+### Step 11: Consolidate mod.rs with Renderer struct and orchestration
+
+The main `mod.rs` will contain:
+- All module declarations (`mod constants; mod content; ...`)
+- Re-exports as needed (`pub use constants::*;`)
+- The `Renderer` struct definition
+- `Renderer::new()`
+- Public API methods: `viewport_mut()`, `viewport()`, `font_metrics()`, etc.
+- Main entry point: `render_with_editor()` which orchestrates calls to sub-modules
+- Any viewport-related methods that don't fit elsewhere
+
+Location: `crates/editor/src/renderer/mod.rs`
+
+### Step 12: Update imports in dependent files
+
+Update files that use the renderer:
+- `crates/editor/src/main.rs`: `mod renderer;` stays the same, `use crate::renderer::Renderer;` should still work
+- `crates/editor/src/drain_loop.rs`: `use crate::renderer::Renderer;` should still work
+
+Verify all public exports are accessible.
+
+### Step 13: Verify compilation and run tests
+
+- Run `cargo check` to verify all imports resolve correctly
+- Run `cargo build` to ensure compilation succeeds
+- Run `cargo test` to verify no regressions
+
+### Step 14: Verify visual correctness
+
+- Launch the editor and verify:
+  - Text rendering works correctly
+  - Tab bar renders properly
+  - Left rail renders properly
+  - Selector overlay works
+  - Confirm dialog works
+  - Find strip works
+  - Multi-pane layout works
+  - Welcome screen renders
+
+### Step 15: Update subsystem documentation
+
+Update `docs/subsystems/renderer/OVERVIEW.md` frontmatter to reference the new
+module structure:
+- `crates/editor/src/renderer/mod.rs#Renderer` (instead of `renderer.rs#Renderer`)
 
 ---
 
 **BACKREFERENCE COMMENTS**
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
-
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
-
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+All existing chunk backreferences in the code will be preserved exactly as they
+appear. No new backreferences will be added since this is a pure code movement
+refactor. Each module file should retain the chunk comments that were associated
+with the functions moved into it.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+No external dependencies. This is a pure refactor of existing code.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Method visibility boundaries**: Some private methods become pub(super) when
+   extracted. This is safe since module boundaries control visibility, but we must
+   ensure no unintended public API exposure.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Shared mutable state**: Many methods mutate `&mut self`. The extraction pattern
+   must either:
+   - Keep methods as `impl Renderer` in sub-modules (preferred), or
+   - Pass required state as parameters (more verbose but more explicit)
+
+   Decision: Keep as `impl Renderer` methods in sub-modules to minimize API churn.
+
+3. **Cyclic imports**: If modules reference each other (e.g., `content.rs` needs
+   `scissor.rs`), we need to ensure the import graph is acyclic. Constants and
+   scissor helpers should be leaf modules with no dependencies on other renderer
+   sub-modules.
+
+4. **glyph_buffer.rs mentioned in goal**: The goal suggests potentially decomposing
+   `glyph_buffer.rs` (92KB) as well. This is marked as "if time permits" and is
+   **out of scope for this chunk**. A separate chunk should be created for that work.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- POPULATE DURING IMPLEMENTATION -->
