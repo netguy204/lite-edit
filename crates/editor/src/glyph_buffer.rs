@@ -285,6 +285,9 @@ pub struct GlyphBuffer {
     persistent_indices: Vec<u32>,
     /// Persistent buffer for tracking which buffer lines are rendered
     rendered_buffer_lines: Vec<usize>,
+    /// Timing of the last styled_line collection pass (perf-instrumentation only).
+    #[cfg(feature = "perf-instrumentation")]
+    last_styled_line_timing: Option<(std::time::Duration, usize)>,
 }
 
 impl GlyphBuffer {
@@ -309,6 +312,8 @@ impl GlyphBuffer {
             persistent_vertices: Vec::new(),
             persistent_indices: Vec::new(),
             rendered_buffer_lines: Vec::new(),
+            #[cfg(feature = "perf-instrumentation")]
+            last_styled_line_timing: None,
         }
     }
 
@@ -338,6 +343,12 @@ impl GlyphBuffer {
     /// Returns the current vertical offset
     pub fn y_offset(&self) -> f32 {
         self.y_offset
+    }
+
+    /// Takes the last styled_line timing measurement, if any (perf-instrumentation only).
+    #[cfg(feature = "perf-instrumentation")]
+    pub fn take_styled_line_timing(&mut self) -> Option<(std::time::Duration, usize)> {
+        self.last_styled_line_timing.take()
     }
 
     /// Returns the vertex buffer, if any
@@ -1243,9 +1254,18 @@ impl GlyphBuffer {
         estimated_quads += 1; // cursor
 
         // Pre-collect styled lines for all rendered buffer lines
+        #[cfg(feature = "perf-instrumentation")]
+        let styled_line_start = std::time::Instant::now();
+
         let styled_lines: Vec<Option<_>> = self.rendered_buffer_lines.iter()
             .map(|&line| view.styled_line(line))
             .collect();
+
+        #[cfg(feature = "perf-instrumentation")]
+        {
+            let elapsed = styled_line_start.elapsed();
+            self.last_styled_line_timing = Some((elapsed, self.rendered_buffer_lines.len()));
+        }
 
         // Reset quad ranges
         // Chunk: docs/chunks/terminal_styling_fidelity - Added background and underline ranges
