@@ -2871,11 +2871,10 @@ impl EditorState {
 
         // Check for terminal tab
         if let Some((terminal, _viewport)) = tab.terminal_and_viewport_mut() {
-            // Terminal tab: encode text as if typed
-            let modes = terminal.term_mode();
-            let bytes = InputEncoder::encode_paste(text, modes);
+            // Terminal tab: write text as raw UTF-8 (not paste-bracketed)
+            let bytes = text.as_bytes();
             if !bytes.is_empty() {
-                let _ = terminal.write_input(&bytes);
+                let _ = terminal.write_input(bytes);
             }
             return;
         }
