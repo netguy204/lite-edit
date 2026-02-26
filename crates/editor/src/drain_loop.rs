@@ -431,6 +431,18 @@ impl EventDrainLoop {
             // Take the dirty region
             let _dirty = self.state.take_dirty_region();
 
+            // Chunk: docs/chunks/styled_line_cache - Handle styled line cache invalidation
+            // Check if the cache should be fully cleared (e.g., on tab switch)
+            if self.state.take_clear_styled_line_cache() {
+                self.renderer.clear_styled_line_cache();
+            } else {
+                // Take the dirty lines and invalidate the styled line cache so that modified
+                // lines are recomputed during the next render while unchanged lines are served
+                // from cache.
+                let dirty_lines = self.state.take_dirty_lines();
+                self.renderer.invalidate_styled_lines(&dirty_lines);
+            }
+
             #[cfg(feature = "perf-instrumentation")]
             self.perf_stats.record_dirty_region(&_dirty);
 

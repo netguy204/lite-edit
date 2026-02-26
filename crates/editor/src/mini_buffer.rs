@@ -31,7 +31,8 @@ use crate::focus::FocusTarget;
 use crate::font::FontMetrics;
 use crate::input::{Key, KeyEvent};
 use crate::viewport::Viewport;
-use lite_edit_buffer::TextBuffer;
+// Chunk: docs/chunks/styled_line_cache - Import DirtyLines for EditorContext
+use lite_edit_buffer::{DirtyLines, TextBuffer};
 
 /// A single-line text editing buffer with full editor affordances.
 ///
@@ -66,6 +67,10 @@ pub struct MiniBuffer {
     viewport: Viewport,
     /// Dirty region accumulator
     dirty_region: DirtyRegion,
+    // Chunk: docs/chunks/styled_line_cache - Dirty lines for EditorContext (unused for MiniBuffer)
+    /// Dirty lines accumulator (required by EditorContext but not used for cache invalidation
+    /// since MiniBuffer doesn't participate in the main styled line cache)
+    dirty_lines: DirtyLines,
     /// Font metrics for editor context
     font_metrics: FontMetrics,
 }
@@ -90,6 +95,8 @@ impl MiniBuffer {
             buffer: TextBuffer::new(),
             viewport,
             dirty_region: DirtyRegion::None,
+            // Chunk: docs/chunks/styled_line_cache - Initialize dirty lines
+            dirty_lines: DirtyLines::None,
             font_metrics,
         }
     }
@@ -147,11 +154,13 @@ impl MiniBuffer {
         }
 
         // Create EditorContext and delegate to BufferFocusTarget
+        // Chunk: docs/chunks/styled_line_cache - Pass dirty_lines for EditorContext
         let mut target = BufferFocusTarget::new();
         let mut ctx = EditorContext::new(
             &mut self.buffer,
             &mut self.viewport,
             &mut self.dirty_region,
+            &mut self.dirty_lines,
             self.font_metrics,
             self.font_metrics.line_height as f32, // view_height (single line)
             f32::MAX,                              // view_width (no wrapping needed)

@@ -31,6 +31,11 @@ pub struct EditorContext<'a> {
     pub viewport: &'a mut Viewport,
     /// Accumulated dirty region for this event batch
     pub dirty_region: &'a mut DirtyRegion,
+    // Chunk: docs/chunks/styled_line_cache - Track dirty lines for cache invalidation
+    /// Accumulated dirty lines for styled line cache invalidation.
+    /// This tracks which buffer lines changed so the cache can invalidate
+    /// only those specific lines instead of clearing entirely.
+    pub dirty_lines: &'a mut DirtyLines,
     /// Font metrics for pixel-to-position conversion (char_width, line_height)
     pub font_metrics: FontMetrics,
     /// View height in pixels (for y-coordinate flipping)
@@ -51,13 +56,16 @@ impl<'a> EditorContext<'a> {
     /// * `buffer` - The text buffer being edited
     /// * `viewport` - The viewport (scroll state, visible line range)
     /// * `dirty_region` - Accumulated dirty region for this event batch
+    /// * `dirty_lines` - Accumulated dirty lines for styled line cache invalidation
     /// * `font_metrics` - Font metrics for pixel-to-position conversion
     /// * `view_height` - View height in pixels (for y-coordinate flipping)
     /// * `view_width` - View width in pixels (for line wrapping calculations)
+    // Chunk: docs/chunks/styled_line_cache - Added dirty_lines parameter
     pub fn new(
         buffer: &'a mut TextBuffer,
         viewport: &'a mut Viewport,
         dirty_region: &'a mut DirtyRegion,
+        dirty_lines: &'a mut DirtyLines,
         font_metrics: FontMetrics,
         view_height: f32,
         view_width: f32,
@@ -66,6 +74,7 @@ impl<'a> EditorContext<'a> {
             buffer,
             viewport,
             dirty_region,
+            dirty_lines,
             font_metrics,
             view_height,
             view_width,
@@ -91,6 +100,7 @@ impl<'a> EditorContext<'a> {
     }
 
     // Chunk: docs/chunks/dirty_region_wrap_aware - Wrap-aware dirty region conversion
+    // Chunk: docs/chunks/styled_line_cache - Accumulate dirty lines for cache invalidation
     /// Marks lines as dirty, converting buffer-space DirtyLines to screen-space DirtyRegion.
     ///
     /// This uses wrap-aware conversion to correctly handle soft line wrapping,
@@ -98,8 +108,9 @@ impl<'a> EditorContext<'a> {
     /// The method computes cumulative screen rows for each dirty buffer line
     /// and compares against the viewport's screen-row-based scroll position.
     ///
-    /// This merges the new dirty region into the accumulated dirty region.
-    pub fn mark_dirty(&mut self, dirty_lines: DirtyLines) {
+    /// This merges the new dirty region into the accumulated dirty region and
+    /// also accumulates the dirty lines for styled line cache invalidation.
+    pub fn mark_dirty(&mut self, dirty: DirtyLines) {
         let line_count = self.buffer.line_count();
         let wrap_layout = self.wrap_layout();
 
@@ -109,12 +120,15 @@ impl<'a> EditorContext<'a> {
             .collect();
 
         let screen_dirty = self.viewport.dirty_lines_to_region_wrapped(
-            &dirty_lines,
+            &dirty,
             line_count,
             &wrap_layout,
             |line| line_lens.get(line).copied().unwrap_or(0),
         );
         self.dirty_region.merge(screen_dirty);
+
+        // Chunk: docs/chunks/styled_line_cache - Also accumulate for cache invalidation
+        self.dirty_lines.merge(dirty);
     }
 
     // Chunk: docs/chunks/line_wrap_rendering - Wrap-aware cursor visibility
@@ -178,12 +192,14 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100); // 10 visible lines
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
 
         {
             let mut ctx = EditorContext::new(
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -192,6 +208,8 @@ mod tests {
         }
 
         assert_eq!(dirty, DirtyRegion::Lines { from: 0, to: 1 });
+        // Chunk: docs/chunks/styled_line_cache - Verify dirty_lines is also accumulated
+        assert_eq!(dirty_lines, DirtyLines::Single(0));
     }
 
     #[test]
@@ -200,12 +218,14 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
 
         {
             let mut ctx = EditorContext::new(
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -215,6 +235,8 @@ mod tests {
         }
 
         assert_eq!(dirty, DirtyRegion::Lines { from: 0, to: 3 });
+        // Chunk: docs/chunks/styled_line_cache - Verify dirty_lines merges correctly
+        assert_eq!(dirty_lines, DirtyLines::Range { from: 0, to: 3 });
     }
 
     #[test]
@@ -223,12 +245,14 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
 
         {
             let mut ctx = EditorContext::new(
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -250,12 +274,14 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100); // 10 visible lines
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
 
         {
             let mut ctx = EditorContext::new(
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -275,12 +301,14 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
 
         {
             let mut ctx = EditorContext::new(
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,

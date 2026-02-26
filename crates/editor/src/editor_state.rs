@@ -107,6 +107,11 @@ pub struct EditorState {
     /// This tracks which buffer lines have changed since the last render, allowing
     /// fine-grained cache invalidation instead of clearing the entire cache.
     pub dirty_lines: DirtyLines,
+    // Chunk: docs/chunks/styled_line_cache - Clear cache flag for tab switch
+    /// When true, the styled line cache should be fully cleared on next render.
+    /// Set to true on tab switch to prevent stale cache entries from a previous
+    /// buffer causing visual artifacts.
+    pub clear_styled_line_cache: bool,
     /// The active focus target (currently always the buffer target)
     pub focus_target: BufferFocusTarget,
     /// Whether the cursor is currently visible (for blink animation)
@@ -360,6 +365,8 @@ impl EditorState {
             editor,
             dirty_region: DirtyRegion::None,
             dirty_lines: DirtyLines::None,
+            // Chunk: docs/chunks/styled_line_cache - Initialize cache clear flag
+            clear_styled_line_cache: false,
             focus_target: BufferFocusTarget::new(),
             cursor_visible: true,
             last_keystroke: Instant::now(),
@@ -418,6 +425,8 @@ impl EditorState {
             editor,
             dirty_region: DirtyRegion::None,
             dirty_lines: DirtyLines::None,
+            // Chunk: docs/chunks/styled_line_cache - Initialize cache clear flag
+            clear_styled_line_cache: false,
             focus_target: BufferFocusTarget::new(),
             cursor_visible: true,
             last_keystroke: Instant::now(),
@@ -1895,10 +1904,12 @@ impl EditorState {
             let content_height = self.view_height - TAB_BAR_HEIGHT;
             let content_width = self.view_width - RAIL_WIDTH;
 
+            // Chunk: docs/chunks/styled_line_cache - Pass dirty_lines for cache invalidation
             let mut ctx = EditorContext::new(
                 buffer,
                 viewport,
                 &mut self.dirty_region,
+                &mut self.dirty_lines,
                 font_metrics,
                 content_height,
                 content_width,
@@ -2292,10 +2303,12 @@ impl EditorState {
             // Create context and forward to focus target
             let font_metrics = self.font_metrics;
 
+            // Chunk: docs/chunks/styled_line_cache - Pass dirty_lines for cache invalidation
             let mut ctx = EditorContext::new(
                 buffer,
                 viewport,
                 &mut self.dirty_region,
+                &mut self.dirty_lines,
                 font_metrics,
                 pane_content_height,
                 pane_content_width,
@@ -2540,10 +2553,12 @@ impl EditorState {
             // Create context and forward to focus target
             let font_metrics = self.font_metrics;
 
+            // Chunk: docs/chunks/styled_line_cache - Pass dirty_lines for cache invalidation
             let mut ctx = EditorContext::new(
                 buffer,
                 viewport,
                 &mut self.dirty_region,
+                &mut self.dirty_lines,
                 font_metrics,
                 content_height,
                 content_width,
@@ -2809,6 +2824,17 @@ impl EditorState {
     /// cached styled lines for the changed buffer lines.
     pub fn take_dirty_lines(&mut self) -> DirtyLines {
         std::mem::take(&mut self.dirty_lines)
+    }
+
+    // Chunk: docs/chunks/styled_line_cache - Take clear cache flag for tab switch
+    /// Takes the clear_styled_line_cache flag, leaving `false` in its place.
+    ///
+    /// Call this at the start of each render pass. If true, call
+    /// `Renderer::clear_styled_line_cache()` to fully clear the cache.
+    /// This is set on tab switch to prevent stale cache entries from a
+    /// previous buffer causing visual artifacts.
+    pub fn take_clear_styled_line_cache(&mut self) -> bool {
+        std::mem::take(&mut self.clear_styled_line_cache)
     }
 
     /// Toggles cursor visibility for blink animation.
@@ -3502,6 +3528,10 @@ impl EditorState {
             // (must be done after pane.switch_tab so active_tab is updated)
             self.sync_active_tab_viewport();
             self.dirty_region.merge(DirtyRegion::FullViewport);
+            // Chunk: docs/chunks/styled_line_cache - Clear cache on tab switch
+            // Mark that the styled line cache should be cleared to prevent stale
+            // entries from the previous buffer causing visual artifacts.
+            self.clear_styled_line_cache = true;
         }
     }
 

@@ -867,7 +867,8 @@ mod tests {
     use crate::font::FontMetrics;
     use crate::input::{Modifiers, ScrollDelta};
     use crate::viewport::Viewport;
-    use lite_edit_buffer::{Position, TextBuffer};
+    // Chunk: docs/chunks/styled_line_cache - Added DirtyLines import for test context
+    use lite_edit_buffer::{DirtyLines, Position, TextBuffer};
 
     /// Creates test font metrics with known values
     fn test_font_metrics() -> FontMetrics {
@@ -881,17 +882,19 @@ mod tests {
         }
     }
 
-    fn create_test_context() -> (TextBuffer, Viewport, DirtyRegion) {
+    // Chunk: docs/chunks/styled_line_cache - Added dirty_lines to test context
+    fn create_test_context() -> (TextBuffer, Viewport, DirtyRegion, DirtyLines) {
         let buffer = TextBuffer::new();
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100); // 10 visible lines
         let dirty = DirtyRegion::None;
-        (buffer, viewport, dirty)
+        let dirty_lines = DirtyLines::None;
+        (buffer, viewport, dirty, dirty_lines)
     }
 
     #[test]
     fn test_typing_hello() {
-        let (mut buffer, mut viewport, mut dirty) = create_test_context();
+        let (mut buffer, mut viewport, mut dirty, mut dirty_lines) = create_test_context();
         let mut target = BufferFocusTarget::new();
 
         {
@@ -899,6 +902,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -914,7 +918,7 @@ mod tests {
 
     #[test]
     fn test_typing_then_backspace() {
-        let (mut buffer, mut viewport, mut dirty) = create_test_context();
+        let (mut buffer, mut viewport, mut dirty, mut dirty_lines) = create_test_context();
         let mut target = BufferFocusTarget::new();
 
         {
@@ -922,6 +926,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -942,6 +947,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Move right
@@ -950,6 +956,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -964,6 +971,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -978,6 +986,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -992,6 +1001,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1003,7 +1013,7 @@ mod tests {
 
     #[test]
     fn test_enter_creates_newline() {
-        let (mut buffer, mut viewport, mut dirty) = create_test_context();
+        let (mut buffer, mut viewport, mut dirty, mut dirty_lines) = create_test_context();
         let mut target = BufferFocusTarget::new();
 
         {
@@ -1011,6 +1021,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1032,6 +1043,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -1039,6 +1051,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1056,6 +1069,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -1063,6 +1077,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1087,6 +1102,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -1094,6 +1110,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1118,6 +1135,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -1125,6 +1143,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1149,6 +1168,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -1156,6 +1176,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1180,6 +1201,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -1187,6 +1209,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1205,6 +1228,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -1212,6 +1236,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1234,6 +1259,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100); // 10 visible lines
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Move cursor to line 15 (beyond viewport)
@@ -1242,6 +1268,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1259,7 +1286,7 @@ mod tests {
 
     #[test]
     fn test_unhandled_key_returns_no() {
-        let (mut buffer, mut viewport, mut dirty) = create_test_context();
+        let (mut buffer, mut viewport, mut dirty, mut dirty_lines) = create_test_context();
         let mut target = BufferFocusTarget::new();
 
         let result = {
@@ -1267,6 +1294,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1293,6 +1321,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -1300,6 +1329,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1485,6 +1515,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Click on "world" at column 2 (character 'r')
@@ -1496,6 +1527,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1542,6 +1574,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Scroll to line 5 + 8 pixels (fractional)
@@ -1554,6 +1587,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1606,6 +1640,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         let result = {
@@ -1613,6 +1648,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1640,6 +1676,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -1647,6 +1684,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1673,6 +1711,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -1680,6 +1719,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1705,6 +1745,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -1712,6 +1753,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1740,6 +1782,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -1747,6 +1790,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1779,6 +1823,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -1786,6 +1831,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1819,6 +1865,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -1826,6 +1873,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1868,6 +1916,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -1875,6 +1924,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1902,6 +1952,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -1909,6 +1960,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1940,6 +1992,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -1947,6 +2000,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -1973,6 +2027,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -1980,6 +2035,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2009,6 +2065,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -2016,6 +2073,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2051,6 +2109,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -2058,6 +2117,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2086,6 +2146,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -2093,6 +2154,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2120,6 +2182,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -2127,6 +2190,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2154,6 +2218,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -2161,6 +2226,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2188,6 +2254,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -2195,6 +2262,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2222,6 +2290,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -2229,6 +2298,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2256,6 +2326,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -2263,6 +2334,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2290,6 +2362,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -2297,6 +2370,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2324,6 +2398,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -2331,6 +2406,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2419,6 +2495,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -2426,6 +2503,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2451,6 +2529,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Ensure no selection
@@ -2461,6 +2540,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2488,6 +2568,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -2495,6 +2576,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2530,6 +2612,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Verify we have a selection first
@@ -2539,6 +2622,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2562,6 +2646,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2603,6 +2688,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Select "hello" using shift+right arrows (5 times)
@@ -2611,6 +2697,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2637,6 +2724,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2671,6 +2759,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // No selection
@@ -2681,6 +2770,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2713,6 +2803,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Select "hello" using shift+right arrows
@@ -2721,6 +2812,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2758,6 +2850,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2782,6 +2875,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Cmd+A to select all
@@ -2790,6 +2884,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2814,6 +2909,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2844,6 +2940,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Set anchor at (0, 2) and move cursor to (2, 1) preserving selection
@@ -2859,6 +2956,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2895,6 +2993,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100); // 10 visible lines
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Initial offset
@@ -2905,6 +3004,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2929,6 +3029,7 @@ mod tests {
         viewport.update_size(160.0, 100);
         viewport.scroll_to(10, 50); // Start scrolled down
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -2936,6 +3037,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2958,6 +3060,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100); // 10 visible lines, 20 total lines
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -2965,6 +3068,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -2988,6 +3092,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         let original_cursor = buffer.cursor_position();
@@ -2997,6 +3102,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3019,6 +3125,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -3026,6 +3133,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3057,10 +3165,12 @@ mod tests {
         // Scroll 7 pixels three times = 21 pixels = 1 line + 5 pixels
         for _ in 0..3 {
             let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
             let mut ctx = EditorContext::new(
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3094,6 +3204,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(80.0, 100); // 5 visible rows
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -3101,6 +3212,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 80.0,
                 640.0, // 640px width = 80 cols at 8px glyph
@@ -3133,10 +3245,12 @@ mod tests {
         // First, scroll to max
         {
             let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
             let mut ctx = EditorContext::new(
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 80.0,
                 640.0,
@@ -3150,10 +3264,12 @@ mod tests {
         // Now scroll back up by 1 pixel
         {
             let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
             let mut ctx = EditorContext::new(
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 80.0,
                 640.0,
@@ -3186,6 +3302,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(80.0, 100); // 5 visible rows
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Scroll to max
@@ -3194,6 +3311,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 80.0,
                 640.0,
@@ -3211,10 +3329,12 @@ mod tests {
         // Chunk: docs/chunks/tiling_workspace_integration - Tests use screen-space coordinates (y=0 at top)
         {
             let mut dirty2 = DirtyRegion::None;
+            let mut dirty_lines2 = DirtyLines::None;
             let mut ctx = EditorContext::new(
                 &mut buffer,
                 &mut viewport,
                 &mut dirty2,
+                &mut dirty_lines2,
                 test_font_metrics(),
                 80.0,
                 640.0,
@@ -3252,6 +3372,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100); // 10 visible lines
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -3289,6 +3410,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100); // 10 visible lines
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Scroll to max
@@ -3315,10 +3437,12 @@ mod tests {
         // Chunk: docs/chunks/tiling_workspace_integration - Tests use screen-space coordinates (y=0 at top)
         {
             let mut dirty2 = DirtyRegion::None;
+            let mut dirty_lines2 = DirtyLines::None;
             let mut ctx = EditorContext::new(
                 &mut buffer,
                 &mut viewport,
                 &mut dirty2,
+                &mut dirty_lines2,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3352,6 +3476,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Click on "world" at column 2 (character 'r')
@@ -3362,6 +3487,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3392,6 +3518,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Mouse down at line 0, column 1 (character 'e')
@@ -3402,6 +3529,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3426,6 +3554,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3456,6 +3585,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3483,6 +3613,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Mouse down at some position
@@ -3491,6 +3622,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3510,6 +3642,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3534,6 +3667,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Mouse down at column 1
@@ -3542,6 +3676,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3561,6 +3696,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3580,6 +3716,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3606,6 +3743,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Mouse down at line 0, column 0
@@ -3615,6 +3753,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3634,6 +3773,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3659,6 +3799,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Mouse down at line 0, column 0
@@ -3667,6 +3808,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3687,6 +3829,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3712,6 +3855,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Mouse down at line 1
@@ -3721,6 +3865,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3741,6 +3886,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3766,6 +3912,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Mouse down at line 0, column 1
@@ -3775,6 +3922,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3800,6 +3948,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3827,6 +3976,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3851,6 +4001,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3877,6 +4028,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Mouse down at column 4
@@ -3885,6 +4037,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3908,6 +4061,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3939,6 +4093,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Mouse down at line 1
@@ -3948,6 +4103,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -3974,6 +4130,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -4015,6 +4172,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         let result = {
@@ -4022,6 +4180,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -4049,6 +4208,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -4056,6 +4216,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -4081,6 +4242,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -4088,6 +4250,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -4115,6 +4278,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -4122,6 +4286,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -4146,6 +4311,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Double-click at col 2 (pixel x = 16, col = 16/8 = 2)
@@ -4155,6 +4321,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -4184,6 +4351,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -4191,6 +4359,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -4218,6 +4387,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Click at col 5 (first space)
@@ -4227,6 +4397,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -4254,6 +4425,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -4261,6 +4433,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -4285,6 +4458,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Click at x = 80 (col 10, past end of "hello" which is 5 chars)
@@ -4293,6 +4467,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -4321,6 +4496,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -4328,6 +4504,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -4353,6 +4530,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         // Line 1 is at flipped_y in [16, 32)
@@ -4363,6 +4541,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -4798,6 +4977,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -4805,6 +4985,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -4829,6 +5010,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -4836,6 +5018,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -4901,6 +5084,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         let visible_lines = viewport.visible_lines();
@@ -4911,6 +5095,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -4934,6 +5119,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -4941,6 +5127,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -4964,6 +5151,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -4971,6 +5159,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -4994,6 +5183,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -5001,6 +5191,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -5024,6 +5215,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -5031,6 +5223,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -5060,6 +5253,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(32.0, 100); // Only 2 visible lines
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -5093,6 +5287,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(16.0, 100); // Only 1 visible line
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         {
@@ -5125,6 +5320,7 @@ mod tests {
         let mut viewport = Viewport::new(16.0);
         viewport.update_size(160.0, 100);
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         let initial_offset = viewport.scroll_offset_px();
@@ -5135,6 +5331,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
@@ -5163,6 +5360,7 @@ mod tests {
         viewport.update_size(160.0, 100);
         viewport.set_scroll_offset_px(320.0, 30); // Scroll down 20 lines worth
         let mut dirty = DirtyRegion::None;
+        let mut dirty_lines = DirtyLines::None;
         let mut target = BufferFocusTarget::new();
 
         let initial_offset = viewport.scroll_offset_px();
@@ -5173,6 +5371,7 @@ mod tests {
                 &mut buffer,
                 &mut viewport,
                 &mut dirty,
+                &mut dirty_lines,
                 test_font_metrics(),
                 160.0,
                 800.0,
