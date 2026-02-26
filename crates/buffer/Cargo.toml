@@ -8,7 +8,8 @@ description = "Text buffer implementation for lite-edit"
 license.workspace = true
 
 [dependencies]
-# No dependencies - standard library only
+# Chunk: docs/chunks/grapheme_cluster_awareness - Unicode grapheme cluster boundary detection
+unicode-segmentation = "1.10"
 
 [dev-dependencies]
 # No dev dependencies needed

@@ -53,6 +53,8 @@
 
 mod buffer_view;
 mod gap_buffer;
+// Chunk: docs/chunks/grapheme_cluster_awareness - Grapheme cluster boundary detection
+mod grapheme;
 mod line_index;
 mod text_buffer;
 mod types;
