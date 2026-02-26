@@ -100,6 +100,15 @@ pub enum EditorEvent {
     /// - Focus changes away from the text field
     /// - The text input system needs to clear marked state
     UnmarkText,
+
+    // Chunk: docs/chunks/app_nap_activity_assertions - Window resign key event
+    /// Window lost key status (app was backgrounded).
+    ///
+    /// This event is sent from the windowDidResignKey delegate method to notify
+    /// the editor that the window is no longer key. Used to release the activity
+    /// assertion immediately when backgrounding, rather than waiting for the
+    /// 2-second timeout.
+    WindowResignKey,
 }
 
 impl EditorEvent {

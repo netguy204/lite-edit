@@ -34,6 +34,8 @@
 //! timer, resize) send events through an `mpsc` channel, and a single drain loop
 //! processes them sequentially with exclusive ownership of the editor state.
 
+// Chunk: docs/chunks/app_nap_activity_assertions - Activity assertion for App Nap
+mod activity_assertion;
 mod buffer_target;
 mod clipboard;
 // Chunk: docs/chunks/renderer_styled_content - ColorPalette for styled text
@@ -238,6 +240,7 @@ define_class!(
         }
 
         // Chunk: docs/chunks/app_nap_blink_timer - Stop blink timer when backgrounded for App Nap
+        // Chunk: docs/chunks/app_nap_activity_assertions - Release activity assertion when backgrounded
         #[unsafe(method(windowDidResignKey:))]
         fn window_did_resign_key(&self, _notification: &NSNotification) {
             // Invalidate and clear the blink timer to allow App Nap when backgrounded.
@@ -245,6 +248,14 @@ define_class!(
             let mut timer_slot = self.ivars().blink_timer.borrow_mut();
             if let Some(timer) = timer_slot.take() {
                 timer.invalidate();
+            }
+
+            // Chunk: docs/chunks/app_nap_activity_assertions - Send WindowResignKey event
+            // Send event to release the activity assertion immediately when backgrounding,
+            // rather than waiting for the 2-second quiescence timeout.
+            let sender = self.ivars().event_sender.borrow();
+            if let Some(sender) = sender.as_ref() {
+                let _ = sender.send_window_resign_key();
             }
         }
 

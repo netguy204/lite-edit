@@ -242,6 +242,17 @@ impl EventSender {
         (self.inner.run_loop_waker)();
         result
     }
+
+    // Chunk: docs/chunks/app_nap_activity_assertions - Window resign key event sender
+    /// Sends a window-resign-key event to the channel.
+    ///
+    /// This is called from the windowDidResignKey delegate method to notify
+    /// the editor that the window is no longer key (app was backgrounded).
+    pub fn send_window_resign_key(&self) -> Result<(), SendError<EditorEvent>> {
+        let result = self.inner.sender.send(EditorEvent::WindowResignKey);
+        (self.inner.run_loop_waker)();
+        result
+    }
 }
 
 // Implement WakeupSignal so EventSender can be used by the terminal crate

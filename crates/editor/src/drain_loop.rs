@@ -227,7 +227,20 @@ impl EventDrainLoop {
             EditorEvent::UnmarkText => {
                 self.handle_unmark_text();
             }
+            // Chunk: docs/chunks/app_nap_activity_assertions - Window resign key handling
+            EditorEvent::WindowResignKey => {
+                self.handle_window_resign_key();
+            }
         }
+    }
+
+    // Chunk: docs/chunks/app_nap_activity_assertions - Release activity assertion on window resign
+    /// Handles window resign key events.
+    ///
+    /// This method is called when the window loses key status (app backgrounded).
+    /// It releases the activity assertion immediately to allow App Nap.
+    fn handle_window_resign_key(&mut self) {
+        self.state.release_activity_assertion();
     }
 
     // Chunk: docs/chunks/file_change_events - File change event handler

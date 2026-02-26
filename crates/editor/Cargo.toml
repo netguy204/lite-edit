@@ -25,7 +25,8 @@ lite-edit-input = { path = "../input" }
 # Core Objective-C runtime bindings
 objc2 = "0.6"
 # Foundation framework (NSString, NSRunLoop, etc.)
-objc2-foundation = "0.3"
+# Chunk: docs/chunks/app_nap_activity_assertions - NSProcessInfo for activity assertions
+objc2-foundation = { version = "0.3", features = ["NSProcessInfo"] }
 # AppKit framework (NSApplication, NSWindow, NSView)
 # Chunk: docs/chunks/dragdrop_file_paste - NSPasteboard feature for drag-and-drop
 objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSResponder", "NSWindow", "NSTextInputClient"] }

@@ -19,6 +19,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+// Chunk: docs/chunks/app_nap_activity_assertions - Activity assertion and MainThreadMarker for App Nap
+use objc2_foundation::MainThreadMarker;
+
+use crate::activity_assertion::ActivityAssertion;
 use crate::buffer_target::BufferFocusTarget;
 // Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog import
 // Chunk: docs/chunks/generic_yes_no_modal - ConfirmDialogContext and geometry import
@@ -190,6 +194,14 @@ pub struct EditorState {
     /// Per-buffer file watcher for files outside the workspace.
     /// Manages watchers for files opened via Cmd+O from external directories.
     buffer_file_watcher: BufferFileWatcher,
+    // Chunk: docs/chunks/app_nap_activity_assertions - Activity assertion for App Nap
+    /// Timestamp of last PTY output from any terminal tab.
+    /// Used to implement a 2-second hysteresis before releasing the activity assertion.
+    last_terminal_activity: Option<Instant>,
+    // Chunk: docs/chunks/app_nap_activity_assertions - Activity assertion for App Nap
+    /// NSProcessInfo activity assertion to prevent App Nap during terminal activity.
+    /// Held while terminals are actively receiving PTY output.
+    activity_assertion: ActivityAssertion,
     /// Flag set by Ctrl+Shift+P to trigger an on-demand perf stats dump.
     #[cfg(feature = "perf-instrumentation")]
     pub dump_perf_stats: bool,
@@ -435,6 +447,9 @@ impl EditorState {
             file_change_suppression: FileChangeSuppression::new(),
             // Chunk: docs/chunks/buffer_file_watching - Initialize per-buffer file watcher
             buffer_file_watcher: BufferFileWatcher::new(),
+            // Chunk: docs/chunks/app_nap_activity_assertions - Initialize activity assertion state
+            last_terminal_activity: None,
+            activity_assertion: ActivityAssertion::new(),
             #[cfg(feature = "perf-instrumentation")]
             dump_perf_stats: false,
         }
@@ -499,6 +514,9 @@ impl EditorState {
             file_change_suppression: FileChangeSuppression::new(),
             // Chunk: docs/chunks/buffer_file_watching - Initialize per-buffer file watcher
             buffer_file_watcher: BufferFileWatcher::new(),
+            // Chunk: docs/chunks/app_nap_activity_assertions - Initialize activity assertion state
+            last_terminal_activity: None,
+            activity_assertion: ActivityAssertion::new(),
             #[cfg(feature = "perf-instrumentation")]
             dump_perf_stats: false,
         }
@@ -3080,6 +3098,17 @@ impl EditorState {
             DirtyRegion::None
         };
 
+        // Chunk: docs/chunks/app_nap_activity_assertions - Track terminal activity for App Nap
+        // When terminals have activity, update the timestamp and hold the activity assertion.
+        // This prevents macOS from napping the process while terminal output is active.
+        if any_activity {
+            self.last_terminal_activity = Some(Instant::now());
+            // Hold the activity assertion (idempotent if already held)
+            if let Some(mtm) = MainThreadMarker::new() {
+                self.activity_assertion.hold(mtm);
+            }
+        }
+
         (dirty, any_needs_rewakeup)
     }
 
@@ -3124,6 +3153,17 @@ impl EditorState {
         std::mem::take(&mut self.clear_styled_line_cache)
     }
 
+    // Chunk: docs/chunks/app_nap_activity_assertions - Release assertion on window resign
+    /// Releases the activity assertion immediately.
+    ///
+    /// Called when the window loses key status (app backgrounded) to release
+    /// the assertion without waiting for the 2-second timeout. This ensures
+    /// macOS can nap the process as soon as possible when backgrounded.
+    pub fn release_activity_assertion(&mut self) {
+        self.activity_assertion.release();
+        self.last_terminal_activity = None;
+    }
+
     /// Toggles cursor visibility for blink animation.
     ///
     /// Focus-aware: only the cursor in the currently focused area (buffer or overlay)
@@ -3135,7 +3175,21 @@ impl EditorState {
     ///
     /// Chunk: docs/chunks/cursor_blink_focus - Focus-aware cursor blink toggle
     // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
+    // Chunk: docs/chunks/app_nap_activity_assertions - Activity timeout check for App Nap
     pub fn toggle_cursor_blink(&mut self) -> DirtyRegion {
+        // Chunk: docs/chunks/app_nap_activity_assertions - Check for terminal quiescence
+        // If terminals have been idle for 2 seconds, release the activity assertion
+        // to allow App Nap when the window is backgrounded.
+        const ACTIVITY_TIMEOUT_MS: u64 = 2000;
+        if let Some(last_activity) = self.last_terminal_activity {
+            let elapsed = Instant::now().duration_since(last_activity);
+            if elapsed.as_millis() >= ACTIVITY_TIMEOUT_MS as u128 {
+                // Terminals have been idle for 2 seconds - release assertion
+                self.activity_assertion.release();
+                self.last_terminal_activity = None;
+            }
+        }
+
         // Terminal tabs don't have a text buffer cursor to blink.
         // The terminal has its own cursor managed by the PTY.
         // Return FullViewport for terminal tabs to ensure the cursor is rendered.
