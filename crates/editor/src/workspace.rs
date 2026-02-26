@@ -1172,15 +1172,18 @@ impl Editor {
     }
 
     // Chunk: docs/chunks/welcome_screen - Welcome screen visibility check
+    // Chunk: docs/chunks/welcome_file_backed - Exclude file-backed tabs from welcome screen
     /// Returns true if the welcome screen should be shown for the active tab.
     ///
     /// The welcome screen is displayed when:
     /// - There is an active workspace with an active tab
     /// - The active tab is a File tab (not Terminal or AgentOutput)
+    /// - The tab is NOT backed by a file on disk (associated_file is None)
     /// - The tab's TextBuffer is empty
     ///
     /// This provides a Vim-style welcome/intro screen on initial launch and
-    /// when creating new empty tabs.
+    /// when creating new empty tabs. File-backed tabs (even if empty) show
+    /// their actual (empty) contents instead.
     pub fn should_show_welcome_screen(&self) -> bool {
         let workspace = match self.active_workspace() {
             Some(ws) => ws,
@@ -1194,6 +1197,12 @@ impl Editor {
 
         // Only show welcome screen for File tabs
         if tab.kind != TabKind::File {
+            return false;
+        }
+
+        // Don't show welcome screen for file-backed tabs (even if empty)
+        // The welcome screen is for fresh, unassociated scratch buffers only
+        if tab.associated_file.is_some() {
             return false;
         }
 
@@ -1858,5 +1867,42 @@ mod tests {
         // From B: Right is no pane (edge), Left is A, Down is C
         // So should find A (Left is checked before Down)
         assert_eq!(fallback, Some(1)); // Pane A
+    }
+
+    // =========================================================================
+    // Welcome Screen Tests (Chunk: docs/chunks/welcome_file_backed)
+    // =========================================================================
+
+    #[test]
+    fn test_welcome_screen_not_shown_for_empty_file_backed_tab() {
+        // Create an editor with a file-backed empty tab
+        let mut editor = Editor::new(TEST_LINE_HEIGHT);
+
+        // Replace the default empty tab with a file-backed empty tab
+        let ws = editor.active_workspace_mut().unwrap();
+        let empty_buffer = TextBuffer::new();
+        let file_backed_tab = Tab::new_file(
+            99,
+            empty_buffer,
+            "empty.txt".to_string(),
+            Some(PathBuf::from("/test/empty.txt")),
+            TEST_LINE_HEIGHT,
+        );
+        // Clear existing tabs and add our file-backed tab
+        ws.close_tab(0); // Close the first tab by index
+        ws.add_tab(file_backed_tab);
+
+        // The welcome screen should NOT be shown for file-backed tabs (even if empty)
+        assert!(!editor.should_show_welcome_screen());
+    }
+
+    #[test]
+    fn test_welcome_screen_shown_for_empty_unassociated_tab() {
+        // Create an editor with a standard empty (unassociated) tab
+        let editor = Editor::new(TEST_LINE_HEIGHT);
+
+        // The default editor creates an empty, unassociated tab
+        // The welcome screen SHOULD be shown for this case
+        assert!(editor.should_show_welcome_screen());
     }
 }

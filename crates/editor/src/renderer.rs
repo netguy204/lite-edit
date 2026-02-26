@@ -2797,6 +2797,7 @@ impl Renderer {
     }
 
     // Chunk: docs/chunks/welcome_screen - Welcome screen rendering
+    // Chunk: docs/chunks/welcome_screen - Renders welcome screen content using Metal glyph pipeline
     // Chunk: docs/chunks/welcome_scroll - Welcome screen vertical scrolling in draw function
     /// Draws the welcome screen when the active tab has an empty buffer.
     ///
