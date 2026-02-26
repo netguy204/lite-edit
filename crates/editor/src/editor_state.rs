@@ -2705,6 +2705,125 @@ impl EditorState {
         // Other tab types (AgentOutput, Diff): no-op
     }
 
+    // Chunk: docs/chunks/unicode_ime_input - Text input event handlers
+
+    /// Handles text insertion from IME, keyboard, paste, or dictation.
+    ///
+    /// This is the final text to insert after any IME composition is complete.
+    /// The text is inserted at the cursor position (or replaces the specified range).
+    pub fn handle_insert_text(&mut self, event: lite_edit_input::TextInputEvent) {
+        // Only handle text input in Buffer focus mode
+        if self.focus != EditorFocus::Buffer {
+            return;
+        }
+
+        let text = &event.text;
+        if text.is_empty() {
+            return;
+        }
+
+        let ws = match self.editor.active_workspace_mut() {
+            Some(ws) => ws,
+            None => return,
+        };
+
+        let tab = match ws.active_tab_mut() {
+            Some(tab) => tab,
+            None => return,
+        };
+
+        // Check for terminal tab
+        if let Some((terminal, _viewport)) = tab.terminal_and_viewport_mut() {
+            // Terminal tab: encode text as if typed
+            let modes = terminal.term_mode();
+            let bytes = InputEncoder::encode_paste(text, modes);
+            if !bytes.is_empty() {
+                let _ = terminal.write_input(&bytes);
+            }
+            return;
+        }
+
+        // File tab: insert text into buffer
+        if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
+            // Clear any marked text first (IME commit replaces marked text)
+            buffer.clear_marked_text();
+
+            let dirty_lines = buffer.insert_str(text);
+            let dirty = viewport.dirty_lines_to_region(&dirty_lines, buffer.line_count());
+            self.dirty_region.merge(dirty);
+
+            // Ensure cursor is visible
+            let cursor_line = buffer.cursor_position().line;
+            if viewport.ensure_visible(cursor_line, buffer.line_count()) {
+                self.dirty_region.merge(DirtyRegion::FullViewport);
+            }
+
+            tab.dirty = true;
+        }
+    }
+
+    /// Handles IME marked text (composition in progress).
+    ///
+    /// The marked text is displayed with an underline to indicate it's uncommitted.
+    pub fn handle_set_marked_text(&mut self, event: lite_edit_input::MarkedTextEvent) {
+        // Only handle in Buffer focus mode
+        if self.focus != EditorFocus::Buffer {
+            return;
+        }
+
+        let ws = match self.editor.active_workspace_mut() {
+            Some(ws) => ws,
+            None => return,
+        };
+
+        let tab = match ws.active_tab_mut() {
+            Some(tab) => tab,
+            None => return,
+        };
+
+        // File tab: set marked text on buffer
+        if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
+            let dirty_lines = buffer.set_marked_text(&event.text, event.selected_range);
+            let dirty = viewport.dirty_lines_to_region(&dirty_lines, buffer.line_count());
+            self.dirty_region.merge(dirty);
+
+            // Ensure cursor is visible (cursor moves to end of marked text)
+            let cursor_line = buffer.cursor_position().line;
+            if viewport.ensure_visible(cursor_line, buffer.line_count()) {
+                self.dirty_region.merge(DirtyRegion::FullViewport);
+            }
+        }
+
+        // Terminal tabs don't support marked text - IME sends final text directly
+    }
+
+    /// Handles IME composition cancellation.
+    ///
+    /// Clears any marked text without inserting it.
+    pub fn handle_unmark_text(&mut self) {
+        // Only handle in Buffer focus mode
+        if self.focus != EditorFocus::Buffer {
+            return;
+        }
+
+        let ws = match self.editor.active_workspace_mut() {
+            Some(ws) => ws,
+            None => return,
+        };
+
+        let tab = match ws.active_tab_mut() {
+            Some(tab) => tab,
+            None => return,
+        };
+
+        // File tab: clear marked text
+        if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
+            let dirty_lines = buffer.cancel_marked_text();
+            let dirty = viewport.dirty_lines_to_region(&dirty_lines, buffer.line_count());
+            self.dirty_region.merge(dirty);
+        }
+    }
+
     /// Returns true if any screen region needs re-rendering.
     pub fn is_dirty(&self) -> bool {
         self.dirty_region.is_dirty()

@@ -31,7 +31,7 @@ use objc2_foundation::{MainThreadMarker, NSString};
 use crate::editor_event::EditorEvent;
 use crate::editor_state::{EditorFocus, EditorState};
 use crate::event_channel::{EventReceiver, EventSender};
-use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
+use crate::input::{KeyEvent, MarkedTextEvent, MouseEvent, ScrollDelta, TextInputEvent};
 use crate::metal_view::{CursorRect, CursorRegions, MetalView};
 use crate::renderer::Renderer;
 use crate::confirm_dialog::calculate_confirm_dialog_geometry;
@@ -213,6 +213,16 @@ impl EventDrainLoop {
             EditorEvent::FileRenamed { from, to } => {
                 self.handle_file_renamed(from, to);
             }
+            // Chunk: docs/chunks/unicode_ime_input - Text input event handling
+            EditorEvent::InsertText(event) => {
+                self.handle_insert_text(event);
+            }
+            EditorEvent::SetMarkedText(event) => {
+                self.handle_set_marked_text(event);
+            }
+            EditorEvent::UnmarkText => {
+                self.handle_unmark_text();
+            }
         }
     }
 
@@ -389,6 +399,33 @@ impl EventDrainLoop {
     /// Handles file drop events by forwarding to the editor state.
     fn handle_file_drop(&mut self, paths: Vec<String>) {
         self.state.handle_file_drop(paths);
+        self.poll_after_input();
+    }
+
+    // Chunk: docs/chunks/unicode_ime_input - Text input event handlers
+
+    /// Handles text insertion events from IME, keyboard, paste, or dictation.
+    ///
+    /// This is the final text to insert - IME composition is complete.
+    fn handle_insert_text(&mut self, event: TextInputEvent) {
+        self.state.handle_insert_text(event);
+        self.poll_after_input();
+    }
+
+    /// Handles IME composition (marked text) updates.
+    ///
+    /// The marked text should be displayed with an underline while composition
+    /// is in progress. This may be called multiple times as the user types.
+    fn handle_set_marked_text(&mut self, event: MarkedTextEvent) {
+        self.state.handle_set_marked_text(event);
+        self.poll_after_input();
+    }
+
+    /// Handles IME composition cancellation.
+    ///
+    /// This clears any marked text without inserting it.
+    fn handle_unmark_text(&mut self) {
+        self.state.handle_unmark_text();
         self.poll_after_input();
     }
 

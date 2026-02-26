@@ -3,6 +3,7 @@
 // Chunk: docs/chunks/mouse_click_cursor - Mouse click cursor positioning
 // Chunk: docs/chunks/viewport_scrolling - Scroll event handling
 // Chunk: docs/chunks/pty_wakeup_reentrant - EventSender-based event delivery
+// Chunk: docs/chunks/unicode_ime_input - NSTextInputClient for IME support
 //!
 //! Metal-backed NSView implementation
 //!
@@ -19,6 +20,16 @@
 //!    to the drain loop, eliminating `Rc<RefCell<>>` borrow conflicts.
 //! 2. **Closures** (legacy): Direct callback closures, kept for backward
 //!    compatibility during the transition.
+//!
+//! ## IME Support
+//!
+//! The view implements the NSTextInputClient protocol to support Input Method
+//! Editors (IME) for CJK languages and other complex input methods. Key events
+//! are routed through `interpretKeyEvents:` which invokes the macOS text input
+//! system. This enables proper handling of:
+//! - Compose sequences (dead keys)
+//! - IME composition (marked text)
+//! - Unicode hex input (Ctrl+Shift+U sequences)
 
 use std::cell::{Cell, RefCell};
 
@@ -36,7 +47,7 @@ use objc2_metal::MTLDevice;
 use objc2_quartz_core::{CALayer, CAMetalLayer};
 
 use crate::event_channel::EventSender;
-use crate::input::{Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind, ScrollDelta};
+use crate::input::{Key, KeyEvent, MarkedTextEvent, Modifiers, MouseEvent, MouseEventKind, ScrollDelta, TextInputEvent};
 
 // CGFloat is a type alias for f64 on 64-bit systems
 type CGFloat = f64;
@@ -265,12 +276,316 @@ define_class!(
             true
         }
 
-        /// Handle key down events
-        // Chunk: docs/chunks/pty_wakeup_reentrant - Prefer EventSender over closure
+        // Chunk: docs/chunks/unicode_ime_input - Route key events through text input system
+        /// Handle key down events.
+        ///
+        /// Key events are handled in two paths:
+        ///
+        /// 1. **Bypass path**: Keys with Command modifier or special function keys are
+        ///    sent directly to the key event handler, bypassing the text input system.
+        ///    This ensures that shortcuts like Cmd+S, Cmd+P, Cmd+Q work immediately.
+        ///
+        /// 2. **Text input path**: All other keys are routed through `interpretKeyEvents:`
+        ///    which invokes the macOS text input system. This enables:
+        ///    - IME composition for CJK languages
+        ///    - Dead key compose sequences (é, ñ, etc.)
+        ///    - Unicode hex input (Ctrl+Shift+U on some systems)
+        ///
+        ///    The text input system then calls NSTextInputClient protocol methods
+        ///    (`insertText:`, `setMarkedText:`, etc.) which we implement below.
         #[unsafe(method(keyDown:))]
         fn __key_down(&self, event: &NSEvent) {
-            if let Some(key_event) = self.convert_key_event(event) {
-                // Prefer EventSender if available, fall back to closure handler
+            let flags = event.modifierFlags();
+
+            // Check if this is a "bypass" key that should skip the text input system.
+            // These include:
+            // - Keys with Command modifier (shortcuts like Cmd+S, Cmd+Q)
+            // - Escape key (cancel operations, exit modes)
+            // - Function keys (F1-F12)
+            // - Navigation keys without modifiers that we handle specially
+            let key_code = event.keyCode();
+            let is_function_key = matches!(key_code,
+                0x7A..=0x7F | // F1-F4 and some system keys
+                0x60..=0x6F | // F5-F12 and other function keys
+                0x72         // Insert/Help
+            );
+            let is_escape = key_code == 0x35;
+            let has_command = flags.contains(NSEventModifierFlags::Command);
+
+            // Bypass the text input system for command shortcuts and function keys
+            if has_command || is_escape || is_function_key {
+                if let Some(key_event) = self.convert_key_event(event) {
+                    let sender = self.ivars().event_sender.borrow();
+                    if let Some(sender) = sender.as_ref() {
+                        let _ = sender.send_key(key_event);
+                    } else {
+                        drop(sender);
+                        let handler = self.ivars().key_handler.borrow();
+                        if let Some(handler) = handler.as_ref() {
+                            handler(key_event);
+                        }
+                    }
+                }
+                return;
+            }
+
+            // Route through the text input system for all other keys.
+            // This will invoke NSTextInputClient methods (insertText:, setMarkedText:, etc.)
+            // based on the current input method.
+            let event_array = NSArray::from_slice(&[event]);
+            self.interpretKeyEvents(&event_array);
+        }
+
+        // Chunk: docs/chunks/unicode_ime_input - NSTextInputClient: insertText:replacementRange:
+        /// Called by the text input system to insert final (committed) text.
+        ///
+        /// This is invoked when:
+        /// - User types regular characters
+        /// - IME commits composed text
+        /// - Paste operations occur
+        /// - Dictation produces text
+        ///
+        /// The `string` parameter is an `NSString` or `NSAttributedString` containing
+        /// the text to insert. The `replacement_range` indicates which existing text
+        /// to replace (or `NSNotFound` for insertion at cursor).
+        #[unsafe(method(insertText:replacementRange:))]
+        fn __insert_text(&self, string: &objc2::runtime::AnyObject, _replacement_range: objc2_foundation::NSRange) {
+            // Convert the string to Rust. The string can be NSString or NSAttributedString,
+            // but we can use the description method to get the text content.
+            let text: Retained<objc2_foundation::NSString> = unsafe { msg_send![string, description] };
+            let text_str = text.to_string();
+
+            if text_str.is_empty() {
+                return;
+            }
+
+            // Send the text input event
+            let sender = self.ivars().event_sender.borrow();
+            if let Some(sender) = sender.as_ref() {
+                let _ = sender.send_insert_text(TextInputEvent::new(text_str));
+            }
+        }
+
+        // Chunk: docs/chunks/unicode_ime_input - NSTextInputClient: setMarkedText:selectedRange:replacementRange:
+        /// Called by the text input system during IME composition.
+        ///
+        /// "Marked text" is uncommitted composition text, displayed with an underline.
+        /// This is called as the user types in an IME, showing candidate characters.
+        ///
+        /// # Arguments
+        /// * `string` - The marked text (NSString or NSAttributedString)
+        /// * `selected_range` - The selected portion within the marked text (for cursor positioning)
+        /// * `replacement_range` - Which existing text to replace (or NSNotFound)
+        #[unsafe(method(setMarkedText:selectedRange:replacementRange:))]
+        fn __set_marked_text(
+            &self,
+            string: &objc2::runtime::AnyObject,
+            selected_range: objc2_foundation::NSRange,
+            _replacement_range: objc2_foundation::NSRange,
+        ) {
+            // Convert the string to Rust
+            let text: Retained<objc2_foundation::NSString> = unsafe { msg_send![string, description] };
+            let text_str = text.to_string();
+
+            // Convert NSRange to Rust range
+            let selected_start = selected_range.location as usize;
+            let selected_end = selected_start + selected_range.length as usize;
+
+            // Send the marked text event
+            let sender = self.ivars().event_sender.borrow();
+            if let Some(sender) = sender.as_ref() {
+                let _ = sender.send_set_marked_text(MarkedTextEvent::with_selection(
+                    text_str,
+                    selected_start..selected_end,
+                ));
+            }
+        }
+
+        // Chunk: docs/chunks/unicode_ime_input - NSTextInputClient: unmarkText
+        /// Called by the text input system to clear marked text without committing.
+        ///
+        /// This is called when the user cancels IME composition (e.g., presses Escape)
+        /// or when focus changes away from the text field.
+        #[unsafe(method(unmarkText))]
+        fn __unmark_text(&self) {
+            let sender = self.ivars().event_sender.borrow();
+            if let Some(sender) = sender.as_ref() {
+                let _ = sender.send_unmark_text();
+            }
+        }
+
+        // Chunk: docs/chunks/unicode_ime_input - NSTextInputClient: hasMarkedText
+        /// Returns whether the view currently has marked text.
+        ///
+        /// The text input system calls this to determine the composition state.
+        /// For now, we return NO since we don't track marked text state in the view.
+        /// The actual marked text state is in TextBuffer.
+        ///
+        /// TODO: Consider adding a callback to query the buffer's marked text state.
+        #[unsafe(method(hasMarkedText))]
+        fn __has_marked_text(&self) -> bool {
+            false
+        }
+
+        // Chunk: docs/chunks/unicode_ime_input - NSTextInputClient: markedRange
+        /// Returns the range of marked text in the document.
+        ///
+        /// Returns `{NSNotFound, 0}` when there's no marked text.
+        #[unsafe(method(markedRange))]
+        fn __marked_range(&self) -> objc2_foundation::NSRange {
+            // Return NSNotFound to indicate no marked text
+            // NSNotFound is defined as NSIntegerMax, which is isize::MAX
+            objc2_foundation::NSRange {
+                location: usize::MAX,
+                length: 0,
+            }
+        }
+
+        // Chunk: docs/chunks/unicode_ime_input - NSTextInputClient: selectedRange
+        /// Returns the range of selected text in the document.
+        ///
+        /// Returns `{NSNotFound, 0}` when there's no selection.
+        /// The text input system uses this to know where to insert text.
+        ///
+        /// TODO: Consider adding a callback to query the buffer's selection state.
+        #[unsafe(method(selectedRange))]
+        fn __selected_range(&self) -> objc2_foundation::NSRange {
+            // Return empty range at "position 0" - we don't track document position here
+            objc2_foundation::NSRange {
+                location: 0,
+                length: 0,
+            }
+        }
+
+        // Chunk: docs/chunks/unicode_ime_input - NSTextInputClient: validAttributesForMarkedText
+        /// Returns the text attributes supported for marked text display.
+        ///
+        /// We return an empty array since we handle styling ourselves.
+        #[unsafe(method_id(validAttributesForMarkedText))]
+        fn __valid_attributes_for_marked_text(&self) -> Retained<NSArray<objc2_foundation::NSString>> {
+            NSArray::new()
+        }
+
+        // Chunk: docs/chunks/unicode_ime_input - NSTextInputClient: attributedSubstringForProposedRange:actualRange:
+        /// Returns the attributed substring for a given range.
+        ///
+        /// The text input system calls this for candidate window positioning and
+        /// reconversion. For now, we return nil.
+        #[unsafe(method_id(attributedSubstringForProposedRange:actualRange:))]
+        fn __attributed_substring_for_proposed_range(
+            &self,
+            _range: objc2_foundation::NSRange,
+            _actual_range: *mut objc2_foundation::NSRange,
+        ) -> Option<Retained<objc2_foundation::NSAttributedString>> {
+            None
+        }
+
+        // Chunk: docs/chunks/unicode_ime_input - NSTextInputClient: firstRectForCharacterRange:actualRange:
+        /// Returns the screen rect for a character range (for IME candidate window positioning).
+        ///
+        /// The text input system calls this to position the IME candidate window near
+        /// the composition point. For now, we return a rect near the top-left of the view.
+        ///
+        /// TODO: Return accurate cursor position for proper candidate window placement.
+        #[unsafe(method(firstRectForCharacterRange:actualRange:))]
+        fn __first_rect_for_character_range(
+            &self,
+            _range: objc2_foundation::NSRange,
+            _actual_range: *mut objc2_foundation::NSRange,
+        ) -> NSRect {
+            // Return a rect relative to the screen
+            // For now, return the window's frame origin + some offset
+            // This is a fallback - a proper implementation would return the cursor position
+            if let Some(window) = self.window() {
+                let view_frame = self.frame();
+                let window_frame = window.frame();
+
+                // Convert view origin to screen coordinates
+                // Place candidate window near top-left of view as fallback
+                NSRect::new(
+                    objc2_foundation::NSPoint::new(
+                        window_frame.origin.x + view_frame.origin.x + 50.0,
+                        window_frame.origin.y + view_frame.origin.y + view_frame.size.height - 50.0,
+                    ),
+                    NSSize::new(0.0, self.ivars().scale_factor.get() * 16.0),
+                )
+            } else {
+                NSRect::new(
+                    objc2_foundation::NSPoint::new(0.0, 0.0),
+                    NSSize::new(0.0, 16.0),
+                )
+            }
+        }
+
+        // Chunk: docs/chunks/unicode_ime_input - NSTextInputClient: characterIndexForPoint:
+        /// Returns the character index for a screen point.
+        ///
+        /// The text input system calls this for mouse-based candidate selection.
+        /// We return NSNotFound since we don't implement position-to-index mapping here.
+        #[unsafe(method(characterIndexForPoint:))]
+        fn __character_index_for_point(&self, _point: objc2_foundation::NSPoint) -> usize {
+            // NSNotFound is defined as NSIntegerMax
+            usize::MAX
+        }
+
+        // Chunk: docs/chunks/unicode_ime_input - NSTextInputClient: doCommandBySelector:
+        /// Handle action commands from the text input system.
+        ///
+        /// This is called for commands like Enter, Tab, Delete that the text input system
+        /// doesn't consume as text. We convert these to KeyEvent and send them.
+        #[unsafe(method(doCommandBySelector:))]
+        fn __do_command_by_selector(&self, selector: objc2::runtime::Sel) {
+            // Convert the selector to a key event if it's a recognized command
+            // The selector name is a C string, so we convert it to a Rust &str
+            let sel_name_cstr = selector.name();
+            let sel_name = sel_name_cstr.to_str().unwrap_or("");
+
+            let key = match sel_name {
+                "insertNewline:" => Some(Key::Return),
+                "insertTab:" => Some(Key::Tab),
+                "insertBacktab:" => Some(Key::Tab), // With Shift modifier
+                "deleteBackward:" => Some(Key::Backspace),
+                "deleteForward:" => Some(Key::Delete),
+                "moveLeft:" => Some(Key::Left),
+                "moveRight:" => Some(Key::Right),
+                "moveUp:" => Some(Key::Up),
+                "moveDown:" => Some(Key::Down),
+                "moveToBeginningOfLine:" => Some(Key::Home),
+                "moveToEndOfLine:" => Some(Key::End),
+                "moveToBeginningOfDocument:" => Some(Key::Home), // Cmd+Home
+                "moveToEndOfDocument:" => Some(Key::End),        // Cmd+End
+                "pageUp:" => Some(Key::PageUp),
+                "pageDown:" => Some(Key::PageDown),
+                // Selection variants (would need Shift modifier)
+                "moveLeftAndModifySelection:" => Some(Key::Left),
+                "moveRightAndModifySelection:" => Some(Key::Right),
+                "moveUpAndModifySelection:" => Some(Key::Up),
+                "moveDownAndModifySelection:" => Some(Key::Down),
+                "moveToBeginningOfLineAndModifySelection:" => Some(Key::Home),
+                "moveToEndOfLineAndModifySelection:" => Some(Key::End),
+                // Cancel
+                "cancelOperation:" | "cancel:" => Some(Key::Escape),
+                // Ignore other selectors
+                _ => None,
+            };
+
+            if let Some(key) = key {
+                // Determine modifiers based on selector name
+                let modifiers = if sel_name.contains("ModifySelection") {
+                    Modifiers {
+                        shift: true,
+                        ..Modifiers::default()
+                    }
+                } else if sel_name == "insertBacktab:" {
+                    Modifiers {
+                        shift: true,
+                        ..Modifiers::default()
+                    }
+                } else {
+                    Modifiers::default()
+                };
+
+                let key_event = KeyEvent::new(key, modifiers);
                 let sender = self.ivars().event_sender.borrow();
                 if let Some(sender) = sender.as_ref() {
                     let _ = sender.send_key(key_event);

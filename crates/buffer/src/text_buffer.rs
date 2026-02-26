@@ -8,7 +8,8 @@
 //! Each mutation operation returns `DirtyLines` indicating which lines changed,
 //! enabling downstream rendering to minimize redraws.
 
-use crate::buffer_view::{BufferView, CursorInfo, StyledLine};
+// Chunk: docs/chunks/unicode_ime_input - Import Style and UnderlineStyle for marked text rendering
+use crate::buffer_view::{BufferView, CursorInfo, Span, Style, StyledLine, UnderlineStyle};
 use crate::gap_buffer::GapBuffer;
 // Chunk: docs/chunks/grapheme_cluster_awareness - Import grapheme cluster boundary helpers
 use crate::grapheme::{grapheme_boundary_left, grapheme_boundary_right, grapheme_len_at, grapheme_len_before, is_grapheme_boundary};
@@ -95,6 +96,32 @@ fn word_boundary_right(chars: &[char], col: usize) -> usize {
     boundary
 }
 
+// Chunk: docs/chunks/unicode_ime_input - Marked text state for IME support
+/// State of IME marked text (in-progress composition).
+///
+/// Marked text is displayed with an underline to indicate it's uncommitted.
+/// The user can continue composing until they commit (press Enter) or cancel (press Escape).
+///
+/// # IME Workflow
+///
+/// 1. User types romanji (e.g., "nihon")
+/// 2. System sets marked text with "にほん" (hiragana)
+/// 3. User presses Space to see kanji candidates
+/// 4. System updates marked text with selected candidate "日本"
+/// 5. User presses Enter to commit
+/// 6. System calls `commit_marked_text()` which inserts "日本" and clears marked state
+#[derive(Debug, Clone, Default)]
+pub struct MarkedTextState {
+    /// The marked text content.
+    pub text: String,
+    /// Start position in the buffer where marked text begins.
+    /// The marked text is not stored in the gap buffer - it's rendered as an overlay.
+    pub start: Position,
+    /// Selected range within the marked text (for IME cursor display).
+    /// This is relative to the start of the marked text, not the buffer.
+    pub selected_range: std::ops::Range<usize>,
+}
+
 /// A text buffer with cursor tracking and dirty line reporting.
 ///
 /// The buffer maintains:
@@ -102,10 +129,12 @@ fn word_boundary_right(chars: &[char], col: usize) -> usize {
 /// - Line boundary tracking for efficient line-based access
 /// - Cursor position as (line, column)
 /// - Selection anchor for text selection (anchor-cursor model)
+/// - Marked text state for IME composition
 ///
 /// All mutation operations return `DirtyLines` to enable efficient rendering.
 // Chunk: docs/chunks/text_selection_model - Selection anchor and range API
 // Chunk: docs/chunks/buffer_view_trait - BufferView trait implementation
+// Chunk: docs/chunks/unicode_ime_input - Marked text support for IME
 #[derive(Debug)]
 pub struct TextBuffer {
     buffer: GapBuffer,
@@ -114,6 +143,9 @@ pub struct TextBuffer {
     /// Selection anchor position. When `Some`, the selection spans from anchor to cursor.
     /// The anchor may come before or after the cursor (both directions are valid).
     selection_anchor: Option<Position>,
+    /// IME marked text state. When `Some`, the marked text is being composed.
+    /// The marked text is rendered with an underline to indicate it's uncommitted.
+    marked_text: Option<MarkedTextState>,
     /// Accumulated dirty lines for BufferView::take_dirty().
     /// This tracks all mutations since the last drain.
     dirty_lines: DirtyLines,
@@ -130,6 +162,7 @@ impl TextBuffer {
             line_index: LineIndex::new(),
             cursor: Position::default(),
             selection_anchor: None,
+            marked_text: None,
             dirty_lines: DirtyLines::None,
             #[cfg(debug_assertions)]
             debug_mutation_count: 0,
@@ -151,6 +184,7 @@ impl TextBuffer {
             line_index,
             cursor: Position::default(),
             selection_anchor: None,
+            marked_text: None,
             dirty_lines: DirtyLines::None,
             #[cfg(debug_assertions)]
             debug_mutation_count: 0,
@@ -389,6 +423,126 @@ impl TextBuffer {
             DirtyLines::Single(start_line)
         };
         self.accumulate_dirty(dirty)
+    }
+
+    // ==================== Marked Text (IME Support) ====================
+    // Chunk: docs/chunks/unicode_ime_input - Marked text API for IME composition
+
+    /// Returns the current marked text state, if any.
+    ///
+    /// Marked text is in-progress IME composition that should be rendered
+    /// with an underline to indicate it's uncommitted.
+    pub fn marked_text(&self) -> Option<&MarkedTextState> {
+        self.marked_text.as_ref()
+    }
+
+    /// Returns true if there is active marked text.
+    pub fn has_marked_text(&self) -> bool {
+        self.marked_text.is_some()
+    }
+
+    /// Sets or updates the marked text.
+    ///
+    /// The marked text is displayed at the cursor position with an underline.
+    /// If there's existing marked text, it's replaced. The cursor moves to
+    /// the end of the marked text.
+    ///
+    /// Returns the dirty lines affected (the line(s) containing the marked text).
+    pub fn set_marked_text(&mut self, text: &str, selected_range: std::ops::Range<usize>) -> DirtyLines {
+        // Clear any existing selection (IME replaces selection)
+        self.selection_anchor = None;
+
+        let start = self.cursor;
+
+        // Update or create marked text state
+        self.marked_text = Some(MarkedTextState {
+            text: text.to_string(),
+            start,
+            selected_range,
+        });
+
+        // Move cursor to end of marked text (for visual feedback)
+        // Note: The marked text might span multiple lines if it contains newlines
+        let mut line = start.line;
+        let mut col = start.col;
+        for ch in text.chars() {
+            if ch == '\n' {
+                line += 1;
+                col = 0;
+            } else {
+                col += 1;
+            }
+        }
+        self.cursor = Position::new(line, col);
+
+        // Mark the affected line(s) as dirty
+        let dirty = if line == start.line {
+            DirtyLines::Single(start.line)
+        } else {
+            DirtyLines::Range { from: start.line, to: line + 1 }
+        };
+        self.accumulate_dirty(dirty)
+    }
+
+    /// Commits the marked text (inserts it permanently) and clears marked state.
+    ///
+    /// This is called when the user confirms their IME composition (e.g., presses Enter).
+    /// The marked text becomes permanent content in the buffer.
+    ///
+    /// Returns the dirty lines affected.
+    pub fn commit_marked_text(&mut self) -> DirtyLines {
+        let marked = match self.marked_text.take() {
+            Some(m) => m,
+            None => return DirtyLines::None,
+        };
+
+        if marked.text.is_empty() {
+            return DirtyLines::None;
+        }
+
+        // Position cursor at the start of marked text for insertion
+        self.cursor = marked.start;
+        self.sync_gap_to_cursor();
+
+        // Insert the marked text as permanent content
+        self.insert_str(&marked.text)
+    }
+
+    /// Cancels the marked text (removes it) and clears marked state.
+    ///
+    /// This is called when the user cancels their IME composition (e.g., presses Escape).
+    /// The cursor returns to the original position (start of marked text).
+    ///
+    /// Returns the dirty lines affected.
+    pub fn cancel_marked_text(&mut self) -> DirtyLines {
+        let marked = match self.marked_text.take() {
+            Some(m) => m,
+            None => return DirtyLines::None,
+        };
+
+        // Restore cursor to start of marked text
+        self.cursor = marked.start;
+
+        // Mark the line(s) that had marked text as dirty
+        let lines_in_text = marked.text.chars().filter(|&c| c == '\n').count();
+        let final_line = marked.start.line + lines_in_text;
+
+        if final_line == marked.start.line {
+            self.accumulate_dirty(DirtyLines::Single(marked.start.line))
+        } else {
+            self.accumulate_dirty(DirtyLines::Range { from: marked.start.line, to: final_line + 1 })
+        }
+    }
+
+    /// Clears any marked text without canceling or committing.
+    ///
+    /// This is a low-level method used internally when inserting text
+    /// that should replace marked text (e.g., insertText: from NSTextInputClient).
+    pub fn clear_marked_text(&mut self) {
+        if let Some(marked) = self.marked_text.take() {
+            // Restore cursor to start of marked text
+            self.cursor = marked.start;
+        }
     }
 
     // ==================== Cursor Movement ====================
@@ -1174,11 +1328,57 @@ impl BufferView for TextBuffer {
         self.line_index.line_count()
     }
 
+    // Chunk: docs/chunks/unicode_ime_input - Render marked text with underline
     fn styled_line(&self, line: usize) -> Option<StyledLine> {
         if line >= self.line_count() {
             return None;
         }
         let content = self.line_content(line);
+
+        // Check if there's marked text that affects this line
+        if let Some(ref marked) = self.marked_text {
+            // For simplicity, we only handle marked text on a single line
+            // (multi-line marked text is rare in practice)
+            if line == marked.start.line {
+                let col = marked.start.col;
+
+                // Split the line content: before marked, marked, after marked
+                let chars: Vec<char> = content.chars().collect();
+
+                if col <= chars.len() {
+                    let before: String = chars[..col].iter().collect();
+                    let after: String = if col < chars.len() {
+                        chars[col..].iter().collect()
+                    } else {
+                        String::new()
+                    };
+
+                    // Build spans: before (plain), marked (underlined), after (plain)
+                    let mut spans = Vec::new();
+
+                    if !before.is_empty() {
+                        spans.push(Span::plain(before));
+                    }
+
+                    // Marked text with underline style
+                    if !marked.text.is_empty() {
+                        let marked_style = Style {
+                            underline: UnderlineStyle::Single,
+                            ..Style::default()
+                        };
+                        spans.push(Span::new(&marked.text, marked_style));
+                    }
+
+                    if !after.is_empty() {
+                        spans.push(Span::plain(after));
+                    }
+
+                    return Some(StyledLine::new(spans));
+                }
+            }
+        }
+
+        // No marked text on this line, return plain content
         Some(StyledLine::plain(content))
     }
 
@@ -3279,5 +3479,202 @@ mod tests {
         let boxed: Box<dyn BufferView> = Box::new(buf);
         assert_eq!(boxed.line_count(), 1);
         assert!(boxed.is_editable());
+    }
+
+    // ==================== Marked Text Tests ====================
+    // Chunk: docs/chunks/unicode_ime_input - Tests for IME marked text behavior
+
+    #[test]
+    fn test_marked_text_initial_state() {
+        let buf = TextBuffer::from_str("hello");
+        assert!(!buf.has_marked_text());
+        assert!(buf.marked_text().is_none());
+    }
+
+    #[test]
+    fn test_set_marked_text_basic() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 5)); // At end of "hello"
+
+        let dirty = buf.set_marked_text("日本", 2..2);
+
+        // Should have marked text now
+        assert!(buf.has_marked_text());
+        let marked = buf.marked_text().unwrap();
+        assert_eq!(marked.text, "日本");
+        assert_eq!(marked.start, Position::new(0, 5));
+        assert_eq!(marked.selected_range, 2..2);
+
+        // Cursor should be at end of marked text
+        assert_eq!(buf.cursor_position(), Position::new(0, 7)); // 5 + 2 chars
+
+        // Dirty should be the line containing marked text
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_set_marked_text_replaces_previous() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 5));
+
+        buf.set_marked_text("にほ", 2..2);
+        assert_eq!(buf.marked_text().unwrap().text, "にほ");
+
+        // Set new marked text
+        buf.set_cursor(Position::new(0, 5)); // Reset cursor
+        buf.set_marked_text("日本語", 3..3);
+        assert_eq!(buf.marked_text().unwrap().text, "日本語");
+    }
+
+    #[test]
+    fn test_commit_marked_text() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 5));
+
+        buf.set_marked_text("日本", 2..2);
+        assert!(buf.has_marked_text());
+
+        let dirty = buf.commit_marked_text();
+
+        // Marked text should be cleared
+        assert!(!buf.has_marked_text());
+
+        // Text should be inserted into buffer
+        assert_eq!(buf.line_content(0), "hello日本");
+
+        // Dirty line should be returned
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_commit_empty_marked_text() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 5));
+
+        buf.set_marked_text("", 0..0);
+        let dirty = buf.commit_marked_text();
+
+        // Empty marked text commits as no-op
+        assert_eq!(buf.line_content(0), "hello");
+        assert_eq!(dirty, DirtyLines::None);
+    }
+
+    #[test]
+    fn test_cancel_marked_text() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 5));
+
+        buf.set_marked_text("日本", 2..2);
+        assert!(buf.has_marked_text());
+        assert_eq!(buf.cursor_position(), Position::new(0, 7)); // At end of marked text
+
+        let dirty = buf.cancel_marked_text();
+
+        // Marked text should be cleared
+        assert!(!buf.has_marked_text());
+
+        // Cursor should be restored to start of marked text
+        assert_eq!(buf.cursor_position(), Position::new(0, 5));
+
+        // Buffer content unchanged
+        assert_eq!(buf.line_content(0), "hello");
+
+        // Dirty line should be returned
+        assert_eq!(dirty, DirtyLines::Single(0));
+    }
+
+    #[test]
+    fn test_cancel_no_marked_text() {
+        let mut buf = TextBuffer::from_str("hello");
+        let dirty = buf.cancel_marked_text();
+
+        // No-op when no marked text
+        assert_eq!(dirty, DirtyLines::None);
+    }
+
+    #[test]
+    fn test_clear_marked_text() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 5));
+
+        buf.set_marked_text("日本", 2..2);
+        assert!(buf.has_marked_text());
+
+        buf.clear_marked_text();
+
+        // Marked text should be cleared
+        assert!(!buf.has_marked_text());
+
+        // Cursor should be at start of where marked text was
+        assert_eq!(buf.cursor_position(), Position::new(0, 5));
+    }
+
+    #[test]
+    fn test_marked_text_clears_selection() {
+        let mut buf = TextBuffer::from_str("hello");
+        // Set cursor first, then anchor (set_cursor clears selection)
+        buf.set_cursor(Position::new(0, 3));
+        buf.set_selection_anchor(Position::new(0, 0));
+        assert!(buf.has_selection());
+
+        buf.set_marked_text("test", 4..4);
+
+        // Selection should be cleared by set_marked_text
+        assert!(!buf.has_selection());
+    }
+
+    #[test]
+    fn test_styled_line_with_marked_text() {
+        use crate::BufferView;
+
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 5));
+        buf.set_marked_text("日本", 2..2);
+
+        let styled = buf.styled_line(0).unwrap();
+
+        // The styled line should contain spans
+        // We expect: "hello" (plain) + "日本" (underlined)
+        assert_eq!(styled.spans.len(), 2);
+        assert_eq!(styled.spans[0].text, "hello");
+        assert_eq!(styled.spans[0].style.underline, UnderlineStyle::None);
+        assert_eq!(styled.spans[1].text, "日本");
+        assert_eq!(styled.spans[1].style.underline, UnderlineStyle::Single);
+    }
+
+    #[test]
+    fn test_styled_line_without_marked_text() {
+        use crate::BufferView;
+
+        let buf = TextBuffer::from_str("hello");
+        let styled = buf.styled_line(0).unwrap();
+
+        // Without marked text, should be a single plain span
+        assert_eq!(styled.spans.len(), 1);
+        assert_eq!(styled.spans[0].text, "hello");
+        assert_eq!(styled.spans[0].style.underline, UnderlineStyle::None);
+    }
+
+    #[test]
+    fn test_marked_text_middle_of_line() {
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 6)); // After "hello "
+
+        buf.set_marked_text("日本", 2..2);
+
+        let marked = buf.marked_text().unwrap();
+        assert_eq!(marked.start, Position::new(0, 6));
+    }
+
+    #[test]
+    fn test_marked_text_selected_range() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 5));
+
+        // Set marked text with custom selection (e.g., candidate window selection)
+        buf.set_marked_text("にほんご", 0..2); // First two chars selected
+
+        let marked = buf.marked_text().unwrap();
+        assert_eq!(marked.selected_range, 0..2);
     }
 }
