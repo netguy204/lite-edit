@@ -255,6 +255,7 @@ impl FocusStack {
 mod tests {
     use super::*;
     use crate::dirty_region::DirtyRegion;
+    use lite_edit_buffer::DirtyLines;
     use crate::font::FontMetrics;
     use crate::viewport::Viewport;
     use lite_edit_buffer::TextBuffer;
@@ -333,6 +334,7 @@ mod tests {
         buffer: &'a mut TextBuffer,
         viewport: &'a mut Viewport,
         dirty_region: &'a mut DirtyRegion,
+        dirty_lines: &'a mut DirtyLines,
     ) -> EditorContext<'a> {
         let metrics = FontMetrics {
             advance_width: 8.0,
@@ -342,7 +344,7 @@ mod tests {
             leading: 0.0,
             point_size: 14.0,
         };
-        EditorContext::new(buffer, viewport, dirty_region, metrics, 400.0, 600.0)
+        EditorContext::new(buffer, viewport, dirty_region, dirty_lines, metrics, 400.0, 600.0)
     }
 
     fn make_key_event() -> KeyEvent {
@@ -404,7 +406,8 @@ mod tests {
         let mut buffer = TextBuffer::new();
         let mut viewport = Viewport::new(16.0);
         let mut dirty = DirtyRegion::None;
-        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty);
+        let mut dirty_lines = DirtyLines::None;
+        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty, &mut dirty_lines);
 
         let result = stack.dispatch_key(make_key_event(), &mut ctx);
         assert_eq!(result, Handled::Yes);
@@ -419,7 +422,8 @@ mod tests {
         let mut buffer = TextBuffer::new();
         let mut viewport = Viewport::new(16.0);
         let mut dirty = DirtyRegion::None;
-        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty);
+        let mut dirty_lines = DirtyLines::None;
+        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty, &mut dirty_lines);
 
         // Top doesn't handle, falls through to bottom which handles
         let result = stack.dispatch_key(make_key_event(), &mut ctx);
@@ -433,7 +437,8 @@ mod tests {
         let mut buffer = TextBuffer::new();
         let mut viewport = Viewport::new(16.0);
         let mut dirty = DirtyRegion::None;
-        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty);
+        let mut dirty_lines = DirtyLines::None;
+        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty, &mut dirty_lines);
 
         let result = stack.dispatch_key(make_key_event(), &mut ctx);
         assert_eq!(result, Handled::No);

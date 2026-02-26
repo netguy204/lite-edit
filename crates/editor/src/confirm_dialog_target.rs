@@ -103,6 +103,7 @@ impl FocusTarget for ConfirmDialogFocusTarget {
 mod tests {
     use super::*;
     use crate::dirty_region::DirtyRegion;
+    use lite_edit_buffer::DirtyLines;
     use crate::font::FontMetrics;
     use crate::input::{Key, Modifiers};
     use crate::viewport::Viewport;
@@ -112,6 +113,7 @@ mod tests {
         buffer: &'a mut TextBuffer,
         viewport: &'a mut Viewport,
         dirty_region: &'a mut DirtyRegion,
+        dirty_lines: &'a mut DirtyLines,
     ) -> EditorContext<'a> {
         let metrics = FontMetrics {
             advance_width: 8.0,
@@ -121,7 +123,7 @@ mod tests {
             leading: 0.0,
             point_size: 14.0,
         };
-        EditorContext::new(buffer, viewport, dirty_region, metrics, 400.0, 600.0)
+        EditorContext::new(buffer, viewport, dirty_region, dirty_lines, metrics, 400.0, 600.0)
     }
 
     fn tab_key() -> KeyEvent {
@@ -143,7 +145,8 @@ mod tests {
         let mut buffer = TextBuffer::new();
         let mut viewport = Viewport::new(16.0);
         let mut dirty = DirtyRegion::None;
-        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty);
+        let mut dirty_lines = DirtyLines::None;
+        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty, &mut dirty_lines);
 
         // Tab should be handled without producing an outcome (just toggles button)
         let result = target.handle_key(tab_key(), &mut ctx);
@@ -159,7 +162,8 @@ mod tests {
         let mut buffer = TextBuffer::new();
         let mut viewport = Viewport::new(16.0);
         let mut dirty = DirtyRegion::None;
-        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty);
+        let mut dirty_lines = DirtyLines::None;
+        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty, &mut dirty_lines);
 
         let result = target.handle_key(escape_key(), &mut ctx);
 
@@ -175,7 +179,8 @@ mod tests {
         let mut buffer = TextBuffer::new();
         let mut viewport = Viewport::new(16.0);
         let mut dirty = DirtyRegion::None;
-        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty);
+        let mut dirty_lines = DirtyLines::None;
+        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty, &mut dirty_lines);
 
         // Return with Cancel selected should produce Cancelled
         let result = target.handle_key(return_key(), &mut ctx);
@@ -191,7 +196,8 @@ mod tests {
         let mut buffer = TextBuffer::new();
         let mut viewport = Viewport::new(16.0);
         let mut dirty = DirtyRegion::None;
-        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty);
+        let mut dirty_lines = DirtyLines::None;
+        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty, &mut dirty_lines);
 
         // First tab to select Abandon
         target.handle_key(tab_key(), &mut ctx);

@@ -157,6 +157,7 @@ impl FocusTarget for FindFocusTarget {
 mod tests {
     use super::*;
     use crate::dirty_region::DirtyRegion;
+    use lite_edit_buffer::DirtyLines;
     use crate::font::FontMetrics;
     use crate::input::Modifiers;
     use crate::viewport::Viewport;
@@ -177,9 +178,10 @@ mod tests {
         buffer: &'a mut TextBuffer,
         viewport: &'a mut Viewport,
         dirty_region: &'a mut DirtyRegion,
+        dirty_lines: &'a mut DirtyLines,
     ) -> EditorContext<'a> {
         let metrics = test_font_metrics();
-        EditorContext::new(buffer, viewport, dirty_region, metrics, 400.0, 600.0)
+        EditorContext::new(buffer, viewport, dirty_region, dirty_lines, metrics, 400.0, 600.0)
     }
 
     fn char_key(ch: char) -> KeyEvent {
@@ -201,7 +203,8 @@ mod tests {
         let mut buffer = TextBuffer::new();
         let mut viewport = Viewport::new(16.0);
         let mut dirty = DirtyRegion::None;
-        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty);
+        let mut dirty_lines = DirtyLines::None;
+        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty, &mut dirty_lines);
 
         let result = target.handle_key(escape_key(), &mut ctx);
 
@@ -216,7 +219,8 @@ mod tests {
         let mut buffer = TextBuffer::new();
         let mut viewport = Viewport::new(16.0);
         let mut dirty = DirtyRegion::None;
-        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty);
+        let mut dirty_lines = DirtyLines::None;
+        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty, &mut dirty_lines);
 
         let result = target.handle_key(return_key(), &mut ctx);
 
@@ -231,7 +235,8 @@ mod tests {
         let mut buffer = TextBuffer::new();
         let mut viewport = Viewport::new(16.0);
         let mut dirty = DirtyRegion::None;
-        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty);
+        let mut dirty_lines = DirtyLines::None;
+        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty, &mut dirty_lines);
 
         // Typing should be handled and update the query
         let result = target.handle_key(char_key('a'), &mut ctx);
@@ -248,7 +253,8 @@ mod tests {
         let mut buffer = TextBuffer::new();
         let mut viewport = Viewport::new(16.0);
         let mut dirty = DirtyRegion::None;
-        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty);
+        let mut dirty_lines = DirtyLines::None;
+        let mut ctx = make_test_context(&mut buffer, &mut viewport, &mut dirty, &mut dirty_lines);
 
         // Escape should not set query_changed
         target.handle_key(escape_key(), &mut ctx);

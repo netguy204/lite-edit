@@ -1,5 +1,5 @@
 ---
-status: FUTURE
+status: HISTORICAL
 ticket: null
 parent_chunk: null
 code_paths: []
@@ -10,9 +10,9 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["typescript_highlight_layering"]
+created_after:
+- typescript_highlight_layering
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

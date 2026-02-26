@@ -1,16 +1,16 @@
 ---
-status: IMPLEMENTING
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
-  - crates/editor/src/focus.rs
-  - crates/editor/src/global_shortcuts.rs
-  - crates/editor/src/selector_target.rs
-  - crates/editor/src/find_target.rs
-  - crates/editor/src/confirm_dialog_target.rs
-  - crates/editor/src/editor_state.rs
-  - crates/editor/src/drain_loop.rs
-  - crates/editor/src/buffer_target.rs
+- crates/editor/src/focus.rs
+- crates/editor/src/global_shortcuts.rs
+- crates/editor/src/selector_target.rs
+- crates/editor/src/find_target.rs
+- crates/editor/src/confirm_dialog_target.rs
+- crates/editor/src/editor_state.rs
+- crates/editor/src/drain_loop.rs
+- crates/editor/src/buffer_target.rs
 code_references: []
 narrative: null
 investigation: null
