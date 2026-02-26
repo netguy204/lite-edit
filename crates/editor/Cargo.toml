@@ -58,6 +58,9 @@ unicode-width = "0.1"
 # Chunk: docs/chunks/three_way_merge - Concurrent edit merge support
 similar = "2.6"
 
+[features]
+perf-instrumentation = []
+
 [dev-dependencies]
 # Temporary directories for testing
 tempfile = "3"

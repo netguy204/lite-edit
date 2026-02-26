@@ -98,6 +98,8 @@ mod workspace;
 mod wrap_layout;
 // Chunk: docs/chunks/workspace_session_persistence - Session persistence
 mod session;
+#[cfg(feature = "perf-instrumentation")]
+mod perf_stats;
 
 pub use file_index::FileIndex;
 pub use row_scroller::RowScroller;

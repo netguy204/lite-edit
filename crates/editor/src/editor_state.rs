@@ -154,6 +154,9 @@ pub struct EditorState {
     /// Registry of paths whose file change events should be suppressed.
     /// Prevents our own file saves from triggering reload/merge flows.
     file_change_suppression: FileChangeSuppression,
+    /// Flag set by Ctrl+Shift+P to trigger an on-demand perf stats dump.
+    #[cfg(feature = "perf-instrumentation")]
+    pub dump_perf_stats: bool,
 }
 
 // =============================================================================
@@ -378,6 +381,8 @@ impl EditorState {
             language_registry: LanguageRegistry::new(),
             // Chunk: docs/chunks/file_change_events - Initialize self-write suppression
             file_change_suppression: FileChangeSuppression::new(),
+            #[cfg(feature = "perf-instrumentation")]
+            dump_perf_stats: false,
         }
     }
 
@@ -428,6 +433,8 @@ impl EditorState {
             language_registry: LanguageRegistry::new(),
             // Chunk: docs/chunks/file_change_events - Initialize self-write suppression
             file_change_suppression: FileChangeSuppression::new(),
+            #[cfg(feature = "perf-instrumentation")]
+            dump_perf_stats: false,
         }
     }
 
@@ -900,6 +907,15 @@ impl EditorState {
                     }
                     return;
                 }
+            }
+        }
+
+        // Ctrl+Shift+P: dump perf stats on demand (perf-instrumentation feature only)
+        #[cfg(feature = "perf-instrumentation")]
+        if event.modifiers.control && event.modifiers.shift && !event.modifiers.command {
+            if let Key::Char('p') | Key::Char('P') = event.key {
+                self.dump_perf_stats = true;
+                return;
             }
         }
 
