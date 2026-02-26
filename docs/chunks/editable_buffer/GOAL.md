@@ -9,7 +9,6 @@ code_paths:
 - crates/editor/src/buffer_target.rs
 - crates/editor/src/editor_state.rs
 - crates/editor/src/metal_view.rs
-- crates/editor/src/renderer.rs
 - crates/editor/src/main.rs
 - crates/editor/tests/typing_test.rs
 code_references:

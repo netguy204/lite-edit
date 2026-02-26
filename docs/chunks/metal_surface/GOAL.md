@@ -8,7 +8,8 @@ code_paths:
   - crates/editor/build.rs
   - crates/editor/src/main.rs
   - crates/editor/src/metal_view.rs
-  - crates/editor/src/renderer.rs
+  - crates/editor/src/renderer/mod.rs
+  - crates/editor/src/renderer/constants.rs
   - crates/editor/tests/smoke_test.rs
   - README.md
 code_references:
