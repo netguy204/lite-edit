@@ -2854,6 +2854,7 @@ impl EditorState {
             buffer.clear_marked_text();
 
             let dirty_lines = buffer.insert_str(text);
+            self.dirty_lines.merge(dirty_lines.clone());
             let dirty = viewport.dirty_lines_to_region(&dirty_lines, buffer.line_count());
             // Chunk: docs/chunks/invalidation_separation - Content invalidation for text insertion
             self.invalidation.merge(InvalidationKind::Content(dirty));
@@ -2890,6 +2891,7 @@ impl EditorState {
         // File tab: set marked text on buffer
         if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
             let dirty_lines = buffer.set_marked_text(&event.text, event.selected_range);
+            self.dirty_lines.merge(dirty_lines.clone());
             let dirty = viewport.dirty_lines_to_region(&dirty_lines, buffer.line_count());
             // Chunk: docs/chunks/invalidation_separation - Content invalidation for marked text
             self.invalidation.merge(InvalidationKind::Content(dirty));
@@ -2926,6 +2928,7 @@ impl EditorState {
         // File tab: clear marked text
         if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
             let dirty_lines = buffer.cancel_marked_text();
+            self.dirty_lines.merge(dirty_lines.clone());
             let dirty = viewport.dirty_lines_to_region(&dirty_lines, buffer.line_count());
             // Chunk: docs/chunks/invalidation_separation - Content invalidation for text clearing
             self.invalidation.merge(InvalidationKind::Content(dirty));
