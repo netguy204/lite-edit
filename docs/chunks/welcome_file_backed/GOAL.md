@@ -1,18 +1,21 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
-code_references: []
+code_paths:
+- crates/editor/src/workspace.rs
+code_references:
+  - ref: crates/editor/src/workspace.rs#Editor::should_show_welcome_screen
+    implements: "Welcome screen visibility excludes file-backed empty tabs"
 narrative: null
 investigation: null
 subsystems: []
 friction_entries: []
 bug_type: semantic
 depends_on: []
-created_after: ["fallback_glyph_metrics"]
+created_after:
+- fallback_glyph_metrics
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
