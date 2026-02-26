@@ -1659,6 +1659,8 @@ impl EditorState {
         let needs_highlighter_sync;
         // Chunk: docs/chunks/unsaved_tab_tint - Track whether we processed a file tab
         let mut is_file_tab = false;
+        // Chunk: docs/chunks/dirty_bit_navigation - Track whether content was mutated
+        let mut content_mutated = false;
 
         // Check if the active tab is a file tab or terminal tab
         // Use a block to limit the borrow scope
@@ -1718,6 +1720,8 @@ impl EditorState {
                 content_width,
             );
             self.focus_target.handle_key(event, &mut ctx);
+            // Chunk: docs/chunks/dirty_bit_navigation - Capture content_mutated before ctx goes out of scope
+            content_mutated = ctx.content_mutated;
         } else if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
             // Chunk: docs/chunks/terminal_clipboard_selection - Terminal clipboard operations
             // Check for Cmd+C (copy) and Cmd+V (paste) first
@@ -1783,12 +1787,12 @@ impl EditorState {
             self.sync_active_tab_highlighter();
         }
 
-        // Chunk: docs/chunks/unsaved_tab_tint - Mark file tab dirty if content changed
-        // If we processed a file tab and the dirty_region indicates changes, mark the tab dirty.
-        // This is a conservative heuristic: dirty_region can be set for cursor visibility or
-        // viewport scrolling, not just content mutations. We accept some over-marking because
-        // the success criteria only require that edits set dirty=true, which this achieves.
-        if is_file_tab && self.dirty_region.is_dirty() {
+        // Chunk: docs/chunks/dirty_bit_navigation - Mark file tab dirty only for content mutations
+        // The EditorContext tracks whether a content-mutating command was executed.
+        // This correctly distinguishes mutations (insert, delete, paste, cut) from
+        // non-mutating operations (cursor movement, selection, scrolling) that also
+        // set dirty_region for rendering purposes.
+        if is_file_tab && content_mutated {
             if let Some(ws) = self.editor.active_workspace_mut() {
                 if let Some(tab) = ws.active_tab_mut() {
                     tab.dirty = true;
@@ -7605,6 +7609,249 @@ mod tests {
         let tab = ws.active_tab().expect("tab");
         assert_eq!(tab.dirty, initial_dirty,
             "Terminal tab dirty flag should not change from input");
+    }
+
+    // =========================================================================
+    // Navigation Does Not Set Dirty Tests (Chunk: docs/chunks/dirty_bit_navigation)
+    // =========================================================================
+
+    /// Tests that arrow key navigation does not set the tab's dirty flag.
+    #[test]
+    fn test_arrow_key_navigation_does_not_set_dirty() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Add some content first (without marking dirty) by loading a file
+        state.buffer_mut().insert_str("hello\nworld\nfoo");
+        // Clear the dirty flag that would have been set
+        let ws = state.editor.active_workspace_mut().expect("workspace");
+        let tab = ws.active_tab_mut().expect("tab");
+        tab.dirty = false;
+
+        // Verify tab is clean
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(!tab.dirty, "Tab should start clean for this test");
+
+        // Arrow down
+        state.handle_key(KeyEvent::new(Key::Down, Modifiers::default()));
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(!tab.dirty, "Arrow down should not set dirty");
+
+        // Arrow up
+        state.handle_key(KeyEvent::new(Key::Up, Modifiers::default()));
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(!tab.dirty, "Arrow up should not set dirty");
+
+        // Arrow left
+        state.handle_key(KeyEvent::new(Key::Left, Modifiers::default()));
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(!tab.dirty, "Arrow left should not set dirty");
+
+        // Arrow right
+        state.handle_key(KeyEvent::new(Key::Right, Modifiers::default()));
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(!tab.dirty, "Arrow right should not set dirty");
+    }
+
+    /// Tests that Command+A (select all) does not set the tab's dirty flag.
+    #[test]
+    fn test_select_all_does_not_set_dirty() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Add some content
+        state.buffer_mut().insert_str("hello world");
+        // Clear the dirty flag
+        let ws = state.editor.active_workspace_mut().expect("workspace");
+        let tab = ws.active_tab_mut().expect("tab");
+        tab.dirty = false;
+
+        // Verify tab is clean
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(!tab.dirty, "Tab should start clean for this test");
+
+        // Cmd+A (select all)
+        let cmd_a = KeyEvent::new(
+            Key::Char('a'),
+            Modifiers { command: true, ..Default::default() },
+        );
+        state.handle_key(cmd_a);
+
+        // Tab should still not be dirty
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(!tab.dirty, "Select all should not set dirty");
+    }
+
+    /// Tests that Shift+arrow selection does not set the tab's dirty flag.
+    #[test]
+    fn test_shift_arrow_selection_does_not_set_dirty() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Add some content
+        state.buffer_mut().insert_str("hello world");
+        // Clear the dirty flag
+        let ws = state.editor.active_workspace_mut().expect("workspace");
+        let tab = ws.active_tab_mut().expect("tab");
+        tab.dirty = false;
+
+        // Verify tab is clean
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(!tab.dirty, "Tab should start clean for this test");
+
+        // Shift+Right (extend selection)
+        let shift_right = KeyEvent::new(
+            Key::Right,
+            Modifiers { shift: true, ..Default::default() },
+        );
+        state.handle_key(shift_right);
+
+        // Tab should still not be dirty
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(!tab.dirty, "Shift+arrow selection should not set dirty");
+
+        // Shift+Left
+        let shift_left = KeyEvent::new(
+            Key::Left,
+            Modifiers { shift: true, ..Default::default() },
+        );
+        state.handle_key(shift_left);
+
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(!tab.dirty, "Shift+left selection should not set dirty");
+    }
+
+    /// Tests that Option+arrow word jump navigation does not set the tab's dirty flag.
+    #[test]
+    fn test_word_jump_does_not_set_dirty() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Add some content with multiple words
+        state.buffer_mut().insert_str("hello world foo bar");
+        // Clear the dirty flag
+        let ws = state.editor.active_workspace_mut().expect("workspace");
+        let tab = ws.active_tab_mut().expect("tab");
+        tab.dirty = false;
+
+        // Verify tab is clean
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(!tab.dirty, "Tab should start clean for this test");
+
+        // Option+Right (word jump)
+        let opt_right = KeyEvent::new(
+            Key::Right,
+            Modifiers { option: true, ..Default::default() },
+        );
+        state.handle_key(opt_right);
+
+        // Tab should still not be dirty
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(!tab.dirty, "Option+arrow word jump should not set dirty");
+
+        // Option+Left (word jump back)
+        let opt_left = KeyEvent::new(
+            Key::Left,
+            Modifiers { option: true, ..Default::default() },
+        );
+        state.handle_key(opt_left);
+
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(!tab.dirty, "Option+left word jump should not set dirty");
+    }
+
+    /// Tests that Page Up/Down does not set the tab's dirty flag.
+    #[test]
+    fn test_page_up_down_does_not_set_dirty() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Add many lines of content
+        let content = (0..50).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+        state.buffer_mut().insert_str(&content);
+        // Clear the dirty flag
+        let ws = state.editor.active_workspace_mut().expect("workspace");
+        let tab = ws.active_tab_mut().expect("tab");
+        tab.dirty = false;
+
+        // Verify tab is clean
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(!tab.dirty, "Tab should start clean for this test");
+
+        // Page Down
+        state.handle_key(KeyEvent::new(Key::PageDown, Modifiers::default()));
+
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(!tab.dirty, "Page Down should not set dirty");
+
+        // Page Up
+        state.handle_key(KeyEvent::new(Key::PageUp, Modifiers::default()));
+
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(!tab.dirty, "Page Up should not set dirty");
+    }
+
+    /// Tests that content-mutating operations still correctly set the tab's dirty flag.
+    /// This is a regression test to ensure the fix for navigation doesn't break mutations.
+    #[test]
+    fn test_mutations_still_set_dirty() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Start with a clean tab
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(!tab.dirty, "New tab should not be dirty initially");
+
+        // Type a character - should set dirty
+        state.handle_key(KeyEvent::char('a'));
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(tab.dirty, "Typing should set dirty");
+
+        // Clear dirty flag to test other mutations
+        let ws = state.editor.active_workspace_mut().expect("workspace");
+        let tab = ws.active_tab_mut().expect("tab");
+        tab.dirty = false;
+
+        // Delete backward - should set dirty
+        state.handle_key(KeyEvent::new(Key::Backspace, Modifiers::default()));
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(tab.dirty, "Backspace should set dirty");
+
+        // Clear dirty flag
+        let ws = state.editor.active_workspace_mut().expect("workspace");
+        let tab = ws.active_tab_mut().expect("tab");
+        tab.dirty = false;
+
+        // Type some content then test delete forward
+        state.handle_key(KeyEvent::char('b'));
+        state.handle_key(KeyEvent::new(Key::Left, Modifiers::default())); // Move left (shouldn't set dirty alone)
+        let ws = state.editor.active_workspace_mut().expect("workspace");
+        let tab = ws.active_tab_mut().expect("tab");
+        tab.dirty = false;
+
+        state.handle_key(KeyEvent::new(Key::Delete, Modifiers::default()));
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(tab.dirty, "Delete forward should set dirty");
     }
 
     // =========================================================================

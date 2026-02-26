@@ -396,15 +396,18 @@ impl BufferFocusTarget {
                 // Do not modify buffer or clear selection (standard copy behavior)
                 return;
             }
+            // Chunk: docs/chunks/dirty_bit_navigation - Paste sets content_mutated when content is inserted
             Command::Paste => {
                 if let Some(text) = crate::clipboard::paste_from_clipboard() {
                     let dirty = ctx.buffer.insert_str(&text);
                     ctx.mark_dirty(dirty);
+                    ctx.set_content_mutated();
                     ctx.ensure_cursor_visible();
                 }
                 return;
             }
             // Chunk: docs/chunks/clipboard_cut - Cut command execution
+            // Chunk: docs/chunks/dirty_bit_navigation - Cut sets content_mutated when selection is deleted
             Command::Cut => {
                 // Get selected text; if no selection, this is a no-op
                 if let Some(text) = ctx.buffer.selected_text() {
@@ -413,6 +416,7 @@ impl BufferFocusTarget {
                     // Delete the selection
                     let dirty = ctx.buffer.delete_selection();
                     ctx.mark_dirty(dirty);
+                    ctx.set_content_mutated();
                     ctx.ensure_cursor_visible();
                 }
                 return;
@@ -505,6 +509,11 @@ impl BufferFocusTarget {
 
         // Mark the affected lines dirty
         ctx.mark_dirty(dirty);
+
+        // Chunk: docs/chunks/dirty_bit_navigation - Mark content mutated for all mutating commands
+        // This path is only reached by content-mutating commands (Insert*, Delete*).
+        // Non-mutating commands (Move*, Select*, Copy, PageUp/Down) use early returns.
+        ctx.set_content_mutated();
 
         // Ensure cursor is visible after mutation
         ctx.ensure_cursor_visible();

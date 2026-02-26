@@ -23,6 +23,7 @@ use lite_edit_buffer::{DirtyLines, TextBuffer};
 ///
 /// The context is borrowed for the duration of event handling, ensuring
 /// safe mutable access to all components.
+// Chunk: docs/chunks/dirty_bit_navigation - Track content mutations for dirty flag
 pub struct EditorContext<'a> {
     /// The text buffer being edited
     pub buffer: &'a mut TextBuffer,
@@ -36,6 +37,11 @@ pub struct EditorContext<'a> {
     pub view_height: f32,
     /// Viewport width in pixels (for line wrapping calculations)
     pub view_width: f32,
+    /// Whether a content-mutating command was executed in this event batch.
+    /// This distinguishes mutations (insert, delete, paste, cut) from non-mutating
+    /// operations (cursor movement, selection, scrolling) that also set dirty_region
+    /// for rendering purposes.
+    pub content_mutated: bool,
 }
 
 impl<'a> EditorContext<'a> {
@@ -63,7 +69,17 @@ impl<'a> EditorContext<'a> {
             font_metrics,
             view_height,
             view_width,
+            content_mutated: false,
         }
+    }
+
+    // Chunk: docs/chunks/dirty_bit_navigation - Mark that a content mutation occurred
+    /// Marks that a content-mutating operation was executed.
+    ///
+    /// Call this when the buffer content is modified (insert, delete, paste, cut).
+    /// Do NOT call this for non-mutating operations (cursor movement, selection, scrolling).
+    pub fn set_content_mutated(&mut self) {
+        self.content_mutated = true;
     }
 
     // Chunk: docs/chunks/line_wrap_rendering - Create WrapLayout for hit-testing
