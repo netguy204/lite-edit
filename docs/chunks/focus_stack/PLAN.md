@@ -192,20 +192,35 @@ None. This chunk is self-contained and doesn't depend on other FUTURE chunks.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
+### Step 7: Partial integration - kept EditorFocus enum for event routing
 
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
+**What changed**: Instead of replacing `handle_key` dispatch logic with `focus_stack.dispatch_key()`, we kept the existing `EditorFocus` enum-based routing. The `focus_stack` is maintained in parallel and used only for `focus_layer()` which drives rendering decisions.
 
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
+**Why**: The existing focus targets (SelectorFocusTarget, FindFocusTarget, etc.) own their own widgets, but EditorState also maintains separate state fields (`active_selector`, `find_mini_buffer`, `confirm_dialog`). Fully replacing the dispatch logic would require:
+1. Moving all widget state into the focus targets
+2. Adding outcome extraction methods to the FocusTarget trait (for downcasting to access pending outcomes)
+3. Reworking all the existing handlers that process outcomes and re-query state
 
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+This represents a significant refactor that risks regressions. The partial integration approach:
+- Maintains working existing behavior (all tests pass)
+- Provides the architectural foundation (FocusStack, FocusTarget, all focus target implementations)
+- Uses focus_stack for rendering decisions via `focus_layer()` → `top_layer()`
+- Keeps focus_stack in sync via push/pop on overlay open/close
+
+**Impact**: The `EditorFocus` enum is still used internally for event routing. This is a transitional state - a future chunk could complete the migration by:
+1. Adding `take_outcome()` method to FocusTarget trait
+2. Migrating state ownership to focus targets
+3. Replacing the match-on-EditorFocus routing with focus_stack.dispatch_key()
+4. Removing EditorFocus enum entirely
+
+### Step 10: Skipped - EditorFocus enum retained
+
+**What changed**: Did not remove the EditorFocus enum as planned.
+
+**Why**: See Step 7 deviation - the enum is still used for event routing.
+
+**Impact**: The codebase has two parallel focus tracking mechanisms:
+- `focus: EditorFocus` - used for event routing in handle_key
+- `focus_stack: FocusStack` - used for rendering decisions via focus_layer()
+
+Both are kept in sync via push/pop operations in open/close methods.

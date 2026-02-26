@@ -35,7 +35,13 @@ use crate::event_channel::EventSender;
 // Chunk: docs/chunks/file_change_events - Self-write suppression
 use crate::file_change_suppression::FileChangeSuppression;
 // Chunk: docs/chunks/focus_stack - FocusLayer import for focus state bridge
-use crate::focus::{FocusLayer, FocusTarget};
+// Chunk: docs/chunks/focus_stack - FocusStack import for stack-based focus management
+use crate::focus::{FocusLayer, FocusStack, FocusTarget};
+// Chunk: docs/chunks/focus_stack - Focus target imports for stack integration
+use crate::global_shortcuts::{GlobalAction, GlobalShortcutTarget};
+use crate::selector_target::SelectorFocusTarget;
+use crate::find_target::{FindFocusTarget, FindOutcome};
+use crate::confirm_dialog_target::ConfirmDialogFocusTarget;
 use crate::font::FontMetrics;
 use crate::input::{KeyEvent, MouseEvent, ScrollDelta};
 use crate::left_rail::{calculate_left_rail_geometry, RAIL_WIDTH};
@@ -104,6 +110,14 @@ pub struct EditorState {
     pub dirty_region: DirtyRegion,
     /// The active focus target (currently always the buffer target)
     pub focus_target: BufferFocusTarget,
+    // Chunk: docs/chunks/focus_stack - Focus stack for composable focus targets
+    /// The focus stack for event propagation.
+    ///
+    /// Stack structure (bottom to top):
+    /// - Index 0: GlobalShortcutTarget (handles Cmd+Q, Cmd+S, etc.)
+    /// - Index 1: BufferFocusTarget (handles buffer editing)
+    /// - Index 2+: [optional overlays] - selector, find bar, confirm dialog
+    pub focus_stack: FocusStack,
     /// Whether the cursor is currently visible (for blink animation)
     pub cursor_visible: bool,
     /// Time of the last keystroke (for cursor blink reset)
@@ -351,10 +365,21 @@ impl EditorState {
 
         // FileIndex is now initialized per-workspace in Workspace::new() and Workspace::with_empty_tab()
         // Chunk: docs/chunks/workspace_dir_picker - Per-workspace file index
+        // Chunk: docs/chunks/focus_stack - Initialize focus stack with global shortcuts and buffer target
+        // The focus stack provides composable focus handling with event propagation.
+        // Stack structure (bottom to top):
+        // - GlobalShortcutTarget: handles Cmd+Q, Cmd+S, etc. (always at bottom)
+        // - BufferFocusTarget: handles buffer editing (always present)
+        // - [overlays]: selector, find bar, confirm dialog (pushed/popped as needed)
+        let mut focus_stack = FocusStack::new();
+        focus_stack.push(Box::new(GlobalShortcutTarget::new()));
+        focus_stack.push(Box::new(BufferFocusTarget::new()));
+
         Self {
             editor,
             dirty_region: DirtyRegion::None,
             focus_target: BufferFocusTarget::new(),
+            focus_stack,
             cursor_visible: true,
             last_keystroke: Instant::now(),
             // Chunk: docs/docs/cursor_blink_focus - Initialize overlay cursor state
@@ -408,10 +433,16 @@ impl EditorState {
         // Create editor with no workspaces
         let editor = Editor::new_deferred(line_height);
 
+        // Chunk: docs/chunks/focus_stack - Initialize focus stack with global shortcuts and buffer target
+        let mut focus_stack = FocusStack::new();
+        focus_stack.push(Box::new(GlobalShortcutTarget::new()));
+        focus_stack.push(Box::new(BufferFocusTarget::new()));
+
         Self {
             editor,
             dirty_region: DirtyRegion::None,
             focus_target: BufferFocusTarget::new(),
+            focus_stack,
             cursor_visible: true,
             last_keystroke: Instant::now(),
             overlay_cursor_visible: true,
@@ -472,12 +503,10 @@ impl EditorState {
     /// type used by the focus stack architecture. The renderer uses this to
     /// determine which overlay to render.
     pub fn focus_layer(&self) -> FocusLayer {
-        match self.focus {
-            EditorFocus::Buffer => FocusLayer::Buffer,
-            EditorFocus::Selector => FocusLayer::Selector,
-            EditorFocus::FindInFile => FocusLayer::FindInFile,
-            EditorFocus::ConfirmDialog => FocusLayer::ConfirmDialog,
-        }
+        // Chunk: docs/chunks/focus_stack - Use focus_stack.top_layer() for rendering decisions
+        // The focus stack's top layer determines what overlay (if any) should be rendered.
+        // This replaces the previous EditorFocus enum match.
+        self.focus_stack.top_layer()
     }
 
     // Chunk: docs/chunks/pty_wakeup_reentrant - EventSender for PTY wakeup
@@ -1020,6 +1049,11 @@ impl EditorState {
         // Store the selector and update focus
         self.active_selector = Some(selector);
         self.focus = EditorFocus::Selector;
+        // Chunk: docs/chunks/focus_stack - Push selector focus target onto stack
+        // This keeps the focus_stack in sync for focus_layer() rendering decisions.
+        // We use new_empty() because the actual widget is in self.active_selector.
+        // TODO(focus_stack): Full integration would store widget only in focus_stack.
+        self.focus_stack.push(Box::new(SelectorFocusTarget::new_empty()));
 
         // Store cache version in workspace (for streaming refresh)
         // Chunk: docs/chunks/workspace_dir_picker - Per-workspace cache version tracking
@@ -1043,6 +1077,8 @@ impl EditorState {
     fn close_selector(&mut self) {
         self.active_selector = None;
         self.focus = EditorFocus::Buffer;
+        // Chunk: docs/chunks/focus_stack - Pop selector focus target from stack
+        self.focus_stack.pop();
 
         // Chunk: docs/chunks/cursor_blink_focus - Reset cursor states on focus transition
         // Buffer cursor resumes blinking (start visible, record keystroke to prevent immediate blink-off)
@@ -1079,6 +1115,10 @@ impl EditorState {
 
                 // Transition focus
                 self.focus = EditorFocus::FindInFile;
+                // Chunk: docs/chunks/focus_stack - Push find focus target onto stack
+                // Use new_empty() since the actual state is in self.find_mini_buffer.
+                // TODO(focus_stack): Full integration would store mini_buffer only in focus_stack.
+                self.focus_stack.push(Box::new(FindFocusTarget::new_empty(self.font_metrics)));
 
                 // Chunk: docs/chunks/cursor_blink_focus - Reset cursor states on focus transition
                 // Main buffer cursor stays visible (static) while overlay is active
@@ -1111,6 +1151,8 @@ impl EditorState {
     fn close_find_strip(&mut self) {
         self.find_mini_buffer = None;
         self.focus = EditorFocus::Buffer;
+        // Chunk: docs/chunks/focus_stack - Pop find focus target from stack
+        self.focus_stack.pop();
 
         // Chunk: docs/chunks/cursor_blink_focus - Reset cursor states on focus transition
         // Buffer cursor resumes blinking (start visible, record keystroke to prevent immediate blink-off)
@@ -1461,6 +1503,8 @@ impl EditorState {
         self.confirm_dialog = None;
         self.confirm_context = None;
         self.focus = EditorFocus::Buffer;
+        // Chunk: docs/chunks/focus_stack - Pop confirm dialog focus target from stack
+        self.focus_stack.pop();
         self.dirty_region.merge(DirtyRegion::FullViewport);
     }
 
@@ -1470,9 +1514,12 @@ impl EditorState {
     /// if the user confirms, then transitions focus to the dialog.
     // Chunk: docs/chunks/generic_yes_no_modal - Use ConfirmDialogContext
     fn show_confirm_dialog(&mut self, pane_id: PaneId, tab_idx: usize) {
-        self.confirm_dialog = Some(ConfirmDialog::new("Abandon unsaved changes?"));
+        let dialog = ConfirmDialog::new("Abandon unsaved changes?");
+        self.confirm_dialog = Some(dialog.clone());
         self.confirm_context = Some(ConfirmDialogContext::CloseDirtyTab { pane_id, tab_idx });
         self.focus = EditorFocus::ConfirmDialog;
+        // Chunk: docs/chunks/focus_stack - Push confirm dialog focus target onto stack
+        self.focus_stack.push(Box::new(ConfirmDialogFocusTarget::new(dialog)));
         self.dirty_region.merge(DirtyRegion::FullViewport);
     }
 
@@ -1482,13 +1529,16 @@ impl EditorState {
     /// `CloseActiveTerminal` context variant.
     // Chunk: docs/chunks/terminal_close_guard - Terminal close confirmation
     fn show_terminal_close_confirm(&mut self, pane_id: PaneId, tab_idx: usize) {
-        self.confirm_dialog = Some(ConfirmDialog::with_labels(
+        let dialog = ConfirmDialog::with_labels(
             "Kill running process?",
             "Cancel",
             "Kill",
-        ));
+        );
+        self.confirm_dialog = Some(dialog.clone());
         self.confirm_context = Some(ConfirmDialogContext::CloseActiveTerminal { pane_id, tab_idx });
         self.focus = EditorFocus::ConfirmDialog;
+        // Chunk: docs/chunks/focus_stack - Push confirm dialog focus target onto stack
+        self.focus_stack.push(Box::new(ConfirmDialogFocusTarget::new(dialog)));
         self.dirty_region.merge(DirtyRegion::FullViewport);
     }
 
@@ -1522,17 +1572,20 @@ impl EditorState {
     /// Uses file-deleted-specific wording ("File deleted from disk") and offers
     /// "Save" (recreate) as the confirm action and "Abandon" as the cancel action.
     fn show_file_deleted_confirm(&mut self, pane_id: PaneId, tab_idx: usize, deleted_path: std::path::PathBuf) {
-        self.confirm_dialog = Some(ConfirmDialog::with_labels(
+        let dialog = ConfirmDialog::with_labels(
             "File deleted from disk",
             "Abandon",
             "Save",
-        ));
+        );
+        self.confirm_dialog = Some(dialog.clone());
         self.confirm_context = Some(ConfirmDialogContext::FileDeletedFromDisk {
             pane_id,
             tab_idx,
             deleted_path,
         });
         self.focus = EditorFocus::ConfirmDialog;
+        // Chunk: docs/chunks/focus_stack - Push confirm dialog focus target onto stack
+        self.focus_stack.push(Box::new(ConfirmDialogFocusTarget::new(dialog)));
         self.dirty_region.merge(DirtyRegion::FullViewport);
     }
 

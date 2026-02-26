@@ -54,6 +54,20 @@ impl FindFocusTarget {
         }
     }
 
+    // Chunk: docs/chunks/focus_stack - Empty constructor for focus_layer() reporting
+    /// Creates a new find focus target with a default empty mini buffer.
+    ///
+    /// This is used during the transition period where EditorState maintains
+    /// both its own state fields and the focus_stack. The focus_stack entry
+    /// only needs to provide the correct `layer()` result for rendering decisions.
+    pub fn new_empty(font_metrics: crate::font::FontMetrics) -> Self {
+        Self {
+            mini_buffer: MiniBuffer::new(font_metrics),
+            pending_outcome: None,
+            query_changed: false,
+        }
+    }
+
     /// Returns the pending outcome, if any.
     pub fn pending_outcome(&self) -> Option<FindOutcome> {
         self.pending_outcome
