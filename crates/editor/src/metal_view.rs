@@ -215,12 +215,6 @@ define_class!(
     // SAFETY: NSObjectProtocol is correctly implemented - we inherit from NSView
     unsafe impl NSObjectProtocol for MetalView {}
 
-    // Chunk: docs/chunks/input_keystroke_regression - NSTextInputClient protocol conformance
-    // SAFETY: NSTextInputClient methods are implemented below in the impl MetalView block.
-    // This declaration tells macOS that our class conforms to the NSTextInputClient protocol,
-    // enabling the text input system to route insertText:, doCommandBySelector:, etc. to us.
-    unsafe impl NSTextInputClient for MetalView {}
-
     // Methods for MetalView - overriding NSView methods
     impl MetalView {
         /// Returns YES to indicate this view wants a layer
@@ -342,7 +336,12 @@ define_class!(
             let event_array = NSArray::from_slice(&[event]);
             self.interpretKeyEvents(&event_array);
         }
+    }
 
+    // Chunk: docs/chunks/input_keystroke_regression - NSTextInputClient protocol conformance
+    // SAFETY: NSTextInputClient protocol methods are in this impl block so objc2 can
+    // register them with the Objective-C runtime during class creation.
+    unsafe impl NSTextInputClient for MetalView {
         // Chunk: docs/chunks/unicode_ime_input - NSTextInputClient: insertText:replacementRange:
         /// Called by the text input system to insert final (committed) text.
         ///
@@ -605,7 +604,9 @@ define_class!(
                 }
             }
         }
+    }
 
+    impl MetalView {
         /// Handle flags changed events (modifier key changes)
         #[unsafe(method(flagsChanged:))]
         fn __flags_changed(&self, _event: &NSEvent) {
