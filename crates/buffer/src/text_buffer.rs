@@ -791,7 +791,7 @@ impl TextBuffer {
     #[cfg(debug_assertions)]
     fn assert_line_index_consistent(&mut self) {
         self.debug_mutation_count += 1;
-        if !self.debug_mutation_count.is_multiple_of(64) {
+        if self.debug_mutation_count % 64 != 0 {
             return;
         }
         let mut expected = LineIndex::new();

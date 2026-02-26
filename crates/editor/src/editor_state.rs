@@ -3770,8 +3770,26 @@ impl EditorState {
             return None;
         }
 
-        // Get the base content (required for merge)
-        let base_content = tab.base_content.clone()?;
+        // Chunk: docs/chunks/merge_conflict_render - Defensive handling for missing base_content
+        // Get the base content. If missing for a dirty buffer, this indicates a lifecycle bug.
+        // We log an error and use an empty string as the base, which triggers the two-way merge
+        // fallback in three_way_merge() - preserving common lines rather than failing silently.
+        let base_content = match &tab.base_content {
+            Some(content) => content.clone(),
+            None => {
+                // This shouldn't happen - dirty buffers should always have base_content set
+                // from when the file was opened/reloaded. Log for diagnostics.
+                eprintln!(
+                    "[merge_file_tab] WARNING: base_content is None for dirty buffer {:?}. \
+                     This indicates a lifecycle bug. Falling back to two-way merge.",
+                    path
+                );
+                // Use empty string as base - this triggers the two-way merge fallback
+                // in three_way_merge(), which preserves common lines between ours/theirs
+                // rather than treating everything as conflicting.
+                String::new()
+            }
+        };
 
         // Get current buffer content
         let buffer = tab.as_text_buffer()?;
@@ -8454,6 +8472,62 @@ mod tests {
             expected_visible,
             "Terminal viewport should have {} visible lines based on content height",
             expected_visible
+        );
+    }
+
+    // Chunk: docs/chunks/terminal_single_pane_refresh - Single-pane terminal rendering test
+    /// Tests that a terminal in single-pane mode produces dirty regions and content.
+    ///
+    /// This validates the fix for the single-pane rendering path: when a terminal tab
+    /// is spawned in a single-pane workspace, PTY output should trigger dirty regions
+    /// and the terminal buffer should have content. The actual rendering behavior
+    /// (glyph buffer update during render pass) must be verified visually.
+    #[test]
+    fn test_single_pane_terminal_dirty_and_content() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Verify this is a single-pane workspace
+        let ws = state.editor.active_workspace().expect("workspace");
+        assert_eq!(
+            ws.pane_root.pane_count(), 1,
+            "Test requires a single-pane workspace"
+        );
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Wait for shell startup and poll for PTY events
+        let mut found_dirty = false;
+        for _ in 0..50 {
+            std::thread::sleep(Duration::from_millis(20));
+            let (dirty, _needs_rewakeup) = state.poll_agents();
+            if dirty.is_dirty() {
+                found_dirty = true;
+                break;
+            }
+        }
+
+        assert!(
+            found_dirty,
+            "poll_agents should return dirty when terminal produces output in single-pane mode"
+        );
+
+        // Verify terminal buffer has content
+        let ws = state.editor.active_workspace().expect("workspace");
+        let tab = ws.active_tab().expect("tab");
+        assert!(
+            tab.buffer().line_count() > 0,
+            "Terminal buffer should have content after shell starts (got {} lines)",
+            tab.buffer().line_count()
+        );
+
+        // Verify we're still in single-pane mode (no accidental splits)
+        assert_eq!(
+            ws.pane_root.pane_count(), 1,
+            "Should still be single-pane after terminal creation"
         );
     }
 
