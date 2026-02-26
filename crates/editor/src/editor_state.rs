@@ -34,6 +34,8 @@ use crate::dirty_region::{DirtyRegion, InvalidationKind};
 use crate::event_channel::EventSender;
 // Chunk: docs/chunks/file_change_events - Self-write suppression
 use crate::file_change_suppression::FileChangeSuppression;
+// Chunk: docs/chunks/buffer_file_watching - Per-buffer file watching
+use crate::buffer_file_watcher::BufferFileWatcher;
 // Chunk: docs/chunks/focus_stack - FocusLayer import for focus state bridge
 // Chunk: docs/chunks/focus_stack - FocusStack import for stack-based focus management
 use crate::focus::{FocusLayer, FocusStack, FocusTarget};
@@ -184,6 +186,10 @@ pub struct EditorState {
     /// Registry of paths whose file change events should be suppressed.
     /// Prevents our own file saves from triggering reload/merge flows.
     file_change_suppression: FileChangeSuppression,
+    // Chunk: docs/chunks/buffer_file_watching - Per-buffer file watching
+    /// Per-buffer file watcher for files outside the workspace.
+    /// Manages watchers for files opened via Cmd+O from external directories.
+    buffer_file_watcher: BufferFileWatcher,
     /// Flag set by Ctrl+Shift+P to trigger an on-demand perf stats dump.
     #[cfg(feature = "perf-instrumentation")]
     pub dump_perf_stats: bool,
@@ -426,6 +432,8 @@ impl EditorState {
             language_registry: LanguageRegistry::new(),
             // Chunk: docs/chunks/file_change_events - Initialize self-write suppression
             file_change_suppression: FileChangeSuppression::new(),
+            // Chunk: docs/chunks/buffer_file_watching - Initialize per-buffer file watcher
+            buffer_file_watcher: BufferFileWatcher::new(),
             #[cfg(feature = "perf-instrumentation")]
             dump_perf_stats: false,
         }
@@ -488,6 +496,8 @@ impl EditorState {
             language_registry: LanguageRegistry::new(),
             // Chunk: docs/chunks/file_change_events - Initialize self-write suppression
             file_change_suppression: FileChangeSuppression::new(),
+            // Chunk: docs/chunks/buffer_file_watching - Initialize per-buffer file watcher
+            buffer_file_watcher: BufferFileWatcher::new(),
             #[cfg(feature = "perf-instrumentation")]
             dump_perf_stats: false,
         }
@@ -511,7 +521,12 @@ impl EditorState {
             .unwrap_or_else(|| "workspace".to_string());
 
         // Create the workspace with the selected directory
-        self.editor.new_workspace(label, root_path);
+        self.editor.new_workspace(label, root_path.clone());
+
+        // Chunk: docs/chunks/buffer_file_watching - Set initial workspace root
+        // Set the buffer file watcher's workspace root for the initial workspace.
+        self.buffer_file_watcher.set_workspace_root(root_path);
+
         self.invalidation.merge(InvalidationKind::Layout);
     }
 
@@ -534,11 +549,27 @@ impl EditorState {
     }
 
     // Chunk: docs/chunks/pty_wakeup_reentrant - EventSender for PTY wakeup
+    // Chunk: docs/chunks/buffer_file_watching - Wire up buffer file watcher callback
     /// Sets the event sender for creating PTY wakeup handles.
     ///
     /// The sender is cloned when spawning new terminals to create PtyWakeup
     /// handles that signal through the unified event queue.
+    ///
+    /// Also wires up the buffer file watcher callback to send FileChanged events
+    /// through the event channel.
     pub fn set_event_sender(&mut self, sender: EventSender) {
+        // Chunk: docs/chunks/buffer_file_watching - Wire buffer file watcher callback
+        // Clone sender for the buffer file watcher callback
+        let event_sender_for_buffer_watcher = sender.clone();
+        self.buffer_file_watcher.set_callback(Box::new(move |path| {
+            let _ = event_sender_for_buffer_watcher.send_file_changed(path);
+        }));
+
+        // Set workspace root for buffer file watcher (if workspace exists)
+        if let Some(ws) = self.editor.active_workspace() {
+            self.buffer_file_watcher.set_workspace_root(ws.root_path.clone());
+        }
+
         self.event_sender = Some(sender);
     }
 
@@ -3267,6 +3298,14 @@ impl EditorState {
 
         self.set_associated_file(Some(path.clone()));
 
+        // Chunk: docs/chunks/buffer_file_watching - Register external file watch
+        // Register a watch for files outside the workspace. This is safe to call
+        // for workspace-internal files because register() checks is_external() first.
+        if let Err(e) = self.buffer_file_watcher.register(&path) {
+            // Log but don't fail - watching is a nice-to-have, not critical
+            eprintln!("Failed to watch external file {:?}: {}", path, e);
+        }
+
         // Chunk: docs/chunks/syntax_highlighting - Set up syntax highlighting
         // Try to set up syntax highlighting based on file extension
         self.setup_active_tab_highlighting();
@@ -3686,12 +3725,16 @@ impl EditorState {
 
         if is_subsequent {
             // Subsequent workspaces get a terminal tab instead of empty file tab
-            self.editor.new_workspace_without_tab(label, selected_dir);
+            self.editor.new_workspace_without_tab(label, selected_dir.clone());
             self.new_terminal_tab();
         } else {
             // First workspace gets empty file tab (for welcome screen)
-            self.editor.new_workspace(label, selected_dir);
+            self.editor.new_workspace(label, selected_dir.clone());
         }
+
+        // Chunk: docs/chunks/buffer_file_watching - Update buffer file watcher root
+        // Update the buffer file watcher's workspace root for the new workspace.
+        self.buffer_file_watcher.set_workspace_root(selected_dir);
 
         self.invalidation.merge(InvalidationKind::Layout);
     }
@@ -3702,6 +3745,12 @@ impl EditorState {
     pub fn close_active_workspace(&mut self) {
         if self.editor.workspace_count() > 1 {
             self.editor.close_workspace(self.editor.active_workspace);
+            // Chunk: docs/chunks/buffer_file_watching - Update buffer file watcher root
+            // After closing a workspace, update the buffer file watcher's root to the
+            // newly active workspace's root path.
+            if let Some(ws) = self.editor.active_workspace() {
+                self.buffer_file_watcher.set_workspace_root(ws.root_path.clone());
+            }
             self.invalidation.merge(InvalidationKind::Layout);
         }
     }
@@ -3712,6 +3761,12 @@ impl EditorState {
     pub fn switch_workspace(&mut self, index: usize) {
         if index < self.editor.workspace_count() && index != self.editor.active_workspace {
             self.editor.switch_workspace(index);
+            // Chunk: docs/chunks/buffer_file_watching - Update buffer file watcher root
+            // Update the buffer file watcher's workspace root when switching workspaces.
+            // This ensures external file detection uses the new workspace's root path.
+            if let Some(ws) = self.editor.active_workspace() {
+                self.buffer_file_watcher.set_workspace_root(ws.root_path.clone());
+            }
             self.invalidation.merge(InvalidationKind::Layout);
         }
     }
@@ -3798,6 +3853,14 @@ impl EditorState {
         let tab_id = self.editor.gen_tab_id();
         let line_height = self.editor.line_height();
 
+        // Chunk: docs/chunks/buffer_file_watching - Extract associated file for watcher cleanup
+        // Get the associated file path before closing (for watcher cleanup)
+        let associated_file = self.editor
+            .active_workspace()
+            .and_then(|ws| ws.active_pane())
+            .and_then(|pane| pane.tabs.get(index))
+            .and_then(|tab| tab.associated_file.clone());
+
         // Chunk: docs/chunks/dirty_tab_close_confirm - Show confirm dialog for dirty tabs
         // Check if the tab is dirty and show confirmation dialog if so.
         // We check this in a separate borrow scope so we can call show_confirm_dialog after.
@@ -3883,6 +3946,12 @@ impl EditorState {
                 }
             }
             self.invalidation.merge(InvalidationKind::Layout);
+        }
+
+        // Chunk: docs/chunks/buffer_file_watching - Unregister external file watch
+        // Unregister the file watcher for the closed tab (if it had an associated file)
+        if let Some(ref path) = associated_file {
+            self.buffer_file_watcher.unregister(path);
         }
     }
 

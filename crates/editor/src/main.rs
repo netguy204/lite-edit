@@ -61,6 +61,8 @@ pub mod file_index;
 mod file_change_debouncer;
 // Chunk: docs/chunks/file_change_events - Self-write suppression
 mod file_change_suppression;
+// Chunk: docs/chunks/buffer_file_watching - Per-buffer file watching
+mod buffer_file_watcher;
 // Chunk: docs/chunks/focus_stack - Find focus target
 mod find_target;
 mod focus;

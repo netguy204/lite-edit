@@ -40,6 +40,9 @@ pub mod file_change_debouncer;
 // Chunk: docs/chunks/file_change_events - Self-write suppression
 pub mod file_change_suppression;
 
+// Chunk: docs/chunks/buffer_file_watching - Per-buffer file watching module
+pub mod buffer_file_watcher;
+
 // Chunk: docs/chunks/workspace_dir_picker - Directory picker for new workspaces
 mod dir_picker;
 
