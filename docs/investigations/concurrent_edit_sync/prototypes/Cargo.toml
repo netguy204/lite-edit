@@ -1,0 +1,18 @@
+[package]
+name = "concurrent-edit-sync-prototypes"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "notify_modify_test"
+path = "notify_modify_test.rs"
+
+[[bin]]
+name = "three_way_merge_test"
+path = "three_way_merge_test.rs"
+
+[dependencies]
+notify = "6"
+similar = "2"
