@@ -8,153 +8,200 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+When the window loses key status (`windowDidResignKey:`), we need to pause all
+file watching to eliminate wakeups that prevent App Nap. When the window becomes
+key again (`windowDidBecomeKey:`), we resume watching and trigger a re-scan to
+detect any changes that occurred while paused.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+There are two file watching systems in lite-edit:
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. **FileIndex** (`crates/editor/src/file_index.rs`): Watches the workspace root
+   recursively for the file picker and file change detection.
+2. **BufferFileWatcher** (`crates/editor/src/buffer_file_watcher.rs`): Watches
+   individual files opened from outside the workspace.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/app_nap_file_watcher_pause/GOAL.md)
-with references to the files that you expect to touch.
--->
+Both need pause/resume functionality. The approach is:
+
+1. **Add pause/resume to BufferFileWatcher**: Stop all watcher threads and drop
+   watchers on pause. On resume, re-register all tracked files and scan for
+   changes by comparing timestamps.
+
+2. **Add pause/resume to FileIndex**: Similar to BufferFileWatcher, but for the
+   workspace watcher. Since FileIndex tracks state in an `Arc<Mutex<SharedState>>`,
+   we can stop the watcher thread and restart it on resume.
+
+3. **Wire into window key events**: Extend `windowDidResignKey:` and
+   `windowDidBecomeKey:` in `main.rs` to call pause/resume on the watchers
+   through the event channel (similar to how the blink timer is handled).
+
+4. **Resume scan**: On resume, instead of relying on FSEvents to deliver
+   coalesced events (which is OS-dependent), we stat all watched files and
+   emit `FileChanged` events for any that changed while paused.
+
+**Why pause instead of just ignoring events?**
+
+The `notify` crate's watcher threads still wake the process to deliver events
+even if we ignore them. Stopping the watchers entirely is required to let the
+process enter App Nap.
+
+**Testing strategy** (per TESTING_PHILOSOPHY.md):
+- Watcher lifecycle is platform code (humble view), so we verify high-level
+  behavior manually via Activity Monitor's "App Nap" column.
+- Add unit tests for timestamp-based change detection logic.
+- Existing file watcher tests remain unchanged.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems are directly relevant to this chunk.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add pause/resume to BufferFileWatcher
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add methods to `BufferFileWatcher`:
 
-Example:
+```rust
+/// Pauses all watchers, storing modification times for later comparison.
+/// Returns the current state for re-registration on resume.
+pub fn pause(&mut self) -> PausedWatcherState
 
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+/// Resumes watching. Re-registers all previously tracked files and
+/// emits FileChanged events for any files modified while paused.
+pub fn resume(&mut self, state: PausedWatcherState)
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+The `PausedWatcherState` struct captures:
+- Map of file paths to their last-known modification times (from stat)
+- The on_change callback (needs to be preserved across pause)
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+On pause:
+1. For each registered file, stat it to get the current mtime
+2. Drop all watchers (this stops the threads)
+3. Clear internal state but keep file_to_watch mapping
+
+On resume:
+1. Re-register all files from the saved mapping
+2. For each file, stat again and compare mtimes
+3. If mtime changed, emit FileChanged through the callback
+
+**Location**: `crates/editor/src/buffer_file_watcher.rs`
+
+### Step 2: Add pause/resume to FileIndex
+
+The FileIndex is more complex because it's already started with threads. We need
+a different approach: add a "paused" flag that the watcher thread checks.
+
+Actually, simpler approach: FileIndex is per-workspace and already has reference
+counting. We can add pause/resume by:
+
+1. Add an `Arc<AtomicBool>` paused flag
+2. The watcher thread checks this flag and sleeps when paused
+3. On resume, trigger a full re-scan of watched files
+
+Or even simpler: since FileIndex watchers can be resource-heavy, we could:
+1. On pause: store the root path and drop the FileIndex
+2. On resume: recreate the FileIndex (it will re-walk and re-watch)
+
+This is heavyweight but simple and safe. The re-walk on resume ensures we
+detect any changes. For a background operation, this is acceptable.
+
+However, this approach loses the cache and recency list. Let's use a middle
+ground:
+
+Add a paused mode where:
+1. The watcher is stopped (events no longer processed)
+2. On resume, the watcher is restarted and we do a single-pass scan of
+   recently-accessed files to emit change events
+
+For now, we'll implement a simpler version: add pause/resume that:
+- Pauses by stopping the watcher
+- Resumes by recreating the watcher (FSEvents will coalesce any missed events)
+
+**Location**: `crates/editor/src/file_index.rs`
+
+### Step 3: Add pause/resume to EditorState
+
+Add methods to EditorState that pause/resume both watchers:
+
+```rust
+/// Pauses file watching for App Nap eligibility.
+pub fn pause_file_watchers(&mut self)
+
+/// Resumes file watching after returning from background.
+pub fn resume_file_watchers(&mut self)
+```
+
+These methods:
+1. Pause/resume the BufferFileWatcher
+2. Pause/resume each workspace's FileIndex
+
+**Location**: `crates/editor/src/editor_state.rs`
+
+### Step 4: Wire into window key events
+
+Extend `windowDidResignKey:` and `windowDidBecomeKey:` in `main.rs`:
+
+```rust
+// In window_did_resign_key, after stopping blink timer:
+// Send a PauseFileWatchers event through the channel
+
+// In window_did_become_key, before starting blink timer:
+// Send a ResumeFileWatchers event through the channel
+```
+
+Add two new event types to `EditorEvent`:
+- `PauseFileWatchers`
+- `ResumeFileWatchers`
+
+Handle these in the drain loop by calling the EditorState methods.
+
+**Location**: `crates/editor/src/main.rs`, `crates/editor/src/editor_event.rs`,
+`crates/editor/src/drain_loop.rs`
+
+### Step 5: Run tests and verify
+
+Run existing tests:
+```bash
+cargo test --package editor
+```
+
+Verify no regressions in file watching tests.
+
+### Step 6: Manual App Nap verification
+
+1. Build and run lite-edit: `cargo run --release -p editor`
+2. Open a file from outside the workspace (Cmd+O, navigate to /tmp or similar)
+3. Open Activity Monitor, enable the "App Nap" column
+4. Focus another application (lite-edit loses key window status)
+5. Wait ~30 seconds for App Nap to engage
+6. Verify "App Nap" shows "Yes" for lite-edit
+7. Modify the external file with another editor
+8. Click lite-edit to regain focus
+9. Verify the file shows as modified (or reloads)
+10. Verify normal file watching continues to work
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **app_nap_blink_timer** (ACTIVE): This chunk adds file watcher pause/resume
+  to the existing window key event handlers created by app_nap_blink_timer.
+- **buffer_file_watching** (ACTIVE): This chunk extends BufferFileWatcher with
+  pause/resume capability.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **FSEvents coalescing reliability**: macOS FSEvents is supposed to coalesce
+  events and deliver them on re-subscribe, but this is not guaranteed. The
+  timestamp-based scan on resume is a fallback to ensure we detect changes.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **FileIndex recreation overhead**: Recreating the FileIndex on resume means
+  re-walking the directory tree. For large workspaces this could cause a brief
+  delay. The walk happens on a background thread so UI won't freeze, but there
+  may be a window where the file picker shows stale results. This is acceptable
+  for a backgrounded app returning to foreground.
+
+- **Simultaneous pause/resume**: If the user rapidly switches between apps,
+  pause and resume events could interleave. The implementation should be
+  idempotent (pausing twice is safe, resuming twice is safe).
 
 ## Deviations
 

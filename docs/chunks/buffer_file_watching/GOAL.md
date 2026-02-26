@@ -23,7 +23,7 @@ code_references:
     implements: "Wire buffer file watcher callback to event channel"
   - ref: crates/editor/src/editor_state.rs#EditorState::associate_file
     implements: "Register external file watch when file is associated"
-  - ref: crates/editor/src/editor_state.rs#EditorState::do_close_tab
+  - ref: crates/editor/src/editor_state.rs#EditorState::close_tab
     implements: "Unregister external file watch when tab is closed"
   - ref: crates/editor/src/lib.rs
     implements: "Module export for buffer_file_watcher"

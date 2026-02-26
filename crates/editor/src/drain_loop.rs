@@ -231,6 +231,13 @@ impl EventDrainLoop {
             EditorEvent::WindowResignKey => {
                 self.handle_window_resign_key();
             }
+            // Chunk: docs/chunks/app_nap_file_watcher_pause - Pause/resume file watchers
+            EditorEvent::PauseFileWatchers => {
+                self.state.pause_file_watchers();
+            }
+            EditorEvent::ResumeFileWatchers => {
+                self.state.resume_file_watchers();
+            }
         }
     }
 

@@ -39,7 +39,9 @@ use crate::event_channel::EventSender;
 // Chunk: docs/chunks/file_change_events - Self-write suppression
 use crate::file_change_suppression::FileChangeSuppression;
 // Chunk: docs/chunks/buffer_file_watching - Per-buffer file watching
-use crate::buffer_file_watcher::BufferFileWatcher;
+// Chunk: docs/chunks/app_nap_file_watcher_pause - Pause/resume state
+use crate::buffer_file_watcher::{BufferFileWatcher, PausedWatcherState};
+use crate::file_index::PausedFileIndexState;
 // Chunk: docs/chunks/focus_stack - FocusLayer import for focus state bridge
 // Chunk: docs/chunks/focus_stack - FocusStack import for stack-based focus management
 use crate::focus::{FocusLayer, FocusStack, FocusTarget};
@@ -202,9 +204,24 @@ pub struct EditorState {
     /// NSProcessInfo activity assertion to prevent App Nap during terminal activity.
     /// Held while terminals are actively receiving PTY output.
     activity_assertion: ActivityAssertion,
+    // Chunk: docs/chunks/app_nap_file_watcher_pause - Paused state storage
+    /// Stored paused state for file watchers. When Some, watchers are paused.
+    paused_watcher_state: Option<PausedFileWatchersState>,
     /// Flag set by Ctrl+Shift+P to trigger an on-demand perf stats dump.
     #[cfg(feature = "perf-instrumentation")]
     pub dump_perf_stats: bool,
+}
+
+// Chunk: docs/chunks/app_nap_file_watcher_pause - Combined paused state
+/// Combined paused state for all file watchers.
+///
+/// This struct holds the paused state from both the BufferFileWatcher
+/// (for external files) and each workspace's FileIndex.
+pub struct PausedFileWatchersState {
+    /// Paused state from the BufferFileWatcher.
+    buffer_watcher_state: PausedWatcherState,
+    /// Paused states from each workspace's FileIndex, keyed by workspace ID.
+    workspace_states: std::collections::HashMap<u64, PausedFileIndexState>,
 }
 
 // =============================================================================
@@ -450,6 +467,8 @@ impl EditorState {
             // Chunk: docs/chunks/app_nap_activity_assertions - Initialize activity assertion state
             last_terminal_activity: None,
             activity_assertion: ActivityAssertion::new(),
+            // Chunk: docs/chunks/app_nap_file_watcher_pause - Initialize paused state
+            paused_watcher_state: None,
             #[cfg(feature = "perf-instrumentation")]
             dump_perf_stats: false,
         }
@@ -517,6 +536,8 @@ impl EditorState {
             // Chunk: docs/chunks/app_nap_activity_assertions - Initialize activity assertion state
             last_terminal_activity: None,
             activity_assertion: ActivityAssertion::new(),
+            // Chunk: docs/chunks/app_nap_file_watcher_pause - Initialize paused state
+            paused_watcher_state: None,
             #[cfg(feature = "perf-instrumentation")]
             dump_perf_stats: false,
         }
@@ -590,6 +611,68 @@ impl EditorState {
         }
 
         self.event_sender = Some(sender);
+    }
+
+    // Chunk: docs/chunks/app_nap_file_watcher_pause - Pause file watchers for App Nap
+    /// Pauses all file watchers to allow App Nap when the app is backgrounded.
+    ///
+    /// This method pauses:
+    /// - The `BufferFileWatcher` (for files outside the workspace)
+    /// - Each workspace's `FileIndex` watcher (for workspace files)
+    ///
+    /// The paused state is stored internally. Call `resume_file_watchers()` when
+    /// the app returns to the foreground to resume watching and detect any changes
+    /// that occurred while paused.
+    ///
+    /// If already paused, this is a no-op.
+    pub fn pause_file_watchers(&mut self) {
+        if self.paused_watcher_state.is_some() {
+            // Already paused
+            return;
+        }
+
+        // Pause the buffer file watcher
+        let buffer_watcher_state = self.buffer_file_watcher.pause();
+
+        // Pause each workspace's file index
+        let mut workspace_states = std::collections::HashMap::new();
+        for ws in &self.editor.workspaces {
+            let state = ws.file_index.pause();
+            workspace_states.insert(ws.id, state);
+        }
+
+        self.paused_watcher_state = Some(PausedFileWatchersState {
+            buffer_watcher_state,
+            workspace_states,
+        });
+    }
+
+    // Chunk: docs/chunks/app_nap_file_watcher_pause - Resume file watchers after App Nap
+    /// Resumes file watchers after returning from background.
+    ///
+    /// This method:
+    /// 1. Resumes the `BufferFileWatcher` and each workspace's `FileIndex`
+    /// 2. Checks for any files that were modified while paused
+    /// 3. Emits FileChanged events for modified files
+    ///
+    /// If not paused, this is a no-op.
+    pub fn resume_file_watchers(&mut self) {
+        let paused_state = match self.paused_watcher_state.take() {
+            Some(state) => state,
+            None => return, // Not paused
+        };
+
+        // Resume the buffer file watcher
+        self.buffer_file_watcher.resume(paused_state.buffer_watcher_state);
+
+        // Resume each workspace's file index
+        // We need to consume the workspace_states HashMap by taking values out
+        let mut workspace_states = paused_state.workspace_states;
+        for ws in &self.editor.workspaces {
+            if let Some(state) = workspace_states.remove(&ws.id) {
+                ws.file_index.resume(state);
+            }
+        }
     }
 
     // Chunk: docs/chunks/pty_wakeup_reentrant - Creates PtyWakeup with WakeupSignal trait

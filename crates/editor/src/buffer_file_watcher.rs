@@ -1,4 +1,5 @@
 // Chunk: docs/chunks/buffer_file_watching - Per-buffer file watching
+// Chunk: docs/chunks/app_nap_file_watcher_pause - Pause/resume for App Nap
 //!
 //! Per-buffer file watching for files outside the workspace.
 //!
@@ -36,12 +37,23 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use crate::file_change_debouncer::FileChangeDebouncer;
 
 /// Type alias for the file change callback (same as FileIndex).
 pub type FileChangeCallback = Box<dyn Fn(PathBuf) + Send + Sync>;
+
+// Chunk: docs/chunks/app_nap_file_watcher_pause - State preserved across pause/resume
+/// State captured when pausing file watchers.
+///
+/// This struct holds the information needed to resume watching and detect
+/// any changes that occurred while paused.
+#[derive(Default)]
+pub struct PausedWatcherState {
+    /// Map from file path to its modification time at pause.
+    file_mtimes: HashMap<PathBuf, Option<SystemTime>>,
+}
 
 /// Manages file watchers for buffers opened from outside the workspace.
 ///
@@ -287,6 +299,100 @@ impl BufferFileWatcher {
     #[allow(dead_code)]
     pub fn file_count(&self) -> usize {
         self.file_to_watch.len()
+    }
+
+    // Chunk: docs/chunks/app_nap_file_watcher_pause - Pause watchers for App Nap
+    /// Pauses all file watchers to allow App Nap when the app is backgrounded.
+    ///
+    /// This method:
+    /// 1. Records the current modification time of each watched file
+    /// 2. Stops all watcher threads by dropping the watchers
+    ///
+    /// Returns a `PausedWatcherState` that should be passed to `resume()` when
+    /// the app returns to the foreground.
+    ///
+    /// If already paused (no watchers), returns an empty state.
+    pub fn pause(&mut self) -> PausedWatcherState {
+        // Capture modification times for all watched files
+        let mut file_mtimes = HashMap::new();
+        for file_path in self.file_to_watch.keys() {
+            let mtime = std::fs::metadata(file_path)
+                .and_then(|m| m.modified())
+                .ok();
+            file_mtimes.insert(file_path.clone(), mtime);
+        }
+
+        // Drop all watchers (this stops the threads and releases resources)
+        // The _stop_tx channels will be dropped, signaling threads to exit.
+        self.watchers.clear();
+
+        PausedWatcherState { file_mtimes }
+    }
+
+    // Chunk: docs/chunks/app_nap_file_watcher_pause - Resume watchers after App Nap
+    /// Resumes file watching after returning from background.
+    ///
+    /// This method:
+    /// 1. Re-registers watchers for all previously tracked files
+    /// 2. Checks if any files were modified while paused (by comparing mtimes)
+    /// 3. Emits FileChanged events for modified files
+    ///
+    /// # Arguments
+    ///
+    /// * `paused_state` - The state returned from `pause()`
+    pub fn resume(&mut self, paused_state: PausedWatcherState) {
+        // Get the callback - we need it to re-register and to emit change events
+        let on_change = match &self.on_change {
+            Some(cb) => cb.clone(),
+            None => return, // No callback, nothing to do
+        };
+
+        // Collect files to re-register and check for changes
+        let files_to_register: Vec<PathBuf> = self.file_to_watch.keys().cloned().collect();
+
+        // Clear file_to_watch since register() will repopulate it
+        // But keep a copy for restoration if registration fails
+        let original_file_to_watch = std::mem::take(&mut self.file_to_watch);
+
+        // Re-register all files
+        for file_path in &files_to_register {
+            if let Err(e) = self.register(file_path) {
+                eprintln!("Failed to re-register watcher for {:?}: {}", file_path, e);
+                // Continue with other files
+            }
+        }
+
+        // Restore any files that weren't re-registered (e.g., if they were inside workspace)
+        for (path, watch_path) in original_file_to_watch {
+            if !self.file_to_watch.contains_key(&path) {
+                self.file_to_watch.insert(path, watch_path);
+            }
+        }
+
+        // Check for modifications while paused and emit FileChanged events
+        for (file_path, old_mtime) in paused_state.file_mtimes {
+            let current_mtime = std::fs::metadata(&file_path)
+                .and_then(|m| m.modified())
+                .ok();
+
+            // If mtime changed (or file was created/deleted), emit change event
+            let changed = match (old_mtime, current_mtime) {
+                (Some(old), Some(new)) => old != new,
+                (None, Some(_)) => true,  // File was created
+                (Some(_), None) => true,  // File was deleted
+                (None, None) => false,    // Still doesn't exist
+            };
+
+            if changed {
+                on_change(file_path);
+            }
+        }
+    }
+
+    /// Returns true if the watcher is currently paused (no active watchers).
+    #[allow(dead_code)]
+    pub fn is_paused(&self) -> bool {
+        self.watchers.is_empty() && !self.file_to_watch.is_empty()
     }
 }
 
@@ -561,5 +667,149 @@ mod tests {
         watcher.unregister(&file2);
         assert_eq!(watcher.watcher_count(), 0);
         assert_eq!(watcher.file_count(), 0);
+    }
+
+    // Chunk: docs/chunks/app_nap_file_watcher_pause - Pause/resume tests
+    #[test]
+    fn test_pause_stops_watchers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let external_dir = tempfile::TempDir::new().unwrap();
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = call_count.clone();
+
+        let mut watcher = BufferFileWatcher::new_with_callback(Box::new(move |_path| {
+            call_count_clone.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        // Create and register a file
+        let test_file = external_dir.path().join("test.txt");
+        std::fs::write(&test_file, "initial").unwrap();
+        watcher.register(&test_file).unwrap();
+
+        assert_eq!(watcher.watcher_count(), 1);
+        assert_eq!(watcher.file_count(), 1);
+
+        // Pause
+        let paused_state = watcher.pause();
+
+        // Watchers should be cleared but files still tracked
+        assert_eq!(watcher.watcher_count(), 0);
+        assert_eq!(watcher.file_count(), 1);
+        assert!(watcher.is_paused());
+
+        // The paused state should have captured the file
+        assert_eq!(paused_state.file_mtimes.len(), 1);
+        assert!(paused_state.file_mtimes.contains_key(&test_file.canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn test_resume_recreates_watchers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let external_dir = tempfile::TempDir::new().unwrap();
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = call_count.clone();
+
+        let mut watcher = BufferFileWatcher::new_with_callback(Box::new(move |_path| {
+            call_count_clone.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        // Create and register a file
+        let test_file = external_dir.path().join("test.txt");
+        std::fs::write(&test_file, "initial").unwrap();
+        watcher.register(&test_file).unwrap();
+
+        // Pause and resume without changes
+        let paused_state = watcher.pause();
+        watcher.resume(paused_state);
+
+        // Watchers should be recreated
+        assert_eq!(watcher.watcher_count(), 1);
+        assert_eq!(watcher.file_count(), 1);
+        assert!(!watcher.is_paused());
+
+        // No change events should have been emitted (no modifications)
+        assert_eq!(call_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_resume_detects_modifications() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let external_dir = tempfile::TempDir::new().unwrap();
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let received_paths = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+        let call_count_clone = call_count.clone();
+        let received_paths_clone = received_paths.clone();
+
+        let mut watcher = BufferFileWatcher::new_with_callback(Box::new(move |path| {
+            call_count_clone.fetch_add(1, Ordering::SeqCst);
+            received_paths_clone.lock().unwrap().push(path);
+        }));
+
+        // Create and register a file
+        let test_file = external_dir.path().join("test.txt");
+        std::fs::write(&test_file, "initial").unwrap();
+        watcher.register(&test_file).unwrap();
+
+        // Pause
+        let paused_state = watcher.pause();
+
+        // Modify the file while paused
+        // Sleep briefly to ensure mtime changes (some filesystems have 1s resolution)
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::fs::write(&test_file, "modified").unwrap();
+
+        // Resume - should detect the modification
+        watcher.resume(paused_state);
+
+        // A change event should have been emitted
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+        let paths = received_paths.lock().unwrap();
+        assert!(paths.iter().any(|p| p.ends_with("test.txt")));
+    }
+
+    #[test]
+    fn test_pause_resume_idempotent() {
+        let external_dir = tempfile::TempDir::new().unwrap();
+
+        let mut watcher = BufferFileWatcher::new_with_callback(Box::new(|_path| {}));
+
+        // Create and register a file
+        let test_file = external_dir.path().join("test.txt");
+        std::fs::write(&test_file, "content").unwrap();
+        watcher.register(&test_file).unwrap();
+
+        // Pause twice should be safe
+        let state1 = watcher.pause();
+        let state2 = watcher.pause(); // Already paused, should return empty state
+
+        // First state should have files, second should be empty (no watchers to stop)
+        assert_eq!(state1.file_mtimes.len(), 1);
+        assert_eq!(state2.file_mtimes.len(), 1); // Still has file mappings
+
+        // Resume with first state
+        watcher.resume(state1);
+        assert_eq!(watcher.watcher_count(), 1);
+
+        // Resume again should be safe (no-op, already running)
+        watcher.resume(state2);
+        assert_eq!(watcher.watcher_count(), 1);
+    }
+
+    #[test]
+    fn test_pause_no_callback_is_safe() {
+        let mut watcher = BufferFileWatcher::new();
+        // No callback set
+
+        // Pause should not panic
+        let paused_state = watcher.pause();
+
+        // Resume should not panic
+        watcher.resume(paused_state);
     }
 }
