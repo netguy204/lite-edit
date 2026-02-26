@@ -1027,6 +1027,13 @@ impl SyntaxHighlighter {
             let actual_start = cap_start.max(line_start);
             let actual_end = cap_end.min(line_end);
 
+            // Skip captures that don't actually intersect this line after clamping.
+            // This can happen because captures are sorted by start byte, but a later
+            // capture (larger start) may have a smaller end that doesn't reach line_start.
+            if actual_start >= actual_end {
+                continue;
+            }
+
             // Handle captures that overlap with already-covered bytes
             if actual_start < covered_until {
                 if actual_end > covered_until {

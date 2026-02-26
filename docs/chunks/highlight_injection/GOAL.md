@@ -77,6 +77,10 @@ host tree and updated incrementally.
   re-highlights correctly without full reparse.
 - Languages not present in the registry gracefully fall back to no highlighting
   for that region (no panic, no visual glitch).
+- Merged capture iteration in `build_line_from_captures` is robust to captures
+  whose clamped range inverts (start > end after clamping to line boundaries),
+  which occurs when captures sorted by start byte have end bytes that precede
+  the current line's start byte.
 
 
 ## Rejected Ideas
