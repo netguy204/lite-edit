@@ -41,6 +41,8 @@
 //! assert_eq!(outcome, ConfirmOutcome::Confirmed);
 //! ```
 
+use std::path::PathBuf;
+
 use crate::input::{Key, KeyEvent};
 use crate::pane_layout::PaneId;
 
@@ -75,6 +77,19 @@ pub enum ConfirmDialogContext {
         pane_id: PaneId,
         /// The index of the tab within the pane.
         tab_idx: usize,
+    },
+    // Chunk: docs/chunks/deletion_rename_handling - File deleted confirmation context
+    /// File was deleted from disk while buffer was open.
+    ///
+    /// The dialog offers "Save" (recreate the file from buffer contents) or
+    /// "Abandon" (close the tab). "Save" is the confirm action, "Abandon" is cancel.
+    FileDeletedFromDisk {
+        /// The pane containing the affected tab.
+        pane_id: PaneId,
+        /// The index of the tab within the pane.
+        tab_idx: usize,
+        /// The path that was deleted (for recreating the file).
+        deleted_path: PathBuf,
     },
 }
 
@@ -428,6 +443,51 @@ mod tests {
             ) => {
                 assert_eq!(a, c);
                 assert_eq!(b, d);
+            }
+            _ => panic!("Clone should produce same variant"),
+        }
+    }
+
+    // =========================================================================
+    // FileDeletedFromDisk context tests
+    // Chunk: docs/chunks/deletion_rename_handling - Tests for FileDeletedFromDisk variant
+    // =========================================================================
+
+    #[test]
+    fn test_context_file_deleted_stores_pane_tab_and_path() {
+        let ctx = ConfirmDialogContext::FileDeletedFromDisk {
+            pane_id: 42,
+            tab_idx: 3,
+            deleted_path: PathBuf::from("/path/to/deleted.txt"),
+        };
+
+        match ctx {
+            ConfirmDialogContext::FileDeletedFromDisk { pane_id, tab_idx, deleted_path } => {
+                assert_eq!(pane_id, 42);
+                assert_eq!(tab_idx, 3);
+                assert_eq!(deleted_path, PathBuf::from("/path/to/deleted.txt"));
+            }
+            _ => panic!("Expected FileDeletedFromDisk variant"),
+        }
+    }
+
+    #[test]
+    fn test_context_file_deleted_is_clone() {
+        let ctx = ConfirmDialogContext::FileDeletedFromDisk {
+            pane_id: 1,
+            tab_idx: 0,
+            deleted_path: PathBuf::from("/path"),
+        };
+        let cloned = ctx.clone();
+
+        match (ctx, cloned) {
+            (
+                ConfirmDialogContext::FileDeletedFromDisk { pane_id: a, tab_idx: b, deleted_path: c },
+                ConfirmDialogContext::FileDeletedFromDisk { pane_id: d, tab_idx: e, deleted_path: f },
+            ) => {
+                assert_eq!(a, d);
+                assert_eq!(b, e);
+                assert_eq!(c, f);
             }
             _ => panic!("Clone should produce same variant"),
         }

@@ -559,12 +559,30 @@ impl Workspace {
         let pane_id = gen_pane_id(&mut next_pane_id);
         let pane = Pane::new(pane_id, id);
 
-        // Start FileIndex with or without the file change callback
+        // Chunk: docs/chunks/deletion_rename_handling - Wire up all file event callbacks
+        // Start FileIndex with or without file event callbacks
         let file_index = if let Some(sender) = event_sender {
-            FileIndex::start_with_callback(root_path.clone(), move |path| {
-                // Ignore send errors (channel might be closed during shutdown)
-                let _ = sender.send_file_changed(path);
-            })
+            // Clone sender for each callback (EventSender is Arc-wrapped internally)
+            let change_sender = sender.clone();
+            let delete_sender = sender.clone();
+            let rename_sender = sender;
+
+            FileIndex::start_with_callbacks(
+                root_path.clone(),
+                // on_change: content modification (debounced)
+                Some(move |path| {
+                    // Ignore send errors (channel might be closed during shutdown)
+                    let _ = change_sender.send_file_changed(path);
+                }),
+                // on_delete: file deletion (immediate)
+                Some(move |path| {
+                    let _ = delete_sender.send_file_deleted(path);
+                }),
+                // on_rename: file rename (immediate, from -> to)
+                Some(move |from, to| {
+                    let _ = rename_sender.send_file_renamed(from, to);
+                }),
+            )
         } else {
             FileIndex::start(root_path.clone())
         };
