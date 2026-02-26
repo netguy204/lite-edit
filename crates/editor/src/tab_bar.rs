@@ -118,6 +118,19 @@ pub const UNREAD_INDICATOR_COLOR: [f32; 4] = [
     1.0,
 ];
 
+// Chunk: docs/chunks/conflict_mode_lifecycle - Conflict indicator color
+/// Conflict indicator color (Catppuccin red/pink #f38ba8)
+///
+/// Used when a tab is in conflict mode (merge produced conflicts). This color
+/// is distinct from the yellow dirty indicator and blue unread indicator,
+/// providing immediate visual recognition that the tab has unresolved conflicts.
+pub const CONFLICT_INDICATOR_COLOR: [f32; 4] = [
+    0.95,  // #f3 = 243/255 ≈ 0.95
+    0.55,  // #8b = 139/255 ≈ 0.55
+    0.66,  // #a8 = 168/255 ≈ 0.66
+    1.0,
+];
+
 /// Close button color (dimmed)
 pub const CLOSE_BUTTON_COLOR: [f32; 4] = [
     0.5,
@@ -241,6 +254,7 @@ pub struct TabBarGeometry {
 }
 
 // Chunk: docs/chunks/content_tab_bar - Tab metadata (label, kind, dirty, unread) used for rendering
+// Chunk: docs/chunks/conflict_mode_lifecycle - Added is_conflict for conflict indicator rendering
 /// Information about a tab for rendering.
 #[derive(Debug, Clone)]
 pub struct TabInfo {
@@ -252,12 +266,15 @@ pub struct TabInfo {
     pub is_dirty: bool,
     /// Whether this tab has unread content (for terminals)
     pub is_unread: bool,
+    /// Whether this tab is in conflict mode (merge conflict markers present)
+    pub is_conflict: bool,
     /// Tab index in the workspace
     pub index: usize,
 }
 
 impl TabInfo {
     // Chunk: docs/chunks/tab_bar_interaction - Derive label from associated_file for file tabs
+    // Chunk: docs/chunks/conflict_mode_lifecycle - Populate is_conflict from tab.conflict_mode
     /// Creates a TabInfo from a Tab.
     ///
     /// For file tabs (`TabKind::File`), the label is derived from the `associated_file`
@@ -287,6 +304,7 @@ impl TabInfo {
             is_active,
             is_dirty: tab.dirty,
             is_unread: tab.unread,
+            is_conflict: tab.conflict_mode,
             index,
         }
     }
@@ -731,13 +749,18 @@ impl TabBarGlyphBuffer {
         }
         self.active_tab_range = QuadRange::new(active_start, indices.len() - active_start);
 
-        // ==================== Phase 4: Dirty/Unread Indicators ====================
+        // ==================== Phase 4: Dirty/Unread/Conflict Indicators ====================
+        // Chunk: docs/chunks/conflict_mode_lifecycle - Conflict indicator has highest priority
         let indicator_start = indices.len();
         for tab_rect in &geometry.tab_rects {
             let tab_info = &tabs[tab_rect.tab_index];
 
-            // Only show indicator if dirty or unread
-            let indicator_color = if tab_info.is_dirty {
+            // Conflict mode takes priority (conflict implies dirty, but we want distinct color)
+            // Then dirty, then unread
+            let indicator_color = if tab_info.is_conflict && tab_info.is_dirty {
+                // Conflict mode - show distinct conflict indicator
+                Some(CONFLICT_INDICATOR_COLOR)
+            } else if tab_info.is_dirty {
                 Some(DIRTY_INDICATOR_COLOR)
             } else if tab_info.is_unread {
                 Some(UNREAD_INDICATOR_COLOR)
@@ -791,7 +814,9 @@ impl TabBarGlyphBuffer {
             let tab_info = &tabs[tab_rect.tab_index];
 
             // Calculate label position (after indicator if present)
-            let label_x = if tab_info.is_dirty || tab_info.is_unread {
+            // Chunk: docs/chunks/conflict_mode_lifecycle - Account for conflict indicator
+            let has_indicator = tab_info.is_dirty || tab_info.is_unread || tab_info.is_conflict;
+            let label_x = if has_indicator {
                 tab_rect.x + TAB_PADDING_H + INDICATOR_SIZE + INDICATOR_GAP
             } else {
                 tab_rect.x + TAB_PADDING_H
@@ -970,6 +995,7 @@ mod tests {
             is_active: true,
             is_dirty: false,
             is_unread: false,
+            is_conflict: false,
             index: 0,
         }];
         let geom = calculate_tab_bar_geometry(800.0, &tabs, test_glyph_width(), 0.0);
@@ -990,6 +1016,7 @@ mod tests {
                 is_active: i == 2,
                 is_dirty: false,
                 is_unread: false,
+                is_conflict: false,
                 index: i,
             })
             .collect();
@@ -1011,6 +1038,7 @@ mod tests {
                 is_active: false,
                 is_dirty: false,
                 is_unread: false,
+                is_conflict: false,
                 index: i,
             })
             .collect();
@@ -1084,6 +1112,7 @@ mod tests {
                 is_active: false,
                 is_dirty: false,
                 is_unread: false,
+                is_conflict: false,
                 index: i,
             })
             .collect();
@@ -1108,6 +1137,7 @@ mod tests {
             is_active: false,
             is_dirty: true,
             is_unread: false,
+            is_conflict: false,
             index: 0,
         }];
 
@@ -1122,6 +1152,7 @@ mod tests {
             is_active: false,
             is_dirty: false,
             is_unread: true,
+            is_conflict: false,
             index: 0,
         }];
 
@@ -1437,5 +1468,113 @@ mod tests {
             "Dirty active red component should be higher");
         assert!(TAB_DIRTY_INACTIVE_COLOR[0] > TAB_INACTIVE_COLOR[0],
             "Dirty inactive red component should be higher");
+    }
+
+    // =========================================================================
+    // Conflict Mode Tests (Chunk: docs/chunks/conflict_mode_lifecycle)
+    // =========================================================================
+
+    /// Helper function to simulate the indicator color selection logic.
+    fn select_indicator_color(is_conflict: bool, is_dirty: bool, is_unread: bool) -> Option<[f32; 4]> {
+        if is_conflict && is_dirty {
+            Some(CONFLICT_INDICATOR_COLOR)
+        } else if is_dirty {
+            Some(DIRTY_INDICATOR_COLOR)
+        } else if is_unread {
+            Some(UNREAD_INDICATOR_COLOR)
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn test_conflict_indicator_takes_priority_over_dirty() {
+        // A tab in conflict mode (which implies dirty) should show the conflict indicator
+        let color = select_indicator_color(true, true, false);
+        assert_eq!(color, Some(CONFLICT_INDICATOR_COLOR));
+    }
+
+    #[test]
+    fn test_conflict_mode_without_dirty_shows_no_conflict_indicator() {
+        // Conflict mode only shows indicator when also dirty (conflict implies dirty)
+        let color = select_indicator_color(true, false, false);
+        assert_eq!(color, None);
+    }
+
+    #[test]
+    fn test_dirty_without_conflict_shows_dirty_indicator() {
+        // A dirty tab not in conflict mode shows the dirty indicator
+        let color = select_indicator_color(false, true, false);
+        assert_eq!(color, Some(DIRTY_INDICATOR_COLOR));
+    }
+
+    #[test]
+    fn test_conflict_indicator_color_is_distinct() {
+        // Conflict indicator should be visually distinct from dirty and unread
+        assert_ne!(CONFLICT_INDICATOR_COLOR, DIRTY_INDICATOR_COLOR);
+        assert_ne!(CONFLICT_INDICATOR_COLOR, UNREAD_INDICATOR_COLOR);
+    }
+
+    #[test]
+    fn test_conflict_indicator_has_red_pink_hue() {
+        // Conflict indicator should be in the red/pink range (Catppuccin red)
+        // Red component should be high
+        assert!(CONFLICT_INDICATOR_COLOR[0] > 0.9, "Red component should be high");
+        // Not blue-dominant
+        assert!(CONFLICT_INDICATOR_COLOR[0] > CONFLICT_INDICATOR_COLOR[2],
+            "Should be red-dominant, not blue-dominant");
+    }
+
+    #[test]
+    fn test_tab_info_includes_conflict_state() {
+        use std::path::PathBuf;
+        use crate::workspace::{Tab, Workspace};
+        use lite_edit_buffer::TextBuffer;
+
+        let mut ws = Workspace::new(1, "test".to_string(), PathBuf::from("/test"));
+
+        // Create a file tab and set it to conflict mode
+        let mut tab = Tab::new_file(
+            1,
+            TextBuffer::new(),
+            "file.rs".to_string(),
+            Some(PathBuf::from("/test/file.rs")),
+            16.0,
+        );
+        tab.dirty = true;
+        tab.conflict_mode = true;
+
+        ws.add_tab(tab);
+
+        let tabs = tabs_from_workspace(&ws);
+
+        assert_eq!(tabs.len(), 1);
+        assert!(tabs[0].is_conflict, "TabInfo should reflect conflict_mode from Tab");
+        assert!(tabs[0].is_dirty, "TabInfo should reflect dirty from Tab");
+    }
+
+    #[test]
+    fn test_clean_tab_not_in_conflict() {
+        use std::path::PathBuf;
+        use crate::workspace::{Tab, Workspace};
+        use lite_edit_buffer::TextBuffer;
+
+        let mut ws = Workspace::new(1, "test".to_string(), PathBuf::from("/test"));
+
+        let tab = Tab::new_file(
+            1,
+            TextBuffer::new(),
+            "file.rs".to_string(),
+            Some(PathBuf::from("/test/file.rs")),
+            16.0,
+        );
+
+        ws.add_tab(tab);
+
+        let tabs = tabs_from_workspace(&ws);
+
+        assert_eq!(tabs.len(), 1);
+        assert!(!tabs[0].is_conflict, "New tab should not be in conflict mode");
+        assert!(!tabs[0].is_dirty, "New tab should not be dirty");
     }
 }

@@ -193,6 +193,7 @@ impl TabBuffer {
 // Chunk: docs/chunks/syntax_highlighting - Added syntax highlighter field
 // Chunk: docs/chunks/welcome_scroll - Welcome screen scroll offset field
 // Chunk: docs/chunks/base_snapshot_reload - Base content snapshot for three-way merge
+// Chunk: docs/chunks/conflict_mode_lifecycle - Conflict mode lifecycle management
 /// A tab within a workspace.
 ///
 /// Each tab owns its own buffer and viewport (for independent scroll positions).
@@ -232,6 +233,15 @@ pub struct Tab {
     /// terminal tabs.
     // Chunk: docs/chunks/base_snapshot_reload - Base version tracking for merge
     pub base_content: Option<String>,
+    /// Whether the tab is in conflict mode.
+    ///
+    /// Set to `true` when a three-way merge produces conflict markers. While in
+    /// conflict mode, incoming `FileChanged` events are ignored (no further
+    /// auto-merge). The mode is cleared when the user saves (Cmd+S), which also
+    /// triggers a re-check of the disk for any changes that occurred during
+    /// conflict resolution.
+    // Chunk: docs/chunks/conflict_mode_lifecycle - Conflict mode flag
+    pub conflict_mode: bool,
 }
 
 impl Tab {
@@ -249,6 +259,7 @@ impl Tab {
             highlighter: None,
             welcome_scroll_offset_px: 0.0,
             base_content: None,
+            conflict_mode: false,
         }
     }
 
@@ -274,6 +285,7 @@ impl Tab {
             highlighter: None,
             welcome_scroll_offset_px: 0.0,
             base_content: None,
+            conflict_mode: false,
         }
     }
 
@@ -291,6 +303,7 @@ impl Tab {
             highlighter: None,
             welcome_scroll_offset_px: 0.0,
             base_content: None,
+            conflict_mode: false,
         }
     }
 

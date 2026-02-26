@@ -3021,10 +3021,16 @@ impl EditorState {
     ///
     /// If no file is associated, this is a no-op.
     /// On write error, this silently fails (error reporting is out of scope).
-    /// On successful save, clears the tab's dirty flag.
+    /// On successful save, clears the tab's dirty flag and conflict mode.
+    ///
+    /// When a tab was in conflict mode, saving signals that the user has finished
+    /// resolving conflicts. After clearing conflict mode, we re-check the disk to
+    /// see if external changes arrived during conflict resolution. If the disk
+    /// differs from what we just saved, a new merge cycle is triggered.
     // Chunk: docs/chunks/file_save - Writes buffer content to associated file path
     // Chunk: docs/chunks/terminal_active_tab_safety - Guard for terminal tabs
     // Chunk: docs/chunks/unsaved_tab_tint - Clear dirty flag on successful save
+    // Chunk: docs/chunks/conflict_mode_lifecycle - Clear conflict mode and re-check disk on save
     fn save_file(&mut self) {
         // Save only makes sense for file tabs with a TextBuffer
         if !self.active_tab_is_file() {
@@ -3043,13 +3049,46 @@ impl EditorState {
 
         let content = self.buffer().content();
         if std::fs::write(&path, content.as_bytes()).is_ok() {
-            // Clear dirty flag on successful save
+            // Track whether we were in conflict mode before clearing it
+            let was_in_conflict_mode = self.editor.active_workspace()
+                .and_then(|ws| ws.active_tab())
+                .map(|t| t.conflict_mode)
+                .unwrap_or(false);
+
+            // Clear dirty flag and conflict mode on successful save
             if let Some(ws) = self.editor.active_workspace_mut() {
                 if let Some(tab) = ws.active_tab_mut() {
                     tab.dirty = false;
                     // Chunk: docs/chunks/base_snapshot_reload - Populate base on save
                     // Update base content snapshot to match saved content
                     tab.base_content = Some(content.clone());
+                    // Chunk: docs/chunks/conflict_mode_lifecycle - Clear conflict mode
+                    tab.conflict_mode = false;
+                }
+            }
+
+            // Chunk: docs/chunks/conflict_mode_lifecycle - Re-check disk after conflict resolution
+            // If we were in conflict mode, check if the disk has changed since our save.
+            // This catches the case where another process modified the file while we
+            // were resolving conflicts. If the disk differs, trigger a new merge cycle.
+            if was_in_conflict_mode {
+                // Read disk content to compare with what we saved
+                if let Ok(disk_bytes) = std::fs::read(&path) {
+                    let disk_content = String::from_utf8_lossy(&disk_bytes).to_string();
+                    // If disk differs from what we just wrote, an external change arrived
+                    // during conflict resolution. Need to merge this new change.
+                    if disk_content != content {
+                        // Re-read to trigger merge - the buffer is now clean (dirty=false),
+                        // but disk differs, so we need to merge the new external changes.
+                        // Mark the buffer dirty first to allow merge to proceed.
+                        if let Some(ws) = self.editor.active_workspace_mut() {
+                            if let Some(tab) = ws.active_tab_mut() {
+                                tab.dirty = true;
+                            }
+                        }
+                        // Trigger merge for the new external changes
+                        let _ = self.merge_file_tab(&path);
+                    }
                 }
             }
         }
@@ -3081,6 +3120,27 @@ impl EditorState {
             }
         }
         // Silently ignore write errors (out of scope for this chunk)
+    }
+
+    // Chunk: docs/chunks/conflict_mode_lifecycle - Check if tab is in conflict mode
+    /// Checks whether a tab at the given path is in conflict mode.
+    ///
+    /// Returns `true` if a tab exists for this path and has `conflict_mode == true`.
+    /// Returns `false` if no matching tab exists or if the tab is not in conflict mode.
+    ///
+    /// This is used by `handle_file_changed` to skip processing FileChanged events
+    /// for tabs that are actively resolving merge conflicts.
+    pub fn is_tab_in_conflict_mode(&self, path: &Path) -> bool {
+        for ws in &self.editor.workspaces {
+            if let Some(tab) = ws.pane_root.all_panes()
+                .iter()
+                .flat_map(|p| p.tabs.iter())
+                .find(|t| t.associated_file.as_ref() == Some(&path.to_path_buf()))
+            {
+                return tab.conflict_mode;
+            }
+        }
+        false
     }
 
     /// Reload a file tab's buffer from disk.
@@ -3242,6 +3302,12 @@ impl EditorState {
         tab.base_content = Some(theirs_content);
 
         // Dirty flag remains true - user still has unsaved merged changes
+
+        // Chunk: docs/chunks/conflict_mode_lifecycle - Set conflict_mode when merge produces conflicts
+        // Set conflict_mode if the merge produced conflict markers
+        if !merge_result.is_clean() {
+            tab.conflict_mode = true;
+        }
 
         // Re-apply syntax highlighting
         let theme = SyntaxTheme::catppuccin_mocha();

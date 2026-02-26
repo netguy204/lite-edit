@@ -1,18 +1,25 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/editor/src/workspace.rs
+  - crates/editor/src/tab_bar.rs
+  - crates/editor/src/editor_state.rs
+  - crates/editor/src/drain_loop.rs
 code_references: []
 narrative: null
 investigation: concurrent_edit_sync
 subsystems: []
 friction_entries: []
 bug_type: null
-depends_on: ["three_way_merge"]
-created_after: ["emacs_keybindings", "terminal_close_guard", "welcome_file_backed"]
+depends_on:
+- three_way_merge
+created_after:
+- emacs_keybindings
+- terminal_close_guard
+- welcome_file_backed
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

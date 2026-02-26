@@ -211,6 +211,7 @@ impl EventDrainLoop {
     // Chunk: docs/chunks/file_change_events - File change event handler
     // Chunk: docs/chunks/base_snapshot_reload - Reload clean buffers on external modification
     // Chunk: docs/chunks/three_way_merge - Merge dirty buffers on external modification
+    // Chunk: docs/chunks/conflict_mode_lifecycle - Suppress FileChanged when in conflict mode
     /// Handles external file modification events.
     ///
     /// This method is called when the filesystem watcher detects that a file
@@ -221,10 +222,21 @@ impl EventDrainLoop {
     /// the user's local edits with the external changes.
     ///
     /// The self-write suppression check prevents reacting to our own saves.
+    /// Tabs in conflict mode are skipped - they suppress auto-merge until
+    /// the user saves to signal conflict resolution completion.
     fn handle_file_changed(&mut self, path: std::path::PathBuf) {
         // Check if this is a self-triggered event (our own save)
         if self.state.is_file_change_suppressed(&path) {
             // Ignore - this was our own write
+            return;
+        }
+
+        // Chunk: docs/chunks/conflict_mode_lifecycle - Ignore events for tabs in conflict mode
+        // When a tab is in conflict mode (has unresolved merge conflicts), we suppress
+        // further auto-merge. The user must save (Cmd+S) to signal they've resolved
+        // the conflicts, which clears conflict mode and allows auto-merge to resume.
+        if self.state.is_tab_in_conflict_mode(&path) {
+            // Ignore - tab is resolving conflicts, don't auto-merge
             return;
         }
 
@@ -248,10 +260,9 @@ impl EventDrainLoop {
         // - Updates buffer with merged content (including any conflict markers)
         // - Updates base_content to new disk content
         // - Re-applies syntax highlighting
+        // - Sets conflict_mode = true if merge produced conflicts
         // - Returns Some(MergeResult) if merge was performed
         let _merge_result = self.state.merge_file_tab(&path);
-        // Note: merge_result contains Clean or Conflict status.
-        // The conflict_mode_lifecycle chunk will add handling for conflicts.
     }
 
     // Chunk: docs/chunks/deletion_rename_handling - File deleted event handler
