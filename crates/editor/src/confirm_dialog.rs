@@ -68,6 +68,14 @@ pub enum ConfirmDialogContext {
         /// Number of dirty tabs (for display in prompt).
         dirty_count: usize,
     },
+    /// Closing a terminal tab with a running process.
+    // Chunk: docs/chunks/terminal_close_guard - Terminal process guard context
+    CloseActiveTerminal {
+        /// The pane containing the terminal tab.
+        pane_id: PaneId,
+        /// The index of the tab within the pane.
+        tab_idx: usize,
+    },
 }
 
 /// Which button is currently selected in the confirm dialog.
@@ -375,6 +383,48 @@ mod tests {
             (
                 ConfirmDialogContext::CloseDirtyTab { pane_id: a, tab_idx: b },
                 ConfirmDialogContext::CloseDirtyTab { pane_id: c, tab_idx: d },
+            ) => {
+                assert_eq!(a, c);
+                assert_eq!(b, d);
+            }
+            _ => panic!("Clone should produce same variant"),
+        }
+    }
+
+    // =========================================================================
+    // CloseActiveTerminal context tests
+    // Chunk: docs/chunks/terminal_close_guard - Tests for CloseActiveTerminal variant
+    // =========================================================================
+
+    #[test]
+    fn test_context_close_active_terminal_stores_pane_and_index() {
+        let ctx = ConfirmDialogContext::CloseActiveTerminal {
+            pane_id: 99,
+            tab_idx: 7,
+        };
+
+        // Verify we can pattern match and extract the values
+        match ctx {
+            ConfirmDialogContext::CloseActiveTerminal { pane_id, tab_idx } => {
+                assert_eq!(pane_id, 99);
+                assert_eq!(tab_idx, 7);
+            }
+            _ => panic!("Expected CloseActiveTerminal variant"),
+        }
+    }
+
+    #[test]
+    fn test_context_close_active_terminal_is_clone() {
+        let ctx = ConfirmDialogContext::CloseActiveTerminal {
+            pane_id: 5,
+            tab_idx: 2,
+        };
+        let cloned = ctx.clone();
+
+        match (ctx, cloned) {
+            (
+                ConfirmDialogContext::CloseActiveTerminal { pane_id: a, tab_idx: b },
+                ConfirmDialogContext::CloseActiveTerminal { pane_id: c, tab_idx: d },
             ) => {
                 assert_eq!(a, c);
                 assert_eq!(b, d);

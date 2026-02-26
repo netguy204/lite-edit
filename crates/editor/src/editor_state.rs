@@ -1328,6 +1328,7 @@ impl EditorState {
     /// Dispatches to the appropriate handler based on the `confirm_context`:
     /// - `CloseDirtyTab`: Force-close the tab without saving
     /// - `QuitWithDirtyTabs`: Set the quit flag
+    /// - `CloseActiveTerminal`: Kill the process and close the terminal tab
     // Chunk: docs/chunks/generic_yes_no_modal - Context-based outcome routing
     fn handle_confirm_dialog_confirmed(&mut self) {
         if let Some(ctx) = self.confirm_context.take() {
@@ -1338,6 +1339,10 @@ impl EditorState {
                 ConfirmDialogContext::QuitWithDirtyTabs { .. } => {
                     // Set the quit flag - the main loop will handle termination
                     self.should_quit = true;
+                }
+                // Chunk: docs/chunks/terminal_close_guard - Kill process and close terminal
+                ConfirmDialogContext::CloseActiveTerminal { pane_id, tab_idx } => {
+                    self.kill_terminal_and_close_tab(pane_id, tab_idx);
                 }
             }
         }
@@ -1363,6 +1368,70 @@ impl EditorState {
         self.confirm_context = Some(ConfirmDialogContext::CloseDirtyTab { pane_id, tab_idx });
         self.focus = EditorFocus::ConfirmDialog;
         self.dirty_region.merge(DirtyRegion::FullViewport);
+    }
+
+    /// Shows a confirmation dialog for closing a terminal with an active process.
+    ///
+    /// Uses terminal-specific wording ("Kill running process?") and the
+    /// `CloseActiveTerminal` context variant.
+    // Chunk: docs/chunks/terminal_close_guard - Terminal close confirmation
+    fn show_terminal_close_confirm(&mut self, pane_id: PaneId, tab_idx: usize) {
+        self.confirm_dialog = Some(ConfirmDialog::with_labels(
+            "Kill running process?",
+            "Cancel",
+            "Kill",
+        ));
+        self.confirm_context = Some(ConfirmDialogContext::CloseActiveTerminal { pane_id, tab_idx });
+        self.focus = EditorFocus::ConfirmDialog;
+        self.dirty_region.merge(DirtyRegion::FullViewport);
+    }
+
+    /// Checks if the tab at `index` in `pane_id` is a terminal with an active process.
+    ///
+    /// Returns `true` if the tab is a terminal and `try_wait()` returns `None` (process running).
+    /// Returns `false` for file tabs, exited terminals, or tabs without a PTY.
+    ///
+    /// Note: This requires mutable access because `try_wait()` may reap a zombie process
+    /// (standard POSIX behavior).
+    // Chunk: docs/chunks/terminal_close_guard - Process liveness detection
+    fn is_terminal_with_active_process(&mut self, pane_id: PaneId, index: usize) -> bool {
+        use crate::workspace::TabKind;
+
+        if let Some(workspace) = self.editor.active_workspace_mut() {
+            if let Some(pane) = workspace.pane_root.get_pane_mut(pane_id) {
+                if let Some(tab) = pane.tabs.get_mut(index) {
+                    // Only check terminal tabs
+                    if tab.kind != TabKind::Terminal {
+                        return false;
+                    }
+                    // Check if process is still running
+                    if let Some(term) = tab.as_terminal_buffer_mut() {
+                        // try_wait returns None if process is still running
+                        return term.try_wait().is_none();
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Kills the terminal process and closes the tab.
+    ///
+    /// This is called after the user confirms closing a terminal with an active process.
+    // Chunk: docs/chunks/terminal_close_guard - Terminal process termination
+    fn kill_terminal_and_close_tab(&mut self, pane_id: PaneId, tab_idx: usize) {
+        // Kill the process first
+        if let Some(workspace) = self.editor.active_workspace_mut() {
+            if let Some(pane) = workspace.pane_root.get_pane_mut(pane_id) {
+                if let Some(tab) = pane.tabs.get_mut(tab_idx) {
+                    if let Some(term) = tab.as_terminal_buffer_mut() {
+                        let _ = term.kill(); // Ignore errors - we're closing anyway
+                    }
+                }
+            }
+        }
+        // Then close the tab using existing force_close logic
+        self.force_close_tab(pane_id, tab_idx);
     }
 
     /// Closes a tab without checking the dirty flag.
@@ -2986,6 +3055,29 @@ impl EditorState {
         if let Some(pane_id) = dirty_pane_id {
             self.show_confirm_dialog(pane_id, index);
             return;
+        }
+
+        // Chunk: docs/chunks/terminal_close_guard - Check terminal process liveness
+        // Check if this is a terminal with an active process
+        let active_terminal_pane_id = self.editor
+            .active_workspace()
+            .and_then(|ws| ws.active_pane())
+            .and_then(|pane| {
+                use crate::workspace::TabKind;
+                pane.tabs.get(index).and_then(|tab| {
+                    if tab.kind == TabKind::Terminal {
+                        Some(pane.id)
+                    } else {
+                        None
+                    }
+                })
+            });
+
+        if let Some(pane_id) = active_terminal_pane_id {
+            if self.is_terminal_with_active_process(pane_id, index) {
+                self.show_terminal_close_confirm(pane_id, index);
+                return;
+            }
         }
 
         if let Some(workspace) = self.editor.active_workspace_mut() {
