@@ -295,6 +295,7 @@ define_class!(
         ///    The text input system then calls NSTextInputClient protocol methods
         ///    (`insertText:`, `setMarkedText:`, etc.) which we implement below.
         // Chunk: docs/chunks/emacs_line_nav - Route Ctrl-modified keys through bypass path
+        // Chunk: docs/chunks/terminal_word_delete - Route Option-modified keys through bypass path
         #[unsafe(method(keyDown:))]
         fn __key_down(&self, event: &NSEvent) {
             let flags = event.modifierFlags();
@@ -303,6 +304,7 @@ define_class!(
             // These include:
             // - Keys with Command modifier (shortcuts like Cmd+S, Cmd+Q)
             // - Keys with Control modifier (Emacs bindings like Ctrl+A, Ctrl+E)
+            // - Keys with Option modifier (word operations like Alt+Backspace, Alt+D)
             // - Escape key (cancel operations, exit modes)
             // - Function keys (F1-F12)
             // - Navigation keys without modifiers that we handle specially
@@ -315,14 +317,16 @@ define_class!(
             let is_escape = key_code == 0x35;
             let has_command = flags.contains(NSEventModifierFlags::Command);
             let has_control = flags.contains(NSEventModifierFlags::Control);
+            let has_option = flags.contains(NSEventModifierFlags::Option);
 
-            // Bypass the text input system for command shortcuts, control shortcuts, and function keys.
+            // Bypass the text input system for command shortcuts, control shortcuts,
+            // option shortcuts, and function keys.
             // Control-modified keys (Emacs bindings) must bypass interpretKeyEvents because Cocoa
             // translates them to Cocoa selectors that may not match our expected commands. For example,
             // Ctrl+A becomes moveToBeginningOfParagraph: instead of moveToBeginningOfLine:.
             // By routing Ctrl+key through convert_key_event() directly, we preserve the full key+modifiers
             // and let resolve_command() handle the mapping to editor commands.
-            if has_command || has_control || is_escape || is_function_key {
+            if has_command || has_control || has_option || is_escape || is_function_key {
                 if let Some(key_event) = self.convert_key_event(event) {
                     let sender = self.ivars().event_sender.borrow();
                     if let Some(sender) = sender.as_ref() {
