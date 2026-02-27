@@ -8,153 +8,216 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+Alt+Backspace and Alt+D do not work in the editor or terminal because macOS's
+text input system intercepts Option-modified keys before they reach our key
+handler. When Option+D is pressed, `interpretKeyEvents:` invokes macOS character
+composition which produces `∂` (U+00F0), and that composed character is sent to
+`insertText:` instead of the key event reaching `convert_key_event()`.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Root cause analysis:**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+The `__key_down` method in `metal_view.rs` decides which keys bypass the macOS
+text input system (`interpretKeyEvents:`) and which flow through it:
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/terminal_word_delete/GOAL.md)
-with references to the files that you expect to touch.
--->
+```rust
+// Current bypass condition (line 325):
+if has_command || has_control || is_escape || is_function_key {
+    // ... direct key handling via convert_key_event()
+}
+```
 
-## Subsystem Considerations
+- **Cmd-modified keys**: Bypassed → work correctly
+- **Ctrl-modified keys**: Bypassed (added by `emacs_line_nav` chunk) → work correctly
+- **Option-modified keys**: NOT bypassed → flow through `interpretKeyEvents:`
+  → macOS composes Unicode characters like `∂` (Opt+D), `∫` (Opt+B), etc.
+  → composed character sent to `insertText:` as literal text
+  → `convert_key_event()` never sees the key, so Alt+D/Alt+Backspace don't work
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+**The fix:**
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
+Add Option (NSEventModifierFlags::Option) to the bypass condition, alongside
+Command and Control. This routes Option-modified keys directly through
+`convert_key_event()` where:
 
-If no subsystems are relevant, delete this section.
+1. `charactersIgnoringModifiers()` is already used when Option is held (line 1195)
+2. The Option modifier is captured correctly (line 1100)
+3. The KeyEvent reaches `InputEncoder` for terminals or `resolve_command()` for buffers
 
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
+The downstream handling is already correct:
+- `InputEncoder::encode_special_key()` handles Alt+Backspace → `\x1b\x7f` ✓
+- `resolve_command()` handles Alt+Backspace → `DeleteBackwardWord` ✓
+- `resolve_command()` handles Alt+D → `DeleteForwardWord` ✓
 
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
+**Why this is safe for IME:**
 
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
+IME composition (CJK input methods, dead keys) uses the base key without
+modifiers or with Shift only. Option-modified keys are NOT used by IME:
+- Japanese Hiragana: Types base characters, spacebar for conversion
+- Chinese Pinyin: Types base letters, numbers for tone selection
+- Dead keys: Option+E, Option+U, etc. produce accent marks for composition
 
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
+However, dead key composition WILL break with this change. For example, typing
+Option+E followed by 'a' currently produces 'á'. With the bypass, Option+E will
+be sent as a key event instead of starting composition.
 
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+**Tradeoff decision**: The goal prioritizes making Alt+Backspace and Alt+D work
+in both editor and terminal contexts over preserving dead key composition. Dead
+key users are a small minority compared to users expecting standard Alt+Backspace
+word deletion. A future chunk could add a setting to toggle this behavior.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Update `__key_down` to bypass interpretKeyEvents for Option-modified keys
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Modify the bypass condition in `__key_down` to include `has_option` alongside
+`has_command` and `has_control`. This routes Option+key combinations directly
+through `convert_key_event()` → `send_key()`.
 
-Example:
+Change the bypass condition from:
+```rust
+let has_command = flags.contains(NSEventModifierFlags::Command);
+let has_control = flags.contains(NSEventModifierFlags::Control);
 
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+if has_command || has_control || is_escape || is_function_key {
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+To:
+```rust
+let has_command = flags.contains(NSEventModifierFlags::Command);
+let has_control = flags.contains(NSEventModifierFlags::Control);
+let has_option = flags.contains(NSEventModifierFlags::Option);
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+if has_command || has_control || has_option || is_escape || is_function_key {
+```
 
-## Dependencies
+Also update the comment block to mention Option-modified keys:
+```rust
+// Check if this is a "bypass" key that should skip the text input system.
+// These include:
+// - Keys with Command modifier (shortcuts like Cmd+S, Cmd+Q)
+// - Keys with Control modifier (Emacs bindings like Ctrl+A, Ctrl+E)
+// - Keys with Option modifier (word operations like Alt+Backspace, Alt+D)
+// - Escape key (cancel operations, exit modes)
+// - Function keys (F1-F12)
+```
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+And update the comment in the bypass block:
+```rust
+// Bypass the text input system for command shortcuts, control shortcuts,
+// option shortcuts, and function keys.
+```
 
-If there are no dependencies, delete this section.
--->
+Location: `crates/editor/src/metal_view.rs#MetalView::__key_down` (lines 298-346)
+
+### Step 2: Add backreference comment
+
+Add a chunk backreference comment at the fix site, documenting that this
+modification was made for the Option modifier bypass:
+
+```rust
+// Chunk: docs/chunks/terminal_word_delete - Route Option-modified keys through bypass path
+```
+
+This should be added alongside the existing backreference:
+```rust
+// Chunk: docs/chunks/emacs_line_nav - Route Ctrl-modified keys through bypass path
+```
+
+Location: `crates/editor/src/metal_view.rs#MetalView::__key_down`
+
+### Step 3: Verify resolve_command handles Alt+D and Alt+Backspace
+
+Confirm that `resolve_command()` in `buffer_target.rs` has the correct mappings:
+
+- Alt+Backspace → `DeleteBackwardWord` (from `delete_backward_word` chunk)
+- Alt+D → `DeleteForwardWord` (from `word_forward_delete` chunk)
+
+These should already exist. No changes expected.
+
+Location: `crates/editor/src/buffer_target.rs#resolve_command`
+
+### Step 4: Verify InputEncoder handles Alt+Backspace and Alt+D
+
+Confirm that `InputEncoder` in `crates/terminal/src/input_encoder.rs` correctly
+encodes:
+
+- Alt+Backspace → `\x1b\x7f` (ESC + DEL)
+- Alt+D → `\x1b\x64` (ESC + 'd')
+
+These should already exist from `terminal_alt_backspace` and related chunks.
+No changes expected.
+
+Location: `crates/terminal/src/input_encoder.rs#InputEncoder::encode_special_key`
+
+### Step 5: Manual testing - Terminal path
+
+Build and run the editor. Open a terminal tab and test:
+
+**Alt+Backspace in terminal:**
+1. Start a shell (bash or zsh)
+2. Type: `echo hello world`
+3. Press Alt+Backspace
+4. Expected: `world` is deleted, leaving `echo hello `
+
+**Alt+D in terminal:**
+1. Type: `echo hello world`
+2. Move cursor to before `hello` (Ctrl+A, then right arrow 5 times)
+3. Press Alt+D
+4. Expected: `hello` is deleted, leaving `echo  world`
+
+### Step 6: Manual testing - Editor buffer path
+
+Open a file buffer and test:
+
+**Alt+Backspace in buffer:**
+1. Type: `hello world`
+2. Place cursor at end of line
+3. Press Alt+Backspace
+4. Expected: `world` is deleted, leaving `hello `
+
+**Alt+D in buffer:**
+1. Type: `hello world`
+2. Place cursor at start of `world`
+3. Press Alt+D
+4. Expected: `world` is deleted, leaving `hello `
+
+### Step 7: Non-regression testing
+
+Verify that these behaviors still work:
+
+- Regular typing (no modifiers) inserts characters
+- Cmd+key shortcuts (Cmd+S, Cmd+Q, Cmd+P) still work
+- Ctrl+key emacs bindings (Ctrl+A, Ctrl+E, Ctrl+K) still work
+- Alt+Arrow navigation (Alt+Left, Alt+Right) still work for word movement
+- Function keys (F1-F12) still work
+
+### Step 8: Update code_paths in GOAL.md
+
+Update the chunk's GOAL.md frontmatter with the file touched:
+
+```yaml
+code_paths:
+  - crates/editor/src/metal_view.rs
+```
+
+Location: `docs/chunks/terminal_word_delete/GOAL.md`
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Dead key composition will break**: Users who rely on Option+E, Option+U,
+  etc. to type accented characters (á, ü, etc.) will no longer be able to do
+  so. This is an intentional tradeoff - the goal explicitly states this is
+  acceptable in favor of making Alt+Backspace/Alt+D work.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Some Option+key Unicode shortcuts will break**: macOS users who type special
+  characters via Option+key (e.g., Option+G → ©, Option+2 → ™) will no longer
+  get those characters. This is the same tradeoff as dead keys.
+
+- **Terminal applications expecting literal Option+key characters**: Some
+  terminal applications might expect to receive the composed Unicode character
+  from Option+key. With this change, they'll receive ESC+key escape sequences
+  instead. This matches standard terminal emulator behavior (iTerm2, Terminal.app
+  with "Use Option as Meta key" enabled).
 
 ## Deviations
 
@@ -169,9 +232,4 @@ When reality diverges from the plan, document it here:
 Minor deviations (renamed a function, used a different helper) don't need
 documentation. Significant deviations (changed the approach, skipped a step,
 added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->
