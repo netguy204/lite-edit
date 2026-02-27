@@ -143,6 +143,12 @@ pub struct TerminalBuffer {
     /// Receiver for terminal events from alacritty_terminal.
     /// Used to receive Event::PtyWrite (DSR responses, etc.) for write-back to PTY.
     event_rx: Receiver<Event>,
+    // Chunk: docs/chunks/terminal_fullscreen_paint - Alt screen mode transition tracking
+    /// Previous alternate screen mode state (for detecting transitions).
+    /// When the terminal transitions between primary and alternate screen modes,
+    /// we force a full viewport repaint to ensure fullscreen apps like Vim paint
+    /// their initial content immediately.
+    was_alt_screen: bool,
 }
 
 impl TerminalBuffer {
@@ -205,6 +211,7 @@ impl TerminalBuffer {
             selection_anchor: None,
             selection_head: None,
             event_rx,
+            was_alt_screen: false, // Terminal starts in primary screen mode
         }
     }
 
@@ -372,6 +379,19 @@ impl TerminalBuffer {
 
             // Update dirty tracking based on terminal damage
             self.update_damage();
+
+            // Chunk: docs/chunks/terminal_fullscreen_paint - Detect alt screen mode transitions
+            // When the terminal transitions between primary and alternate screen modes,
+            // force a full viewport repaint. This ensures fullscreen apps like Vim paint
+            // their initial content immediately, rather than waiting for further PTY output.
+            // Without this, static apps that draw once and then wait for input would
+            // appear blank until the user triggers a repaint (e.g., by resizing).
+            let is_alt = self.is_alt_screen();
+            if is_alt != self.was_alt_screen {
+                // Mode transition detected - force full viewport dirty
+                self.dirty = DirtyLines::FromLineToEnd(0);
+                self.was_alt_screen = is_alt;
+            }
 
             // Check if we need to flush lines to cold storage
             self.check_scrollback_overflow();
@@ -960,6 +980,8 @@ impl TerminalBuffer {
     #[cfg(test)]
     pub fn feed_bytes(&mut self, data: &[u8]) {
         self.processor.advance(&mut self.term, data);
+        // Track mode transitions for consistency with poll_events()
+        self.was_alt_screen = self.is_alt_screen();
         self.dirty = DirtyLines::FromLineToEnd(0);
     }
 }
@@ -1609,5 +1631,119 @@ mod tests {
             }
         }
         assert!(found, "INVERSE should be preserved when cursor is hidden");
+    }
+
+    // =========================================================================
+    // Alt Screen Mode Transition Tests
+    // Chunk: docs/chunks/terminal_fullscreen_paint - Mode transition dirty tracking
+    // =========================================================================
+
+    #[test]
+    fn test_alt_screen_entry_forces_full_dirty() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+        // Clear initial dirty state
+        let _ = terminal.take_dirty();
+
+        // Enter alternate screen mode (ESC[?1049h)
+        terminal.feed_bytes(b"\x1b[?1049h");
+
+        // Verify we're in alt screen mode
+        assert!(terminal.is_alt_screen(), "Should be in alternate screen mode");
+
+        // Dirty should indicate full viewport (from line 0)
+        let dirty = terminal.take_dirty();
+        assert!(
+            matches!(dirty, DirtyLines::FromLineToEnd(0)),
+            "Expected DirtyLines::FromLineToEnd(0), got {:?}",
+            dirty
+        );
+    }
+
+    #[test]
+    fn test_alt_screen_exit_forces_full_dirty() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+        // Enter alternate screen mode first
+        terminal.feed_bytes(b"\x1b[?1049h");
+        let _ = terminal.take_dirty();
+
+        // Exit alternate screen mode (ESC[?1049l)
+        terminal.feed_bytes(b"\x1b[?1049l");
+
+        // Verify we're back in primary screen mode
+        assert!(!terminal.is_alt_screen(), "Should be in primary screen mode");
+
+        // Dirty should indicate full viewport (from line 0)
+        let dirty = terminal.take_dirty();
+        assert!(
+            matches!(dirty, DirtyLines::FromLineToEnd(0)),
+            "Expected DirtyLines::FromLineToEnd(0), got {:?}",
+            dirty
+        );
+    }
+
+    #[test]
+    fn test_no_mode_transition_normal_dirty() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+        // Clear initial dirty state
+        let _ = terminal.take_dirty();
+
+        // Just type some text (no mode transition)
+        terminal.feed_bytes(b"Hello, World!");
+
+        // Dirty should still be set (but we're not changing modes)
+        let dirty = terminal.take_dirty();
+        assert!(
+            matches!(dirty, DirtyLines::FromLineToEnd(0)),
+            "Expected dirty state after typing, got {:?}",
+            dirty
+        );
+
+        // Verify we're still in primary screen mode
+        assert!(!terminal.is_alt_screen(), "Should still be in primary screen mode");
+    }
+
+    #[test]
+    fn test_alt_screen_mode_tracking() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+        // Start in primary screen
+        assert!(!terminal.is_alt_screen());
+
+        // Enter alt screen
+        terminal.feed_bytes(b"\x1b[?1049h");
+        assert!(terminal.is_alt_screen());
+
+        // Exit alt screen
+        terminal.feed_bytes(b"\x1b[?1049l");
+        assert!(!terminal.is_alt_screen());
+
+        // Enter again
+        terminal.feed_bytes(b"\x1b[?1049h");
+        assert!(terminal.is_alt_screen());
+    }
+
+    #[test]
+    fn test_alt_screen_with_content_draw() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+        let _ = terminal.take_dirty();
+
+        // Simulate what Vim does: enter alt screen, clear screen, draw content
+        terminal.feed_bytes(b"\x1b[?1049h\x1b[2J\x1b[HVim Editor Content");
+
+        // Should be in alt screen
+        assert!(terminal.is_alt_screen());
+
+        // Dirty should be set from line 0
+        let dirty = terminal.take_dirty();
+        assert!(
+            matches!(dirty, DirtyLines::FromLineToEnd(0)),
+            "Expected DirtyLines::FromLineToEnd(0), got {:?}",
+            dirty
+        );
+
+        // Content should be there
+        let line = terminal.styled_line(0).unwrap();
+        let text: String = line.spans.iter().map(|s| &s.text[..]).collect();
+        assert!(text.contains("Vim Editor Content"), "Content should be present");
     }
 }
