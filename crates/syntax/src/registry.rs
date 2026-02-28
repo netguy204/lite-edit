@@ -31,6 +31,10 @@ pub struct LanguageConfig {
     /// The canonical language name (e.g., "rust", "python", "javascript").
     /// Used to skip redundant same-language injections.
     pub language_name: &'static str,
+    // Chunk: docs/chunks/treesitter_indent - Indent query for intelligent indentation
+    /// The indents query (for computing line indentation from parse tree structure).
+    /// Empty string means no indent query is configured for this language.
+    pub indents_query: &'static str,
 }
 
 impl LanguageConfig {
@@ -41,6 +45,7 @@ impl LanguageConfig {
         injections_query: &'static str,
         locals_query: &'static str,
         language_name: &'static str,
+        indents_query: &'static str,
     ) -> Self {
         Self {
             language,
@@ -48,6 +53,7 @@ impl LanguageConfig {
             injections_query,
             locals_query,
             language_name,
+            indents_query,
         }
     }
 }
@@ -79,12 +85,14 @@ impl LanguageRegistry {
 
         // Rust (uses HIGHLIGHTS_QUERY and custom locals query for go-to-def)
         // Chunk: docs/chunks/treesitter_gotodef - Use custom locals query for Rust
+        // Chunk: docs/chunks/treesitter_indent - Rust indent query
         let rust_config = LanguageConfig::new(
             tree_sitter_rust::LANGUAGE.into(),
             tree_sitter_rust::HIGHLIGHTS_QUERY,
             tree_sitter_rust::INJECTIONS_QUERY,
             queries::rust::LOCALS_QUERY,
             "rust",
+            include_str!("../queries/rust/indents.scm"),
         );
         configs.insert("rs", rust_config);
 
@@ -96,12 +104,14 @@ impl LanguageRegistry {
             format!("{}\n{}", tree_sitter_c::HIGHLIGHT_QUERY, tree_sitter_cpp::HIGHLIGHT_QUERY)
                 .into_boxed_str(),
         );
+        // Chunk: docs/chunks/treesitter_indent - C++ indent query
         let cpp_config = LanguageConfig::new(
             tree_sitter_cpp::LANGUAGE.into(),
             cpp_combined_query,
             "",
             "",
             "cpp",
+            include_str!("../queries/cpp/indents.scm"),
         );
         configs.insert("cpp", cpp_config.clone());
         configs.insert("cc", cpp_config.clone());
@@ -110,23 +120,27 @@ impl LanguageRegistry {
         configs.insert("h", cpp_config); // .h is ambiguous, default to C++
 
         // C (uses HIGHLIGHT_QUERY - no S)
+        // Chunk: docs/chunks/treesitter_indent - C indent query
         let c_config = LanguageConfig::new(
             tree_sitter_c::LANGUAGE.into(),
             tree_sitter_c::HIGHLIGHT_QUERY,
             "",
             "",
             "c",
+            include_str!("../queries/c/indents.scm"),
         );
         configs.insert("c", c_config);
 
         // Python (uses HIGHLIGHTS_QUERY and custom locals query for go-to-def)
         // Chunk: docs/chunks/treesitter_gotodef - Use custom locals query for Python
+        // Chunk: docs/chunks/treesitter_indent - Python indent query
         let python_config = LanguageConfig::new(
             tree_sitter_python::LANGUAGE.into(),
             tree_sitter_python::HIGHLIGHTS_QUERY,
             "",
             queries::python::LOCALS_QUERY,
             "python",
+            include_str!("../queries/python/indents.scm"),
         );
         configs.insert("py", python_config);
 
@@ -137,106 +151,126 @@ impl LanguageRegistry {
             format!("{}\n{}", tree_sitter_javascript::HIGHLIGHT_QUERY, tree_sitter_typescript::HIGHLIGHTS_QUERY)
                 .into_boxed_str(),
         );
+        // Chunk: docs/chunks/treesitter_indent - TypeScript indent query
         let typescript_config = LanguageConfig::new(
             tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             ts_combined_query,
             "",
             tree_sitter_typescript::LOCALS_QUERY,
             "typescript",
+            include_str!("../queries/typescript/indents.scm"),
         );
         configs.insert("ts", typescript_config);
 
         // TSX also needs the JavaScript base (it extends TypeScript which extends JavaScript)
+        // Chunk: docs/chunks/treesitter_indent - TSX shares TypeScript indent query
         let tsx_config = LanguageConfig::new(
             tree_sitter_typescript::LANGUAGE_TSX.into(),
             ts_combined_query,  // Reuse the combined query
             "",
             tree_sitter_typescript::LOCALS_QUERY,
             "tsx",
+            include_str!("../queries/typescript/indents.scm"),  // Reuse TS indent query
         );
         configs.insert("tsx", tsx_config);
 
         // JavaScript (uses HIGHLIGHT_QUERY - no S)
+        // Chunk: docs/chunks/treesitter_indent - JavaScript indent query
         let javascript_config = LanguageConfig::new(
             tree_sitter_javascript::LANGUAGE.into(),
             tree_sitter_javascript::HIGHLIGHT_QUERY,
             tree_sitter_javascript::INJECTIONS_QUERY,
             tree_sitter_javascript::LOCALS_QUERY,
             "javascript",
+            include_str!("../queries/javascript/indents.scm"),
         );
         configs.insert("js", javascript_config.clone());
         configs.insert("jsx", javascript_config.clone());
         configs.insert("mjs", javascript_config);
 
         // Go (uses HIGHLIGHTS_QUERY)
+        // Chunk: docs/chunks/treesitter_indent - Go indent query
         let go_config = LanguageConfig::new(
             tree_sitter_go::LANGUAGE.into(),
             tree_sitter_go::HIGHLIGHTS_QUERY,
             "",
             "",
             "go",
+            include_str!("../queries/go/indents.scm"),
         );
         configs.insert("go", go_config);
 
         // JSON (uses HIGHLIGHTS_QUERY)
+        // Chunk: docs/chunks/treesitter_indent - JSON indent query
         let json_config = LanguageConfig::new(
             tree_sitter_json::LANGUAGE.into(),
             tree_sitter_json::HIGHLIGHTS_QUERY,
             "",
             "",
             "json",
+            include_str!("../queries/json/indents.scm"),
         );
         configs.insert("json", json_config);
 
         // TOML (uses tree-sitter-toml-ng with LANGUAGE and HIGHLIGHTS_QUERY)
+        // Chunk: docs/chunks/treesitter_indent - TOML indent query
         let toml_config = LanguageConfig::new(
             tree_sitter_toml_ng::LANGUAGE.into(),
             tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
             "",
             "",
             "toml",
+            include_str!("../queries/toml/indents.scm"),
         );
         configs.insert("toml", toml_config);
 
         // Markdown (uses HIGHLIGHT_QUERY_BLOCK for the block parser)
+        // Chunk: docs/chunks/treesitter_indent - Markdown indent query
         let md_config = LanguageConfig::new(
             tree_sitter_md::LANGUAGE.into(),
             tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
             tree_sitter_md::INJECTION_QUERY_BLOCK,
             "",
             "markdown",
+            include_str!("../queries/markdown/indents.scm"),
         );
         configs.insert("md", md_config.clone());
         configs.insert("markdown", md_config);
 
         // HTML (uses HIGHLIGHTS_QUERY)
+        // Chunk: docs/chunks/treesitter_indent - HTML indent query
         let html_config = LanguageConfig::new(
             tree_sitter_html::LANGUAGE.into(),
             tree_sitter_html::HIGHLIGHTS_QUERY,
             tree_sitter_html::INJECTIONS_QUERY,
             "",
             "html",
+            include_str!("../queries/html/indents.scm"),
         );
         configs.insert("html", html_config.clone());
         configs.insert("htm", html_config);
 
         // CSS (uses HIGHLIGHTS_QUERY)
+        // Chunk: docs/chunks/treesitter_indent - CSS indent query
         let css_config = LanguageConfig::new(
             tree_sitter_css::LANGUAGE.into(),
             tree_sitter_css::HIGHLIGHTS_QUERY,
             "",
             "",
             "css",
+            include_str!("../queries/css/indents.scm"),
         );
         configs.insert("css", css_config);
 
         // Bash (uses HIGHLIGHT_QUERY - no S)
+        // Chunk: docs/chunks/treesitter_indent - Bash indent query
         let bash_config = LanguageConfig::new(
             tree_sitter_bash::LANGUAGE.into(),
             tree_sitter_bash::HIGHLIGHT_QUERY,
             "",
             "",
             "bash",
+            include_str!("../queries/bash/indents.scm"),
         );
         configs.insert("sh", bash_config.clone());
         configs.insert("bash", bash_config.clone());
@@ -331,6 +365,7 @@ impl Clone for LanguageConfig {
             injections_query: self.injections_query,
             locals_query: self.locals_query,
             language_name: self.language_name,
+            indents_query: self.indents_query,
         }
     }
 }
