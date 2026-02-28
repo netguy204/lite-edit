@@ -1,18 +1,23 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/syntax/src/indent.rs
 code_references: []
 narrative: null
 investigation: null
 subsystems: []
 friction_entries: []
 bug_type: semantic
-depends_on: ["treesitter_indent"]
-created_after: ["terminal_unicode_env", "incremental_parse", "tab_rendering", "treesitter_indent"]
+depends_on:
+- treesitter_indent
+created_after:
+- terminal_unicode_env
+- incremental_parse
+- tab_rendering
+- treesitter_indent
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
