@@ -69,3 +69,6 @@ pub mod merge;
 
 // Chunk: docs/chunks/styled_line_cache - Styled line cache for reducing per-frame allocations
 mod styled_line_cache;
+
+// Chunk: docs/chunks/tab_rendering - Tab character rendering and tab-aware coordinate mapping
+pub mod tab_width;

@@ -1,8 +1,14 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/editor/src/tab_width.rs
+  - crates/editor/src/lib.rs
+  - crates/editor/src/glyph_buffer.rs
+  - crates/editor/src/wrap_layout.rs
+  - crates/editor/src/buffer_target.rs
+  - crates/editor/tests/tab_rendering_test.rs
 code_references: []
 narrative: null
 investigation: treesitter_editing
@@ -10,9 +16,9 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["pty_wakeup_reliability"]
+created_after:
+- pty_wakeup_reliability
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

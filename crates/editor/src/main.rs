@@ -102,6 +102,8 @@ mod viewport;
 mod welcome_screen;
 mod workspace;
 mod wrap_layout;
+// Chunk: docs/chunks/tab_rendering - Tab character rendering and tab-aware coordinate mapping
+mod tab_width;
 // Chunk: docs/chunks/workspace_session_persistence - Session persistence
 mod session;
 #[cfg(feature = "perf-instrumentation")]
