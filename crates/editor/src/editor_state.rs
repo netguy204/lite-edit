@@ -2981,13 +2981,14 @@ impl EditorState {
         }
 
         // File tab: insert text directly into buffer
+        // Chunk: docs/chunks/incremental_parse - Use tracked variant for incremental parsing
         if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
-            let dirty_lines = buffer.insert_str(&escaped_text);
-            let dirty = viewport.dirty_lines_to_region(&dirty_lines, buffer.line_count());
+            let result = buffer.insert_str_tracked(&escaped_text);
+            let dirty = viewport.dirty_lines_to_region(&result.dirty_lines, buffer.line_count());
             // Chunk: docs/chunks/invalidation_separation - Content invalidation for text insertion
             self.invalidation.merge(InvalidationKind::Content(dirty));
             // Chunk: docs/chunks/styled_line_cache - Track dirty lines for cache invalidation
-            self.dirty_lines.merge(dirty_lines);
+            self.dirty_lines.merge(result.dirty_lines);
 
             // Ensure cursor is visible after insertion
             let cursor_line = buffer.cursor_position().line;
@@ -2998,8 +2999,12 @@ impl EditorState {
             // Mark the tab as dirty (unsaved changes)
             tab.dirty = true;
 
-            // Chunk: docs/chunks/highlight_text_source - Sync highlighter after file drop insertion
-            self.sync_active_tab_highlighter();
+            // Chunk: docs/chunks/incremental_parse - Use incremental parsing when edit info available
+            if let Some(edit_info) = result.edit_info {
+                self.notify_active_tab_edit(edit_info.into());
+            } else {
+                self.sync_active_tab_highlighter();
+            }
         }
 
         // Other tab types (AgentOutput, Diff): no-op
@@ -3175,8 +3180,9 @@ impl EditorState {
 
         // Terminal tabs don't support marked text - IME sends final text directly
 
-        // Chunk: docs/chunks/highlight_text_source - Sync highlighter after setting marked text
-        self.sync_active_tab_highlighter();
+        // Chunk: docs/chunks/incremental_parse - Marked text is overlay-rendered, not committed
+        // to the buffer, so no syntax tree update is needed. The tree will be updated
+        // when the marked text is committed (via handle_insert_text) or cancelled.
     }
 
     /// Handles IME composition cancellation.
@@ -3207,8 +3213,9 @@ impl EditorState {
             self.invalidation.merge(InvalidationKind::Content(dirty));
         }
 
-        // Chunk: docs/chunks/highlight_text_source - Sync highlighter after clearing marked text
-        self.sync_active_tab_highlighter();
+        // Chunk: docs/chunks/incremental_parse - Marked text is overlay-rendered, not committed
+        // to the buffer. Cancelling marked text doesn't change buffer content, so no
+        // syntax tree update is needed.
     }
 
     // Chunk: docs/chunks/invalidation_separation - Updated to use InvalidationKind

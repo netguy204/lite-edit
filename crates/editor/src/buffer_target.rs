@@ -307,17 +307,33 @@ impl BufferFocusTarget {
                 result.dirty_lines
             }
             // Chunk: docs/chunks/delete_backward_word - Alt+Backspace word deletion
-            // TODO: Add delete_backward_word_tracked when needed
-            Command::DeleteBackwardWord => ctx.buffer.delete_backward_word(),
+            // Chunk: docs/chunks/incremental_parse - Use tracked variant for incremental parsing
+            Command::DeleteBackwardWord => {
+                let result = ctx.buffer.delete_backward_word_tracked();
+                ctx.edit_info = result.edit_info;
+                result.dirty_lines
+            }
             // Chunk: docs/chunks/word_forward_delete - Alt+D forward word deletion
-            // TODO: Add delete_forward_word_tracked when needed
-            Command::DeleteForwardWord => ctx.buffer.delete_forward_word(),
+            // Chunk: docs/chunks/incremental_parse - Use tracked variant for incremental parsing
+            Command::DeleteForwardWord => {
+                let result = ctx.buffer.delete_forward_word_tracked();
+                ctx.edit_info = result.edit_info;
+                result.dirty_lines
+            }
             // Chunk: docs/chunks/kill_line - Execute DeleteToLineEnd command
-            // TODO: Add delete_to_line_end_tracked when needed
-            Command::DeleteToLineEnd => ctx.buffer.delete_to_line_end(),
+            // Chunk: docs/chunks/incremental_parse - Use tracked variant for incremental parsing
+            Command::DeleteToLineEnd => {
+                let result = ctx.buffer.delete_to_line_end_tracked();
+                ctx.edit_info = result.edit_info;
+                result.dirty_lines
+            }
             // Chunk: docs/chunks/delete_to_line_start - Execute DeleteToLineStart command
-            // TODO: Add delete_to_line_start_tracked when needed
-            Command::DeleteToLineStart => ctx.buffer.delete_to_line_start(),
+            // Chunk: docs/chunks/incremental_parse - Use tracked variant for incremental parsing
+            Command::DeleteToLineStart => {
+                let result = ctx.buffer.delete_to_line_start_tracked();
+                ctx.edit_info = result.edit_info;
+                result.dirty_lines
+            }
             Command::MoveLeft => {
                 ctx.buffer.move_left();
                 // Cursor movement doesn't dirty buffer content, but we need to redraw
