@@ -1,49 +1,19 @@
 # Review Feedback
 
-**Iteration:** 1
+**Iteration:** 2
 **Decision:** FEEDBACK
 
 ## Summary
 
-Core symbol index infrastructure is implemented and tested (SymbolIndex struct, tags query loading, background indexer, gitignore handling), but editor integration is incomplete: symbol indexing is never initialized, goto_definition doesn't fall back to the index, no disambiguation UI exists, and incremental updates on save aren't wired up.
+All iteration 1 issues resolved; implementation functionally complete but missing the #[ignore] performance benchmark test specified in PLAN.md Step 11
 
 ## Issues to Address
 
-### Issue 1: crates/editor/src/workspace.rs:740
+### Issue 1: crates/syntax/src/symbol_index.rs (tests section)
 
-**Concern:** symbol_index is initialized to None but start_symbol_indexing() is never called. The symbol index remains unpopulated.
+**Concern:** PLAN.md Step 11 specifies #[test] #[ignore] benchmark to validate <5s indexing for ~1000 files. This test does not exist.
 
-**Suggestion:** In EditorState initialization or workspace creation path, call workspace.start_symbol_indexing(Arc::clone(&language_registry)) when a workspace has a root path.
-
-### Issue 2: crates/editor/src/editor_state.rs:1411-1414
-
-**Concern:** goto_definition shows 'Definition not found in this file' when LocalsResolver returns None, instead of consulting the symbol index for cross-file matches.
-
-**Suggestion:** Before showing 'not found', check workspace.symbol_index.lookup(symbol_name). If matches exist, proceed to disambiguation or single-jump. If is_indexing(), show 'Indexing workspace...' message.
-
-### Issue 3: crates/editor/src/definition_selector.rs (missing)
-
-**Concern:** PLAN.md Step 9 describes implementing a DefinitionSelector using existing selector infrastructure. This file does not exist. Multiple-match scenarios cannot be handled.
-
-**Suggestion:** Implement DefinitionSelector following the FilePickerSelector pattern, displaying {file_path}:{line} for each match. Wire it into goto_definition() when lookup() returns multiple results.
-
-### Issue 4: crates/editor/src/editor_state.rs:4034-4096 (save_file())
-
-**Concern:** save_file() does not call workspace.update_symbol_index_for_file(). Saved files are not re-indexed, causing stale index entries.
-
-**Suggestion:** After successful file write, add: workspace.update_symbol_index_for_file(&path, &self.language_registry);
-
-### Issue 5: crates/editor/src/editor_state.rs (goto_definition)
-
-**Concern:** PLAN.md Step 10 specifies showing 'Indexing workspace...' when is_indexing() is true. This graceful degradation is not implemented.
-
-**Suggestion:** Check symbol_index.is_indexing() before returning 'Definition not found' and show appropriate status message.
-
-### Issue 6: crates/syntax/src/symbol_index.rs (tests section)
-
-**Concern:** PLAN.md Step 11 specifies an #[ignore] benchmark test to validate <5s indexing time for ~1000 files. This test does not exist.
-
-**Suggestion:** Add a #[test] #[ignore] test that creates a tempdir with ~1000 synthetic source files, runs start_indexing(), and asserts completion within 5 seconds.
+**Suggestion:** Add #[test] #[ignore] test that creates tempdir with ~1000 synthetic files, measures indexing time, asserts <5s
 
 
 ---

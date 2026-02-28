@@ -686,4 +686,172 @@ class Greeter:
         let result = index_file(&index, &file_path, &registry);
         assert!(matches!(result, Err(IndexError::NoTagsQuery)));
     }
+
+    #[test]
+    fn test_start_indexing_with_tempdir() {
+        use tempfile::TempDir;
+        use std::fs::{self, File};
+        use std::io::Write;
+
+        let temp = TempDir::new().unwrap();
+
+        // Create a few source files
+        let src_dir = temp.path().join("src");
+        fs::create_dir(&src_dir).unwrap();
+
+        let mut file1 = File::create(src_dir.join("lib.rs")).unwrap();
+        writeln!(file1, "pub fn library_function() {{}}\npub struct LibStruct {{}}").unwrap();
+
+        let mut file2 = File::create(src_dir.join("main.rs")).unwrap();
+        writeln!(file2, "fn main() {{}}\nfn helper() {{}}").unwrap();
+
+        let registry = Arc::new(LanguageRegistry::new());
+        let index = SymbolIndex::start_indexing(temp.path().to_path_buf(), registry);
+
+        // Wait for indexing to complete
+        while index.is_indexing() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Verify symbols were indexed
+        let lib_results = index.lookup("library_function");
+        assert!(!lib_results.is_empty(), "Expected to find library_function");
+
+        let main_results = index.lookup("main");
+        assert!(!main_results.is_empty(), "Expected to find main");
+    }
+
+    #[test]
+    fn test_update_file_incremental() {
+        use tempfile::TempDir;
+        use std::fs::File;
+        use std::io::Write;
+
+        let temp = TempDir::new().unwrap();
+        let file_path = temp.path().join("test.rs");
+
+        // Create initial file
+        {
+            let mut file = File::create(&file_path).unwrap();
+            writeln!(file, "fn original_function() {{}}").unwrap();
+        }
+
+        let registry = LanguageRegistry::new();
+        let index = SymbolIndex::new();
+
+        // Manually index the file first
+        let internal_index = Arc::new(RwLock::new(HashMap::new()));
+        index_file(&internal_index, &file_path, &registry).unwrap();
+
+        // Transfer to SymbolIndex via insert
+        let guard = internal_index.read().unwrap();
+        for (name, locs) in guard.iter() {
+            for loc in locs {
+                index.insert(name.clone(), loc.clone());
+            }
+        }
+        drop(guard);
+
+        // Verify original function is indexed
+        let results = index.lookup("original_function");
+        assert_eq!(results.len(), 1, "Expected to find original_function");
+
+        // Modify the file
+        {
+            let mut file = File::create(&file_path).unwrap();
+            writeln!(file, "fn updated_function() {{}}").unwrap();
+        }
+
+        // Update the index
+        index.update_file(&file_path, &registry);
+
+        // Old function should be gone
+        let old_results = index.lookup("original_function");
+        assert!(old_results.is_empty(), "original_function should be removed");
+
+        // New function should be present
+        let new_results = index.lookup("updated_function");
+        assert_eq!(new_results.len(), 1, "Expected to find updated_function");
+    }
+
+    /// Performance test for workspace indexing.
+    ///
+    /// Creates ~1000 source files and verifies indexing completes in under 5 seconds.
+    /// Run with `cargo test --release -- --ignored` to execute.
+    #[test]
+    #[ignore]
+    fn test_indexing_performance_1000_files() {
+        use tempfile::TempDir;
+        use std::fs::{self, File};
+        use std::io::Write;
+        use std::time::Instant;
+
+        let temp = TempDir::new().unwrap();
+        let src_dir = temp.path().join("src");
+        fs::create_dir(&src_dir).unwrap();
+
+        // Create 1000 Rust source files, each with a few function/struct definitions
+        let file_count = 1000;
+        for i in 0..file_count {
+            let subdir = src_dir.join(format!("module_{:03}", i / 50));
+            if !subdir.exists() {
+                fs::create_dir(&subdir).unwrap();
+            }
+
+            let file_path = subdir.join(format!("file_{:04}.rs", i));
+            let mut file = File::create(&file_path).unwrap();
+            writeln!(file, r#"
+pub fn function_{i}() {{
+    // Implementation
+}}
+
+pub struct Struct{i} {{
+    field: i32,
+}}
+
+impl Struct{i} {{
+    pub fn new() -> Self {{
+        Self {{ field: {i} }}
+    }}
+
+    pub fn method_{i}(&self) -> i32 {{
+        self.field
+    }}
+}}
+
+pub const CONST_{i}: i32 = {i};
+"#, i = i).unwrap();
+        }
+
+        // Time the indexing operation
+        let start = Instant::now();
+
+        let registry = Arc::new(LanguageRegistry::new());
+        let index = SymbolIndex::start_indexing(temp.path().to_path_buf(), registry);
+
+        // Wait for indexing to complete
+        while index.is_indexing() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let elapsed = start.elapsed();
+
+        // Verify indexing completed
+        assert!(!index.is_indexing(), "Indexing should be complete");
+
+        // Verify we found symbols
+        let symbol_count = index.symbol_count();
+        eprintln!("Indexed {} files, found {} unique symbols in {:?}", file_count, symbol_count, elapsed);
+
+        // We expect at least 1 function per file
+        assert!(symbol_count >= file_count, "Expected at least {} symbols, got {}", file_count, symbol_count);
+
+        // Performance assertion: should complete in under 5 seconds
+        assert!(
+            elapsed.as_secs() < 5,
+            "Indexing {} files took {:?}, expected < 5 seconds",
+            file_count,
+            elapsed
+        );
+    }
 }
