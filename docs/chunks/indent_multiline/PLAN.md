@@ -8,170 +8,132 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The bug is in `compute_indent_delta()` (lines 199-255 of `crates/syntax/src/indent.rs`).
+Currently, when a node marked `@indent` starts on the reference line, we add +1 to
+the indent delta unconditionally. This is correct for block-introducing constructs
+like `function_definition` or `if_statement` (which inherently span multiple lines
+when they have a body), but incorrect for bracket/container nodes like `argument_list`,
+`list`, `tuple`, etc. These should only trigger indent when they span multiple lines.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**The fix**: Before counting an `@indent` capture, check if the captured node spans
+multiple lines (`node.start_position().row != node.end_position().row`). If the node
+is single-line, skip it.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+This is a semantic bug fix with localized scope. The change modifies only the
+`@indent` capture handling in `compute_indent_delta()`. No query file changes are
+required—the existing Python and Rust queries are correct; the algorithm is wrong.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/indent_multiline/GOAL.md)
-with references to the files that you expect to touch.
--->
-
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Per `docs/trunk/TESTING_PHILOSOPHY.md`, we follow TDD: write failing tests first,
+then implement the fix to make them pass.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing tests for single-line bracket regression
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add unit tests to `crates/syntax/src/indent.rs` that demonstrate the bug:
 
-Example:
+1. `test_python_single_line_call_no_indent`: After `main()` inside a function,
+   pressing Enter should maintain indent, not increase it.
+2. `test_python_single_line_list_no_indent`: After `[1, 2, 3]` assignment,
+   pressing Enter should maintain indent.
+3. `test_python_multiline_call_indents`: Multi-line `foo(\narg\n)` should still
+   indent correctly.
+4. `test_python_multiline_list_indents`: Multi-line `[\n1,\n]` should still
+   indent correctly.
+5. `test_rust_single_line_call_no_indent`: Rust equivalent to ensure fix applies
+   to all languages.
 
-### Step 1: Define the SegmentHeader struct
+These tests should fail before the fix, demonstrating the regression.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Location: `crates/syntax/src/indent.rs`, in the `#[cfg(test)]` module.
 
-Location: src/segment/format.rs
+### Step 2: Implement multiline check in compute_indent_delta
 
-### Step 2: Implement header serialization
+Modify the `@indent` capture handling in `compute_indent_delta()`:
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+**Current logic** (lines 221-225):
+```rust
+if Some(capture.index) == self.captures.indent {
+    if capture_start_row == ref_line && !indent_added {
+        delta += 1;
+        indent_added = true;
+    }
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+**New logic**:
+```rust
+if Some(capture.index) == self.captures.indent {
+    if capture_start_row == ref_line && !indent_added {
+        // Only count @indent if the node spans multiple lines.
+        // Single-line bracket expressions (argument_list, list, etc.)
+        // should not trigger indent.
+        let is_multiline = capture.node.start_position().row
+                         != capture.node.end_position().row;
+        if is_multiline {
+            delta += 1;
+            indent_added = true;
+        }
+    }
+}
+```
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+This change affects only `@indent` captures. `@indent.always` is intentionally
+left unchanged (it stacks and may have different semantics).
+
+Location: `crates/syntax/src/indent.rs`, `compute_indent_delta()` method.
+
+### Step 3: Verify existing tests still pass
+
+Run the full test suite for the `syntax` crate:
+
+```bash
+cargo test -p syntax
+```
+
+All existing tests must pass. The change should not regress:
+- `test_rust_indent_after_open_brace` (multiline by definition)
+- `test_python_indent_after_colon` (multiline by definition)
+- `test_python_indent_in_class` (multiline by definition)
+- `test_rust_maintain_indent` (no new indent expected)
+
+### Step 4: Verify new tests pass
+
+Confirm the tests from Step 1 now pass:
+
+```bash
+cargo test -p syntax -- single_line
+cargo test -p syntax -- multiline
+```
+
+### Step 5: Add backreference comment
+
+Add a chunk backreference to the modified section:
+
+```rust
+// Chunk: docs/chunks/indent_multiline - Multiline check for bracket @indent
+```
+
+Place this comment above the `compute_indent_delta` method to document the
+semantic fix.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **treesitter_indent**: This chunk depends on the base indent implementation
+  from `treesitter_indent`. That chunk is already ACTIVE (merged).
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **False negatives for intentionally single-line indent captures**: If a
+   language query intentionally marks a single-line construct for indent (e.g.,
+   a one-line lambda that should indent its body), this fix would suppress it.
+   Mitigation: Review query files after implementation; no such cases exist in
+   Python or Rust queries today.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Performance impact**: Adding `node.end_position()` lookup adds negligible
+   overhead (it's already cached in the tree-sitter node). No measurable impact
+   expected.
 
-## Deviations
-
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+3. **`@indent.always` behavior**: We intentionally leave `@indent.always`
+   unchanged. If a query author explicitly uses `@indent.always` on a single-line
+   node, they get the indent. This preserves the "always" semantics.
