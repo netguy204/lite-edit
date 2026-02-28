@@ -345,7 +345,13 @@ impl Viewport {
             // Cursor is at or after first_visible_line
             let cursor_screen_row = cumulative_screen_row + cursor_row_offset;
 
-            if cursor_screen_row >= visible_lines {
+            // Chunk: docs/chunks/viewport_keystroke_jostle - Fix off-by-one
+            // +1 accounts for partially visible bottom row (matching visible_range semantics)
+            // Subsystem: docs/subsystems/viewport_scroll - Invariant 5
+            //
+            // The change from `>=` to `>` means screen row `visible_lines` is now
+            // considered visible (it's the partial row that visible_range includes).
+            if cursor_screen_row > visible_lines {
                 // Cursor is below viewport - scroll down
                 // Put the cursor's screen row at the bottom of the viewport
                 let new_top_row = cursor_screen_row.saturating_sub(visible_lines.saturating_sub(1));
@@ -939,13 +945,19 @@ mod tests {
         let mut vp = Viewport::new(16.0);
         vp.update_size(160.0, 100); // 10 visible lines, showing 0..10
 
-        // Line 9 is the last visible line (0-indexed)
+        // Line 9 is the last fully visible line (0-indexed)
         let scrolled = vp.ensure_visible(9, 100);
         assert!(!scrolled);
 
-        // Line 10 is just beyond visible
+        // Chunk: docs/chunks/viewport_keystroke_jostle - Fix off-by-one
+        // Line 10 is the partial row (visible_range includes +1 for partial visibility).
+        // It IS rendered, so ensure_visible should NOT scroll.
         let scrolled = vp.ensure_visible(10, 100);
-        assert!(scrolled);
+        assert!(!scrolled, "Line 10 (partial row) is visible and should not scroll");
+
+        // Line 11 is the first line beyond the partial row - SHOULD scroll
+        let scrolled = vp.ensure_visible(11, 100);
+        assert!(scrolled, "Line 11 is beyond partial row and should scroll");
     }
 
     #[test]
@@ -1346,14 +1358,20 @@ mod tests {
 
     #[test]
     fn test_ensure_visible_with_margin_delegates_to_scroller() {
+        // Chunk: docs/chunks/viewport_keystroke_jostle - Updated for +1 partial row fix
         // Verify that Viewport.ensure_visible_with_margin delegates properly to RowScroller
         let mut vp = Viewport::new(16.0);
         vp.update_size(160.0, 100); // 10 visible lines
 
-        // With margin=1, line 9 should trigger scroll
+        // With margin=1, effective_visible = 9
+        // Line 9 is the effective partial row - should NOT scroll
         let scrolled = vp.ensure_visible_with_margin(9, 100, 1);
-        assert!(scrolled);
-        assert_eq!(vp.first_visible_line(), 1);
+        assert!(!scrolled, "Line 9 is the effective partial row, should not scroll");
+
+        // Line 10 is beyond effective viewport - SHOULD scroll
+        let scrolled = vp.ensure_visible_with_margin(10, 100, 1);
+        assert!(scrolled, "Line 10 is beyond effective viewport, should scroll");
+        assert_eq!(vp.first_visible_line(), 2);
     }
 
     #[test]
@@ -2530,5 +2548,74 @@ mod tests {
             DirtyRegion::FullViewport,
             "Zero visible lines should return FullViewport (degenerate viewport)"
         );
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/viewport_keystroke_jostle - ensure_visible_wrapped +1 fix
+    // =========================================================================
+
+    #[test]
+    fn test_ensure_visible_wrapped_partial_row_should_not_scroll() {
+        use crate::wrap_layout::WrapLayout;
+        use crate::font::FontMetrics;
+
+        // visible_range includes visible_rows + 1 to account for the partially
+        // visible bottom row. ensure_visible_wrapped should match this behavior.
+        //
+        // With 10 visible rows (0..9 fully visible), screen row 10 is the partial row.
+        // A cursor at screen row 10 IS visible (rendered), so should NOT scroll.
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(160.0, 100); // 10 visible lines
+
+        // Set up wrap layout: 800px wide viewport, 8px per char = 100 cols per row
+        // Lines with 50 chars won't wrap (fit in one row)
+        let metrics = FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        };
+        let wrap_layout = WrapLayout::new(800.0, &metrics);
+
+        // Create 20 short lines (50 chars each, no wrapping needed)
+        let line_lengths: Vec<usize> = (0..20).map(|_| 50).collect();
+        let line_len_fn = |line: usize| line_lengths.get(line).copied().unwrap_or(0);
+
+        // Cursor at line 10 (screen row 10) - this is the partial row
+        // With first_visible_line = 0, cursor_screen_row = 10
+        // 10 >= 10 in old code: scrolls (BUG)
+        // 10 > 10 in fixed code: does not scroll (CORRECT)
+        let scrolled = vp.ensure_visible_wrapped(
+            10,    // cursor_line
+            0,     // cursor_col
+            0,     // first_visible_line
+            20,    // line_count
+            &wrap_layout,
+            line_len_fn,
+        );
+
+        assert!(
+            !scrolled,
+            "Screen row 10 (partial row) is visible via visible_range, should NOT scroll"
+        );
+        assert_eq!(vp.first_visible_line(), 0, "Should not have scrolled");
+
+        // Cursor at line 11 (screen row 11) - this is truly beyond the partial row
+        let scrolled = vp.ensure_visible_wrapped(
+            11,    // cursor_line
+            0,     // cursor_col
+            0,     // first_visible_line
+            20,    // line_count
+            &wrap_layout,
+            line_len_fn,
+        );
+
+        assert!(
+            scrolled,
+            "Screen row 11 is beyond the partial row, SHOULD scroll"
+        );
+        assert!(vp.first_visible_line() > 0, "Should have scrolled down");
     }
 }

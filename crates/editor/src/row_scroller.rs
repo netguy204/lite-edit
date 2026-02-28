@@ -203,9 +203,14 @@ impl RowScroller {
             // Snap to whole-row boundary
             let target_px = row as f32 * self.row_height;
             self.set_scroll_offset_px(target_px, row_count);
-        } else if row >= first_row + effective_visible {
+        } else if row > first_row + effective_visible {
             // Row is below effective viewport - scroll down
-            // Put the row at the effective bottom of the viewport
+            // +1 accounts for partially visible bottom row (matching visible_range semantics)
+            // Subsystem: docs/subsystems/viewport_scroll - Invariant 5
+            // Chunk: docs/chunks/viewport_keystroke_jostle - Fix off-by-one
+            //
+            // The change from `>=` to `>` means row `first_row + effective_visible` is now
+            // considered visible (it's the partial row that visible_range includes).
             let new_row = row.saturating_sub(effective_visible.saturating_sub(1));
             // Snap to whole-row boundary
             let target_px = new_row as f32 * self.row_height;
@@ -532,9 +537,14 @@ mod tests {
         // Row 9 is the last fully visible row
         let scrolled = scroller.ensure_visible(9, 100);
         assert!(!scrolled);
-        // Row 10 is just beyond visible
+        // Chunk: docs/chunks/viewport_keystroke_jostle - Fix off-by-one
+        // Row 10 is the partial row (visible_range includes +1 for partial visibility).
+        // It IS rendered, so ensure_visible should NOT scroll.
         let scrolled = scroller.ensure_visible(10, 100);
-        assert!(scrolled);
+        assert!(!scrolled, "Row 10 (partial row) is visible and should not scroll");
+        // Row 11 is the first row beyond the partial row - SHOULD scroll
+        let scrolled = scroller.ensure_visible(11, 100);
+        assert!(scrolled, "Row 11 is beyond the partial row and should scroll");
     }
 
     #[test]
@@ -677,18 +687,22 @@ mod tests {
 
     #[test]
     fn test_ensure_visible_with_margin_scrolls_earlier() {
-        // With margin=1, a row that would be at position 9 (last visible) should trigger scroll
+        // Chunk: docs/chunks/viewport_keystroke_jostle - Updated for +1 partial row fix
+        // With margin=1, effective_visible = 10 - 1 = 9.
+        // Row 9 is the partial row (at position first_row + effective_visible = 0 + 9).
+        // Row 10 is the first row beyond the effective viewport.
         let mut scroller = RowScroller::new(16.0);
-        scroller.update_size(160.0, 100); // 10 visible rows, showing 0..10
+        scroller.update_size(160.0, 100); // 10 visible rows
 
-        // Row 9 would be at the last visible position without margin
-        // With margin=1, effective visible rows = 9, so row 9 is beyond effective viewport
+        // Row 9 is the effective partial row - should NOT scroll
         let scrolled = scroller.ensure_visible_with_margin(9, 100, 1);
+        assert!(!scrolled, "Row 9 is the effective partial row, should not scroll");
 
-        // Should have scrolled to put row 9 at effective bottom (position 8)
-        // new_row = 9 - (9 - 1) = 1
-        assert!(scrolled);
-        assert_eq!(scroller.first_visible_row(), 1);
+        // Row 10 is beyond effective viewport - SHOULD scroll
+        let scrolled = scroller.ensure_visible_with_margin(10, 100, 1);
+        assert!(scrolled, "Row 10 is beyond effective viewport, should scroll");
+        // Put row 10 at effective bottom: new_row = 10 - (9 - 1) = 2
+        assert_eq!(scroller.first_visible_row(), 2);
     }
 
     #[test]
@@ -705,31 +719,40 @@ mod tests {
 
     #[test]
     fn test_ensure_visible_with_margin_larger_margin() {
+        // Chunk: docs/chunks/viewport_keystroke_jostle - Updated for +1 partial row fix
         // Test with margin=2
         let mut scroller = RowScroller::new(16.0);
         scroller.update_size(160.0, 100); // 10 visible rows
 
         // With margin=2, effective visible = 8
-        // Row 8 should trigger scroll (it's >= first + 8)
+        // Row 8 is the partial row (at position first + effective = 0 + 8) - should NOT scroll
         let scrolled = scroller.ensure_visible_with_margin(8, 100, 2);
+        assert!(!scrolled, "Row 8 is the effective partial row, should not scroll");
 
-        assert!(scrolled);
-        // new_row = 8 - (8 - 1) = 1
-        assert_eq!(scroller.first_visible_row(), 1);
+        // Row 9 is beyond effective viewport - SHOULD scroll
+        let scrolled = scroller.ensure_visible_with_margin(9, 100, 2);
+        assert!(scrolled, "Row 9 is beyond effective partial row, should scroll");
+        // new_row = 9 - (8 - 1) = 2
+        assert_eq!(scroller.first_visible_row(), 2);
     }
 
     #[test]
     fn test_ensure_visible_with_margin_clamps_to_min_one() {
+        // Chunk: docs/chunks/viewport_keystroke_jostle - Updated for +1 partial row fix
         // With a very small viewport (2 rows) and margin=2, effective should be clamped to 1
         let mut scroller = RowScroller::new(16.0);
         scroller.update_size(32.0, 100); // 2 visible rows
 
-        // Row 1 should trigger scroll because effective visible = max(2-2, 1) = 1
+        // effective visible = max(2-2, 1) = 1
+        // Row 1 is the partial row (at position 0 + 1) - should NOT scroll
         let scrolled = scroller.ensure_visible_with_margin(1, 100, 2);
+        assert!(!scrolled, "Row 1 is the effective partial row, should not scroll");
 
-        assert!(scrolled);
-        // new_row = 1 - (1 - 1) = 1
-        assert_eq!(scroller.first_visible_row(), 1);
+        // Row 2 is beyond effective partial row - SHOULD scroll
+        let scrolled = scroller.ensure_visible_with_margin(2, 100, 2);
+        assert!(scrolled, "Row 2 is beyond effective partial row, should scroll");
+        // new_row = 2 - (1 - 1) = 2
+        assert_eq!(scroller.first_visible_row(), 2);
     }
 
     #[test]
@@ -788,5 +811,63 @@ mod tests {
         assert_eq!(scroller.visible_rows(), 20);
         // scroll_offset_px is preserved even though it's beyond new theoretical max
         assert!((scroller.scroll_offset_px() - 640.0).abs() < 0.001);
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/viewport_keystroke_jostle - Fix off-by-one in ensure_visible
+    // =========================================================================
+
+    #[test]
+    fn test_ensure_visible_partial_row_should_not_scroll() {
+        // visible_range includes visible_rows + 1 to account for the partially
+        // visible bottom row. ensure_visible should match this behavior.
+        //
+        // With 10 visible rows (0..9 fully visible), row 10 is the partial row.
+        // Row 10 IS visible (rendered), so ensure_visible(10) should NOT scroll.
+        let mut scroller = RowScroller::new(16.0);
+        scroller.update_size(160.0, 100); // 10 visible rows, showing 0..10 (inclusive partial)
+
+        // Verify visible_range includes the +1 row
+        let range = scroller.visible_range(100);
+        assert_eq!(range, 0..11, "visible_range should include row 10 (the +1 partial row)");
+
+        // Row 10 is visible (the partial row) - should NOT scroll
+        let scrolled = scroller.ensure_visible(10, 100);
+        assert!(
+            !scrolled,
+            "Row 10 (partial row) is visible via visible_range, so ensure_visible should NOT scroll"
+        );
+        assert_eq!(scroller.first_visible_row(), 0, "Should not have scrolled");
+
+        // Row 11 is truly beyond the partial row - SHOULD scroll
+        let scrolled = scroller.ensure_visible(11, 100);
+        assert!(
+            scrolled,
+            "Row 11 is beyond the partial row, so ensure_visible SHOULD scroll"
+        );
+        assert!(scroller.first_visible_row() > 0, "Should have scrolled down");
+    }
+
+    #[test]
+    fn test_ensure_visible_with_margin_partial_row_should_not_scroll() {
+        // Same test but with margin=1 to verify margin interaction with +1 fix.
+        // With 10 visible rows and margin=1, effective_visible = 9.
+        // Row 9 is the effective partial row, so ensure_visible(9) should NOT scroll.
+        let mut scroller = RowScroller::new(16.0);
+        scroller.update_size(160.0, 100); // 10 visible rows
+
+        // Row 9 should NOT scroll (it's the effective partial row with margin=1)
+        let scrolled = scroller.ensure_visible_with_margin(9, 100, 1);
+        assert!(
+            !scrolled,
+            "Row 9 (effective partial row with margin=1) should NOT trigger scroll"
+        );
+
+        // Row 10 is beyond the effective viewport - SHOULD scroll
+        let scrolled = scroller.ensure_visible_with_margin(10, 100, 1);
+        assert!(
+            scrolled,
+            "Row 10 is beyond effective partial row with margin=1, should scroll"
+        );
     }
 }
