@@ -5,6 +5,7 @@
 // Chunk: docs/chunks/line_wrap_rendering - Soft line wrapping support
 // Chunk: docs/chunks/workspace_model - Content area x offset for left rail
 // Chunk: docs/chunks/terminal_background_box_drawing - On-demand glyph addition for terminal rendering
+// Chunk: docs/chunks/tab_rendering - Tab-aware visual width for glyph positioning
 //!
 //! Glyph vertex buffer construction
 //!
@@ -54,6 +55,8 @@ use crate::wrap_layout::WrapLayout;
 use lite_edit_buffer::{BufferView, CursorShape, DirtyLines, StyledLine, UnderlineStyle};
 // Chunk: docs/chunks/terminal_multibyte_rendering - Wide character width tracking
 use unicode_width::UnicodeWidthChar;
+// Chunk: docs/chunks/tab_rendering - Tab-aware visual width calculation
+use crate::tab_width;
 
 // =============================================================================
 // Vertex Data
@@ -1364,6 +1367,7 @@ impl GlyphBuffer {
 
         // ==================== Phase 1: Background Quads ====================
         // Chunk: docs/chunks/terminal_styling_fidelity - Per-span background colors for terminal styling
+        // Chunk: docs/chunks/tab_rendering - Tab-aware visual width for background quads
         let background_start_index = self.persistent_indices.len();
 
         {
@@ -1373,13 +1377,24 @@ impl GlyphBuffer {
             let mut is_first_buffer_line = true;
 
             for idx in 0..self.rendered_buffer_lines.len() {
-                let buffer_line = self.rendered_buffer_lines[idx];
                 if cumulative_screen_row >= max_screen_rows {
                     break;
                 }
 
-                let line_len = view.line_len(buffer_line);
-                let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
+                // Calculate line visual width using tab-aware width calculation
+                // Chunk: docs/chunks/tab_rendering - Tab-aware visual width for wrap calculation
+                let line_visual_width: usize = if let Some(styled_line) = &styled_lines[idx] {
+                    let mut visual_col = 0;
+                    for span in &styled_line.spans {
+                        for c in span.text.chars() {
+                            visual_col += tab_width::char_visual_width(c, visual_col);
+                        }
+                    }
+                    visual_col
+                } else {
+                    0
+                };
+                let rows_for_line = wrap_layout.screen_rows_for_line(line_visual_width);
 
                 // Determine the starting row offset within this buffer line
                 let start_row_offset = if is_first_buffer_line {
@@ -1391,14 +1406,16 @@ impl GlyphBuffer {
 
                 // Iterate spans and emit background quads for non-default backgrounds
                 // Chunk: docs/chunks/terminal_multibyte_rendering - Width-aware column counting for wide characters
+                // Chunk: docs/chunks/tab_rendering - Tab-aware visual column tracking
                 if let Some(styled_line) = &styled_lines[idx] {
-                    let mut col: usize = 0;
+                    let mut visual_col: usize = 0;
                     for span in &styled_line.spans {
-                        // Use width-aware counting: sum of display widths for all characters
-                        let span_width: usize = span.text.chars()
-                            .map(|c| c.width().unwrap_or(1))
-                            .sum();
-                        let end_col = col + span_width;
+                        // Use tab-aware width counting: sum of visual widths for all characters
+                        let span_start_visual_col = visual_col;
+                        for c in span.text.chars() {
+                            visual_col += tab_width::char_visual_width(c, visual_col);
+                        }
+                        let span_end_visual_col = visual_col;
 
                         // Emit background quad if bg is not default, or if inverse
                         // is set (inverse swaps fg↔bg, so default bg becomes fg color)
@@ -1409,8 +1426,8 @@ impl GlyphBuffer {
 
                             // The span may cross multiple screen rows due to wrapping.
                             // Emit a background quad for each screen row the span covers.
-                            let span_start_row_offset = col / cols_per_row;
-                            let span_end_row_offset = if end_col == 0 { 0 } else { (end_col - 1) / cols_per_row };
+                            let span_start_row_offset = span_start_visual_col / cols_per_row;
+                            let span_end_row_offset = if span_end_visual_col == 0 { 0 } else { (span_end_visual_col - 1) / cols_per_row };
 
                             for row_offset in span_start_row_offset..=span_end_row_offset {
                                 // Skip rows before our starting row
@@ -1427,8 +1444,8 @@ impl GlyphBuffer {
                                 let row_start_col = row_offset * cols_per_row;
                                 let row_end_col = (row_offset + 1) * cols_per_row;
 
-                                let span_start_on_row = col.max(row_start_col);
-                                let span_end_on_row = end_col.min(row_end_col);
+                                let span_start_on_row = span_start_visual_col.max(row_start_col);
+                                let span_end_on_row = span_end_visual_col.min(row_end_col);
 
                                 if span_start_on_row < span_end_on_row {
                                     // Convert to screen columns (relative to this screen row)
@@ -1454,8 +1471,6 @@ impl GlyphBuffer {
                                 }
                             }
                         }
-
-                        col = end_col;
                     }
                 }
 
@@ -1468,6 +1483,7 @@ impl GlyphBuffer {
 
         // ==================== Phase 2: Selection Quads ====================
         // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Fixed screen row tracking
+        // Chunk: docs/chunks/tab_rendering - Tab-aware visual column conversion for selection
         let selection_start_index = self.persistent_indices.len();
 
         if let Some((sel_start, sel_end)) = view.selection_range() {
@@ -1483,13 +1499,23 @@ impl GlyphBuffer {
             let mut cumulative_screen_row: usize = 0;
             let mut is_first_buffer_line = true;
 
-            for buffer_line in first_visible_buffer_line..line_count {
+            for idx in 0..self.rendered_buffer_lines.len() {
+                let buffer_line = self.rendered_buffer_lines[idx];
                 if cumulative_screen_row >= max_screen_rows {
                     break;
                 }
 
-                let line_len = view.line_len(buffer_line);
-                let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
+                // Get line content for tab-aware visual width calculation
+                // Chunk: docs/chunks/tab_rendering - Build line content from spans
+                let line_content: String = if let Some(styled_line) = &styled_lines[idx] {
+                    styled_line.spans.iter().flat_map(|s| s.text.chars()).collect()
+                } else {
+                    String::new()
+                };
+
+                // Calculate line visual width using tab-aware calculation
+                let line_visual_width = tab_width::line_visual_width(&line_content);
+                let rows_for_line = wrap_layout.screen_rows_for_line(line_visual_width);
 
                 // Determine the starting row offset within this buffer line
                 let start_row_offset = if is_first_buffer_line {
@@ -1501,20 +1527,30 @@ impl GlyphBuffer {
 
                 // Check if this buffer line intersects the selection
                 if buffer_line >= sel_start.line && buffer_line <= sel_end.line {
-                    // Calculate selection bounds for this buffer line
-                    let line_sel_start = if buffer_line == sel_start.line {
+                    // Calculate selection bounds for this buffer line (in character indices)
+                    let line_sel_start_char = if buffer_line == sel_start.line {
                         sel_start.col
                     } else {
                         0
                     };
-                    let line_sel_end = if buffer_line == sel_end.line {
+                    let line_sel_end_char = if buffer_line == sel_end.line {
                         sel_end.col
                     } else {
                         // Include newline character visualization
-                        line_len + 1
+                        line_content.chars().count() + 1
                     };
 
-                    if line_sel_start < line_sel_end {
+                    // Convert character indices to visual columns
+                    // Chunk: docs/chunks/tab_rendering - Tab-aware selection bounds
+                    let line_sel_start_visual = tab_width::char_col_to_visual_col(&line_content, line_sel_start_char);
+                    let line_sel_end_visual = if line_sel_end_char > line_content.chars().count() {
+                        // Selection extends past line end (includes newline)
+                        line_visual_width + 1
+                    } else {
+                        tab_width::char_col_to_visual_col(&line_content, line_sel_end_char)
+                    };
+
+                    if line_sel_start_visual < line_sel_end_visual {
                         // Emit selection quads for each screen row in this buffer line
                         for row_offset in start_row_offset..rows_for_line {
                             let screen_row = cumulative_screen_row + (row_offset - start_row_offset);
@@ -1522,13 +1558,13 @@ impl GlyphBuffer {
                                 break;
                             }
 
-                            // Calculate which buffer columns are on this screen row
+                            // Calculate which visual columns are on this screen row
                             let row_start_col = row_offset * cols_per_row;
-                            let row_end_col = ((row_offset + 1) * cols_per_row).min(line_len + 1);
+                            let row_end_col = ((row_offset + 1) * cols_per_row).min(line_visual_width + 1);
 
-                            // Calculate intersection with selection
-                            let sel_start_on_row = line_sel_start.max(row_start_col);
-                            let sel_end_on_row = line_sel_end.min(row_end_col);
+                            // Calculate intersection with selection (in visual columns)
+                            let sel_start_on_row = line_sel_start_visual.max(row_start_col);
+                            let sel_end_on_row = line_sel_end_visual.min(row_end_col);
 
                             if sel_start_on_row < sel_end_on_row {
                                 // Convert to screen columns (relative to this screen row)
@@ -1564,8 +1600,9 @@ impl GlyphBuffer {
         let selection_index_count = self.persistent_indices.len() - selection_start_index;
         self.selection_range = QuadRange::new(selection_start_index, selection_index_count);
 
-        // ==================== Phase 2: Border Quads ====================
+        // ==================== Phase 2.5: Border Quads ====================
         // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Fixed screen row tracking
+        // Chunk: docs/chunks/tab_rendering - Tab-aware visual width for wrap calculation
         let border_start_index = self.persistent_indices.len();
 
         {
@@ -1573,13 +1610,25 @@ impl GlyphBuffer {
             let mut cumulative_screen_row: usize = 0;
             let mut is_first_buffer_line = true;
 
-            for buffer_line in first_visible_buffer_line..line_count {
+            for idx in 0..self.rendered_buffer_lines.len() {
                 if cumulative_screen_row >= max_screen_rows {
                     break;
                 }
 
-                let line_len = view.line_len(buffer_line);
-                let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
+                // Calculate line visual width using tab-aware calculation
+                // Chunk: docs/chunks/tab_rendering - Tab-aware visual width for wrap calculation
+                let line_visual_width: usize = if let Some(styled_line) = &styled_lines[idx] {
+                    let mut visual_col = 0;
+                    for span in &styled_line.spans {
+                        for c in span.text.chars() {
+                            visual_col += tab_width::char_visual_width(c, visual_col);
+                        }
+                    }
+                    visual_col
+                } else {
+                    0
+                };
+                let rows_for_line = wrap_layout.screen_rows_for_line(line_visual_width);
 
                 // Determine the starting row offset within this buffer line
                 let start_row_offset = if is_first_buffer_line {
@@ -1620,6 +1669,7 @@ impl GlyphBuffer {
         // ==================== Phase 3: Glyph Quads ====================
         // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Fixed screen row tracking
         // Chunk: docs/chunks/terminal_styling_fidelity - Per-span foreground colors for terminal styling
+        // Chunk: docs/chunks/tab_rendering - Tab-aware visual column tracking
         let glyph_start_index = self.persistent_indices.len();
 
         {
@@ -1640,13 +1690,19 @@ impl GlyphBuffer {
                     continue;
                 };
 
-                // Calculate line length from spans using display widths (wide chars count as 2)
+                // Calculate line visual width from spans using tab-aware display widths
                 // Chunk: docs/chunks/terminal_multibyte_rendering - Width-aware line length calculation
-                let line_len: usize = styled_line.spans.iter()
-                    .flat_map(|s| s.text.chars())
-                    .map(|c| c.width().unwrap_or(1))
-                    .sum();
-                let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
+                // Chunk: docs/chunks/tab_rendering - Tab-aware visual width calculation
+                let line_visual_width: usize = {
+                    let mut visual_col = 0;
+                    for span in &styled_line.spans {
+                        for c in span.text.chars() {
+                            visual_col += tab_width::char_visual_width(c, visual_col);
+                        }
+                    }
+                    visual_col
+                };
+                let rows_for_line = wrap_layout.screen_rows_for_line(line_visual_width);
 
                 // Determine the starting row offset within this buffer line
                 let start_row_offset = if is_first_buffer_line {
@@ -1656,18 +1712,19 @@ impl GlyphBuffer {
                 };
                 is_first_buffer_line = false;
 
-                // Calculate which buffer columns to skip (those before start_row_offset)
-                let start_col = start_row_offset * cols_per_row;
+                // Calculate which visual columns to skip (those before start_row_offset)
+                let start_visual_col = start_row_offset * cols_per_row;
 
-                // Iterate spans, tracking cumulative column position
+                // Iterate spans, tracking cumulative visual column position
                 // Chunk: docs/chunks/terminal_multibyte_rendering - Width-aware column advancement for wide characters
-                let mut col: usize = 0;
+                // Chunk: docs/chunks/tab_rendering - Tab-aware visual column advancement
+                let mut visual_col: usize = 0;
                 for span in &styled_line.spans {
-                    // Skip hidden text - use width-aware counting
+                    // Skip hidden text - use tab-aware visual width counting
                     if span.style.hidden {
-                        col += span.text.chars()
-                            .map(|c| c.width().unwrap_or(1))
-                            .sum::<usize>();
+                        for c in span.text.chars() {
+                            visual_col += tab_width::char_visual_width(c, visual_col);
+                        }
                         continue;
                     }
 
@@ -1675,18 +1732,20 @@ impl GlyphBuffer {
                     let (fg, _) = self.palette.resolve_style_colors(&span.style);
 
                     for c in span.text.chars() {
-                        // Get character display width (1 for narrow, 2 for wide, 0 for zero-width)
-                        let char_width = c.width().unwrap_or(1);
+                        // Get character display width using tab-aware calculation
+                        // Chunk: docs/chunks/tab_rendering - Tab-aware character width
+                        let char_width = tab_width::char_visual_width(c, visual_col);
 
                         // Skip characters on rows before our starting row
-                        if col < start_col {
-                            col += char_width;
+                        if visual_col < start_visual_col {
+                            visual_col += char_width;
                             continue;
                         }
 
-                        // Skip spaces (they don't need quads)
-                        if c == ' ' {
-                            col += char_width;
+                        // Skip spaces and tabs (they don't need glyphs, just whitespace)
+                        // Chunk: docs/chunks/tab_rendering - Skip tab characters (render as whitespace)
+                        if c == ' ' || c == '\t' {
+                            visual_col += char_width;
                             continue;
                         }
 
@@ -1695,19 +1754,20 @@ impl GlyphBuffer {
                         let glyph = match atlas.ensure_glyph(font, c) {
                             Some(g) => g,
                             None => {
-                                col += char_width;
+                                visual_col += char_width;
                                 continue;
                             }
                         };
 
                         // Calculate screen position using wrap layout
-                        let (row_offset, screen_col) = wrap_layout.buffer_col_to_screen_pos(col);
+                        // visual_col is the visual column where this character starts
+                        let (row_offset, screen_col) = wrap_layout.buffer_col_to_screen_pos(visual_col);
                         // Adjust row_offset to be relative to viewport top
                         let screen_row = cumulative_screen_row + (row_offset - start_row_offset);
 
                         if screen_row >= max_screen_rows {
                             // Don't break entirely - there might be more chars on earlier rows
-                            col += char_width;
+                            visual_col += char_width;
                             continue;
                         }
 
@@ -1732,8 +1792,8 @@ impl GlyphBuffer {
                         self.persistent_indices.push(vertex_offset + 3);
                         vertex_offset += 4;
 
-                        // Advance by character display width (2 for wide chars like CJK/emoji)
-                        col += char_width;
+                        // Advance by character display width (tab-aware, handles wide chars too)
+                        visual_col += char_width;
                     }
                 }
 
@@ -1746,6 +1806,7 @@ impl GlyphBuffer {
 
         // ==================== Phase 4: Underline Quads ====================
         // Chunk: docs/chunks/terminal_styling_fidelity - Underline rendering for terminal styling
+        // Chunk: docs/chunks/tab_rendering - Tab-aware visual width for underline quads
         let underline_start_index = self.persistent_indices.len();
 
         {
@@ -1755,13 +1816,24 @@ impl GlyphBuffer {
             let mut is_first_buffer_line = true;
 
             for idx in 0..self.rendered_buffer_lines.len() {
-                let buffer_line = self.rendered_buffer_lines[idx];
                 if cumulative_screen_row >= max_screen_rows {
                     break;
                 }
 
-                let line_len = view.line_len(buffer_line);
-                let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
+                // Calculate line visual width using tab-aware calculation
+                // Chunk: docs/chunks/tab_rendering - Tab-aware visual width for wrap calculation
+                let line_visual_width: usize = if let Some(styled_line) = &styled_lines[idx] {
+                    let mut visual_col = 0;
+                    for span in &styled_line.spans {
+                        for c in span.text.chars() {
+                            visual_col += tab_width::char_visual_width(c, visual_col);
+                        }
+                    }
+                    visual_col
+                } else {
+                    0
+                };
+                let rows_for_line = wrap_layout.screen_rows_for_line(line_visual_width);
 
                 // Determine the starting row offset within this buffer line
                 let start_row_offset = if is_first_buffer_line {
@@ -1773,14 +1845,16 @@ impl GlyphBuffer {
 
                 // Iterate spans and emit underline quads for underlined spans
                 // Chunk: docs/chunks/terminal_multibyte_rendering - Width-aware column counting for wide characters
+                // Chunk: docs/chunks/tab_rendering - Tab-aware visual column tracking for underlines
                 if let Some(styled_line) = &styled_lines[idx] {
-                    let mut col: usize = 0;
+                    let mut visual_col: usize = 0;
                     for span in &styled_line.spans {
-                        // Use width-aware counting: sum of display widths for all characters
-                        let span_width: usize = span.text.chars()
-                            .map(|c| c.width().unwrap_or(1))
-                            .sum();
-                        let end_col = col + span_width;
+                        // Use tab-aware width counting: track visual column position
+                        let span_start_visual_col = visual_col;
+                        for c in span.text.chars() {
+                            visual_col += tab_width::char_visual_width(c, visual_col);
+                        }
+                        let span_end_visual_col = visual_col;
 
                         // Emit underline quad if underline style is not None
                         if span.style.underline != UnderlineStyle::None {
@@ -1794,8 +1868,8 @@ impl GlyphBuffer {
 
                             // The span may cross multiple screen rows due to wrapping.
                             // Emit an underline quad for each screen row the span covers.
-                            let span_start_row_offset = col / cols_per_row;
-                            let span_end_row_offset = if end_col == 0 { 0 } else { (end_col - 1) / cols_per_row };
+                            let span_start_row_offset = span_start_visual_col / cols_per_row;
+                            let span_end_row_offset = if span_end_visual_col == 0 { 0 } else { (span_end_visual_col - 1) / cols_per_row };
 
                             for row_offset in span_start_row_offset..=span_end_row_offset {
                                 // Skip rows before our starting row
@@ -1812,8 +1886,8 @@ impl GlyphBuffer {
                                 let row_start_col = row_offset * cols_per_row;
                                 let row_end_col = (row_offset + 1) * cols_per_row;
 
-                                let span_start_on_row = col.max(row_start_col);
-                                let span_end_on_row = end_col.min(row_end_col);
+                                let span_start_on_row = span_start_visual_col.max(row_start_col);
+                                let span_end_on_row = span_end_visual_col.min(row_end_col);
 
                                 if span_start_on_row < span_end_on_row {
                                     // Convert to screen columns (relative to this screen row)
@@ -1839,8 +1913,6 @@ impl GlyphBuffer {
                                 }
                             }
                         }
-
-                        col = end_col;
                     }
                 }
 
@@ -1853,6 +1925,7 @@ impl GlyphBuffer {
 
         // ==================== Phase 5: Cursor Quad ====================
         // Chunk: docs/chunks/cursor_wrap_scroll_alignment - Fixed cursor positioning
+        // Chunk: docs/chunks/tab_rendering - Tab-aware cursor visual column
         let cursor_start_index = self.persistent_indices.len();
 
         if cursor_visible {
@@ -1874,9 +1947,25 @@ impl GlyphBuffer {
                     let mut is_first_buffer_line = true;
                     let mut found_cursor = false;
 
-                    for buffer_line in first_visible_buffer_line..=cursor_pos.line.min(line_count.saturating_sub(1)) {
-                        let line_len = view.line_len(buffer_line);
-                        let rows_for_line = wrap_layout.screen_rows_for_line(line_len);
+                    // Find the index of the cursor line in rendered_buffer_lines for styled_line access
+                    let cursor_line_idx = self.rendered_buffer_lines.iter().position(|&l| l == cursor_pos.line);
+
+                    for idx in 0..self.rendered_buffer_lines.len() {
+                        let buffer_line = self.rendered_buffer_lines[idx];
+                        if buffer_line > cursor_pos.line {
+                            break;
+                        }
+
+                        // Get line content for tab-aware visual width calculation
+                        // Chunk: docs/chunks/tab_rendering - Build line content from spans
+                        let line_content: String = if let Some(styled_line) = &styled_lines[idx] {
+                            styled_line.spans.iter().flat_map(|s| s.text.chars()).collect()
+                        } else {
+                            String::new()
+                        };
+
+                        let line_visual_width = tab_width::line_visual_width(&line_content);
+                        let rows_for_line = wrap_layout.screen_rows_for_line(line_visual_width);
 
                         // Determine the starting row offset within this buffer line
                         let start_row_offset = if is_first_buffer_line {
@@ -1887,8 +1976,12 @@ impl GlyphBuffer {
                         is_first_buffer_line = false;
 
                         if buffer_line == cursor_pos.line {
+                            // Convert cursor character column to visual column
+                            // Chunk: docs/chunks/tab_rendering - Tab-aware cursor positioning
+                            let cursor_visual_col = tab_width::char_col_to_visual_col(&line_content, cursor_pos.col);
+
                             // Calculate cursor's screen position within this buffer line
-                            let (row_offset, screen_col) = wrap_layout.buffer_col_to_screen_pos(cursor_pos.col);
+                            let (row_offset, screen_col) = wrap_layout.buffer_col_to_screen_pos(cursor_visual_col);
 
                             // Check if the cursor's row is scrolled above the viewport
                             if row_offset < start_row_offset {
@@ -1924,6 +2017,7 @@ impl GlyphBuffer {
                     }
 
                     let _ = found_cursor; // Suppress unused warning
+                    let _ = cursor_line_idx; // Suppress unused warning
                     let _ = vertex_offset; // Suppress unused warning
                 }
                 } // end else (cursor not hidden)

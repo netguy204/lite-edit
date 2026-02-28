@@ -3,6 +3,7 @@
 // Chunk: docs/chunks/viewport_scrolling - Scroll event handling
 // Chunk: docs/chunks/line_wrap_rendering - Wrap-aware hit-testing
 // Chunk: docs/chunks/viewport_emacs_navigation - Emacs navigation and page up/down
+// Chunk: docs/chunks/tab_rendering - Tab-aware mouse hit-testing
 //!
 //! Buffer focus target implementation.
 //!
@@ -20,6 +21,8 @@ use crate::context::EditorContext;
 use crate::focus::{FocusLayer, FocusTarget, Handled};
 use crate::font::FontMetrics;
 use crate::input::{Key, KeyEvent, MouseEvent, MouseEventKind, ScrollDelta};
+// Chunk: docs/chunks/tab_rendering - Tab-aware visual column to character column conversion
+use crate::tab_width;
 use crate::viewport::Viewport;
 use crate::wrap_layout::WrapLayout;
 use lite_edit_buffer::Position;
@@ -631,6 +634,7 @@ impl FocusTarget for BufferFocusTarget {
         match event.kind {
             MouseEventKind::Down => {
                 // Convert pixel position to buffer position using wrap-aware mapping
+                // Chunk: docs/chunks/tab_rendering - Tab-aware mouse hit-testing
                 let position = pixel_to_buffer_position_wrapped(
                     event.position,
                     ctx.view_height,
@@ -639,6 +643,7 @@ impl FocusTarget for BufferFocusTarget {
                     ctx.viewport.first_visible_line(),
                     ctx.buffer.line_count(),
                     |line| ctx.buffer.line_len(line),
+                    |line| ctx.buffer.line_content(line),
                 );
 
                 // Spec: docs/trunk/SPEC.md#word-model
@@ -661,6 +666,7 @@ impl FocusTarget for BufferFocusTarget {
                 let old_cursor = ctx.buffer.cursor_position();
 
                 // Convert pixel position to buffer position using wrap-aware mapping
+                // Chunk: docs/chunks/tab_rendering - Tab-aware mouse hit-testing
                 let new_position = pixel_to_buffer_position_wrapped(
                     event.position,
                     ctx.view_height,
@@ -669,6 +675,7 @@ impl FocusTarget for BufferFocusTarget {
                     ctx.viewport.first_visible_line(),
                     ctx.buffer.line_count(),
                     |line| ctx.buffer.line_len(line),
+                    |line| ctx.buffer.line_content(line),
                 );
 
                 // Move cursor without clearing selection to extend the selection
@@ -799,11 +806,13 @@ where
 ///   line space. This parameter is the screen row index, not a buffer line index.
 /// * `line_count` - Total number of lines in the buffer
 /// * `line_len_fn` - Closure to get the character count of a specific buffer line
+/// * `line_content_fn` - Closure to get the content of a specific buffer line (for tab-aware hit-testing)
 ///
 /// # Returns
 /// A buffer `Position` with line and column computed from wrapped coordinates.
 // Chunk: docs/chunks/scroll_wrap_deadzone_v2 - Fixed screen row to buffer line mapping
-fn pixel_to_buffer_position_wrapped<F>(
+// Chunk: docs/chunks/tab_rendering - Tab-aware visual column to character column conversion
+fn pixel_to_buffer_position_wrapped<F, G>(
     position: (f64, f64),
     _view_height: f32, // Kept for API compatibility but no longer used for flip
     wrap_layout: &WrapLayout,
@@ -811,9 +820,11 @@ fn pixel_to_buffer_position_wrapped<F>(
     first_visible_screen_row: usize,
     line_count: usize,
     line_len_fn: F,
+    line_content_fn: G,
 ) -> Position
 where
     F: Fn(usize) -> usize,
+    G: Fn(usize) -> String,
 {
     let (x, y) = position;
     let line_height = wrap_layout.line_height();
@@ -840,6 +851,9 @@ where
 
     // Convert absolute screen row to buffer line using the same logic as the renderer.
     // This ensures click handling agrees with what's actually rendered.
+    // Note: Viewport::buffer_line_for_screen_row uses line_len_fn which returns character count.
+    // For tab-aware wrapping, this should use visual width, but the viewport function would
+    // need similar updates. For now, we handle the tab-aware conversion at the column level.
     let (buffer_line, row_offset_in_line, _) = Viewport::buffer_line_for_screen_row(
         absolute_screen_row,
         line_count,
@@ -847,20 +861,27 @@ where
         &line_len_fn,
     );
 
-    let line_len = line_len_fn(buffer_line);
+    // Get line content for tab-aware visual column conversion
+    // Chunk: docs/chunks/tab_rendering - Get line content for tab-aware hit-testing
+    let line_content = line_content_fn(buffer_line);
 
-    // Compute screen column from x position
+    // Compute screen column from x position (this is a visual column within the screen row)
     let screen_col = if x >= 0.0 && glyph_width > 0.0 {
         (x / glyph_width as f64).floor() as usize
     } else {
         0
     };
 
-    // Convert (row_offset, screen_col) to buffer column
-    let buffer_col = wrap_layout.screen_pos_to_buffer_col(row_offset_in_line, screen_col);
+    // Convert (row_offset, screen_col) to visual column within the line
+    let visual_col = wrap_layout.screen_pos_to_buffer_col(row_offset_in_line, screen_col);
 
-    // Clamp to line length
-    let clamped_col = buffer_col.min(line_len);
+    // Convert visual column to character column using tab-aware conversion
+    // Chunk: docs/chunks/tab_rendering - Tab-aware visual to character column conversion
+    let char_col = tab_width::visual_col_to_char_col(&line_content, visual_col);
+
+    // Clamp to line length (in characters)
+    let line_char_count = line_content.chars().count();
+    let clamped_col = char_col.min(line_char_count);
 
     Position::new(buffer_line, clamped_col)
 }
@@ -4622,6 +4643,7 @@ mod tests {
         // Click at y=32 -> screen row 2
 
         // Click at y=0 (top of viewport in screen space)
+        // Chunk: docs/chunks/tab_rendering - Added line_content_fn parameter for tab-aware hit-testing
         let position = pixel_to_buffer_position_wrapped(
             (0.0, 0.0), // x=0, y=0 (top of viewport in screen space)
             48.0,       // view_height
@@ -4630,6 +4652,7 @@ mod tests {
             3,   // first_visible_line (this is screen row 3)
             5,   // line_count
             |line| line_lens[line],
+            |line| " ".repeat(line_lens[line]), // Generate spaces for line content (no tabs)
         );
 
         // At max scroll (screen row 3 is top of viewport):
@@ -4668,6 +4691,7 @@ mod tests {
         let line_lens = vec![160; 10]; // All lines are 160 chars (2 screen rows each)
 
         // Click at top of viewport (y=0 in screen space)
+        // Chunk: docs/chunks/tab_rendering - Added line_content_fn parameter for tab-aware hit-testing
         let position = pixel_to_buffer_position_wrapped(
             (0.0, 0.0), // x=0, y=0 (top of viewport in screen space)
             80.0,       // view_height
@@ -4676,6 +4700,7 @@ mod tests {
             15,  // first_visible_line (screen row 15)
             10,  // line_count
             |line| line_lens[line],
+            |line| " ".repeat(line_lens[line]), // Generate spaces for line content (no tabs)
         );
 
         // Screen row 15 corresponds to buffer line 7 (second row of that line)
@@ -4698,6 +4723,7 @@ mod tests {
         let line_lens = vec![160, 40, 40, 40, 40]; // Line 0 wraps
 
         // Click at y=0 (screen row 0, which is buffer line 0)
+        // Chunk: docs/chunks/tab_rendering - Added line_content_fn parameter for tab-aware hit-testing
         let position = pixel_to_buffer_position_wrapped(
             (0.0, 0.0), // x=0, y=0 (top of 48px viewport in screen space)
             48.0,
@@ -4706,6 +4732,7 @@ mod tests {
             0, // first_visible_line = 0 (no scroll)
             5,
             |line| line_lens[line],
+            |line| " ".repeat(line_lens[line]), // Generate spaces for line content (no tabs)
         );
 
         assert_eq!(position.line, 0, "With no scroll, click at top should land on buffer line 0");
@@ -4738,6 +4765,7 @@ mod tests {
 
             // When scrolled such that screen_row is at the top of viewport,
             // clicking at the top (y=0) should return the same buffer line.
+            // Chunk: docs/chunks/tab_rendering - Added line_content_fn parameter for tab-aware hit-testing
             let position = pixel_to_buffer_position_wrapped(
                 (0.0, 0.0), // Click at top of 48px viewport (y=0 in screen space)
                 48.0,
@@ -4746,6 +4774,7 @@ mod tests {
                 screen_row, // first_visible_line = this screen row
                 5,
                 |line| line_lens[line],
+                |line| " ".repeat(line_lens[line]), // Generate spaces for line content (no tabs)
             );
 
             assert_eq!(
@@ -4799,6 +4828,7 @@ mod tests {
 
         // Click at continuation row 1 (the second screen row of the wrapped line)
         // In screen space: y=16 means row 1 (16px / 16px line height = row 1)
+        // Chunk: docs/chunks/tab_rendering - Added line_content_fn parameter for tab-aware hit-testing
         let position_row1 = pixel_to_buffer_position_wrapped(
             (80.0, 16.0), // x=80px (col 10 = 80/8), y=16 (row 1)
             view_height,
@@ -4807,6 +4837,7 @@ mod tests {
             0,   // first_visible_line (screen row 0)
             1,   // line_count
             |line| line_lens[line],
+            |line| " ".repeat(line_lens[line]), // Generate spaces for line content (no tabs)
         );
 
         // Expected: buffer line 0, buffer col = 1 * 80 + 10 = 90
@@ -4819,6 +4850,7 @@ mod tests {
 
         // Click at continuation row 2 (the third screen row of the wrapped line)
         // In screen space: y=32 means row 2
+        // Chunk: docs/chunks/tab_rendering - Added line_content_fn parameter for tab-aware hit-testing
         let position_row2 = pixel_to_buffer_position_wrapped(
             (80.0, 32.0), // x=80px (col 10), y=32 (row 2)
             view_height,
@@ -4827,6 +4859,7 @@ mod tests {
             0,
             1,
             |line| line_lens[line],
+            |line| " ".repeat(line_lens[line]), // Generate spaces for line content (no tabs)
         );
 
         // Expected: buffer line 0, buffer col = 2 * 80 + 10 = 170

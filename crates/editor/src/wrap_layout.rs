@@ -1,5 +1,6 @@
 // Subsystem: docs/subsystems/viewport_scroll - Viewport mapping & scroll arithmetic
 // Chunk: docs/chunks/line_wrap_rendering - Soft line wrapping coordinate mapping
+// Chunk: docs/chunks/tab_rendering - Tab-aware visual width for wrap calculation
 //!
 //! Wrap layout calculation for soft line wrapping
 //!
@@ -16,8 +17,15 @@
 //!
 //! No cache, no data structure, no invalidation. The `WrapLayout` struct is stateless
 //! and computes all mappings on the fly.
+//!
+//! ## Tab Character Handling
+//!
+//! Tab characters expand to variable visual widths depending on their position in the
+//! line. The `screen_rows_for_line_content` method computes visual width using
+//! `tab_width::line_visual_width`, accounting for tabs and wide characters.
 
 use crate::font::FontMetrics;
+use crate::tab_width;
 
 /// Stateless layout calculator for soft line wrapping.
 ///
@@ -88,46 +96,92 @@ impl WrapLayout {
     }
 
     // Chunk: docs/chunks/line_wrap_rendering - O(1) screen row count for a buffer line
-    /// Returns the number of visual screen rows needed to display a line with `char_count` characters.
+    /// Returns the number of visual screen rows needed to display a line with `visual_width` columns.
     ///
-    /// This is O(1) arithmetic: `ceil(char_count / cols_per_row)`.
+    /// This is O(1) arithmetic: `ceil(visual_width / cols_per_row)`.
     ///
     /// # Arguments
-    /// * `char_count` - Number of characters in the buffer line
+    /// * `visual_width` - Visual width of the line in columns (accounting for tabs and wide chars)
+    ///
+    /// # Returns
+    /// The number of screen rows needed (at least 1, even for empty lines).
+    ///
+    /// # Note
+    /// For simple cases without tabs, the visual width equals the character count.
+    /// For lines with tabs, use `screen_rows_for_line_content` or compute visual width
+    /// using `tab_width::line_visual_width`.
+    #[inline]
+    pub fn screen_rows_for_line(&self, visual_width: usize) -> usize {
+        if visual_width == 0 {
+            1 // Empty line still takes one screen row
+        } else {
+            // Ceiling division: (visual_width + cols_per_row - 1) / cols_per_row
+            (visual_width + self.cols_per_row - 1) / self.cols_per_row
+        }
+    }
+
+    // Chunk: docs/chunks/tab_rendering - Tab-aware screen row count
+    /// Returns the number of visual screen rows needed to display a line, accounting for
+    /// tabs and wide characters.
+    ///
+    /// This is O(n) in line length because it must traverse the line content to compute
+    /// visual width. For lines without tabs or wide characters, this produces the same
+    /// result as `screen_rows_for_line(line.chars().count())`.
+    ///
+    /// # Arguments
+    /// * `line` - The line content
     ///
     /// # Returns
     /// The number of screen rows needed (at least 1, even for empty lines).
     #[inline]
-    pub fn screen_rows_for_line(&self, char_count: usize) -> usize {
-        if char_count == 0 {
-            1 // Empty line still takes one screen row
-        } else {
-            // Ceiling division: (char_count + cols_per_row - 1) / cols_per_row
-            (char_count + self.cols_per_row - 1) / self.cols_per_row
-        }
+    pub fn screen_rows_for_line_content(&self, line: &str) -> usize {
+        let visual_width = tab_width::line_visual_width(line);
+        self.screen_rows_for_line(visual_width)
     }
 
     // Chunk: docs/chunks/line_wrap_rendering - O(1) buffer column to screen position
-    /// Converts a buffer column to screen position within a wrapped line.
+    /// Converts a visual column to screen position within a wrapped line.
     ///
-    /// This is O(1) arithmetic: `divmod(buf_col, cols_per_row)`.
+    /// This is O(1) arithmetic: `divmod(visual_col, cols_per_row)`.
     ///
     /// # Arguments
-    /// * `buf_col` - The column index in the buffer line (0-indexed)
+    /// * `visual_col` - The visual column (accounting for tabs and wide chars)
     ///
     /// # Returns
     /// A tuple `(row_offset, screen_col)` where:
     /// - `row_offset` is which screen row within the wrapped line (0 = first row)
     /// - `screen_col` is the column within that screen row
+    ///
+    /// # Note
+    /// For tab-aware positioning, first convert the buffer column to visual column
+    /// using `tab_width::char_col_to_visual_col`, then call this method.
     #[inline]
-    pub fn buffer_col_to_screen_pos(&self, buf_col: usize) -> (usize, usize) {
-        let row_offset = buf_col / self.cols_per_row;
-        let screen_col = buf_col % self.cols_per_row;
+    pub fn buffer_col_to_screen_pos(&self, visual_col: usize) -> (usize, usize) {
+        let row_offset = visual_col / self.cols_per_row;
+        let screen_col = visual_col % self.cols_per_row;
         (row_offset, screen_col)
     }
 
+    // Chunk: docs/chunks/tab_rendering - Tab-aware buffer column to screen position
+    /// Converts a buffer column (character index) to screen position, accounting for
+    /// tabs and wide characters.
+    ///
+    /// # Arguments
+    /// * `line` - The line content
+    /// * `char_col` - The character index in the buffer line (0-indexed)
+    ///
+    /// # Returns
+    /// A tuple `(row_offset, screen_col)` where:
+    /// - `row_offset` is which screen row within the wrapped line (0 = first row)
+    /// - `screen_col` is the visual column within that screen row
+    #[inline]
+    pub fn char_col_to_screen_pos(&self, line: &str, char_col: usize) -> (usize, usize) {
+        let visual_col = tab_width::char_col_to_visual_col(line, char_col);
+        self.buffer_col_to_screen_pos(visual_col)
+    }
+
     // Chunk: docs/chunks/line_wrap_rendering - O(1) screen position to buffer column
-    /// Converts a screen position within a wrapped line back to a buffer column.
+    /// Converts a screen position within a wrapped line back to a visual column.
     ///
     /// This is O(1) arithmetic: `row_offset * cols_per_row + screen_col`.
     ///
@@ -136,10 +190,32 @@ impl WrapLayout {
     /// * `screen_col` - Column within that screen row
     ///
     /// # Returns
-    /// The buffer column index.
+    /// The visual column index.
+    ///
+    /// # Note
+    /// For tab-aware hit-testing, use `screen_pos_to_char_col` which converts the
+    /// visual column back to a character index.
     #[inline]
     pub fn screen_pos_to_buffer_col(&self, row_offset: usize, screen_col: usize) -> usize {
         row_offset * self.cols_per_row + screen_col
+    }
+
+    // Chunk: docs/chunks/tab_rendering - Tab-aware screen position to character column
+    /// Converts a screen position within a wrapped line to a character index, accounting
+    /// for tabs and wide characters.
+    ///
+    /// # Arguments
+    /// * `line` - The line content
+    /// * `row_offset` - Which screen row within the wrapped line (0 = first row)
+    /// * `screen_col` - Column within that screen row
+    ///
+    /// # Returns
+    /// The character index in the buffer line. If the visual column falls inside a tab
+    /// character's span, returns the tab's character index.
+    #[inline]
+    pub fn screen_pos_to_char_col(&self, line: &str, row_offset: usize, screen_col: usize) -> usize {
+        let visual_col = self.screen_pos_to_buffer_col(row_offset, screen_col);
+        tab_width::visual_col_to_char_col(line, visual_col)
     }
 
     // Chunk: docs/chunks/line_wrap_rendering - Continuation row detection
@@ -437,5 +513,59 @@ mod tests {
         let (x, y) = layout.position_for_wrapped(3, 125, 5.0);
         assert_eq!(x, 200.0); // 25 * 8
         assert_eq!(y, 59.0); // 4 * 16 - 5 = 64 - 5
+    }
+
+    // ==================== Tab-aware methods ====================
+
+    #[test]
+    fn test_screen_rows_for_line_content_simple() {
+        let layout = WrapLayout::new(800.0, &test_metrics()); // 100 cols
+        assert_eq!(layout.screen_rows_for_line_content("hello"), 1);
+        assert_eq!(layout.screen_rows_for_line_content(""), 1);
+    }
+
+    #[test]
+    fn test_screen_rows_for_line_content_with_tab() {
+        let layout = WrapLayout::new(80.0, &test_metrics()); // 10 cols
+        // "a\tb" has visual width 5 (1 + 3 + 1), fits in one row of 10 cols
+        assert_eq!(layout.screen_rows_for_line_content("a\tb"), 1);
+        // "\t\t\t" has visual width 12 (4 + 4 + 4), needs 2 rows of 10 cols
+        assert_eq!(layout.screen_rows_for_line_content("\t\t\t"), 2);
+    }
+
+    #[test]
+    fn test_char_col_to_screen_pos_simple() {
+        let layout = WrapLayout::new(80.0, &test_metrics()); // 10 cols
+        // "hello" at char 5 is at visual col 5, row 0
+        assert_eq!(layout.char_col_to_screen_pos("hello", 5), (0, 5));
+        // Char 12 in a simple string is at row 1, col 2
+        assert_eq!(layout.char_col_to_screen_pos("hello world abc", 12), (1, 2));
+    }
+
+    #[test]
+    fn test_char_col_to_screen_pos_with_tab() {
+        let layout = WrapLayout::new(80.0, &test_metrics()); // 10 cols
+        // "a\tb": char 0 at visual 0, char 1 at visual 1, char 2 at visual 4
+        assert_eq!(layout.char_col_to_screen_pos("a\tb", 0), (0, 0));
+        assert_eq!(layout.char_col_to_screen_pos("a\tb", 1), (0, 1)); // tab starts at visual col 1
+        assert_eq!(layout.char_col_to_screen_pos("a\tb", 2), (0, 4)); // 'b' is at visual col 4
+    }
+
+    #[test]
+    fn test_screen_pos_to_char_col_simple() {
+        let layout = WrapLayout::new(80.0, &test_metrics()); // 10 cols
+        // "hello" at screen (0, 2) is char 2
+        assert_eq!(layout.screen_pos_to_char_col("hello", 0, 2), 2);
+    }
+
+    #[test]
+    fn test_screen_pos_to_char_col_with_tab() {
+        let layout = WrapLayout::new(80.0, &test_metrics()); // 10 cols
+        // "a\tb": clicking at visual col 2 or 3 should give char 1 (the tab)
+        assert_eq!(layout.screen_pos_to_char_col("a\tb", 0, 0), 0); // 'a'
+        assert_eq!(layout.screen_pos_to_char_col("a\tb", 0, 1), 1); // tab start
+        assert_eq!(layout.screen_pos_to_char_col("a\tb", 0, 2), 1); // inside tab
+        assert_eq!(layout.screen_pos_to_char_col("a\tb", 0, 3), 1); // inside tab
+        assert_eq!(layout.screen_pos_to_char_col("a\tb", 0, 4), 2); // 'b'
     }
 }
