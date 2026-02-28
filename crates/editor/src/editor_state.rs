@@ -2065,6 +2065,8 @@ impl EditorState {
         let mut is_file_tab = false;
         // Chunk: docs/chunks/dirty_bit_navigation - Track whether content was mutated
         let mut content_mutated = false;
+        // Chunk: docs/chunks/incremental_parse - Capture edit info for incremental parsing
+        let mut captured_edit_info: Option<lite_edit_buffer::EditInfo> = None;
 
         // Check if the active tab is a file tab or terminal tab
         // Use a block to limit the borrow scope
@@ -2135,6 +2137,10 @@ impl EditorState {
             // Chunk: docs/chunks/dirty_bit_navigation - Capture content_mutated before ctx goes out of scope
             content_mutated = ctx.content_mutated;
 
+            // Chunk: docs/chunks/incremental_parse - Capture edit info for incremental parsing
+            // Store the edit info to use after the borrow scope ends
+            captured_edit_info = ctx.edit_info.take();
+
             // Chunk: docs/chunks/invalidation_separation - Convert to Content invalidation
             if ctx_dirty_region.is_dirty() {
                 self.invalidation.merge(InvalidationKind::Content(ctx_dirty_region));
@@ -2200,8 +2206,15 @@ impl EditorState {
         } // End of borrow scope
 
         // Chunk: docs/chunks/syntax_highlighting - Sync highlighter after buffer mutation
+        // Chunk: docs/chunks/incremental_parse - Use incremental parsing when edit info available
         if needs_highlighter_sync {
-            self.sync_active_tab_highlighter();
+            if let Some(edit_info) = captured_edit_info {
+                // Use incremental parsing path - more efficient than full reparse
+                self.notify_active_tab_edit(edit_info.into());
+            } else {
+                // Fall back to full reparse for operations without tracked edits
+                self.sync_active_tab_highlighter();
+            }
         }
 
         // Chunk: docs/chunks/dirty_bit_navigation - Mark file tab dirty only for content mutations
@@ -2968,13 +2981,14 @@ impl EditorState {
         }
 
         // File tab: insert text directly into buffer
+        // Chunk: docs/chunks/incremental_parse - Use tracked variant for incremental parsing
         if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
-            let dirty_lines = buffer.insert_str(&escaped_text);
-            let dirty = viewport.dirty_lines_to_region(&dirty_lines, buffer.line_count());
+            let result = buffer.insert_str_tracked(&escaped_text);
+            let dirty = viewport.dirty_lines_to_region(&result.dirty_lines, buffer.line_count());
             // Chunk: docs/chunks/invalidation_separation - Content invalidation for text insertion
             self.invalidation.merge(InvalidationKind::Content(dirty));
             // Chunk: docs/chunks/styled_line_cache - Track dirty lines for cache invalidation
-            self.dirty_lines.merge(dirty_lines);
+            self.dirty_lines.merge(result.dirty_lines);
 
             // Ensure cursor is visible after insertion
             let cursor_line = buffer.cursor_position().line;
@@ -2986,7 +3000,12 @@ impl EditorState {
             tab.dirty = true;
 
             // Chunk: docs/chunks/highlight_text_source - Sync highlighter after file drop insertion
-            self.sync_active_tab_highlighter();
+            // Chunk: docs/chunks/incremental_parse - Use incremental parsing when edit info available
+            if let Some(edit_info) = result.edit_info {
+                self.notify_active_tab_edit(edit_info.into());
+            } else {
+                self.sync_active_tab_highlighter();
+            }
         }
 
         // Other tab types (AgentOutput, Diff): no-op
@@ -3092,13 +3111,17 @@ impl EditorState {
                 }
 
                 // File tab: insert text into buffer
+                // Chunk: docs/chunks/incremental_parse - Use tracked variant for incremental parsing
+                let mut captured_edit_info: Option<lite_edit_buffer::EditInfo> = None;
+
                 if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
                     // Clear any marked text first (IME commit replaces marked text)
                     buffer.clear_marked_text();
 
-                    let dirty_lines = buffer.insert_str(text);
-                    self.dirty_lines.merge(dirty_lines.clone());
-                    let dirty = viewport.dirty_lines_to_region(&dirty_lines, buffer.line_count());
+                    let result = buffer.insert_str_tracked(text);
+                    captured_edit_info = result.edit_info;
+                    self.dirty_lines.merge(result.dirty_lines.clone());
+                    let dirty = viewport.dirty_lines_to_region(&result.dirty_lines, buffer.line_count());
                     // Chunk: docs/chunks/invalidation_separation - Content invalidation for text insertion
                     self.invalidation.merge(InvalidationKind::Content(dirty));
 
@@ -3112,7 +3135,12 @@ impl EditorState {
                 }
 
                 // Chunk: docs/chunks/highlight_text_source - Sync highlighter after text insertion
-                self.sync_active_tab_highlighter();
+                // Chunk: docs/chunks/incremental_parse - Use incremental parsing when edit info available
+                if let Some(edit_info) = captured_edit_info {
+                    self.notify_active_tab_edit(edit_info.into());
+                } else {
+                    self.sync_active_tab_highlighter();
+                }
             }
         }
     }
@@ -3153,10 +3181,13 @@ impl EditorState {
 
         // Terminal tabs don't support marked text - IME sends final text directly
 
-        // Chunk: docs/chunks/highlight_text_source - Sync highlighter after setting marked text
-        self.sync_active_tab_highlighter();
+        // Chunk: docs/chunks/highlight_text_source - IME marked text (no sync needed for overlay text)
+        // Chunk: docs/chunks/incremental_parse - Marked text is overlay-rendered, not committed
+        // to the buffer, so no syntax tree update is needed. The tree will be updated
+        // when the marked text is committed (via handle_insert_text) or cancelled.
     }
 
+    // Chunk: docs/chunks/highlight_text_source - IME cancellation (no sync needed, doesn't modify buffer)
     /// Handles IME composition cancellation.
     ///
     /// Clears any marked text without inserting it.
@@ -3185,8 +3216,9 @@ impl EditorState {
             self.invalidation.merge(InvalidationKind::Content(dirty));
         }
 
-        // Chunk: docs/chunks/highlight_text_source - Sync highlighter after clearing marked text
-        self.sync_active_tab_highlighter();
+        // Chunk: docs/chunks/incremental_parse - Marked text is overlay-rendered, not committed
+        // to the buffer. Cancelling marked text doesn't change buffer content, so no
+        // syntax tree update is needed.
     }
 
     // Chunk: docs/chunks/invalidation_separation - Updated to use InvalidationKind
@@ -3602,6 +3634,19 @@ impl EditorState {
         if let Some(ws) = self.editor.active_workspace_mut() {
             if let Some(tab) = ws.active_tab_mut() {
                 tab.sync_highlighter();
+            }
+        }
+    }
+
+    // Chunk: docs/chunks/incremental_parse - Incremental syntax tree update
+    /// Notifies the active tab's highlighter of a buffer edit for incremental parsing.
+    ///
+    /// This is more efficient than `sync_active_tab_highlighter` because it only
+    /// updates the affected portion of the syntax tree rather than doing a full reparse.
+    fn notify_active_tab_edit(&mut self, event: lite_edit_syntax::EditEvent) {
+        if let Some(ws) = self.editor.active_workspace_mut() {
+            if let Some(tab) = ws.active_tab_mut() {
+                tab.notify_edit(event);
             }
         }
     }

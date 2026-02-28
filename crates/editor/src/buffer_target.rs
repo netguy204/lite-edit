@@ -278,21 +278,65 @@ impl BufferFocusTarget {
 
     /// Executes a command on the buffer through the editor context.
     // Chunk: docs/chunks/line_nav_keybindings - MoveToLineStart/MoveToLineEnd execution
+    // Chunk: docs/chunks/incremental_parse - Use tracked variants for incremental parsing
     fn execute_command(&self, cmd: Command, ctx: &mut EditorContext) {
+        // Chunk: docs/chunks/incremental_parse - Use tracked variants to capture edit info
+        // For mutation commands, use the `_tracked` variants that return MutationResult
+        // with edit info for incremental syntax parsing.
         let dirty = match cmd {
-            Command::InsertChar(ch) => ctx.buffer.insert_char(ch),
-            Command::InsertNewline => ctx.buffer.insert_newline(),
-            Command::InsertTab => ctx.buffer.insert_char('\t'),
-            Command::DeleteBackward => ctx.buffer.delete_backward(),
-            Command::DeleteForward => ctx.buffer.delete_forward(),
+            Command::InsertChar(ch) => {
+                let result = ctx.buffer.insert_char_tracked(ch);
+                ctx.edit_info = result.edit_info;
+                result.dirty_lines
+            }
+            Command::InsertNewline => {
+                let result = ctx.buffer.insert_newline_tracked();
+                ctx.edit_info = result.edit_info;
+                result.dirty_lines
+            }
+            Command::InsertTab => {
+                let result = ctx.buffer.insert_char_tracked('\t');
+                ctx.edit_info = result.edit_info;
+                result.dirty_lines
+            }
+            Command::DeleteBackward => {
+                let result = ctx.buffer.delete_backward_tracked();
+                ctx.edit_info = result.edit_info;
+                result.dirty_lines
+            }
+            Command::DeleteForward => {
+                let result = ctx.buffer.delete_forward_tracked();
+                ctx.edit_info = result.edit_info;
+                result.dirty_lines
+            }
             // Chunk: docs/chunks/delete_backward_word - Alt+Backspace word deletion
-            Command::DeleteBackwardWord => ctx.buffer.delete_backward_word(),
+            // Chunk: docs/chunks/incremental_parse - Use tracked variant for incremental parsing
+            Command::DeleteBackwardWord => {
+                let result = ctx.buffer.delete_backward_word_tracked();
+                ctx.edit_info = result.edit_info;
+                result.dirty_lines
+            }
             // Chunk: docs/chunks/word_forward_delete - Alt+D forward word deletion
-            Command::DeleteForwardWord => ctx.buffer.delete_forward_word(),
+            // Chunk: docs/chunks/incremental_parse - Use tracked variant for incremental parsing
+            Command::DeleteForwardWord => {
+                let result = ctx.buffer.delete_forward_word_tracked();
+                ctx.edit_info = result.edit_info;
+                result.dirty_lines
+            }
             // Chunk: docs/chunks/kill_line - Execute DeleteToLineEnd command
-            Command::DeleteToLineEnd => ctx.buffer.delete_to_line_end(),
+            // Chunk: docs/chunks/incremental_parse - Use tracked variant for incremental parsing
+            Command::DeleteToLineEnd => {
+                let result = ctx.buffer.delete_to_line_end_tracked();
+                ctx.edit_info = result.edit_info;
+                result.dirty_lines
+            }
             // Chunk: docs/chunks/delete_to_line_start - Execute DeleteToLineStart command
-            Command::DeleteToLineStart => ctx.buffer.delete_to_line_start(),
+            // Chunk: docs/chunks/incremental_parse - Use tracked variant for incremental parsing
+            Command::DeleteToLineStart => {
+                let result = ctx.buffer.delete_to_line_start_tracked();
+                ctx.edit_info = result.edit_info;
+                result.dirty_lines
+            }
             Command::MoveLeft => {
                 ctx.buffer.move_left();
                 // Cursor movement doesn't dirty buffer content, but we need to redraw
@@ -410,10 +454,12 @@ impl BufferFocusTarget {
                 return;
             }
             // Chunk: docs/chunks/dirty_bit_navigation - Paste sets content_mutated when content is inserted
+            // Chunk: docs/chunks/incremental_parse - Use tracked variant for incremental parsing
             Command::Paste => {
                 if let Some(text) = crate::clipboard::paste_from_clipboard() {
-                    let dirty = ctx.buffer.insert_str(&text);
-                    ctx.mark_dirty(dirty);
+                    let result = ctx.buffer.insert_str_tracked(&text);
+                    ctx.edit_info = result.edit_info;
+                    ctx.mark_dirty(result.dirty_lines);
                     ctx.set_content_mutated();
                     ctx.ensure_cursor_visible();
                 }
@@ -421,14 +467,16 @@ impl BufferFocusTarget {
             }
             // Chunk: docs/chunks/clipboard_cut - Cut command execution
             // Chunk: docs/chunks/dirty_bit_navigation - Cut sets content_mutated when selection is deleted
+            // Chunk: docs/chunks/incremental_parse - Use tracked variant for incremental parsing
             Command::Cut => {
                 // Get selected text; if no selection, this is a no-op
                 if let Some(text) = ctx.buffer.selected_text() {
                     // Copy to clipboard first (before mutation)
                     crate::clipboard::copy_to_clipboard(&text);
-                    // Delete the selection
-                    let dirty = ctx.buffer.delete_selection();
-                    ctx.mark_dirty(dirty);
+                    // Delete the selection using tracked variant
+                    let result = ctx.buffer.delete_selection_tracked();
+                    ctx.edit_info = result.edit_info;
+                    ctx.mark_dirty(result.dirty_lines);
                     ctx.set_content_mutated();
                     ctx.ensure_cursor_visible();
                 }

@@ -1330,6 +1330,7 @@ impl SyntaxHighlighter {
         self.build_spans_with_external_text(line_idx, line_text, line_start, line_end)
     }
 
+    // Chunk: docs/chunks/highlight_text_source - Internal helper for buffer-sourced spans
     /// Builds spans for a line using externally-provided text content.
     ///
     /// This is similar to `build_line_from_captures` but uses the provided

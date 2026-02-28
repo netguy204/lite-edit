@@ -54,6 +54,23 @@ impl EditEvent {
     }
 }
 
+// Chunk: docs/chunks/incremental_parse - Convert EditInfo from buffer crate to EditEvent
+impl From<lite_edit_buffer::EditInfo> for EditEvent {
+    fn from(info: lite_edit_buffer::EditInfo) -> Self {
+        EditEvent {
+            start_byte: info.start_byte,
+            old_end_byte: info.old_end_byte,
+            new_end_byte: info.new_end_byte,
+            start_row: info.start_row,
+            start_col: info.start_col,
+            old_end_row: info.old_end_row,
+            old_end_col: info.old_end_col,
+            new_end_row: info.new_end_row,
+            new_end_col: info.new_end_col,
+        }
+    }
+}
+
 /// Calculates the byte offset for a (row, col) position in a source string.
 ///
 /// Positions are 0-indexed. Column is in characters, not bytes.
