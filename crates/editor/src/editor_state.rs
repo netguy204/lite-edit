@@ -8647,8 +8647,10 @@ mod tests {
 
         // The terminal shell needs time to start and produce output.
         // Poll repeatedly until we get dirty activity.
+        // Use generous timeout (10s) because shell startup is slow under parallel test load
+        // (many tests spawn shells concurrently).
         let mut found_dirty = false;
-        for _ in 0..50 {
+        for _ in 0..500 {
             std::thread::sleep(Duration::from_millis(20));
             let (dirty, _needs_rewakeup) = state.poll_agents();
             if dirty.is_dirty() {
@@ -8751,9 +8753,11 @@ mod tests {
         // Create a terminal tab
         state.new_terminal_tab();
 
-        // Wait for shell startup and poll for PTY events
+        // Wait for shell startup and poll for PTY events.
+        // Use generous timeout (10s) because shell startup is slow under parallel test load
+        // (many tests spawn shells concurrently).
         let mut found_dirty = false;
-        for _ in 0..50 {
+        for _ in 0..500 {
             std::thread::sleep(Duration::from_millis(20));
             let (dirty, _needs_rewakeup) = state.poll_agents();
             if dirty.is_dirty() {
