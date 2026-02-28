@@ -5,7 +5,7 @@ parent_chunk: null
 code_paths:
 - crates/editor/src/styled_line_cache.rs
 - crates/editor/src/glyph_buffer.rs
-- crates/editor/src/renderer.rs
+- crates/editor/src/renderer/mod.rs
 - crates/editor/src/lib.rs
 code_references:
   - ref: crates/editor/src/styled_line_cache.rs#StyledLineCache

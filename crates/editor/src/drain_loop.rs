@@ -202,8 +202,9 @@ impl EventDrainLoop {
                 self.handle_resize();
             }
             // Chunk: docs/chunks/dragdrop_file_paste - File drop handling
-            EditorEvent::FileDrop(paths) => {
-                self.handle_file_drop(paths);
+            // Chunk: docs/chunks/terminal_image_paste - Position-aware file drop
+            EditorEvent::FileDrop { paths, position } => {
+                self.handle_file_drop(paths, position);
             }
             // Chunk: docs/chunks/file_change_events - External file modification handling
             EditorEvent::FileChanged(path) => {
@@ -425,9 +426,13 @@ impl EventDrainLoop {
     }
 
     // Chunk: docs/chunks/dragdrop_file_paste - File drop handling
+    // Chunk: docs/chunks/terminal_image_paste - Position-aware file drop
     /// Handles file drop events by forwarding to the editor state.
-    fn handle_file_drop(&mut self, paths: Vec<String>) {
-        self.state.handle_file_drop(paths);
+    ///
+    /// The position (in screen coordinates) is used to determine which pane
+    /// the drop landed on for pane-aware routing.
+    fn handle_file_drop(&mut self, paths: Vec<String>, position: (f64, f64)) {
+        self.state.handle_file_drop(paths, position);
         self.poll_after_input();
     }
 

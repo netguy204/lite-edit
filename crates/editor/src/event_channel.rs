@@ -171,9 +171,11 @@ impl EventSender {
     /// Sends a file drop event to the channel.
     ///
     /// This is called when files are dropped onto the view via drag-and-drop.
+    /// The position is in screen coordinates (pixels, y=0 at top).
     // Chunk: docs/chunks/dragdrop_file_paste - File drop event sender
-    pub fn send_file_drop(&self, paths: Vec<String>) -> Result<(), SendError<EditorEvent>> {
-        let result = self.inner.sender.send(EditorEvent::FileDrop(paths));
+    // Chunk: docs/chunks/terminal_image_paste - Added position for pane-aware routing
+    pub fn send_file_drop(&self, paths: Vec<String>, position: (f64, f64)) -> Result<(), SendError<EditorEvent>> {
+        let result = self.inner.sender.send(EditorEvent::FileDrop { paths, position });
         (self.inner.run_loop_waker)();
         result
     }
@@ -482,14 +484,16 @@ mod tests {
         });
 
         let paths = vec!["/path/to/file.txt".to_string(), "/another/path.txt".to_string()];
-        sender.send_file_drop(paths.clone()).unwrap();
+        let position = (150.0, 200.0);
+        sender.send_file_drop(paths.clone(), position).unwrap();
 
         assert_eq!(waker_called.load(Ordering::SeqCst), 1, "Waker should be called after send_file_drop");
 
         let event = receiver.try_recv().unwrap();
         match event {
-            EditorEvent::FileDrop(received_paths) => {
+            EditorEvent::FileDrop { paths: received_paths, position: received_position } => {
                 assert_eq!(received_paths, paths);
+                assert_eq!(received_position, position);
             }
             _ => panic!("Expected FileDrop event"),
         }
