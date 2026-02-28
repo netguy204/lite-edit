@@ -237,6 +237,7 @@ pub fn calculate_welcome_geometry(
 }
 
 /// Calculates the total content dimensions (width in chars, height in lines).
+// Chunk: docs/chunks/welcome_scroll - Made pub(crate) to expose deterministic content dimensions for scroll clamping
 pub(crate) fn calculate_content_dimensions() -> (usize, usize) {
     // Logo width and height
     let logo_width = FEATHER_LOGO.iter().map(|(s, _)| s.len()).max().unwrap_or(0);

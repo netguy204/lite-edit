@@ -3227,6 +3227,7 @@ impl EditorState {
     /// Scrolls the tab in the specified pane without changing focus.
     // Chunk: docs/chunks/pane_hover_scroll - Pane-targeted scroll execution
     // Chunk: docs/chunks/vsplit_scroll - Use pane-specific dimensions for scroll clamping
+    // Chunk: docs/chunks/welcome_scroll - Routes scroll events on empty file tabs to the welcome scroll offset
     fn scroll_pane(&mut self, target_pane_id: crate::pane_layout::PaneId, delta: ScrollDelta) {
         // Chunk: docs/chunks/vsplit_scroll - Get pane-specific dimensions before borrowing workspace.
         // Using full-window dimensions here causes scroll clamping to use incorrect wrap
