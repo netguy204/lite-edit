@@ -1,5 +1,5 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
 code_paths: []
@@ -10,9 +10,15 @@ subsystems: []
 friction_entries: []
 bug_type: semantic
 depends_on: []
-created_after: ["app_nap_activity_assertions", "app_nap_blink_timer", "app_nap_file_watcher_pause", "highlight_text_source", "merge_conflict_render", "minibuffer_input", "terminal_single_pane_refresh"]
+created_after:
+- app_nap_activity_assertions
+- app_nap_blink_timer
+- app_nap_file_watcher_pause
+- highlight_text_source
+- merge_conflict_render
+- minibuffer_input
+- terminal_single_pane_refresh
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
