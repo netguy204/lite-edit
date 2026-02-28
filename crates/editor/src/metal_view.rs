@@ -277,6 +277,19 @@ define_class!(
             true
         }
 
+        // Chunk: docs/chunks/terminal_image_paste - acceptsFirstMouse for click-through behavior
+        /// Returns true to accept mouse events on first click when window is inactive.
+        ///
+        /// This enables click-through behavior: when lite-edit is not the key window,
+        /// the first click/drag both activates the window AND delivers the event to
+        /// the view. This is important for drag-and-drop from other apps so that the
+        /// pane under the drop point can receive focus, and for general click-to-focus
+        /// behavior where clicking a specific pane should focus that pane immediately.
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn __accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            true
+        }
+
         // Chunk: docs/chunks/unicode_ime_input - Route key events through text input system
         /// Handle key down events.
         ///
@@ -750,9 +763,11 @@ define_class!(
         }
 
         // Chunk: docs/chunks/dragdrop_file_paste - NSDraggingDestination protocol implementation
+        // Chunk: docs/chunks/terminal_image_paste - Extract drop position for pane-aware routing
         /// Called when user releases the drag over our view.
         ///
-        /// Extracts file URLs from the pasteboard and sends them via the event channel.
+        /// Extracts file URLs from the pasteboard and sends them via the event channel,
+        /// along with the drop position for pane-aware routing.
         /// Returns `true` on success, `false` if no files were dropped.
         #[unsafe(method(performDragOperation:))]
         fn __perform_drag_operation(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
@@ -792,10 +807,29 @@ define_class!(
                 return false.into();
             }
 
-            // Send the file drop event via the event sender
+            // Extract drop position from NSDraggingInfo
+            // draggingLocation returns NSPoint in window coordinates
+            let location_in_window: objc2_foundation::NSPoint = sender.draggingLocation();
+
+            // Convert to view coordinates (same pattern as mouse events)
+            let location_in_view: objc2_foundation::NSPoint =
+                unsafe { msg_send![self, convertPoint: location_in_window, fromView: std::ptr::null::<NSView>()] };
+
+            // Get scale factor and view frame for coordinate conversion
+            let scale = self.ivars().scale_factor.get();
+            let frame = self.frame();
+
+            // Convert to pixels and flip Y coordinate from bottom-left (NSView) to top-left (screen)
+            // This matches the coordinate system used by resolve_pane_hit
+            let position = (
+                location_in_view.x * scale,
+                (frame.size.height - location_in_view.y) * scale,
+            );
+
+            // Send the file drop event via the event sender with position
             let event_sender_guard = self.ivars().event_sender.borrow();
             if let Some(event_sender) = event_sender_guard.as_ref() {
-                let _ = event_sender.send_file_drop(paths);
+                let _ = event_sender.send_file_drop(paths, position);
             }
 
             true.into()

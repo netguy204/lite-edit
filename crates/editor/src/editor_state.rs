@@ -2873,18 +2873,25 @@ impl EditorState {
     }
 
     // Chunk: docs/chunks/dragdrop_file_paste - File drop handling
+    // Chunk: docs/chunks/terminal_image_paste - Position-aware pane routing
     /// Handles file drop events by inserting shell-escaped file paths.
     ///
     /// When files are dropped onto the view, this method:
-    /// 1. Shell-escapes each path (single-quote escaping for POSIX shells)
-    /// 2. Joins multiple paths with spaces
-    /// 3. Inserts the result as text based on the current focus:
+    /// 1. Uses the drop position to determine which pane the drop landed on
+    /// 2. Shell-escapes each path (single-quote escaping for POSIX shells)
+    /// 3. Joins multiple paths with spaces
+    /// 4. Inserts the result as text into the target pane:
     ///    - Terminal tab: Uses bracketed paste encoding
     ///    - File tab: Inserts directly into the buffer
     ///    - Other modes (Selector, FindInFile, ConfirmDialog): Ignored
+    ///    - Tab bar drops: Ignored
     ///
-    /// This mirrors how macOS Terminal.app and Alacritty handle file drops.
-    pub fn handle_file_drop(&mut self, paths: Vec<String>) {
+    /// This mirrors how macOS Terminal.app and Alacritty handle file drops,
+    /// but adds pane-aware routing so the drop goes to the pane under the
+    /// cursor rather than whichever pane was last active.
+    pub fn handle_file_drop(&mut self, paths: Vec<String>, position: (f64, f64)) {
+        use crate::pane_layout::{resolve_pane_hit, HitZone};
+
         // Only handle drops when in Buffer focus mode
         // (Selector/FindInFile/ConfirmDialog don't accept file drops)
         if self.focus != EditorFocus::Buffer {
@@ -2895,21 +2902,58 @@ impl EditorState {
             return;
         }
 
+        let (screen_x, screen_y) = position;
+
+        // Use renderer-consistent bounds for pane hit resolution
+        let bounds = (
+            RAIL_WIDTH,
+            0.0,
+            self.view_width - RAIL_WIDTH,
+            self.view_height,
+        );
+
+        // Resolve which pane the drop landed on
+        let hit = if let Some(workspace) = self.editor.active_workspace() {
+            resolve_pane_hit(
+                screen_x as f32,
+                screen_y as f32,
+                bounds,
+                &workspace.pane_root,
+                TAB_BAR_HEIGHT,
+            )
+        } else {
+            return;
+        };
+
+        let Some(hit) = hit else {
+            return; // Drop outside any pane (e.g., in rail area)
+        };
+
+        // Ignore drops in the tab bar region - we only route to pane content
+        if hit.zone == HitZone::TabBar {
+            return;
+        }
+
         // Shell-escape and join the paths
         let escaped_text = shell_escape_paths(&paths);
 
-        // Get the active tab and route based on type
+        // Get the specific pane that was hit (not active_pane_id)
         let ws = match self.editor.active_workspace_mut() {
             Some(ws) => ws,
             None => return,
         };
 
-        let tab = match ws.active_tab_mut() {
+        let pane = match ws.pane_root.get_pane_mut(hit.pane_id) {
+            Some(pane) => pane,
+            None => return,
+        };
+
+        let tab = match pane.active_tab_mut() {
             Some(tab) => tab,
             None => return,
         };
 
-        // Check for terminal tab first
+        // Route to terminal or buffer based on tab type
         if let Some((terminal, _viewport)) = tab.terminal_and_viewport_mut() {
             // Terminal tab: use bracketed paste encoding (same as Cmd+V)
             let modes = terminal.term_mode();
@@ -10791,7 +10835,12 @@ mod tests {
 
     // =========================================================================
     // File Drop Tests (Chunk: docs/chunks/dragdrop_file_paste)
+    // Chunk: docs/chunks/terminal_image_paste - Updated tests to include position
     // =========================================================================
+
+    /// Default position for file drop tests - within the content area of a single pane.
+    /// Uses coordinates well inside the pane (past RAIL_WIDTH and TAB_BAR_HEIGHT).
+    const FILE_DROP_TEST_POSITION: (f64, f64) = (100.0, 100.0);
 
     #[test]
     fn test_file_drop_inserts_shell_escaped_path_in_buffer() {
@@ -10799,7 +10848,7 @@ mod tests {
         state.update_viewport_size(320.0);
 
         // Drop a single file
-        state.handle_file_drop(vec!["/Users/test/file.txt".to_string()]);
+        state.handle_file_drop(vec!["/Users/test/file.txt".to_string()], FILE_DROP_TEST_POSITION);
 
         // Should be shell-escaped with single quotes
         assert_eq!(state.buffer().content(), "'/Users/test/file.txt'");
@@ -10811,7 +10860,7 @@ mod tests {
         state.update_viewport_size(320.0);
 
         // Drop a file with spaces in the name
-        state.handle_file_drop(vec!["/Users/test/my file.txt".to_string()]);
+        state.handle_file_drop(vec!["/Users/test/my file.txt".to_string()], FILE_DROP_TEST_POSITION);
 
         // Spaces inside single quotes don't need extra escaping
         assert_eq!(state.buffer().content(), "'/Users/test/my file.txt'");
@@ -10823,7 +10872,7 @@ mod tests {
         state.update_viewport_size(320.0);
 
         // Drop a file with single quote in the name
-        state.handle_file_drop(vec!["/Users/test/foo's.txt".to_string()]);
+        state.handle_file_drop(vec!["/Users/test/foo's.txt".to_string()], FILE_DROP_TEST_POSITION);
 
         // Single quotes escaped with the '\'' pattern
         assert_eq!(state.buffer().content(), "'/Users/test/foo'\\''s.txt'");
@@ -10838,7 +10887,7 @@ mod tests {
         state.handle_file_drop(vec![
             "/path/to/file1.txt".to_string(),
             "/path/to/file2.txt".to_string(),
-        ]);
+        ], FILE_DROP_TEST_POSITION);
 
         // Should be space-separated
         assert_eq!(
@@ -10853,7 +10902,7 @@ mod tests {
         state.update_viewport_size(320.0);
 
         // Drop no files
-        state.handle_file_drop(vec![]);
+        state.handle_file_drop(vec![], FILE_DROP_TEST_POSITION);
 
         // Buffer should remain empty
         assert!(state.buffer().is_empty());
@@ -10868,7 +10917,7 @@ mod tests {
         state.focus = EditorFocus::Selector;
 
         // Try to drop a file
-        state.handle_file_drop(vec!["/Users/test/file.txt".to_string()]);
+        state.handle_file_drop(vec!["/Users/test/file.txt".to_string()], FILE_DROP_TEST_POSITION);
 
         // Buffer should remain empty because selector mode ignores drops
         assert!(state.buffer().is_empty());
@@ -10889,7 +10938,7 @@ mod tests {
         assert!(!tab.dirty);
 
         // Drop a file
-        state.handle_file_drop(vec!["/path/to/file.txt".to_string()]);
+        state.handle_file_drop(vec!["/path/to/file.txt".to_string()], FILE_DROP_TEST_POSITION);
 
         // Tab should now be marked dirty
         let tab = state
@@ -10899,6 +10948,164 @@ mod tests {
             .active_tab()
             .unwrap();
         assert!(tab.dirty, "Tab should be marked dirty after file drop");
+    }
+
+    #[test]
+    fn test_file_drop_in_rail_area_ignored() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(320.0);
+
+        // Drop in the left rail area (x < RAIL_WIDTH)
+        let rail_position = (10.0, 100.0); // 10px is within the ~28px rail width
+        state.handle_file_drop(vec!["/Users/test/file.txt".to_string()], rail_position);
+
+        // Buffer should remain empty because drop was in rail area
+        assert!(state.buffer().is_empty());
+    }
+
+    #[test]
+    fn test_file_drop_in_tab_bar_ignored() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(320.0);
+
+        // Drop in the tab bar area (y < TAB_BAR_HEIGHT, which is 32px)
+        let tab_bar_position = (100.0, 10.0); // 10px is within the 32px tab bar height
+        state.handle_file_drop(vec!["/Users/test/file.txt".to_string()], tab_bar_position);
+
+        // Buffer should remain empty because drop was in tab bar
+        assert!(state.buffer().is_empty());
+    }
+
+    // =========================================================================
+    // Multi-Pane File Drop Routing Tests (Chunk: docs/chunks/terminal_image_paste)
+    // =========================================================================
+
+    /// Tests that file drop routes to the pane under the cursor, not the active pane.
+    ///
+    /// Layout (horizontal split, 800x600):
+    /// - Left pane: x=56 to 428, width=372 (pane_id=1, active)
+    /// - Right pane: x=428 to 800, width=372 (pane_id=2, not active)
+    ///
+    /// When we drop a file on the RIGHT pane (which is NOT active), the file path
+    /// should be inserted into the RIGHT pane's buffer, not the left pane's buffer.
+    #[test]
+    fn test_file_drop_targets_pane_under_cursor_not_active_pane() {
+        let mut state = create_horizontal_split_state();
+
+        // Verify left pane is active initially
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.active_pane_id, 1, "Left pane should be active");
+
+        // Verify initial content of both panes
+        let left_content_before = ws.pane_root.get_pane(1).unwrap()
+            .active_tab().unwrap().as_text_buffer().unwrap().content();
+        let right_content_before = ws.pane_root.get_pane(2).unwrap()
+            .active_tab().unwrap().as_text_buffer().unwrap().content();
+
+        assert_eq!(left_content_before, "left1 content");
+        assert_eq!(right_content_before, "right1 content");
+
+        // Drop file in the RIGHT pane's content area
+        // Right pane starts at x=428, content area starts at y=32 (TAB_BAR_HEIGHT)
+        // Use a position clearly in the right pane: x=600, y=100
+        let right_pane_position = (600.0, 100.0);
+        state.handle_file_drop(vec!["/path/to/dropped.txt".to_string()], right_pane_position);
+
+        // LEFT pane (active) should be UNCHANGED
+        let ws = state.editor.active_workspace().unwrap();
+        let left_content_after = ws.pane_root.get_pane(1).unwrap()
+            .active_tab().unwrap().as_text_buffer().unwrap().content();
+        assert_eq!(left_content_after, "left1 content",
+            "Left pane (active) should not receive the drop");
+
+        // RIGHT pane (not active) should have the dropped file path inserted
+        let right_content_after = ws.pane_root.get_pane(2).unwrap()
+            .active_tab().unwrap().as_text_buffer().unwrap().content();
+        assert!(right_content_after.contains("/path/to/dropped.txt"),
+            "Right pane should receive the drop. Content: {}", right_content_after);
+    }
+
+    /// Tests that file drop works correctly when dropping on the already-active pane.
+    #[test]
+    fn test_file_drop_on_active_pane_in_multi_pane_layout() {
+        let mut state = create_horizontal_split_state();
+
+        // Verify left pane is active
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.active_pane_id, 1, "Left pane should be active");
+
+        // Get initial content
+        let left_content_before = ws.pane_root.get_pane(1).unwrap()
+            .active_tab().unwrap().as_text_buffer().unwrap().content();
+        assert_eq!(left_content_before, "left1 content");
+
+        // Drop file in the LEFT pane's content area (the active pane)
+        // Left pane: x=56 to 428, content area starts at y=32
+        // Use a position clearly in the left pane: x=200, y=100
+        let left_pane_position = (200.0, 100.0);
+        state.handle_file_drop(vec!["/path/to/file.txt".to_string()], left_pane_position);
+
+        // LEFT pane should receive the drop
+        let ws = state.editor.active_workspace().unwrap();
+        let left_content_after = ws.pane_root.get_pane(1).unwrap()
+            .active_tab().unwrap().as_text_buffer().unwrap().content();
+        assert!(left_content_after.contains("/path/to/file.txt"),
+            "Left pane should receive the drop. Content: {}", left_content_after);
+
+        // RIGHT pane should be unchanged
+        let right_content_after = ws.pane_root.get_pane(2).unwrap()
+            .active_tab().unwrap().as_text_buffer().unwrap().content();
+        assert_eq!(right_content_after, "right1 content",
+            "Right pane should not receive the drop");
+    }
+
+    /// Tests that file drop in the tab bar region of any pane is ignored.
+    #[test]
+    fn test_file_drop_in_multi_pane_tab_bar_ignored() {
+        let mut state = create_horizontal_split_state();
+
+        // Get initial content of right pane
+        let ws = state.editor.active_workspace().unwrap();
+        let right_content_before = ws.pane_root.get_pane(2).unwrap()
+            .active_tab().unwrap().as_text_buffer().unwrap().content();
+        assert_eq!(right_content_before, "right1 content");
+
+        // Drop file in the RIGHT pane's TAB BAR (y < 32)
+        // Right pane starts at x=428
+        let right_tab_bar_position = (600.0, 16.0);
+        state.handle_file_drop(vec!["/path/to/file.txt".to_string()], right_tab_bar_position);
+
+        // RIGHT pane should be unchanged (tab bar drop ignored)
+        let ws = state.editor.active_workspace().unwrap();
+        let right_content_after = ws.pane_root.get_pane(2).unwrap()
+            .active_tab().unwrap().as_text_buffer().unwrap().content();
+        assert_eq!(right_content_after, right_content_before,
+            "Tab bar drop should be ignored");
+    }
+
+    /// Tests that dropping on the divider between panes is handled gracefully.
+    /// The divider has zero width in our layout, so this tests the edge case.
+    #[test]
+    fn test_file_drop_on_pane_boundary_routes_to_adjacent_pane() {
+        let mut state = create_horizontal_split_state();
+
+        // The split is at x=428 (50% of content width 744 + RAIL_WIDTH 56)
+        // Drop exactly at the boundary
+        let boundary_position = (428.0, 100.0);
+        state.handle_file_drop(vec!["/path/to/boundary.txt".to_string()], boundary_position);
+
+        // At least one pane should have received the drop (either left or right)
+        let ws = state.editor.active_workspace().unwrap();
+        let left_content = ws.pane_root.get_pane(1).unwrap()
+            .active_tab().unwrap().as_text_buffer().unwrap().content();
+        let right_content = ws.pane_root.get_pane(2).unwrap()
+            .active_tab().unwrap().as_text_buffer().unwrap().content();
+
+        let either_received = left_content.contains("boundary.txt")
+            || right_content.contains("boundary.txt");
+        assert!(either_received,
+            "Boundary drop should route to one of the panes. Left: {}, Right: {}",
+            left_content, right_content);
     }
 
     // =========================================================================
