@@ -8,153 +8,215 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The fix involves extending the environment variable setup in `crates/terminal/src/pty.rs`
+to ensure child processes receive proper UTF-8 locale information and terminal
+identification. The current implementation only sets `TERM` and `COLORTERM`, which is
+insufficient for applications that use locale environment variables to decide whether
+to emit Unicode characters.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Strategy:**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. **Add locale environment variables**: Set `LANG` to ensure UTF-8 encoding is
+   signaled to child processes. The approach will:
+   - First attempt to inherit the parent's `LANG` if it ends with `.UTF-8`
+   - Fall back to `en_US.UTF-8` if the parent environment lacks a UTF-8 locale
+   - This handles both terminal-launched scenarios (inherits user's locale) and
+     Finder/Dock-launched scenarios (minimal environment, falls back to explicit UTF-8)
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/terminal_unicode_env/GOAL.md)
-with references to the files that you expect to touch.
--->
+2. **Add `TERM_PROGRAM=lite-edit`**: This allows applications to identify the terminal
+   emulator, which some programs use for capability detection.
 
-## Subsystem Considerations
+3. **Optionally set `LC_ALL`**: Some applications check `LC_ALL` before `LANG`. Setting
+   `LC_ALL` can override other `LC_*` variables, but setting `LANG` alone should be
+   sufficient for most use cases since `LC_ALL` is typically not set by default on macOS.
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+**Existing code to build on:**
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
+- `pty.rs:97-99` (in `spawn()`) and `pty.rs:217-219` (in `spawn_with_wakeup()`)
+  already set `TERM` and `COLORTERM`. We extend this pattern.
+- Both spawn functions share the same environment setup logic, so both must be updated.
 
-If no subsystems are relevant, delete this section.
+**Testing approach per TESTING_PHILOSOPHY.md:**
 
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/0001-validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/0002-error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
+- The core behavior (environment variable propagation) can be tested by spawning a
+  process that echoes environment variables and verifying the expected values.
+- This is testable in a unit test without GUI/platform dependencies.
+- Visual Unicode rendering (box-drawing, geometric shapes) is a "humble view" concern
+  and cannot be unit-tested; manual verification is appropriate for that aspect.
 
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/0001-validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+<!-- No subsystems are relevant to this chunk.
+     The renderer and viewport_scroll subsystems do not govern PTY environment setup. -->
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing tests for environment variable propagation
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+**Location:** `crates/terminal/src/pty.rs` (in the `#[cfg(test)]` module)
 
-Example:
+Create tests that verify environment variables are properly set in child processes:
 
-### Step 1: Define the SegmentHeader struct
+1. `test_env_lang_utf8` — Spawns `printenv LANG` and verifies the output contains
+   `.UTF-8`. This tests the locale environment variable is set.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+2. `test_env_term_program` — Spawns `printenv TERM_PROGRAM` and verifies the output
+   is `lite-edit`. This tests the terminal identification is set.
 
-Location: src/segment/format.rs
+3. `test_unicode_output_preserved` — Spawns `echo` with a Unicode character (e.g.,
+   `echo "●"`) and verifies the exact character is received (not an underscore or
+   replacement). This is a regression test for the original bug.
 
-### Step 2: Implement header serialization
+These tests should fail initially because the environment variables are not yet set.
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+### Step 2: Extract environment setup into a helper function
 
-### Step 3: ...
+**Location:** `crates/terminal/src/pty.rs`
+
+Currently, both `spawn()` and `spawn_with_wakeup()` have identical environment setup
+code:
+
+```rust
+cmd_builder.env("TERM", "xterm-256color");
+cmd_builder.env("COLORTERM", "truecolor");
+```
+
+Extract this into a private helper function `configure_pty_environment()` that takes
+a mutable `CommandBuilder` reference and sets all required environment variables.
+This ensures both spawn functions stay in sync and reduces duplication.
+
+**Signature:**
+```rust
+// Chunk: docs/chunks/terminal_unicode_env - UTF-8 locale environment setup
+fn configure_pty_environment(cmd: &mut CommandBuilder) {
+    // Environment setup logic here
+}
+```
+
+Add a chunk backreference comment to the helper function.
+
+### Step 3: Implement locale detection and UTF-8 environment variables
+
+**Location:** `crates/terminal/src/pty.rs` (in `configure_pty_environment`)
+
+Implement the locale detection logic:
+
+```rust
+// 1. Check if parent process has a UTF-8 locale set
+let lang = std::env::var("LANG")
+    .ok()
+    .filter(|v| v.ends_with(".UTF-8") || v.ends_with(".utf8"))
+    .unwrap_or_else(|| "en_US.UTF-8".to_string());
+
+// 2. Set LANG for the child process
+cmd.env("LANG", &lang);
+
+// 3. Set TERM_PROGRAM to identify lite-edit
+cmd.env("TERM_PROGRAM", "lite-edit");
+```
+
+This approach:
+- Inherits the user's locale if it's UTF-8 (respects user preferences)
+- Falls back to `en_US.UTF-8` for Finder/Dock launches or non-UTF-8 parent locales
+- Sets `TERM_PROGRAM` for application identification
+
+**Note:** We do NOT set `LC_ALL` because:
+- `LC_ALL` overrides all other `LC_*` variables, which could override user preferences
+- `LANG` is sufficient for UTF-8 signaling
+- macOS does not set `LC_ALL` by default, and we should match that behavior
+
+### Step 4: Update `spawn()` to use the helper
+
+**Location:** `crates/terminal/src/pty.rs`, lines 97-99
+
+Replace:
+```rust
+// Set up environment
+cmd_builder.env("TERM", "xterm-256color");
+cmd_builder.env("COLORTERM", "truecolor");
+```
+
+With:
+```rust
+// Set up environment (terminal capabilities + UTF-8 locale)
+configure_pty_environment(&mut cmd_builder);
+```
+
+### Step 5: Update `spawn_with_wakeup()` to use the helper
+
+**Location:** `crates/terminal/src/pty.rs`, lines 217-219
+
+Replace:
+```rust
+// Set up environment
+cmd_builder.env("TERM", "xterm-256color");
+cmd_builder.env("COLORTERM", "truecolor");
+```
+
+With:
+```rust
+// Set up environment (terminal capabilities + UTF-8 locale)
+configure_pty_environment(&mut cmd_builder);
+```
+
+### Step 6: Run tests and verify they pass
+
+Run the new environment variable tests:
+```bash
+cargo test -p terminal test_env_lang_utf8
+cargo test -p terminal test_env_term_program
+cargo test -p terminal test_unicode_output_preserved
+```
+
+Also run the existing tests to ensure no regressions:
+```bash
+cargo test -p terminal
+```
+
+### Step 7: Manual verification with a TUI application
+
+After the automated tests pass, manually verify the fix works end-to-end:
+
+1. Build lite-edit
+2. Open a terminal tab
+3. Run a TUI application that uses Unicode (e.g., Claude Code, or `echo "● □ └ ├ ✱"`)
+4. Verify the Unicode characters render correctly (not as underscores)
+5. Test both scenarios:
+   - Launch lite-edit from a terminal (inherits locale)
+   - Launch lite-edit from Finder/Dock (minimal environment, uses fallback)
 
 ---
 
 **BACKREFERENCE COMMENTS**
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+Add a chunk backreference to the `configure_pty_environment()` helper function:
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
+```rust
+// Chunk: docs/chunks/terminal_unicode_env - UTF-8 locale environment setup
+fn configure_pty_environment(cmd: &mut CommandBuilder) { ... }
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
-
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
-
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+None. The `portable-pty` crate's `CommandBuilder::env()` method is already available
+and used by the existing code. No new dependencies are required.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Locale availability:** `en_US.UTF-8` should be available on all macOS systems,
+   but if a system has a minimal locale configuration, the fallback might fail.
+   Risk is low because macOS ships with UTF-8 locales by default.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Inheriting non-UTF-8 locales:** If the parent process has `LANG=C` or another
+   non-UTF-8 locale, we fall back to `en_US.UTF-8`. This is intentional — the goal
+   is to enable Unicode rendering, and `C` locale would defeat that purpose.
+
+3. **`TERM_PROGRAM` conflicts:** Some applications check `TERM_PROGRAM` and may have
+   special behavior for known terminals. Setting `lite-edit` is unlikely to trigger
+   unintended behavior, but applications won't have lite-edit-specific code paths.
+   This is acceptable — we're signaling identity, not requesting special treatment.
+
+4. **Test reliability:** The environment variable tests rely on `printenv` being
+   available, which is standard on macOS but worth noting. The tests should be
+   platform-appropriate.
 
 ## Deviations
 
