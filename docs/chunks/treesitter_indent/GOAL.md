@@ -1,18 +1,29 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/syntax/src/indent.rs
+  - crates/syntax/src/registry.rs
+  - crates/syntax/src/highlighter.rs
+  - crates/syntax/src/lib.rs
+  - crates/syntax/queries/rust/indents.scm
+  - crates/syntax/queries/python/indents.scm
+  - crates/editor/src/workspace.rs
+  - crates/editor/src/buffer_target.rs
+  - crates/editor/src/editor_state.rs
+  - crates/editor/tests/indent_test.rs
 code_references: []
 narrative: null
 investigation: treesitter_editing
 subsystems: []
 friction_entries: []
 bug_type: null
-depends_on: ["incremental_parse"]
-created_after: ["pty_wakeup_reliability"]
+depends_on:
+- incremental_parse
+created_after:
+- pty_wakeup_reliability
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

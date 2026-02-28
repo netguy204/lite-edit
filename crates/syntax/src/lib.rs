@@ -37,10 +37,14 @@
 
 mod edit;
 mod highlighter;
+// Chunk: docs/chunks/treesitter_indent - Indent computation module
+mod indent;
 mod registry;
 mod theme;
 
 pub use edit::{byte_offset_to_position, delete_event, insert_event, position_to_byte_offset, EditEvent};
 pub use highlighter::SyntaxHighlighter;
+// Chunk: docs/chunks/treesitter_indent - Export indent types
+pub use indent::{IndentComputer, IndentConfig};
 pub use registry::{LanguageConfig, LanguageRegistry};
 pub use theme::SyntaxTheme;
