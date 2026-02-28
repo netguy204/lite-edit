@@ -8,170 +8,219 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The root cause is that `line_byte_range()` computes the line end as `self.line_offsets[line_idx + 1] - 1`, which subtracts 1 from the byte offset of the newline character. For multi-byte UTF-8 characters like `╔` (3 bytes: `\xe2\x95\x94`), subtracting 1 from the byte offset after such a character lands inside the multi-byte sequence, causing a panic when slicing.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Strategy: Safe Character Boundary Adjustment**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+Rather than blindly subtracting 1, we'll:
+1. Create a helper function `safe_char_boundary(source, pos, direction)` that adjusts a byte position to the nearest valid character boundary
+2. Use `str::is_char_boundary()` to validate positions before slicing
+3. Apply this helper to all ~13 locations in `highlighter.rs` that perform `&self.source[start..end]` slicing
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/highlighter_utf8_safety/GOAL.md)
-with references to the files that you expect to touch.
--->
+**Key insight:** The problem isn't just `line_byte_range()`. After edits, tree-sitter capture offsets can also become stale and point into the middle of multi-byte characters. The fix must handle both cases:
+- **Line boundaries:** Ensure `line_byte_range()` always returns valid char boundaries
+- **Capture offsets:** Clamp capture byte offsets to valid boundaries before slicing
 
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+**TDD approach:** Per TESTING_PHILOSOPHY.md, we'll write failing tests first that trigger the panic with multi-byte UTF-8 content, then implement the fix to make them pass.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing regression tests
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create tests that reproduce the panic with multi-byte UTF-8 characters:
 
-Example:
+1. Test file containing box-drawing characters on multiple lines
+2. Test editing a file that adds/removes characters before a multi-byte character
+3. Test highlighting a line that ends with a multi-byte character (no trailing newline)
 
-### Step 1: Define the SegmentHeader struct
+These tests must fail initially (panic) to verify we're testing the right bug.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Location: `crates/syntax/src/highlighter.rs` in the `#[cfg(test)]` module
 
-Location: src/segment/format.rs
+Test cases:
+```rust
+#[test]
+fn test_highlight_line_with_box_drawing_chars() {
+    // Source with box-drawing characters that are 3 bytes each
+    let source = "╔══════╗\n║ test ║\n╚══════╝";
+    let hl = make_rust_highlighter(source).unwrap();
+    // This should NOT panic
+    let _ = hl.highlight_line(0);
+    let _ = hl.highlight_line(1);
+    let _ = hl.highlight_line(2);
+}
 
-### Step 2: Implement header serialization
+#[test]
+fn test_highlight_line_with_emoji() {
+    let source = "fn main() { /* 🦀 */ }";
+    let hl = make_rust_highlighter(source).unwrap();
+    let _ = hl.highlight_line(0);
+}
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+#[test]
+fn test_edit_near_multibyte_char() {
+    let source = "status: IMPLEMENTING";
+    let mut hl = make_rust_highlighter(source).unwrap();
+    // Replace "IMPLEMENTING" with "F" (shorter), then highlight
+    let event = crate::edit::delete_event(source, 0, 8, "IMPLEMENTING".len());
+    let new_source = "status: F";
+    hl.edit(event, new_source);
+    // If the file has multi-byte chars elsewhere, offsets shift
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+### Step 2: Create `safe_char_boundary` helper function
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Add a private helper function that adjusts a byte position to the nearest valid character boundary:
 
-## Dependencies
+```rust
+// Chunk: docs/chunks/highlighter_utf8_safety - UTF-8 safe byte offset adjustment
+/// Adjusts a byte position to the nearest valid character boundary.
+///
+/// When `round_down` is true, moves backward to the start of the character
+/// containing `pos`. When false, moves forward to the next character boundary.
+///
+/// Returns `pos` unchanged if it's already a valid boundary.
+fn safe_char_boundary(source: &str, pos: usize, round_down: bool) -> usize {
+    if pos >= source.len() {
+        return source.len();
+    }
+    if source.is_char_boundary(pos) {
+        return pos;
+    }
+    if round_down {
+        // Search backward for valid boundary
+        let mut adjusted = pos;
+        while adjusted > 0 && !source.is_char_boundary(adjusted) {
+            adjusted -= 1;
+        }
+        adjusted
+    } else {
+        // Search forward for valid boundary
+        let mut adjusted = pos;
+        while adjusted < source.len() && !source.is_char_boundary(adjusted) {
+            adjusted += 1;
+        }
+        adjusted
+    }
+}
+```
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+Location: `crates/syntax/src/highlighter.rs`, near `build_line_offsets()`
 
-If there are no dependencies, delete this section.
--->
+### Step 3: Fix `line_byte_range()` to return valid char boundaries
+
+Update `line_byte_range()` to ensure the returned end position is a valid character boundary:
+
+Current code (line 1307-1321):
+```rust
+fn line_byte_range(&self, line_idx: usize) -> Option<(usize, usize)> {
+    if line_idx >= self.line_offsets.len() {
+        return None;
+    }
+    let start = self.line_offsets[line_idx];
+    let end = if line_idx + 1 < self.line_offsets.len() {
+        self.line_offsets[line_idx + 1] - 1  // BUG: May land inside multi-byte char
+    } else {
+        self.source.len()
+    };
+    Some((start, end))
+}
+```
+
+Fixed code:
+```rust
+fn line_byte_range(&self, line_idx: usize) -> Option<(usize, usize)> {
+    if line_idx >= self.line_offsets.len() {
+        return None;
+    }
+    let start = self.line_offsets[line_idx];
+    let end = if line_idx + 1 < self.line_offsets.len() {
+        // Subtract 1 to exclude the newline, then adjust to valid char boundary
+        let raw_end = self.line_offsets[line_idx + 1].saturating_sub(1);
+        safe_char_boundary(&self.source, raw_end, true)  // Round down
+    } else {
+        self.source.len()
+    };
+    // Ensure start is also valid (should always be, but defensive)
+    let start = safe_char_boundary(&self.source, start, true);
+    Some((start, end.max(start)))  // Ensure end >= start
+}
+```
+
+### Step 4: Fix `build_line_from_captures()` slicing sites
+
+Update all `&self.source[start..end]` slicing in `build_line_from_captures()` (line 964-1135) to use safe boundaries.
+
+Key locations to fix:
+- Line 970: `let line_text = &self.source[line_start..line_end];`
+- Line 1089: `let tail = &self.source[covered_until..actual_end];`
+- Line 1100: `let gap_text = &self.source[covered_until..actual_start];`
+- Line 1107: `let capture_text = &self.source[actual_start..actual_end];`
+- Line 1121: `let remaining = &self.source[covered_until..line_end];`
+
+For capture offsets, clamp to valid boundaries before slicing:
+```rust
+let actual_start = safe_char_boundary(&self.source, cap_start.max(line_start), true);
+let actual_end = safe_char_boundary(&self.source, cap_end.min(line_end), false);
+```
+
+### Step 5: Fix `build_line_from_captures_impl()` slicing sites
+
+Apply the same fix to `build_line_from_captures_impl()` (line 1161-1301):
+
+- Line 1260: `let tail = &self.source[covered_until..actual_end];`
+- Line 1270: `let gap_text = &self.source[covered_until..actual_start];`
+- Line 1276: `let capture_text = &self.source[actual_start..actual_end];`
+- Line 1289: `let remaining = &self.source[covered_until..line_end];`
+
+Same pattern: ensure `covered_until`, `actual_start`, and `actual_end` are all valid char boundaries before slicing.
+
+### Step 6: Fix injection region slicing
+
+Fix the slicing in injection-related methods:
+
+- Line 544: `let lang_text = &self.source[capture.node.start_byte()..capture.node.end_byte()];`
+- Line 665: `let line_text = &self.source[line_start..line_end];` (in `highlight_single_line`)
+- Line 881: `let region_source = &self.source[region.byte_range.clone()];`
+- Line 938: `let region_source = &self.source[region.byte_range.clone()];`
+
+For `region.byte_range`, validate and clamp:
+```rust
+let safe_start = safe_char_boundary(&self.source, region.byte_range.start, true);
+let safe_end = safe_char_boundary(&self.source, region.byte_range.end, false);
+let region_source = &self.source[safe_start..safe_end];
+```
+
+### Step 7: Verify tests pass
+
+Run the test suite to confirm:
+1. The new UTF-8 regression tests pass (no panics)
+2. All existing tests still pass (no regressions in highlighting correctness)
+
+```bash
+cargo test -p syntax
+```
+
+### Step 8: Add additional edge case tests
+
+Add tests for:
+- CJK characters (Chinese/Japanese/Korean - typically 3 bytes UTF-8)
+- Mixed ASCII and multi-byte content on the same line
+- Lines consisting entirely of multi-byte characters
+- Edit operations that change content length near multi-byte characters
+- Empty lines adjacent to lines with multi-byte characters
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Performance impact:** The `safe_char_boundary` helper adds a small amount of overhead, but since it typically returns immediately when `is_char_boundary()` is true, and only loops in pathological cases, the impact should be negligible.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Capture offset drift:** When edits change content length, tree-sitter captures may reference stale byte offsets. The current fix clamps these to valid boundaries, which may cause visual misalignment of highlighting until the tree is re-parsed. This is acceptable (graceful degradation vs panic) but worth noting.
+
+3. **Line offset index accuracy:** The `line_offsets` index is built by scanning for `\n` bytes, which is correct for UTF-8 since `\n` is always a single byte and cannot appear inside multi-byte sequences. This is safe.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->
