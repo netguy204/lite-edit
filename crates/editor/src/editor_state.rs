@@ -1140,6 +1140,7 @@ impl EditorState {
                         match result {
                             MoveResult::MovedToExisting { .. } | MoveResult::MovedToNew { .. } => {
                                 self.invalidation.merge(InvalidationKind::Layout);
+                                self.clear_styled_line_cache = true;
                             }
                             MoveResult::Rejected | MoveResult::SourceNotFound => {
                                 // No-op, no visual change
