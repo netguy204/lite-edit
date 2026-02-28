@@ -34,13 +34,13 @@ code_references:
     implements: "Buffer rendering with cursor quad generation"
   - ref: crates/editor/src/glyph_buffer.rs#GlyphBuffer::create_cursor_quad
     implements: "Cursor rendering as a block quad at cursor position"
-  - ref: crates/editor/src/renderer.rs#Renderer
+  - ref: crates/editor/src/renderer/mod.rs#Renderer
     implements: "Extended to hold Viewport for rendering (no longer owns TextBuffer after renderer_polymorphic_buffer)"
-  - ref: crates/editor/src/renderer.rs#Renderer::update_viewport_size
+  - ref: crates/editor/src/renderer/mod.rs#Renderer::update_viewport_size
     implements: "Updates viewport when window resizes"
-  - ref: crates/editor/src/renderer.rs#Renderer::apply_mutation
+  - ref: crates/editor/src/renderer/mod.rs#Renderer::apply_mutation
     implements: "Converts DirtyLines to DirtyRegion for incremental rendering"
-  - ref: crates/editor/src/renderer.rs#Renderer::render_dirty
+  - ref: crates/editor/src/renderer/mod.rs#Renderer::render_dirty
     implements: "Renders based on dirty region (triggers full redraw if dirty)"
   - ref: crates/editor/src/main.rs#AppDelegate::setup_window
     implements: "Creates EditorState and Renderer with viewport size initialization"
