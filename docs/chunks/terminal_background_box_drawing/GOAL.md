@@ -5,7 +5,7 @@ parent_chunk: null
 code_paths:
   - crates/editor/src/glyph_atlas.rs
   - crates/editor/src/glyph_buffer.rs
-  - crates/editor/src/renderer.rs
+  - crates/editor/src/renderer/
   - crates/editor/src/font.rs
   - crates/terminal/tests/integration.rs
 code_references:
