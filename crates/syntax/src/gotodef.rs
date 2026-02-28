@@ -506,4 +506,139 @@ fn foo() {
             "Should find inner scope definition, not outer"
         );
     }
+
+    #[test]
+    fn test_rust_locally_defined_function() {
+        let resolver = make_rust_resolver();
+        let code = r#"
+fn outer() {
+    fn inner(x: i32) -> i32 {
+        x + 1
+    }
+    let result = inner(42);
+}
+"#;
+        let tree = parse_rust(code);
+        let source = code.as_bytes();
+
+        // Find the reference to inner in the call
+        let ref_pos = code.find("inner(42)").unwrap();
+        let result = resolver.find_definition(&tree, source, ref_pos);
+
+        assert!(result.is_some(), "Should find definition for inner function");
+        let range = result.unwrap();
+        let def_text = &code[range.clone()];
+        assert_eq!(
+            def_text, "inner",
+            "Definition should be 'inner', got '{}'",
+            def_text
+        );
+    }
+
+    #[test]
+    fn test_cursor_on_non_identifier() {
+        let resolver = make_rust_resolver();
+        let code = r#"
+fn foo() {
+    let x = 42;
+}
+"#;
+        let tree = parse_rust(code);
+        let source = code.as_bytes();
+
+        // Try to find definition when cursor is on "42" (a number, not an identifier)
+        let num_pos = code.find("42").unwrap();
+        let result = resolver.find_definition(&tree, source, num_pos);
+
+        assert!(
+            result.is_none(),
+            "Should return None when cursor is on a non-identifier"
+        );
+    }
+
+    #[test]
+    fn test_empty_file() {
+        let resolver = make_rust_resolver();
+        let code = "";
+        let tree = parse_rust(code);
+        let source = code.as_bytes();
+
+        // Try to find definition in empty file
+        let result = resolver.find_definition(&tree, source, 0);
+
+        assert!(result.is_none(), "Should return None for empty file");
+    }
+
+    #[test]
+    fn test_python_locally_defined_function() {
+        let resolver = make_python_resolver();
+        let code = r#"
+def outer():
+    def inner(x):
+        return x + 1
+    result = inner(42)
+"#;
+        let tree = parse_python(code);
+        let source = code.as_bytes();
+
+        // Find the reference to inner in the call
+        let ref_pos = code.find("inner(42)").unwrap();
+        let result = resolver.find_definition(&tree, source, ref_pos);
+
+        assert!(
+            result.is_some(),
+            "Should find definition for inner function"
+        );
+        let range = result.unwrap();
+        let def_text = &code[range.clone()];
+        assert_eq!(
+            def_text, "inner",
+            "Definition should be 'inner', got '{}'",
+            def_text
+        );
+    }
+
+    #[test]
+    fn test_typescript_local_variable() {
+        // TypeScript's LOCALS_QUERY may be empty or incomplete depending on tree-sitter version.
+        // If so, skip this test gracefully.
+        let resolver = match LocalsResolver::new(
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            tree_sitter_typescript::LOCALS_QUERY,
+        ) {
+            Some(r) => r,
+            None => {
+                eprintln!(
+                    "Skipping TypeScript test: LOCALS_QUERY is empty or missing required captures"
+                );
+                return;
+            }
+        };
+
+        let code = r#"
+function greet(name: string): void {
+    const message = "Hello, " + name;
+    console.log(message);
+}
+"#;
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+            .unwrap();
+        let tree = parser.parse(code, None).unwrap();
+        let source = code.as_bytes();
+
+        // Find the reference to message in console.log
+        let ref_pos = code.find("log(message)").unwrap() + 4;
+        let result = resolver.find_definition(&tree, source, ref_pos);
+
+        assert!(result.is_some(), "Should find definition for message");
+        let range = result.unwrap();
+        let def_text = &code[range.clone()];
+        assert_eq!(
+            def_text, "message",
+            "Definition should be 'message', got '{}'",
+            def_text
+        );
+    }
 }

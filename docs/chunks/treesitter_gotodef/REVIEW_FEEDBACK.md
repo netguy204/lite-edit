@@ -1,49 +1,19 @@
 # Review Feedback
 
-**Iteration:** 1
+**Iteration:** 2
 **Decision:** FEEDBACK
 
 ## Summary
 
-Syntax layer complete (LocalsResolver, query files, registry wiring) but editor integration missing (commands, keybindings, jump stack, Cmd-click, status messages)
+Six of seven success criteria satisfied; status message for 'definition not found' is not implemented - the editor silently does nothing when go-to-definition fails to find a match
 
 ## Issues to Address
 
-### Issue 1: crates/editor/src/buffer_target.rs
+### Issue 1: crates/editor/src/editor_state.rs:1368-1371
 
-**Concern:** GotoDefinition and GoBack command variants not defined
+**Concern:** The None branch in goto_definition() explicitly states 'For now, just do nothing' but GOAL.md requires 'clear feedback (e.g., a brief status message definition not found in this file)'
 
-**Suggestion:** Add command variants and execute_command handling per PLAN.md Step 8
-
-### Issue 2: crates/editor/src/buffer_target.rs:resolve_command
-
-**Concern:** No keybindings for GotoDefinition or GoBack
-
-**Suggestion:** Wire Cmd+D or F12 to GotoDefinition; pick alternative to Cmd+[ for GoBack
-
-### Issue 3: crates/editor/src/workspace.rs
-
-**Concern:** JumpStack not implemented
-
-**Suggestion:** Add JumpPosition struct and JumpStack with push/pop per PLAN.md Step 6
-
-### Issue 4: crates/syntax/src/highlighter.rs
-
-**Concern:** tree() accessor missing from SyntaxHighlighter
-
-**Suggestion:** Add pub fn tree(&self) -> &Tree per PLAN.md Step 4
-
-### Issue 5: crates/editor/src/editor_state.rs
-
-**Concern:** Cmd-click not handled for go-to-definition
-
-**Suggestion:** Check Command modifier on mouse down per PLAN.md Step 9
-
-### Issue 6: crates/editor/src/buffer_target.rs
-
-**Concern:** No feedback when definition not found
-
-**Suggestion:** Display transient status message per PLAN.md Step 10
+**Suggestion:** Display a transient status message when LocalsResolver::find_definition returns None. Check existing status/message patterns in MiniBuffer or add a simple status display. The message should auto-clear after ~2 seconds or on next keypress per PLAN.md Step 10.
 
 
 ---

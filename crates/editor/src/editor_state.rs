@@ -208,6 +208,11 @@ pub struct EditorState {
     // Chunk: docs/chunks/app_nap_file_watcher_pause - Paused state storage
     /// Stored paused state for file watchers. When Some, watchers are paused.
     paused_watcher_state: Option<PausedFileWatchersState>,
+    // Chunk: docs/chunks/treesitter_gotodef - Status message field
+    /// Optional transient status message for user feedback.
+    /// Set by operations like go-to-definition when no definition is found.
+    /// Automatically expires after 2 seconds or on next keypress.
+    pub status_message: Option<StatusMessage>,
     /// Flag set by Ctrl+Shift+P to trigger an on-demand perf stats dump.
     #[cfg(feature = "perf-instrumentation")]
     pub dump_perf_stats: bool,
@@ -223,6 +228,37 @@ pub struct PausedFileWatchersState {
     buffer_watcher_state: PausedWatcherState,
     /// Paused states from each workspace's FileIndex, keyed by workspace ID.
     workspace_states: std::collections::HashMap<u64, PausedFileIndexState>,
+}
+
+// Chunk: docs/chunks/treesitter_gotodef - Status message for transient feedback
+/// A transient status message displayed to the user.
+///
+/// Status messages are shown briefly to provide feedback (e.g., "Definition not found")
+/// and automatically expire after a duration or on the next keypress.
+#[derive(Clone, Debug)]
+pub struct StatusMessage {
+    /// The message text to display.
+    pub text: String,
+    /// When the message was created.
+    pub created_at: Instant,
+    /// Duration after which the message should expire (default: 2 seconds).
+    pub duration: std::time::Duration,
+}
+
+impl StatusMessage {
+    /// Creates a new status message with the default 2-second duration.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            created_at: Instant::now(),
+            duration: std::time::Duration::from_secs(2),
+        }
+    }
+
+    /// Returns true if the message has expired.
+    pub fn is_expired(&self) -> bool {
+        self.created_at.elapsed() >= self.duration
+    }
 }
 
 // =============================================================================
@@ -470,6 +506,8 @@ impl EditorState {
             activity_assertion: ActivityAssertion::new(),
             // Chunk: docs/chunks/app_nap_file_watcher_pause - Initialize paused state
             paused_watcher_state: None,
+            // Chunk: docs/chunks/treesitter_gotodef - Initialize status message
+            status_message: None,
             #[cfg(feature = "perf-instrumentation")]
             dump_perf_stats: false,
         }
@@ -539,6 +577,8 @@ impl EditorState {
             activity_assertion: ActivityAssertion::new(),
             // Chunk: docs/chunks/app_nap_file_watcher_pause - Initialize paused state
             paused_watcher_state: None,
+            // Chunk: docs/chunks/treesitter_gotodef - Initialize status message
+            status_message: None,
             #[cfg(feature = "perf-instrumentation")]
             dump_perf_stats: false,
         }
@@ -928,6 +968,9 @@ impl EditorState {
     // Chunk: docs/chunks/terminal_paste_render - Paste handler without premature dirty marking
     pub fn handle_key(&mut self, event: KeyEvent) {
         use crate::input::Key;
+
+        // Chunk: docs/chunks/treesitter_gotodef - Clear status message on any keypress
+        self.status_message = None;
 
         // Check for app-level shortcuts before delegating to focus target
         // Cmd+Q (without Ctrl) triggers quit
@@ -1367,9 +1410,25 @@ impl EditorState {
             }
             None => {
                 // No definition found - show status message
-                // For now, just do nothing (status message is handled separately)
+                self.status_message = Some(StatusMessage::new("Definition not found in this file"));
             }
         }
+    }
+
+    // Chunk: docs/chunks/treesitter_gotodef - Status message accessor with expiry
+    /// Returns the current status message, if any and not expired.
+    ///
+    /// Also clears the message if it has expired. Call this from the render
+    /// loop to both get the current message and trigger automatic expiry.
+    pub fn current_status_message(&mut self) -> Option<&str> {
+        // Check expiry and clear if needed
+        if let Some(ref msg) = self.status_message {
+            if msg.is_expired() {
+                self.status_message = None;
+                return None;
+            }
+        }
+        self.status_message.as_ref().map(|m| m.text.as_str())
     }
 
     // Chunk: docs/chunks/treesitter_gotodef - Go back to previous position from jump stack
@@ -12261,5 +12320,89 @@ mod tests {
         let buffer = TextBuffer::from_str("hello\nworld");
         let pos = clamp_position_to_buffer(Position::new(0, 0), &buffer);
         assert_eq!(pos, Position::new(0, 0)); // unchanged
+    }
+
+    // =========================================================================
+    // Status Message Tests (Chunk: docs/chunks/treesitter_gotodef)
+    // =========================================================================
+
+    #[test]
+    fn test_status_message_creation() {
+        let msg = StatusMessage::new("Test message");
+        assert_eq!(msg.text, "Test message");
+        assert!(!msg.is_expired());
+    }
+
+    #[test]
+    fn test_status_message_expiry() {
+        use std::thread;
+
+        // Create a message with a very short duration
+        let mut msg = StatusMessage::new("Test");
+        msg.duration = Duration::from_millis(50);
+
+        // Initially not expired
+        assert!(!msg.is_expired());
+
+        // Wait for expiry
+        thread::sleep(Duration::from_millis(60));
+        assert!(msg.is_expired());
+    }
+
+    #[test]
+    fn test_status_message_cleared_on_keypress() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Set a status message
+        state.status_message = Some(StatusMessage::new("Test message"));
+        assert!(state.status_message.is_some());
+
+        // Handle a key event
+        state.handle_key(KeyEvent::char('a'));
+
+        // Status message should be cleared
+        assert!(state.status_message.is_none());
+    }
+
+    #[test]
+    fn test_current_status_message_returns_text() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // No message initially
+        assert!(state.current_status_message().is_none());
+
+        // Set a message
+        state.status_message = Some(StatusMessage::new("Definition not found"));
+
+        // Should return the message text
+        assert_eq!(
+            state.current_status_message(),
+            Some("Definition not found")
+        );
+    }
+
+    #[test]
+    fn test_current_status_message_clears_expired() {
+        use std::thread;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Set a message with short expiry
+        let mut msg = StatusMessage::new("Test");
+        msg.duration = Duration::from_millis(50);
+        state.status_message = Some(msg);
+
+        // Initially present
+        assert!(state.current_status_message().is_some());
+
+        // Wait for expiry
+        thread::sleep(Duration::from_millis(60));
+
+        // Should return None and clear the message
+        assert!(state.current_status_message().is_none());
+        assert!(state.status_message.is_none());
     }
 }
