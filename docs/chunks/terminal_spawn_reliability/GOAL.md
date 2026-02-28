@@ -1,8 +1,11 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/editor/src/workspace.rs
+- crates/editor/src/editor_state.rs
+- crates/terminal/src/pty.rs
 code_references: []
 narrative: null
 investigation: terminal_shell_flakiness
@@ -10,9 +13,11 @@ subsystems: []
 friction_entries: []
 bug_type: semantic
 depends_on: []
-created_after: ["terminal_unicode_env", "incremental_parse", "tab_rendering"]
+created_after:
+- terminal_unicode_env
+- incremental_parse
+- tab_rendering
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
