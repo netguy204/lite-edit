@@ -2475,6 +2475,8 @@ impl EditorState {
         let is_enter_key = matches!(event.key, crate::input::Key::Return)
             && !event.modifiers.command
             && !event.modifiers.control;
+        // Chunk: docs/chunks/terminal_spawn_reliability - Track if we need to retry terminal spawn
+        let mut should_retry_terminal = false;
 
         // Check if the active tab is a file tab or terminal tab
         // Use a block to limit the borrow scope
@@ -2609,9 +2611,25 @@ impl EditorState {
 
             // Mark full viewport dirty since terminal output may change
             self.invalidation.merge(InvalidationKind::Layout);
+        } else if tab.is_error_tab() {
+            // Chunk: docs/chunks/terminal_spawn_reliability - Error tab retry on Enter
+            // Error tabs display "Press Enter to retry" - handle Enter key to retry terminal spawn
+            use crate::input::Key;
+            if matches!(event.key, Key::Return) && !event.modifiers.command && !event.modifiers.control {
+                // Set flag to retry after borrow scope ends
+                should_retry_terminal = true;
+            }
+            // Other keys are ignored on error tabs
         }
         // Other tab types (AgentOutput, Diff): no-op
         } // End of borrow scope
+
+        // Chunk: docs/chunks/terminal_spawn_reliability - Handle error tab retry
+        // After the borrow scope ends, we can safely call retry_terminal_spawn
+        if should_retry_terminal {
+            self.retry_terminal_spawn();
+            return;
+        }
 
         // Chunk: docs/chunks/syntax_highlighting - Sync highlighter after buffer mutation
         // Chunk: docs/chunks/incremental_parse - Use incremental parsing when edit info available
@@ -3209,6 +3227,7 @@ impl EditorState {
     /// Scrolls the tab in the specified pane without changing focus.
     // Chunk: docs/chunks/pane_hover_scroll - Pane-targeted scroll execution
     // Chunk: docs/chunks/vsplit_scroll - Use pane-specific dimensions for scroll clamping
+    // Chunk: docs/chunks/welcome_scroll - Routes scroll events on empty file tabs to the welcome scroll offset
     fn scroll_pane(&mut self, target_pane_id: crate::pane_layout::PaneId, delta: ScrollDelta) {
         // Chunk: docs/chunks/vsplit_scroll - Get pane-specific dimensions before borrowing workspace.
         // Using full-window dimensions here causes scroll clamping to use incorrect wrap
@@ -4962,6 +4981,14 @@ impl EditorState {
             return;
         }
 
+        // Generate label based on existing terminal count
+        let existing_count = self.terminal_tab_count();
+        let label = if existing_count == 0 {
+            "Terminal".to_string()
+        } else {
+            format!("Terminal {}", existing_count + 1)
+        };
+
         // Create terminal buffer with 5000 scrollback lines
         let mut terminal = TerminalBuffer::new(cols, rows, 5000);
 
@@ -4983,23 +5010,18 @@ impl EditorState {
             terminal.spawn_shell(&cwd)
         };
 
-        // Log error but don't fail
-        if let Err(e) = spawn_result {
-            eprintln!("Failed to spawn shell: {}", e);
-        }
-
-        // Generate label based on existing terminal count
-        let existing_count = self.terminal_tab_count();
-        let label = if existing_count == 0 {
-            "Terminal".to_string()
-        } else {
-            format!("Terminal {}", existing_count + 1)
-        };
-
-        // Create and add the terminal tab
+        // Chunk: docs/chunks/terminal_spawn_reliability - Error state for failed terminal spawns
+        // Create and add the tab - either a working terminal or an error tab
         let tab_id = self.editor.gen_tab_id();
         let line_height = self.editor.line_height();
-        let new_tab = Tab::new_terminal(tab_id, terminal, label, line_height);
+        let new_tab = match spawn_result {
+            Ok(()) => Tab::new_terminal(tab_id, terminal, label, line_height),
+            Err(e) => {
+                // Create an error tab instead of a dead terminal
+                let error_msg = format!("{}", e);
+                Tab::new_error(tab_id, error_msg, label, line_height)
+            }
+        };
 
         if let Some(workspace) = self.editor.active_workspace_mut() {
             workspace.add_tab(new_tab);
@@ -5028,6 +5050,98 @@ impl EditorState {
 
         // Ensure the new tab is visible in the tab bar
         self.ensure_active_tab_visible();
+        self.invalidation.merge(InvalidationKind::Layout);
+    }
+
+    // Chunk: docs/chunks/terminal_spawn_reliability - Retry failed terminal spawn
+    /// Retries spawning a terminal for the active error tab.
+    ///
+    /// If the active tab is an error tab (from a failed terminal spawn), this method
+    /// replaces it with a new terminal tab. The new terminal uses the same label and
+    /// attempts to spawn a shell again.
+    ///
+    /// If the retry also fails, the tab remains an error tab with the new error message.
+    pub fn retry_terminal_spawn(&mut self) {
+        use crate::left_rail::RAIL_WIDTH;
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        use crate::workspace::Tab;
+        use lite_edit_terminal::TerminalBuffer;
+
+        // Check if active tab is an error tab
+        let (tab_id, label) = {
+            let Some(ws) = self.editor.active_workspace() else { return };
+            let Some(tab) = ws.active_tab() else { return };
+            if !tab.is_error_tab() {
+                return;
+            }
+            (tab.id, tab.label.clone())
+        };
+
+        // Get pane dimensions for terminal sizing
+        let pane_dimensions = self.editor.active_workspace()
+            .map(|ws| ws.active_pane_id)
+            .and_then(|pane_id| self.get_pane_content_dimensions(pane_id));
+
+        let (content_height, content_width) = match pane_dimensions {
+            Some((height, width)) => (height, width),
+            None => (self.view_height - TAB_BAR_HEIGHT, self.view_width - RAIL_WIDTH),
+        };
+
+        if content_height <= 0.0 || content_width <= 0.0 {
+            return;
+        }
+
+        let rows = (content_height as f64 / self.font_metrics.line_height).floor() as usize;
+        let cols = (content_width as f64 / self.font_metrics.advance_width).floor() as usize;
+
+        if rows == 0 || cols == 0 {
+            return;
+        }
+
+        // Create and spawn new terminal
+        let mut terminal = TerminalBuffer::new(cols, rows, 5000);
+        let cwd = self
+            .editor
+            .active_workspace()
+            .map(|ws| ws.root_path.clone())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+        let spawn_result = if let Some(wakeup) = self.create_pty_wakeup() {
+            terminal.spawn_shell_with_wakeup(&cwd, wakeup)
+        } else {
+            terminal.spawn_shell(&cwd)
+        };
+
+        // Replace the error tab with either a working terminal or a new error tab
+        let line_height = self.editor.line_height();
+        let new_tab = match spawn_result {
+            Ok(()) => Tab::new_terminal(tab_id, terminal, label, line_height),
+            Err(e) => {
+                let error_msg = format!("{}", e);
+                Tab::new_error(tab_id, error_msg, label, line_height)
+            }
+        };
+
+        // Replace the active tab
+        if let Some(workspace) = self.editor.active_workspace_mut() {
+            if let Some(pane) = workspace.active_pane_mut() {
+                let active_idx = pane.active_tab;
+                if active_idx < pane.tabs.len() {
+                    pane.tabs[active_idx] = new_tab;
+                }
+            }
+        }
+
+        // Initialize viewport for the new tab
+        if let Some(workspace) = self.editor.active_workspace_mut() {
+            if let Some(tab) = workspace.active_tab_mut() {
+                let line_count = tab.buffer().line_count();
+                tab.viewport.update_size(content_height, line_count);
+            }
+        }
+
+        self.sync_active_tab_viewport();
+        self.sync_pane_viewports();
         self.invalidation.merge(InvalidationKind::Layout);
     }
 
