@@ -17,9 +17,7 @@ code_references:
   - ref: crates/terminal/src/pty_wakeup.rs#PtyWakeup
     implements: "Run-loop wakeup handle with debouncing for cross-thread PTY signaling"
   - ref: crates/terminal/src/pty_wakeup.rs#PtyWakeup::signal
-    implements: "Dispatches callback to main queue via GCD when PTY data arrives"
-  - ref: crates/terminal/src/pty_wakeup.rs#set_global_wakeup_callback
-    implements: "Global callback registration for PTY wakeup (legacy mechanism, superseded by WakeupSignal)"
+    implements: "Signals WakeupSignal (via EventSender) when PTY data arrives; uses direct CFRunLoop calls"
   - ref: crates/terminal/src/pty.rs#PtyHandle::spawn_with_wakeup
     implements: "PTY spawn variant that signals wakeup on data arrival"
   - ref: crates/terminal/src/terminal_buffer.rs#TerminalBuffer::spawn_shell_with_wakeup
