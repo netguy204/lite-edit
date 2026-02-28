@@ -22,9 +22,9 @@ code_references:
     implements: "Convenience accessor for the renderer to read active tab's welcome scroll offset"
   - ref: crates/editor/src/editor_state.rs#EditorState::scroll_pane
     implements: "Routes scroll events on empty file tabs to the welcome scroll offset rather than buffer viewport"
-  - ref: crates/editor/src/renderer.rs#Renderer::draw_welcome_screen
+  - ref: crates/editor/src/renderer/welcome.rs#Renderer::draw_welcome_screen
     implements: "Accepts scroll_offset_px and forwards it to calculate_welcome_geometry for single-pane rendering"
-  - ref: crates/editor/src/renderer.rs#Renderer::draw_welcome_screen_in_pane
+  - ref: crates/editor/src/renderer/welcome.rs#Renderer::draw_welcome_screen_in_pane
     implements: "Accepts scroll_offset_px and forwards it to calculate_welcome_geometry for multi-pane rendering"
 narrative: null
 investigation: null

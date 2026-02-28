@@ -2999,6 +2999,7 @@ impl EditorState {
             // Mark the tab as dirty (unsaved changes)
             tab.dirty = true;
 
+            // Chunk: docs/chunks/highlight_text_source - Sync highlighter after file drop insertion
             // Chunk: docs/chunks/incremental_parse - Use incremental parsing when edit info available
             if let Some(edit_info) = result.edit_info {
                 self.notify_active_tab_edit(edit_info.into());
@@ -3180,11 +3181,13 @@ impl EditorState {
 
         // Terminal tabs don't support marked text - IME sends final text directly
 
+        // Chunk: docs/chunks/highlight_text_source - IME marked text (no sync needed for overlay text)
         // Chunk: docs/chunks/incremental_parse - Marked text is overlay-rendered, not committed
         // to the buffer, so no syntax tree update is needed. The tree will be updated
         // when the marked text is committed (via handle_insert_text) or cancelled.
     }
 
+    // Chunk: docs/chunks/highlight_text_source - IME cancellation (no sync needed, doesn't modify buffer)
     /// Handles IME composition cancellation.
     ///
     /// Clears any marked text without inserting it.
