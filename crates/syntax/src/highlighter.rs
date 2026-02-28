@@ -1277,6 +1277,15 @@ impl SyntaxHighlighter {
         &self.source
     }
 
+    // Chunk: docs/chunks/treesitter_gotodef - Tree accessor for go-to-definition
+    /// Returns a reference to the current parse tree.
+    ///
+    /// This enables external code (like go-to-definition) to run additional
+    /// queries against the parse tree.
+    pub fn tree(&self) -> &Tree {
+        &self.tree
+    }
+
     // Chunk: docs/chunks/highlight_text_source - Buffer-sourced span generation
     /// Returns style spans for a line using externally-provided text content.
     ///

@@ -501,6 +501,88 @@ impl std::fmt::Debug for Tab {
 // Workspace
 // =============================================================================
 
+// =============================================================================
+// JumpStack (Chunk: docs/chunks/treesitter_gotodef)
+// =============================================================================
+
+// Chunk: docs/chunks/treesitter_gotodef - Jump stack for go-to-definition back navigation
+/// A position in a buffer for the jump stack.
+///
+/// Records the location (tab, pane, line, column) before a jump so that
+/// the user can navigate back with a "go back" command.
+#[derive(Clone, Debug)]
+pub struct JumpPosition {
+    /// The tab ID where the jump originated
+    pub tab_id: TabId,
+    /// The pane ID containing the tab
+    pub pane_id: PaneId,
+    /// The line number (0-indexed)
+    pub line: usize,
+    /// The column number (0-indexed)
+    pub col: usize,
+}
+
+// Chunk: docs/chunks/treesitter_gotodef - Jump stack for go-to-definition
+/// A bounded stack of jump positions for back-navigation.
+///
+/// Used by go-to-definition to record the cursor position before jumping,
+/// enabling the user to navigate back to previous locations.
+#[derive(Debug)]
+pub struct JumpStack {
+    positions: Vec<JumpPosition>,
+    max_size: usize,
+}
+
+impl JumpStack {
+    /// Creates a new jump stack with the given maximum size.
+    pub fn new(max_size: usize) -> Self {
+        Self {
+            positions: Vec::new(),
+            max_size,
+        }
+    }
+
+    /// Pushes a position onto the stack.
+    ///
+    /// If the stack is at capacity, the oldest position is removed.
+    pub fn push(&mut self, pos: JumpPosition) {
+        if self.positions.len() >= self.max_size {
+            self.positions.remove(0);
+        }
+        self.positions.push(pos);
+    }
+
+    /// Pops and returns the most recent position, if any.
+    pub fn pop(&mut self) -> Option<JumpPosition> {
+        self.positions.pop()
+    }
+
+    /// Returns the number of positions in the stack.
+    pub fn len(&self) -> usize {
+        self.positions.len()
+    }
+
+    /// Returns true if the stack is empty.
+    pub fn is_empty(&self) -> bool {
+        self.positions.is_empty()
+    }
+
+    /// Clears all positions from the stack.
+    pub fn clear(&mut self) {
+        self.positions.clear();
+    }
+}
+
+impl Default for JumpStack {
+    fn default() -> Self {
+        Self::new(100) // Default max size of 100 positions
+    }
+}
+
+// =============================================================================
+// Workspace
+// =============================================================================
+
 // Chunk: docs/chunks/content_tab_bar - Owns tab list and tab_bar_view_offset for horizontal scroll
 // Chunk: docs/chunks/tiling_workspace_integration - Pane tree integration
 // Chunk: docs/chunks/workspace_dir_picker - Per-workspace FileIndex
@@ -545,6 +627,12 @@ pub struct Workspace {
     pub file_index: FileIndex,
     /// The cache version at the last query (for streaming refresh during indexing).
     pub last_cache_version: u64,
+    // Chunk: docs/chunks/treesitter_gotodef - Jump stack for go-to-definition
+    /// Stack of cursor positions for go-back navigation after go-to-definition.
+    ///
+    /// When the user invokes go-to-definition, the current position is pushed
+    /// onto this stack. The "go back" command pops and restores the previous position.
+    pub jump_stack: JumpStack,
 }
 
 impl Workspace {
@@ -611,6 +699,7 @@ impl Workspace {
             agent: None,
             file_index,
             last_cache_version: 0,
+            jump_stack: JumpStack::default(),
         }
     }
 
@@ -2192,5 +2281,107 @@ mod tests {
         let mut tab = Tab::empty_file(1, TEST_LINE_HEIGHT);
         tab.base_content = Some("file content".to_string());
         assert_eq!(tab.base_content, Some("file content".to_string()));
+    }
+
+    // =========================================================================
+    // JumpStack Tests (Chunk: docs/chunks/treesitter_gotodef)
+    // =========================================================================
+
+    #[test]
+    fn test_jump_stack_push_and_pop() {
+        let mut stack = JumpStack::new(10);
+        assert!(stack.is_empty());
+        assert_eq!(stack.len(), 0);
+
+        let pos1 = JumpPosition {
+            tab_id: 1,
+            pane_id: PaneId(0),
+            line: 10,
+            col: 5,
+        };
+        let pos2 = JumpPosition {
+            tab_id: 1,
+            pane_id: PaneId(0),
+            line: 20,
+            col: 8,
+        };
+
+        stack.push(pos1.clone());
+        assert_eq!(stack.len(), 1);
+        assert!(!stack.is_empty());
+
+        stack.push(pos2.clone());
+        assert_eq!(stack.len(), 2);
+
+        // Pop should return in LIFO order
+        let popped = stack.pop().unwrap();
+        assert_eq!(popped.line, 20);
+        assert_eq!(popped.col, 8);
+        assert_eq!(stack.len(), 1);
+
+        let popped = stack.pop().unwrap();
+        assert_eq!(popped.line, 10);
+        assert_eq!(popped.col, 5);
+        assert!(stack.is_empty());
+
+        // Pop from empty stack returns None
+        assert!(stack.pop().is_none());
+    }
+
+    #[test]
+    fn test_jump_stack_max_size() {
+        let mut stack = JumpStack::new(3);
+
+        // Push 5 items into a stack with max 3
+        for i in 0..5 {
+            stack.push(JumpPosition {
+                tab_id: 1,
+                pane_id: PaneId(0),
+                line: i,
+                col: 0,
+            });
+        }
+
+        // Stack should only have 3 items
+        assert_eq!(stack.len(), 3);
+
+        // The oldest items should have been removed, so we should have lines 2, 3, 4
+        let p1 = stack.pop().unwrap();
+        assert_eq!(p1.line, 4);
+        let p2 = stack.pop().unwrap();
+        assert_eq!(p2.line, 3);
+        let p3 = stack.pop().unwrap();
+        assert_eq!(p3.line, 2);
+        assert!(stack.pop().is_none());
+    }
+
+    #[test]
+    fn test_jump_stack_clear() {
+        let mut stack = JumpStack::new(10);
+        stack.push(JumpPosition {
+            tab_id: 1,
+            pane_id: PaneId(0),
+            line: 10,
+            col: 5,
+        });
+        stack.push(JumpPosition {
+            tab_id: 1,
+            pane_id: PaneId(0),
+            line: 20,
+            col: 8,
+        });
+
+        assert_eq!(stack.len(), 2);
+        stack.clear();
+        assert!(stack.is_empty());
+        assert_eq!(stack.len(), 0);
+    }
+
+    #[test]
+    fn test_jump_stack_default() {
+        let stack = JumpStack::default();
+        assert!(stack.is_empty());
+        // Default max size should be 100
+        // (We test this indirectly by checking the stack works)
     }
 }

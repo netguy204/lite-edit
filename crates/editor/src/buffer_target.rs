@@ -107,6 +107,11 @@ enum Command {
     PageUp,
     /// Scroll viewport and cursor down by one page
     PageDown,
+    // Chunk: docs/chunks/treesitter_gotodef - Go-to-definition navigation
+    /// Go to the definition of the symbol under the cursor (Cmd+D or F12)
+    GotoDefinition,
+    /// Go back to the previous cursor position from jump stack (Cmd+[)
+    GoBack,
 }
 
 /// Resolves a key event to a command.
@@ -258,6 +263,14 @@ fn resolve_command(event: &KeyEvent) -> Option<Command> {
 
         // Ctrl+P → previous-line (move cursor up)
         Key::Char('p') if mods.control && !mods.command => Some(Command::MoveUp),
+
+        // Chunk: docs/chunks/treesitter_gotodef - Go-to-definition key bindings
+        // F12 → go to definition (common IDE binding)
+        Key::F12 if !mods.shift => Some(Command::GotoDefinition),
+
+        // Ctrl+- → go back (return to previous cursor position)
+        // This follows the browser/IDE convention for navigation back
+        Key::Char('-') if mods.control && !mods.command => Some(Command::GoBack),
 
         // Unhandled
         _ => None,
@@ -566,6 +579,14 @@ impl BufferFocusTarget {
                 ctx.ensure_cursor_visible();
                 return;
             }
+            // Chunk: docs/chunks/treesitter_gotodef - GotoDefinition/GoBack are handled at EditorState level
+            // These commands are intercepted before reaching BufferFocusTarget::handle_key,
+            // so if they reach here, we just return (they need workspace-level access).
+            Command::GotoDefinition | Command::GoBack => {
+                // These are handled at EditorState level where we have access to
+                // the highlighter tree, language registry, and jump stack.
+                return;
+            }
         };
 
         // Mark the affected lines dirty
@@ -860,7 +881,8 @@ where
 /// A buffer `Position` with line and column computed from wrapped coordinates.
 // Chunk: docs/chunks/scroll_wrap_deadzone_v2 - Fixed screen row to buffer line mapping
 // Chunk: docs/chunks/tab_rendering - Tab-aware visual column to character column conversion
-fn pixel_to_buffer_position_wrapped<F, G>(
+// Chunk: docs/chunks/treesitter_gotodef - Made public for Cmd+click go-to-definition
+pub fn pixel_to_buffer_position_wrapped<F, G>(
     position: (f64, f64),
     _view_height: f32, // Kept for API compatibility but no longer used for flip
     wrap_layout: &WrapLayout,
