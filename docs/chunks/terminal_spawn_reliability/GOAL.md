@@ -1,30 +1,39 @@
 ---
-status: FUTURE
+status: ACTIVE
 ticket: null
 parent_chunk: null
-code_paths: []
-code_references: []
+code_paths:
+- crates/editor/src/workspace.rs
+- crates/editor/src/editor_state.rs
+- crates/terminal/src/pty.rs
+code_references:
+  - ref: crates/editor/src/workspace.rs#ErrorBuffer
+    implements: "Read-only buffer displaying error message and retry hint for failed terminal spawns"
+  - ref: crates/editor/src/workspace.rs#TabBuffer::Error
+    implements: "TabBuffer variant wrapping ErrorBuffer for failed terminal spawns"
+  - ref: crates/editor/src/workspace.rs#Tab::new_error
+    implements: "Constructor for error tabs with TabKind::Terminal visual treatment"
+  - ref: crates/editor/src/workspace.rs#Tab::is_error_tab
+    implements: "Detection method for error tabs to enable retry handling"
+  - ref: crates/editor/src/editor_state.rs#EditorState::new_terminal_tab
+    implements: "Terminal spawn with error state fallback instead of dead tab"
+  - ref: crates/editor/src/editor_state.rs#EditorState::retry_terminal_spawn
+    implements: "Replace error tab with new terminal spawn attempt"
+  - ref: crates/terminal/src/pty.rs#PtyHandle
+    implements: "PTY handle with reader_done_rx channel for timed join on Drop"
+  - ref: crates/terminal/src/pty.rs#PtyHandle::Drop
+    implements: "Timed join (100ms) of reader thread to prevent PTY fd leaks"
 narrative: null
 investigation: terminal_shell_flakiness
 subsystems: []
 friction_entries: []
 bug_type: semantic
 depends_on: []
-created_after: ["terminal_unicode_env", "incremental_parse", "tab_rendering"]
+created_after:
+- terminal_unicode_env
+- incremental_parse
+- tab_rendering
 ---
-
-<!--
-╔══════════════════════════════════════════════════════════════════════════════╗
-║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
-║                                                                              ║
-║  AGENT INSTRUCTIONS: When editing this file, preserve this entire comment    ║
-║  block. Only modify the frontmatter YAML and the content sections below      ║
-║  (Minor Goal, Success Criteria, Relationship to Parent). Use targeted edits  ║
-║  that replace specific sections rather than rewriting the entire file.       ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-
-See earlier in this file for full schema documentation.
--->
 
 # Chunk Goal
 
