@@ -8,153 +8,328 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk adds cross-file go-to-definition by building a workspace-wide symbol index from tree-sitter `tags.scm` queries. The strategy has three main components:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **SymbolIndex struct** (`crates/syntax/src/symbol_index.rs`): A thread-safe data structure (`Arc<RwLock<...>>`) that maps symbol names to definition locations `(file_path, line, col)`. The index stores only names and positions—no file contents—keeping memory proportional to symbol count.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **Background indexer thread**: On workspace open, spawn a thread that walks all source files (respecting `.gitignore` and exclusion patterns), parses each with tree-sitter, runs `TAGS_QUERY` to extract top-level definitions (`@definition.function`, `@definition.class`, etc.), and populates the index. The indexer must not block the editor's render loop.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/treesitter_symbol_index/GOAL.md)
-with references to the files that you expect to touch.
--->
+3. **Go-to-definition fallback**: Extend `EditorState::goto_definition()` to consult the symbol index when `LocalsResolver::find_definition()` returns `None`. If multiple definitions match (e.g., `new()` in several files), present a disambiguation UI (selector overlay) rather than jumping arbitrarily.
+
+**Key patterns used**:
+- Follow `FileIndex` (`crates/editor/src/file_index.rs`) as the reference pattern for background-threaded indexing with watcher-based updates
+- Use `TAGS_QUERY` constants exported by tree-sitter grammar crates (verified: rust, python, go, javascript, typescript all export `TAGS_QUERY`)
+- Reuse `LanguageRegistry` to get the tree-sitter `Language` for parsing
+- Store the index on `Workspace` (like `FileIndex`) so each workspace has its own index
+
+**Testing approach** (per `docs/trunk/TESTING_PHILOSOPHY.md`):
+- Unit tests for `SymbolIndex` CRUD operations
+- Integration tests for indexing a tempdir with known files
+- Tests for the disambiguation scenario (multiple matches)
+- Performance test validating <5s index time for ~1000 files
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+No existing subsystems are directly affected by this chunk. The renderer, spatial_layout, and viewport_scroll subsystems are not touched.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+This chunk may warrant a future `treesitter_features` subsystem discovery if the pattern of "load query → run query → process captures → wire to editor action" becomes common across go-to-def, indent, and potential future features (refactoring, reference finding). However, that subsystem discovery is out of scope for this chunk.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add tags_query field to LanguageConfig
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Extend `LanguageConfig` in `crates/syntax/src/registry.rs` to include a `tags_query: &'static str` field. Populate it for languages that export `TAGS_QUERY`:
 
-Example:
+- Rust: `tree_sitter_rust::TAGS_QUERY`
+- Python: `tree_sitter_python::TAGS_QUERY`
+- Go: `tree_sitter_go::TAGS_QUERY`
+- JavaScript: `tree_sitter_javascript::TAGS_QUERY`
+- TypeScript: `tree_sitter_typescript::TAGS_QUERY`
 
-### Step 1: Define the SegmentHeader struct
+For languages without tags queries (C, C++, JSON, TOML, Markdown, HTML, CSS, Bash), use an empty string.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+**Location**: `crates/syntax/src/registry.rs`
 
-Location: src/segment/format.rs
+**Test**: Add a unit test verifying `config.tags_query.len() > 0` for rust, python, go, js, ts.
 
-### Step 2: Implement header serialization
+---
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+### Step 2: Define SymbolLocation and SymbolIndex structs
 
-### Step 3: ...
+Create `crates/syntax/src/symbol_index.rs` with:
+
+```rust
+// Chunk: docs/chunks/treesitter_symbol_index - Cross-file symbol index
+
+/// Location of a symbol definition
+pub struct SymbolLocation {
+    pub file_path: PathBuf,
+    pub line: usize,      // 0-indexed
+    pub col: usize,       // 0-indexed
+    pub kind: SymbolKind, // function, class, method, etc.
+}
+
+pub enum SymbolKind {
+    Function,
+    Class,
+    Method,
+    Module,
+    Interface,
+    Macro,
+    Constant,
+}
+
+/// Thread-safe symbol index
+pub struct SymbolIndex {
+    // Maps symbol name → Vec<SymbolLocation> (multiple files can define same name)
+    index: Arc<RwLock<HashMap<String, Vec<SymbolLocation>>>>,
+    // True while initial indexing is running
+    indexing: Arc<AtomicBool>,
+}
+```
+
+Implement basic methods:
+- `new() -> Self`
+- `is_indexing(&self) -> bool`
+- `insert(&self, name: String, loc: SymbolLocation)`
+- `lookup(&self, name: &str) -> Vec<SymbolLocation>` (returns clone)
+- `remove_file(&self, path: &Path)` (removes all symbols from a file)
+- `clear(&self)`
+
+**Location**: `crates/syntax/src/symbol_index.rs`
+
+**Test**: Unit tests for insert, lookup, remove_file, multiple-definitions case.
+
+---
+
+### Step 3: Implement index_file function
+
+Add `index_file()` that parses a single file and extracts symbol definitions:
+
+```rust
+pub fn index_file(
+    index: &SymbolIndex,
+    file_path: &Path,
+    registry: &LanguageRegistry,
+) -> Result<(), IndexError>
+```
+
+Implementation:
+1. Determine file extension and get `LanguageConfig` from registry
+2. Skip if `tags_query` is empty
+3. Create a tree-sitter `Parser`, set language, parse file contents
+4. Compile the `tags_query` into a `Query`
+5. Run `QueryCursor` over the tree root
+6. For each capture matching `@name` within a `@definition.*` pattern:
+   - Extract the symbol name from the node text
+   - Extract the symbol kind from the outer capture name (e.g., `definition.function` → `Function`)
+   - Convert byte offset to (line, col) position
+   - Insert into the index
+7. Return Ok(())
+
+Cache compiled queries in a `HashMap<&'static str, Query>` (keyed by language name) to avoid recompilation per file.
+
+**Location**: `crates/syntax/src/symbol_index.rs`
+
+**Test**: Integration test that indexes a tempdir with a known Rust file and verifies expected symbols are found.
+
+---
+
+### Step 4: Implement background indexer thread
+
+Add `SymbolIndex::start_indexing()` that spawns a background thread:
+
+```rust
+pub fn start_indexing(
+    root: PathBuf,
+    registry: Arc<LanguageRegistry>,
+) -> SymbolIndex
+```
+
+The spawned thread:
+1. Sets `indexing = true`
+2. Walks `root` recursively using `walkdir` or similar
+3. Skips directories matching exclusion patterns:
+   - Any path component starting with `.` (dotfiles/directories)
+   - `target/` (Rust build)
+   - `node_modules/`
+   - Files matching `.gitignore` patterns (use `ignore` crate for gitignore parsing)
+4. For each source file (matching supported extensions: rs, py, go, js, ts, tsx, jsx), calls `index_file()`
+5. Sets `indexing = false` when complete
+
+Use a batching approach: index files in groups of ~50, then yield to allow other operations. This prevents thread starvation.
+
+**Location**: `crates/syntax/src/symbol_index.rs`
+
+**Dependencies**: Add `walkdir = "2"` and `ignore = "0.4"` to `crates/syntax/Cargo.toml`
+
+**Test**: Integration test with a tempdir containing ~100 files, verifying indexing completes and `is_indexing()` transitions false.
+
+---
+
+### Step 5: Add incremental update on file save
+
+Extend `SymbolIndex` to support incremental updates:
+
+```rust
+pub fn update_file(&self, file_path: &Path, registry: &LanguageRegistry)
+```
+
+Implementation:
+1. Call `remove_file(file_path)` to clear stale entries
+2. Call `index_file()` to re-extract symbols from the updated file
+
+This will be wired to the editor's file save path.
+
+**Location**: `crates/syntax/src/symbol_index.rs`
+
+**Test**: Unit test that modifies a file's content, calls `update_file`, and verifies the index reflects the change.
+
+---
+
+### Step 6: Add SymbolIndex to Workspace
+
+Modify `Workspace` struct in `crates/editor/src/workspace.rs`:
+
+```rust
+pub struct Workspace {
+    // ... existing fields ...
+    /// Cross-file symbol index for go-to-definition
+    pub symbol_index: Option<SymbolIndex>,
+}
+```
+
+Initialize `symbol_index` to `None` initially. In `Workspace::new_with_root()` (or equivalent), if a root directory is provided, call `SymbolIndex::start_indexing(root, registry)`.
+
+**Location**: `crates/editor/src/workspace.rs`
+
+---
+
+### Step 7: Wire incremental update to file save
+
+In `EditorState::save_file()` (or the save path), after successfully writing the file to disk:
+
+```rust
+if let Some(ref index) = workspace.symbol_index {
+    index.update_file(&file_path, &self.language_registry);
+}
+```
+
+**Location**: `crates/editor/src/editor_state.rs`
+
+---
+
+### Step 8: Extend goto_definition to consult symbol index
+
+Modify `EditorState::goto_definition()`:
+
+1. First, try same-file resolution via `LocalsResolver::find_definition()` (existing code)
+2. If `None`, extract the symbol name at cursor position (use the identifier node under cursor)
+3. Query `workspace.symbol_index.lookup(symbol_name)`
+4. If zero results: show status message "Definition not found"
+5. If one result: jump to that location (open file if not already open, move cursor)
+6. If multiple results: show disambiguation selector (Step 9)
+
+To extract the symbol name at cursor:
+- Use the parse tree from the highlighter
+- Find the node at cursor byte offset
+- Walk up to find an identifier node
+- Extract its text
+
+**Location**: `crates/editor/src/editor_state.rs`
+
+**Test**: Integration test with a workspace containing two files, verifying cross-file jump works.
+
+---
+
+### Step 9: Implement disambiguation UI for multiple matches
+
+When `symbol_index.lookup()` returns multiple `SymbolLocation`s, present a selector overlay showing each match with file path context.
+
+Reuse the existing selector infrastructure (`Selector`, `SelectorTarget`) from the file picker:
+
+1. Create `DefinitionSelector` similar to `FilePickerSelector`
+2. Items are `SymbolLocation`s, displayed as `{file_path}:{line}` (e.g., `src/foo.rs:42`)
+3. On selection, jump to that location
+4. Pressing Escape dismisses without jumping
+
+**Location**: `crates/editor/src/definition_selector.rs` (new file), wired from `editor_state.rs`
+
+**Test**: Test that presenting 3 matches shows selector, selection jumps correctly, escape dismisses.
+
+---
+
+### Step 10: Add "indexing..." feedback
+
+When `symbol_index.is_indexing()` is true and user triggers go-to-definition with no same-file result:
+- Show status message "Indexing workspace..." instead of "Definition not found"
+- This gracefully degrades startup experience
+
+**Location**: `crates/editor/src/editor_state.rs`
+
+---
+
+### Step 11: Performance validation
+
+Add an ignored benchmark test that:
+1. Creates a tempdir with ~1000 source files (can generate synthetic Rust files with function definitions)
+2. Measures time to complete `start_indexing()`
+3. Asserts < 5 seconds
+
+Use `#[test] #[ignore]` with manual invocation via `cargo test -- --ignored`.
+
+**Location**: `crates/syntax/src/symbol_index.rs` (or `tests/`)
+
+---
+
+### Step 12: Export module and update lib.rs
+
+Export the new module:
+- `crates/syntax/src/lib.rs`: Add `pub mod symbol_index;` and re-export `SymbolIndex`, `SymbolLocation`, `SymbolKind`
+
+**Location**: `crates/syntax/src/lib.rs`
 
 ---
 
 **BACKREFERENCE COMMENTS**
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+When implementing code, add backreference comments:
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+// Chunk: docs/chunks/treesitter_symbol_index - Cross-file symbol index for go-to-definition
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
-
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Place at module level for `symbol_index.rs` and at function level for `goto_definition` changes.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+**Chunk dependencies** (already satisfied per frontmatter):
+- `treesitter_gotodef` - Provides same-file go-to-definition infrastructure (jump stack, `LocalsResolver`, F12 binding)
 
-If there are no dependencies, delete this section.
--->
+**New crate dependencies** (add to `crates/syntax/Cargo.toml`):
+- `walkdir = "2"` - Recursive directory walking
+- `ignore = "0.4"` - Gitignore pattern matching (respects `.gitignore` files automatically)
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Query compilation caching**: The tags query must be compiled once per language, not per file. Use a `OnceCell` or `Lazy<HashMap<&str, Query>>` to cache compiled queries. If this is slow, consider compiling at LanguageRegistry construction time.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Large monorepo performance**: The 5-second target for ~1000 files may be tight for very large projects. Mitigations:
+   - Parallelize parsing with `rayon` (deferred optimization)
+   - Batch file discovery and parsing
+   - Profile to identify bottlenecks (file I/O vs parsing vs query execution)
+
+3. **Symbol name collisions**: Common names like `new`, `init`, `main`, `test` will have many matches. The disambiguation UI must handle long lists gracefully (possibly truncating with "... and N more").
+
+4. **File not in workspace**: If user opens a file outside the indexed workspace root, cross-file go-to-def won't work for symbols defined in that file. This is acceptable—document as a limitation.
+
+5. **LanguageRegistry thread safety**: `LanguageRegistry` is currently not `Send + Sync`. The background thread needs access to it for extension→language mapping. Options:
+   - Pass a cloned `LanguageRegistry` to the background thread (preferred—it's cheap to clone)
+   - Wrap in `Arc<LanguageRegistry>` and ensure `Send + Sync`
+
+6. **Identifier extraction at cursor**: Need a reliable way to get the identifier under cursor. Current plan: use the parse tree from `SyntaxHighlighter`, find the innermost node at cursor byte offset, then walk up to find an identifier node. Edge case: cursor between tokens or on whitespace.
+
+7. **Disambiguation selector integration**: The selector infrastructure in `crates/editor` is tightly coupled to file picking. May need refactoring to make it generic, or implement a simpler purpose-built selector for definition results.
 
 ## Deviations
 

@@ -12,13 +12,15 @@
 //! workspace represents an independent working context.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::event_channel::EventSender;
 use crate::file_index::FileIndex;
 use crate::pane_layout::{gen_pane_id, Pane, PaneId, PaneLayoutNode};
 use crate::viewport::Viewport;
 use lite_edit_buffer::{BufferView, TextBuffer};
-use lite_edit_syntax::{LanguageRegistry, SyntaxHighlighter, SyntaxTheme};
+// Chunk: docs/chunks/treesitter_symbol_index - Symbol index for cross-file go-to-definition
+use lite_edit_syntax::{LanguageRegistry, SymbolIndex, SyntaxHighlighter, SyntaxTheme};
 // Chunk: docs/chunks/terminal_flood_starvation - PollResult for byte-budgeted polling
 use lite_edit_terminal::{AgentConfig, AgentHandle, AgentState, PollResult, TerminalBuffer};
 
@@ -656,6 +658,16 @@ pub struct Workspace {
     /// When the user invokes go-to-definition, the current position is pushed
     /// onto this stack. The "go back" command pops and restores the previous position.
     pub jump_stack: JumpStack,
+    // Chunk: docs/chunks/treesitter_symbol_index - Symbol index for cross-file go-to-definition
+    /// The symbol index for cross-file go-to-definition.
+    ///
+    /// This index maps symbol names (functions, classes, etc.) to their definition
+    /// locations across all files in the workspace. It is built on a background thread
+    /// when the workspace is created, and updated incrementally when files are saved.
+    ///
+    /// The index is initialized via `start_symbol_indexing()` after workspace creation.
+    /// It's `None` until initialization.
+    pub symbol_index: Option<SymbolIndex>,
 }
 
 impl Workspace {
@@ -723,6 +735,9 @@ impl Workspace {
             file_index,
             last_cache_version: 0,
             jump_stack: JumpStack::default(),
+            // Chunk: docs/chunks/treesitter_symbol_index - Initialize symbol_index as None
+            // Call start_symbol_indexing() to begin background indexing
+            symbol_index: None,
         }
     }
 
@@ -759,6 +774,38 @@ impl Workspace {
     /// Generates a new unique pane ID.
     pub fn gen_pane_id(&mut self) -> PaneId {
         gen_pane_id(&mut self.next_pane_id)
+    }
+
+    // Chunk: docs/chunks/treesitter_symbol_index - Start symbol indexing
+    /// Starts background symbol indexing for this workspace.
+    ///
+    /// This initializes the symbol index with the workspace's root path and starts
+    /// a background thread to scan all source files. Once complete, the index can
+    /// be used for cross-file go-to-definition.
+    ///
+    /// # Arguments
+    ///
+    /// * `registry` - The language registry for extension-to-language mapping
+    pub fn start_symbol_indexing(&mut self, registry: Arc<LanguageRegistry>) {
+        self.symbol_index = Some(SymbolIndex::start_indexing(self.root_path.clone(), registry));
+    }
+
+    // Chunk: docs/chunks/treesitter_symbol_index - Update symbol index for a file
+    /// Updates the symbol index for a single file.
+    ///
+    /// Call this when a file is saved to keep the index up-to-date. The update
+    /// removes all existing entries for the file and re-indexes it.
+    ///
+    /// If the symbol index hasn't been initialized, this is a no-op.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Absolute path to the file that was saved
+    /// * `registry` - The language registry for extension-to-language mapping
+    pub fn update_symbol_index_for_file(&self, file_path: &std::path::Path, registry: &LanguageRegistry) {
+        if let Some(ref index) = self.symbol_index {
+            index.update_file(file_path, registry);
+        }
     }
 
     // Chunk: docs/chunks/pane_mirror_restore - next_pane_id synchronization
