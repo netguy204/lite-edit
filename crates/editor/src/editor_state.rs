@@ -588,6 +588,7 @@ impl EditorState {
         self.focus_stack.top_layer()
     }
 
+    // Chunk: docs/chunks/terminal_pty_wakeup - EventSender registration for creating PtyWakeup handles
     // Chunk: docs/chunks/pty_wakeup_reentrant - EventSender for PTY wakeup
     // Chunk: docs/chunks/buffer_file_watching - Wire up buffer file watcher callback
     /// Sets the event sender for creating PTY wakeup handles.
@@ -675,6 +676,7 @@ impl EditorState {
         }
     }
 
+    // Chunk: docs/chunks/terminal_pty_wakeup - Creates PtyWakeup handle from registered EventSender
     // Chunk: docs/chunks/pty_wakeup_reentrant - Creates PtyWakeup with WakeupSignal trait
     /// Creates a PTY wakeup handle using the stored event sender.
     ///
