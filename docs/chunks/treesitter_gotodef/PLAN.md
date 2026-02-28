@@ -8,153 +8,294 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+Implement same-file go-to-definition using tree-sitter `locals.scm` queries. The approach follows the nvim-treesitter pattern: run a locals query to collect scope, definition, and reference captures; identify the reference node at the cursor position; walk enclosing scopes upward matching by text equality; and jump to the first matching definition.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Architecture**: The go-to-def logic will be implemented in a new `gotodef` module in `crates/syntax`, keeping tree-sitter query execution close to the existing highlighter infrastructure. The `SyntaxHighlighter` will be extended with a public method to access the parse tree and source (required for running locals queries). The editor layer will wire keyboard shortcuts and mouse events to invoke the resolution.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+**Key patterns from DEC decisions and TESTING_PHILOSOPHY.md**:
+- Follow the Model-View-Update pattern: cursor position and jump stack are model state, resolution is update logic, rendering is unchanged
+- Test behavior at boundaries: empty files, cursor on non-identifier, definition on same line as reference, shadowed variables
+- Incremental parsing is now active (via `incremental_parse` chunk), so query execution can rely on up-to-date trees
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/treesitter_gotodef/GOAL.md)
-with references to the files that you expect to touch.
--->
+**Performance budget**: Query execution and scope walking must complete within the 8ms P99 latency budget. Based on investigation findings, locals queries on typical files (~500 captures) execute in ~200µs, well within budget.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+- **docs/subsystems/viewport_scroll**: Not directly relevant - go-to-def jumps the cursor, viewport follows via existing cursor-follows-viewport logic
+- **docs/subsystems/renderer**: Not relevant - no rendering changes needed, just cursor position updates
+- **docs/subsystems/spatial_layout**: Not relevant - cursor positioning uses existing buffer position APIs
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems are directly relevant to this chunk.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write `locals.scm` query files for Rust, Python, JavaScript, TypeScript
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create `locals.scm` query content for the four required languages. These define `@local.scope`, `@local.definition`, and `@local.reference` captures that enable scope-walking resolution.
 
-Example:
+**Sources**:
+- JavaScript and TypeScript: Use `tree_sitter_javascript::LOCALS_QUERY` and `tree_sitter_typescript::LOCALS_QUERY` which are already populated in `LanguageConfig`
+- Rust and Python: Port from nvim-treesitter's `queries/{lang}/locals.scm` files (MIT-licensed)
 
-### Step 1: Define the SegmentHeader struct
+**Format**: Store as `&'static str` constants in a new `queries` module in `crates/syntax/src/queries/`. Use the same `Box::leak` pattern as existing combined queries in `registry.rs`.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+**Files created**: `crates/syntax/src/queries/mod.rs`, `crates/syntax/src/queries/rust.rs`, `crates/syntax/src/queries/python.rs`
 
-Location: src/segment/format.rs
+**Test**: Verify query compiles for each language (no syntax errors).
 
-### Step 2: Implement header serialization
+### Step 2: Populate `locals_query` in `LanguageRegistry` for all four languages
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Update `LanguageRegistry::new()` in `registry.rs` to use the new locals query constants for Rust and Python. Remove the `#[allow(dead_code)]` annotation from the `locals_query` field.
 
-### Step 3: ...
+**Location**: `crates/syntax/src/registry.rs`
 
----
+**Changes**:
+- Import query constants from the new `queries` module
+- Set `locals_query` to the appropriate constant for Rust, Python, JavaScript, TypeScript
+- Remove `#[allow(dead_code)]` from `locals_query` field (line 25)
 
-**BACKREFERENCE COMMENTS**
+**Test**: `registry.config_for_extension("rs").unwrap().locals_query.is_empty()` returns `false`
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+### Step 3: Implement `LocalsResolver` struct in new `gotodef` module
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+Create `crates/syntax/src/gotodef.rs` with a `LocalsResolver` that:
+1. Compiles the locals query once (cached on struct)
+2. Provides `resolve(&self, source: &str, tree: &Tree, cursor_byte: usize) -> Option<Position>`
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+**Data structures**:
+```rust
+/// A captured scope/definition/reference from the locals query
+struct LocalsCapture {
+    kind: CaptureKind,  // Scope, Definition, or Reference
+    node_range: (usize, usize),  // byte range
+    name: String,  // text content for definitions/references
+}
 
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+enum CaptureKind {
+    Scope,
+    Definition,
+    Reference,
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+**Resolution algorithm**:
+1. Run `QueryCursor` over the tree to collect all captures
+2. Find the reference capture that contains `cursor_byte`
+3. If not found, return `None` (cursor not on a reference)
+4. Extract the reference's text (the identifier name)
+5. Build list of scopes that contain the cursor position
+6. For each scope (innermost first), search for a definition with matching text
+7. Return the definition's position if found
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+**Location**: `crates/syntax/src/gotodef.rs`
+
+**Backreference**:
+```rust
+// Chunk: docs/chunks/treesitter_gotodef - Same-file go-to-definition resolution
+```
+
+**Test**: Unit test with inline Rust source containing a local variable definition and reference; verify resolution returns the definition position.
+
+### Step 4: Add public tree and source accessors to `SyntaxHighlighter`
+
+Add methods to `SyntaxHighlighter` to expose the parse tree and source, enabling external code to run additional queries:
+
+```rust
+/// Returns a reference to the current parse tree.
+pub fn tree(&self) -> &Tree {
+    &self.tree
+}
+
+/// Returns a reference to the current source text.
+pub fn source(&self) -> &str {
+    &self.source
+}
+```
+
+The `source()` method already exists (line 1276). Only `tree()` needs to be added.
+
+**Location**: `crates/syntax/src/highlighter.rs`
+
+**Test**: Compile; method is trivial and covered by integration tests.
+
+### Step 5: Add `GotoDefResolver` struct that wraps `LocalsResolver` with language config
+
+Create a higher-level struct that handles language config lookup and query compilation:
+
+```rust
+/// Go-to-definition resolver for a specific language.
+///
+/// Compiled once per language, reused for all files of that language.
+pub struct GotoDefResolver {
+    locals_query: Query,
+}
+
+impl GotoDefResolver {
+    /// Creates a new resolver for the given language config.
+    /// Returns None if the language has no locals query.
+    pub fn new(config: &LanguageConfig) -> Option<Self>;
+
+    /// Resolves the definition for the symbol at the given byte position.
+    /// Returns the byte offset of the definition, or None if not found.
+    pub fn resolve(&self, source: &str, tree: &Tree, cursor_byte: usize) -> Option<usize>;
+}
+```
+
+**Location**: `crates/syntax/src/gotodef.rs`
+
+**Export**: Add to `crates/syntax/src/lib.rs`: `pub use gotodef::GotoDefResolver;`
+
+**Test**: Integration test: create highlighter, get tree, call resolver, verify result.
+
+### Step 6: Add jump stack to `Workspace` for back-navigation
+
+Add a simple jump stack to track cursor positions before go-to-def jumps:
+
+```rust
+/// Position in a buffer for jump stack
+#[derive(Clone, Debug)]
+pub struct JumpPosition {
+    pub tab_id: TabId,
+    pub line: usize,
+    pub col: usize,
+}
+
+/// Stack of jump positions for back-navigation
+pub struct JumpStack {
+    positions: Vec<JumpPosition>,
+    max_size: usize,  // Limit to prevent unbounded growth, e.g., 100
+}
+```
+
+**Methods**:
+- `push(pos: JumpPosition)`: Push a position onto the stack
+- `pop() -> Option<JumpPosition>`: Pop and return the most recent position
+
+Add `jump_stack: JumpStack` field to `Workspace`.
+
+**Location**: `crates/editor/src/workspace.rs`
+
+**Backreference**:
+```rust
+// Chunk: docs/chunks/treesitter_gotodef - Jump stack for go-to-definition back navigation
+```
+
+**Test**: Unit test: push positions, pop returns in LIFO order, respects max size.
+
+### Step 7: Add `GotoDefinition` command to `BufferFocusTarget`
+
+Add a new command variant to `buffer_target.rs`:
+
+```rust
+/// Go to the definition of the symbol under the cursor
+GotoDefinition,
+/// Go back to the previous cursor position (from jump stack)
+GoBack,
+```
+
+Add key bindings in `resolve_command()`:
+- `Key::Char('d')` with Command modifier → `GotoDefinition` (Cmd+D)
+- Or F12 → `GotoDefinition` (common IDE binding)
+- `Key::Char('[')` with Command modifier → `GoBack` (Cmd+[)
+
+**Location**: `crates/editor/src/buffer_target.rs`
+
+**Test**: Key binding resolution test.
+
+### Step 8: Implement `execute_command` for `GotoDefinition` and `GoBack`
+
+In `BufferFocusTarget::execute_command()`, handle the new commands:
+
+**GotoDefinition**:
+1. Get current cursor position (line, col)
+2. Convert to byte offset using `TextBuffer::byte_offset_at()`
+3. Get the `SyntaxHighlighter` from the active tab
+4. Get the `LanguageConfig` and create/reuse a `GotoDefResolver`
+5. Call `resolver.resolve(source, tree, cursor_byte)`
+6. If found:
+   - Push current position to jump stack
+   - Convert definition byte offset to (line, col)
+   - Move cursor to definition position
+   - Mark dirty region for redraw
+7. If not found:
+   - Display status message "Definition not found in this file"
+
+**GoBack**:
+1. Pop from jump stack
+2. If position found:
+   - Check if tab still exists
+   - Switch to that tab if different
+   - Move cursor to saved position
+3. If stack empty: do nothing
+
+**Location**: `crates/editor/src/buffer_target.rs` for command execution, `crates/editor/src/editor_state.rs` for workspace access
+
+**Note**: The resolver may need to be cached on the highlighter or workspace to avoid recompilation. Consider adding `GotoDefResolver` as a lazily-initialized field alongside the `SyntaxHighlighter`.
+
+**Backreference**:
+```rust
+// Chunk: docs/chunks/treesitter_gotodef - GotoDefinition command execution
+```
+
+### Step 9: Add Cmd-click handling for go-to-definition
+
+Extend mouse event handling in `editor_state.rs` to detect Cmd-click:
+
+```rust
+// In handle_mouse() or handle_mouse_buffer()
+if event.kind == MouseEventKind::Down && event.modifiers.command {
+    // Convert click position to buffer position
+    // Trigger go-to-definition at that position
+}
+```
+
+**Integration**: The click position is converted to a buffer position, then `GotoDefinition` logic is invoked with that position rather than the current cursor position.
+
+**Location**: `crates/editor/src/editor_state.rs` and/or `crates/editor/src/buffer_target.rs`
+
+### Step 10: Add status message display for "definition not found"
+
+When go-to-definition fails (no same-file definition found), display a brief status message to the user. Use the existing `MiniBuffer` or add a simple status display.
+
+**Location**: Check existing status/message patterns in `crates/editor/src/mini_buffer.rs`
+
+**Message**: "Definition not found in this file" (or similar concise text)
+
+**Duration**: Message should auto-clear after ~2 seconds or on next keypress
+
+### Step 11: Write comprehensive tests
+
+**Unit tests** (in `crates/syntax/src/gotodef.rs`):
+- Resolution of local variable definition
+- Resolution of function parameter
+- Resolution of locally-defined function
+- Shadowed variable (innermost definition wins)
+- Cursor on definition (not reference) → returns None or same position
+- Cursor on non-identifier → returns None
+- Empty file → returns None
+
+**Integration tests** (in `crates/editor/tests/`):
+- Cmd+D on identifier moves cursor to definition
+- Cmd+[ after Cmd+D returns to original position
+- Cmd-click on identifier moves cursor to definition
+- Jump stack size is bounded
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **incremental_parse chunk** (ACTIVE): This chunk depends on incremental parsing being wired up, which it now is. The `Tab::notify_edit()` path is active, ensuring parse trees are up-to-date.
+- **tree_sitter_javascript, tree_sitter_typescript, tree_sitter_rust, tree_sitter_python crates**: Already dependencies in `Cargo.toml`.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Locals query accuracy for Rust**: nvim-treesitter has documented bugs for hoisted function names (issue #499). May need to test carefully and document limitations.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Query caching strategy**: Should `GotoDefResolver` be created once per language and shared, or created per-file? Per-language is more efficient but requires a cache somewhere (perhaps on `LanguageRegistry` or a new struct).
+
+3. **Cmd+D conflict**: Cmd+D is used in some editors for "add selection to next find match". Verify no existing binding conflict. F12 is a safer alternative if conflicts arise.
+
+4. **Status message infrastructure**: May need to add a simple status display if `MiniBuffer` doesn't support transient messages. Keep implementation minimal.
+
+5. **Cross-file symbols**: When resolution fails for an imported symbol, the "not found" message should be clear that this is a same-file limitation, not a bug.
 
 ## Deviations
 
@@ -165,13 +306,4 @@ When reality diverges from the plan, document it here:
 - What changed?
 - Why?
 - What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

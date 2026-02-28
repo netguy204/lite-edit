@@ -1,11 +1,13 @@
 // Chunk: docs/chunks/syntax_highlighting - Language registry for 13 languages
 // Chunk: docs/chunks/syntax_highlight_perf - LanguageConfig highlights_query for direct QueryCursor usage
+// Chunk: docs/chunks/treesitter_gotodef - Locals query support for go-to-definition
 
 //! Language registry mapping file extensions to tree-sitter configurations.
 //!
 //! This module provides `LanguageRegistry` which maps file extensions to
 //! tree-sitter `Language` objects and their associated highlight queries.
 
+use crate::queries;
 use std::collections::HashMap;
 use tree_sitter::Language;
 
@@ -21,8 +23,9 @@ pub struct LanguageConfig {
     // Chunk: docs/chunks/highlight_injection - Injection query now used for embedded language highlighting
     /// The injections query (for embedded languages like Markdown code blocks, HTML script tags)
     pub injections_query: &'static str,
-    /// The locals query (for scope-based highlighting)
-    #[allow(dead_code)] // Reserved for future locals support
+    // Chunk: docs/chunks/treesitter_gotodef - Locals query for go-to-definition
+    /// The locals query (for scope-aware go-to-definition and highlighting).
+    /// Defines `@local.scope`, `@local.definition`, and `@local.reference` captures.
     pub locals_query: &'static str,
     // Chunk: docs/chunks/highlight_injection - Language name for same-language injection filtering
     /// The canonical language name (e.g., "rust", "python", "javascript").
@@ -74,12 +77,13 @@ impl LanguageRegistry {
     pub fn new() -> Self {
         let mut configs = HashMap::new();
 
-        // Rust (uses HIGHLIGHTS_QUERY)
+        // Rust (uses HIGHLIGHTS_QUERY and custom locals query for go-to-def)
+        // Chunk: docs/chunks/treesitter_gotodef - Use custom locals query for Rust
         let rust_config = LanguageConfig::new(
             tree_sitter_rust::LANGUAGE.into(),
             tree_sitter_rust::HIGHLIGHTS_QUERY,
             tree_sitter_rust::INJECTIONS_QUERY,
-            "",
+            queries::rust::LOCALS_QUERY,
             "rust",
         );
         configs.insert("rs", rust_config);
@@ -115,12 +119,13 @@ impl LanguageRegistry {
         );
         configs.insert("c", c_config);
 
-        // Python (uses HIGHLIGHTS_QUERY)
+        // Python (uses HIGHLIGHTS_QUERY and custom locals query for go-to-def)
+        // Chunk: docs/chunks/treesitter_gotodef - Use custom locals query for Python
         let python_config = LanguageConfig::new(
             tree_sitter_python::LANGUAGE.into(),
             tree_sitter_python::HIGHLIGHTS_QUERY,
             "",
-            "",
+            queries::python::LOCALS_QUERY,
             "python",
         );
         configs.insert("py", python_config);

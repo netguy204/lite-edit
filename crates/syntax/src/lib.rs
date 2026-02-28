@@ -36,11 +36,14 @@
 //! ```
 
 mod edit;
+pub mod gotodef;
 mod highlighter;
+pub mod queries;
 mod registry;
 mod theme;
 
 pub use edit::{byte_offset_to_position, delete_event, insert_event, position_to_byte_offset, EditEvent};
+pub use gotodef::LocalsResolver;
 pub use highlighter::SyntaxHighlighter;
 pub use registry::{LanguageConfig, LanguageRegistry};
 pub use theme::SyntaxTheme;
