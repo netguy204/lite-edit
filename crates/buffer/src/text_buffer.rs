@@ -4328,8 +4328,9 @@ mod tests {
     #[test]
     fn test_delete_selection_tracked() {
         let mut buf = TextBuffer::from_str("hello world");
-        buf.set_selection_anchor(Position::new(0, 6));
+        // Set cursor first, then anchor, to avoid set_cursor clearing the selection
         buf.set_cursor(Position::new(0, 11));
+        buf.set_selection_anchor(Position::new(0, 6));
 
         let result = buf.delete_selection_tracked();
 
