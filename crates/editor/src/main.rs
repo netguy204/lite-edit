@@ -287,6 +287,7 @@ define_class!(
     }
 );
 
+// Chunk: docs/chunks/metal_surface - Application delegate handling lifecycle and window setup
 impl AppDelegate {
     /// Creates a new application delegate
     fn new(mtm: MainThreadMarker) -> Retained<Self> {

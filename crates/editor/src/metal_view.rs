@@ -327,6 +327,19 @@ define_class!(
                 0x60..=0x6F | // F5-F12 and other function keys
                 0x72         // Insert/Help
             );
+            // Chunk: docs/chunks/terminal_tmux_pageup - Navigation keys bypass text input system
+            // Navigation keys (PageUp, PageDown, Home, End, Forward Delete) need to bypass
+            // interpretKeyEvents because the text input system's selector-based routing
+            // (e.g., "pageUp:") is unreliable in some keyboard/IME configurations and
+            // terminal environments like tmux copy mode. Direct routing through
+            // convert_key_event() ensures consistent key delivery.
+            let is_navigation_key = matches!(key_code,
+                0x73 | // Home
+                0x74 | // PageUp
+                0x75 | // Forward Delete
+                0x77 | // End
+                0x79   // PageDown
+            );
             let is_escape = key_code == 0x35;
             let has_command = flags.contains(NSEventModifierFlags::Command);
             let has_control = flags.contains(NSEventModifierFlags::Control);
@@ -339,7 +352,7 @@ define_class!(
             // Ctrl+A becomes moveToBeginningOfParagraph: instead of moveToBeginningOfLine:.
             // By routing Ctrl+key through convert_key_event() directly, we preserve the full key+modifiers
             // and let resolve_command() handle the mapping to editor commands.
-            if has_command || has_control || has_option || is_escape || is_function_key {
+            if has_command || has_control || has_option || is_escape || is_function_key || is_navigation_key {
                 if let Some(key_event) = self.convert_key_event(event) {
                     let sender = self.ivars().event_sender.borrow();
                     if let Some(sender) = sender.as_ref() {
