@@ -15,6 +15,27 @@ use crate::event::TerminalEvent;
 // Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
 use crate::pty_wakeup::PtyWakeup;
 
+// Chunk: docs/chunks/terminal_unicode_env - UTF-8 locale detection for Unicode support
+/// Returns a UTF-8 locale value for the LANG environment variable.
+///
+/// This function implements locale detection with fallback:
+/// 1. If the parent environment has a LANG variable with UTF-8 encoding, return it
+/// 2. Otherwise, return "en_US.UTF-8" as a sane default
+///
+/// This ensures child processes receive proper UTF-8 locale information,
+/// which is critical for applications that check locale to decide whether
+/// to output Unicode characters (e.g., Node.js's `is-unicode-supported`).
+fn get_utf8_lang() -> String {
+    if let Ok(lang) = std::env::var("LANG") {
+        // Check if the existing LANG has UTF-8 encoding (case-insensitive)
+        if lang.to_uppercase().contains(".UTF-8") || lang.to_uppercase().contains(".UTF8") {
+            return lang;
+        }
+    }
+    // Fallback to en_US.UTF-8, which is always available on macOS
+    "en_US.UTF-8".to_string()
+}
+
 /// Handle to a PTY process and its I/O thread.
 pub struct PtyHandle {
     /// Writer to send input to PTY stdin.
@@ -97,6 +118,12 @@ impl PtyHandle {
         // Set up environment
         cmd_builder.env("TERM", "xterm-256color");
         cmd_builder.env("COLORTERM", "truecolor");
+
+        // Chunk: docs/chunks/terminal_unicode_env - UTF-8 locale and terminal identification
+        // Set locale for UTF-8 support (inherit if UTF-8, otherwise fallback to en_US.UTF-8)
+        cmd_builder.env("LANG", get_utf8_lang());
+        // Set terminal identification so applications can identify lite-edit
+        cmd_builder.env("TERM_PROGRAM", "lite-edit");
 
         // Spawn the child process
         let child = pair
@@ -217,6 +244,12 @@ impl PtyHandle {
         // Set up environment
         cmd_builder.env("TERM", "xterm-256color");
         cmd_builder.env("COLORTERM", "truecolor");
+
+        // Chunk: docs/chunks/terminal_unicode_env - UTF-8 locale and terminal identification
+        // Set locale for UTF-8 support (inherit if UTF-8, otherwise fallback to en_US.UTF-8)
+        cmd_builder.env("LANG", get_utf8_lang());
+        // Set terminal identification so applications can identify lite-edit
+        cmd_builder.env("TERM_PROGRAM", "lite-edit");
 
         // Spawn the child process
         let child = pair
@@ -407,6 +440,55 @@ mod tests {
         // Check exit code
         let exit_code = handle.try_wait();
         assert_eq!(exit_code, Some(0));
+    }
+
+    // Chunk: docs/chunks/terminal_unicode_env - Unicode environment variable test
+    #[test]
+    fn test_unicode_environment_variables() {
+        // Spawn a shell command that prints environment variables
+        // to verify LANG and TERM_PROGRAM are set correctly for Unicode support
+        let handle = PtyHandle::spawn(
+            "/bin/sh",
+            &["-c", "env"],
+            Path::new("/tmp"),
+            24,
+            80,
+            false, // Explicit command, not login shell
+        );
+
+        assert!(handle.is_ok(), "Failed to spawn PTY: {:?}", handle.err());
+        let handle = handle.unwrap();
+
+        // Collect output with multiple polling attempts
+        let mut output = String::new();
+        for _ in 0..20 {
+            std::thread::sleep(Duration::from_millis(50));
+            while let Some(event) = handle.try_recv() {
+                if let TerminalEvent::PtyOutput(data) = event {
+                    output.push_str(&String::from_utf8_lossy(&data));
+                }
+            }
+        }
+
+        // Verify LANG is set with UTF-8 encoding
+        let has_utf8_lang = output.lines().any(|line| {
+            line.starts_with("LANG=") && line.to_uppercase().contains(".UTF-8")
+        });
+        assert!(
+            has_utf8_lang,
+            "Expected LANG environment variable with .UTF-8 suffix in output:\n{}",
+            output
+        );
+
+        // Verify TERM_PROGRAM is set to lite-edit
+        let has_term_program = output.lines().any(|line| {
+            line == "TERM_PROGRAM=lite-edit"
+        });
+        assert!(
+            has_term_program,
+            "Expected TERM_PROGRAM=lite-edit in output:\n{}",
+            output
+        );
     }
 
     // Chunk: docs/chunks/terminal_shell_env - Login shell integration test
