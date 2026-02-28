@@ -1,20 +1,25 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/terminal/src/terminal_buffer.rs
+- crates/editor/src/row_scroller.rs
+- crates/editor/src/viewport.rs
 code_references: []
 narrative: null
 investigation: null
 subsystems:
-  - subsystem_id: "viewport_scroll"
-    relationship: implements
+- subsystem_id: viewport_scroll
+  relationship: implements
 friction_entries: []
 bug_type: semantic
 depends_on: []
-created_after: ["terminal_unicode_env", "incremental_parse", "tab_rendering"]
+created_after:
+- terminal_unicode_env
+- incremental_parse
+- tab_rendering
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
