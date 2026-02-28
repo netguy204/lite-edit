@@ -481,6 +481,29 @@ impl Tab {
             hl.update_source(&source);
         }
     }
+
+    // Chunk: docs/chunks/treesitter_indent - Expose indent computation to editor
+    /// Computes the indentation for a new line.
+    ///
+    /// Returns the indent string to insert, or empty string if:
+    /// - No highlighter is configured
+    /// - Language has no indent query
+    /// - Computation fails
+    ///
+    /// # Arguments
+    ///
+    /// * `line` - The line number to compute indent for
+    /// * `config` - Indentation configuration (tabs vs spaces, width)
+    pub fn compute_indent_for_line(
+        &self,
+        line: usize,
+        config: &lite_edit_syntax::IndentConfig,
+    ) -> String {
+        self.highlighter
+            .as_ref()
+            .map(|hl| hl.compute_indent(line, config))
+            .unwrap_or_default()
+    }
 }
 
 impl std::fmt::Debug for Tab {
@@ -2192,5 +2215,74 @@ mod tests {
         let mut tab = Tab::empty_file(1, TEST_LINE_HEIGHT);
         tab.base_content = Some("file content".to_string());
         assert_eq!(tab.base_content, Some("file content".to_string()));
+    }
+
+    // =========================================================================
+    // Indent Computation Tests (Chunk: docs/chunks/treesitter_indent)
+    // =========================================================================
+
+    #[test]
+    fn test_tab_compute_indent_without_highlighter() {
+        // Without a highlighter, compute_indent_for_line should return empty string
+        let tab = Tab::empty_file(1, TEST_LINE_HEIGHT);
+        let config = lite_edit_syntax::IndentConfig::default();
+
+        let indent = tab.compute_indent_for_line(0, &config);
+        assert_eq!(indent, "", "Should return empty string without highlighter");
+    }
+
+    #[test]
+    fn test_tab_compute_indent_with_highlighter() {
+        // Create a tab with Rust source and setup highlighting
+        let mut buffer = TextBuffer::from_str("fn main() {\n");
+        // Move cursor to the new line
+        buffer.set_cursor(lite_edit_buffer::Position { line: 1, col: 0 });
+
+        let mut tab = Tab::new_file(
+            1,
+            buffer,
+            "test.rs".to_string(),
+            Some(PathBuf::from("/test/test.rs")),
+            TEST_LINE_HEIGHT,
+        );
+
+        // Setup highlighting
+        let registry = LanguageRegistry::new();
+        let theme = SyntaxTheme::catppuccin_mocha();
+        let setup_ok = tab.setup_highlighting(&registry, theme);
+        assert!(setup_ok, "Highlighting setup should succeed for .rs file");
+
+        // Compute indent for line 1 (after opening brace)
+        let config = lite_edit_syntax::IndentConfig::default();
+        let indent = tab.compute_indent_for_line(1, &config);
+
+        assert_eq!(indent, "    ", "Should indent after opening brace");
+    }
+
+    #[test]
+    fn test_tab_compute_indent_python() {
+        // Create a tab with Python source
+        let mut buffer = TextBuffer::from_str("def foo():\n");
+        buffer.set_cursor(lite_edit_buffer::Position { line: 1, col: 0 });
+
+        let mut tab = Tab::new_file(
+            1,
+            buffer,
+            "test.py".to_string(),
+            Some(PathBuf::from("/test/test.py")),
+            TEST_LINE_HEIGHT,
+        );
+
+        // Setup highlighting
+        let registry = LanguageRegistry::new();
+        let theme = SyntaxTheme::catppuccin_mocha();
+        let setup_ok = tab.setup_highlighting(&registry, theme);
+        assert!(setup_ok, "Highlighting setup should succeed for .py file");
+
+        // Compute indent for line 1 (after colon)
+        let config = lite_edit_syntax::IndentConfig::default();
+        let indent = tab.compute_indent_for_line(1, &config);
+
+        assert_eq!(indent, "    ", "Should indent after function def colon");
     }
 }

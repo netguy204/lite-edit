@@ -2067,6 +2067,10 @@ impl EditorState {
         let mut content_mutated = false;
         // Chunk: docs/chunks/incremental_parse - Capture edit info for incremental parsing
         let mut captured_edit_info: Option<lite_edit_buffer::EditInfo> = None;
+        // Chunk: docs/chunks/treesitter_indent - Track if this is an Enter key for auto-indent
+        let is_enter_key = matches!(event.key, crate::input::Key::Return)
+            && !event.modifiers.command
+            && !event.modifiers.control;
 
         // Check if the active tab is a file tab or terminal tab
         // Use a block to limit the borrow scope
@@ -2215,6 +2219,13 @@ impl EditorState {
                 // Fall back to full reparse for operations without tracked edits
                 self.sync_active_tab_highlighter();
             }
+        }
+
+        // Chunk: docs/chunks/treesitter_indent - Apply intelligent indentation after Enter
+        // After syncing the highlighter (so the tree is up-to-date), compute and insert
+        // the appropriate indentation for the new line.
+        if is_file_tab && is_enter_key && needs_highlighter_sync {
+            self.apply_auto_indent();
         }
 
         // Chunk: docs/chunks/dirty_bit_navigation - Mark file tab dirty only for content mutations
@@ -3649,6 +3660,77 @@ impl EditorState {
                 tab.notify_edit(event);
             }
         }
+    }
+
+    // Chunk: docs/chunks/treesitter_indent - Apply intelligent indentation
+    /// Applies auto-indentation to the current line after Enter is pressed.
+    ///
+    /// This computes the correct indentation based on the parse tree structure
+    /// (e.g., +1 indent after opening brace, matching indent for closing brace)
+    /// and inserts it at the start of the current line.
+    ///
+    /// Should be called after the highlighter has been synced (so the tree is up-to-date).
+    fn apply_auto_indent(&mut self) {
+        // Get the indent string to insert
+        let indent_str = {
+            let ws = match self.editor.active_workspace() {
+                Some(ws) => ws,
+                None => return,
+            };
+            let tab = match ws.active_tab() {
+                Some(tab) => tab,
+                None => return,
+            };
+            let buffer = match tab.as_text_buffer() {
+                Some(buf) => buf,
+                None => return,
+            };
+
+            let cursor_line = buffer.cursor_position().line;
+            let config = lite_edit_syntax::IndentConfig::default();
+            let indent = tab.compute_indent_for_line(cursor_line, &config);
+
+            // Don't insert if no indent computed
+            if indent.is_empty() {
+                return;
+            }
+
+            indent
+        };
+
+        // Insert the indent string and update highlighter
+        // We need separate borrows to satisfy the borrow checker
+        let edit_info = {
+            let ws = match self.editor.active_workspace_mut() {
+                Some(ws) => ws,
+                None => return,
+            };
+            let tab = match ws.active_tab_mut() {
+                Some(tab) => tab,
+                None => return,
+            };
+
+            // Get buffer and viewport together to avoid borrow conflicts
+            let (buffer, _viewport) = match tab.buffer_and_viewport_mut() {
+                Some(bv) => bv,
+                None => return,
+            };
+
+            // Insert the indent string at cursor position
+            // The cursor is at the start of the new line after Enter
+            let result = buffer.insert_str_tracked(&indent_str);
+
+            result.edit_info
+        };
+
+        // Notify the highlighter of the indent insertion
+        if let Some(edit_info) = edit_info {
+            self.notify_active_tab_edit(edit_info.into());
+        }
+
+        // Mark the line dirty for rendering
+        // Use Layout invalidation since we modified the buffer content
+        self.invalidation.merge(InvalidationKind::Layout);
     }
 
     /// Returns the window title based on the current file association.
