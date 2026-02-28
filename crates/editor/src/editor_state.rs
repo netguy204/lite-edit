@@ -68,7 +68,8 @@ use crate::workspace::Editor;
 // Chunk: docs/chunks/styled_line_cache - DirtyLines for cache invalidation tracking
 use lite_edit_buffer::{DirtyLines, Position, TextBuffer};
 // Chunk: docs/chunks/syntax_highlighting - Syntax highlighting support
-use lite_edit_syntax::{LanguageRegistry, SyntaxTheme};
+// Chunk: docs/chunks/treesitter_gotodef - LocalsResolver for go-to-definition
+use lite_edit_syntax::{LanguageRegistry, LocalsResolver, SyntaxTheme};
 // Chunk: docs/chunks/dragdrop_file_paste - Shell escaping for dropped file paths
 use lite_edit::shell_escape::shell_escape_paths;
 // Chunk: docs/chunks/terminal_active_tab_safety - Terminal input encoding
@@ -207,6 +208,11 @@ pub struct EditorState {
     // Chunk: docs/chunks/app_nap_file_watcher_pause - Paused state storage
     /// Stored paused state for file watchers. When Some, watchers are paused.
     paused_watcher_state: Option<PausedFileWatchersState>,
+    // Chunk: docs/chunks/treesitter_gotodef - Status message field
+    /// Optional transient status message for user feedback.
+    /// Set by operations like go-to-definition when no definition is found.
+    /// Automatically expires after 2 seconds or on next keypress.
+    pub status_message: Option<StatusMessage>,
     /// Flag set by Ctrl+Shift+P to trigger an on-demand perf stats dump.
     #[cfg(feature = "perf-instrumentation")]
     pub dump_perf_stats: bool,
@@ -222,6 +228,37 @@ pub struct PausedFileWatchersState {
     buffer_watcher_state: PausedWatcherState,
     /// Paused states from each workspace's FileIndex, keyed by workspace ID.
     workspace_states: std::collections::HashMap<u64, PausedFileIndexState>,
+}
+
+// Chunk: docs/chunks/treesitter_gotodef - Status message for transient feedback
+/// A transient status message displayed to the user.
+///
+/// Status messages are shown briefly to provide feedback (e.g., "Definition not found")
+/// and automatically expire after a duration or on the next keypress.
+#[derive(Clone, Debug)]
+pub struct StatusMessage {
+    /// The message text to display.
+    pub text: String,
+    /// When the message was created.
+    pub created_at: Instant,
+    /// Duration after which the message should expire (default: 2 seconds).
+    pub duration: std::time::Duration,
+}
+
+impl StatusMessage {
+    /// Creates a new status message with the default 2-second duration.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            created_at: Instant::now(),
+            duration: std::time::Duration::from_secs(2),
+        }
+    }
+
+    /// Returns true if the message has expired.
+    pub fn is_expired(&self) -> bool {
+        self.created_at.elapsed() >= self.duration
+    }
 }
 
 // =============================================================================
@@ -469,6 +506,8 @@ impl EditorState {
             activity_assertion: ActivityAssertion::new(),
             // Chunk: docs/chunks/app_nap_file_watcher_pause - Initialize paused state
             paused_watcher_state: None,
+            // Chunk: docs/chunks/treesitter_gotodef - Initialize status message
+            status_message: None,
             #[cfg(feature = "perf-instrumentation")]
             dump_perf_stats: false,
         }
@@ -538,6 +577,8 @@ impl EditorState {
             activity_assertion: ActivityAssertion::new(),
             // Chunk: docs/chunks/app_nap_file_watcher_pause - Initialize paused state
             paused_watcher_state: None,
+            // Chunk: docs/chunks/treesitter_gotodef - Initialize status message
+            status_message: None,
             #[cfg(feature = "perf-instrumentation")]
             dump_perf_stats: false,
         }
@@ -928,6 +969,9 @@ impl EditorState {
     pub fn handle_key(&mut self, event: KeyEvent) {
         use crate::input::Key;
 
+        // Chunk: docs/chunks/treesitter_gotodef - Clear status message on any keypress
+        self.status_message = None;
+
         // Check for app-level shortcuts before delegating to focus target
         // Cmd+Q (without Ctrl) triggers quit
         if event.modifiers.command && !event.modifiers.control {
@@ -1107,6 +1151,25 @@ impl EditorState {
             }
         }
 
+        // Chunk: docs/chunks/treesitter_gotodef - Go-to-definition key handling
+        // F12 → go to definition (only in Buffer focus)
+        if let Key::F12 = event.key {
+            if !event.modifiers.shift && self.focus == EditorFocus::Buffer {
+                self.goto_definition();
+                return;
+            }
+        }
+
+        // Ctrl+- → go back to previous position (only in Buffer focus)
+        if event.modifiers.control && !event.modifiers.command {
+            if let Key::Char('-') = event.key {
+                if self.focus == EditorFocus::Buffer {
+                    self.go_back();
+                    return;
+                }
+            }
+        }
+
         // Route based on current focus
         match self.focus {
             EditorFocus::Selector => {
@@ -1244,6 +1307,161 @@ impl EditorState {
         self.cursor_visible = true;
         self.last_keystroke = Instant::now();
 
+        self.invalidation.merge(InvalidationKind::Layout);
+    }
+
+    // =========================================================================
+    // Go-to-Definition (Chunk: docs/chunks/treesitter_gotodef)
+    // =========================================================================
+
+    // Chunk: docs/chunks/treesitter_gotodef - Go-to-definition using tree-sitter locals queries
+    /// Navigates to the definition of the symbol under the cursor.
+    ///
+    /// Uses tree-sitter locals queries to find the definition of the identifier
+    /// at the cursor position. If found:
+    /// - Pushes the current position onto the jump stack
+    /// - Moves the cursor to the definition
+    ///
+    /// If no definition is found (e.g., the cursor is not on an identifier,
+    /// or the symbol is defined in another file), displays a status message.
+    fn goto_definition(&mut self) {
+        // Only works on file tabs with syntax highlighting
+        let workspace = match self.editor.active_workspace_mut() {
+            Some(ws) => ws,
+            None => return,
+        };
+
+        let pane_id = workspace.active_pane_id;
+        let tab = match workspace.active_tab() {
+            Some(t) => t,
+            None => return,
+        };
+
+        // Get the highlighter and buffer
+        let highlighter = match tab.highlighter() {
+            Some(h) => h,
+            None => {
+                // No highlighter = no syntax support for this file type
+                return;
+            }
+        };
+
+        let buffer = match tab.as_text_buffer() {
+            Some(b) => b,
+            None => return,
+        };
+
+        // Get the language config from the registry to create a LocalsResolver
+        let ext = match tab.associated_file.as_ref().and_then(|p| p.extension()).and_then(|e| e.to_str()) {
+            Some(e) => e,
+            None => return,
+        };
+
+        let config = match self.language_registry.config_for_extension(ext) {
+            Some(c) => c,
+            None => return,
+        };
+
+        // Create the locals resolver
+        let resolver = match LocalsResolver::new(config.language.clone(), config.locals_query) {
+            Some(r) => r,
+            None => {
+                // No locals query = no go-to-def support
+                return;
+            }
+        };
+
+        // Get current cursor position
+        let cursor_pos = buffer.cursor_position();
+        let source = buffer.content();
+
+        // Convert cursor position to byte offset
+        let cursor_byte = lite_edit_syntax::position_to_byte_offset(&source, cursor_pos.line, cursor_pos.col);
+
+        // Try to find the definition
+        let tree = highlighter.tree();
+        let result = resolver.find_definition(tree, source.as_bytes(), cursor_byte);
+
+        match result {
+            Some(def_range) => {
+                // Found a definition - push current position to jump stack
+                let workspace = self.editor.active_workspace_mut().unwrap();
+                let tab = workspace.active_tab().unwrap();
+                let tab_id = tab.id;
+
+                workspace.jump_stack.push(crate::workspace::JumpPosition {
+                    tab_id,
+                    pane_id,
+                    line: cursor_pos.line,
+                    col: cursor_pos.col,
+                });
+
+                // Convert byte offset to position
+                let (def_line, def_col) = lite_edit_syntax::byte_offset_to_position(&source, def_range.start);
+
+                // Move cursor to definition
+                let tab = workspace.active_tab_mut().unwrap();
+                if let Some(buffer) = tab.as_text_buffer_mut() {
+                    buffer.set_cursor(Position::new(def_line, def_col));
+                }
+
+                // Ensure the new cursor position is visible
+                self.invalidation.merge(InvalidationKind::Layout);
+            }
+            None => {
+                // No definition found - show status message
+                self.status_message = Some(StatusMessage::new("Definition not found in this file"));
+            }
+        }
+    }
+
+    // Chunk: docs/chunks/treesitter_gotodef - Status message accessor with expiry
+    /// Returns the current status message, if any and not expired.
+    ///
+    /// Also clears the message if it has expired. Call this from the render
+    /// loop to both get the current message and trigger automatic expiry.
+    pub fn current_status_message(&mut self) -> Option<&str> {
+        // Check expiry and clear if needed
+        if let Some(ref msg) = self.status_message {
+            if msg.is_expired() {
+                self.status_message = None;
+                return None;
+            }
+        }
+        self.status_message.as_ref().map(|m| m.text.as_str())
+    }
+
+    // Chunk: docs/chunks/treesitter_gotodef - Go back to previous position from jump stack
+    /// Navigates back to the previous cursor position.
+    ///
+    /// Pops the most recent position from the jump stack and navigates to it.
+    /// If the tab still exists, moves the cursor to the saved position.
+    /// If the stack is empty, does nothing.
+    fn go_back(&mut self) {
+        let workspace = match self.editor.active_workspace_mut() {
+            Some(ws) => ws,
+            None => return,
+        };
+
+        // Pop from jump stack
+        let pos = match workspace.jump_stack.pop() {
+            Some(p) => p,
+            None => return, // Empty stack - nothing to go back to
+        };
+
+        // Check if the tab still exists and navigate to it
+        // For now, we only support same-tab jumps (the tab_id check)
+        // Cross-tab jumps would require finding the tab and switching to it
+        let tab = workspace.active_tab_mut();
+        if let Some(tab) = tab {
+            if tab.id == pos.tab_id {
+                if let Some(buffer) = tab.as_text_buffer_mut() {
+                    buffer.set_cursor(Position::new(pos.line, pos.col));
+                }
+            }
+        }
+
+        // Mark dirty to redraw cursor at new position
         self.invalidation.merge(InvalidationKind::Layout);
     }
 
@@ -2505,11 +2723,50 @@ impl EditorState {
             (fallback_x, fallback_y)
         };
 
+        // Chunk: docs/chunks/treesitter_gotodef - Cmd+click for go-to-definition
+        // Check for Cmd+click and handle it specially (before getting mutable refs)
+        let is_cmd_click = matches!(event.kind, MouseEventKind::Down)
+            && event.modifiers.command
+            && !event.modifiers.control
+            && !event.modifiers.option
+            && event.click_count == 1;
+
         // Try to get the text buffer and viewport for file tabs
         if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
             // File tab: use the existing BufferFocusTarget path
 
-            // Ensure cursor is visible when clicking
+            // Chunk: docs/chunks/treesitter_gotodef - Cmd+click for go-to-definition
+            if is_cmd_click {
+                // Position the cursor at the click location
+                use crate::buffer_target::pixel_to_buffer_position_wrapped;
+                use crate::wrap_layout::WrapLayout;
+
+                let font_metrics = self.font_metrics;
+                let wrap_layout = WrapLayout::new(
+                    if let Some(ref hit) = hit { hit.pane_rect.width } else { self.view_width - RAIL_WIDTH },
+                    &font_metrics,
+                );
+
+                let position = pixel_to_buffer_position_wrapped(
+                    (content_x, content_y),
+                    if let Some(ref hit) = hit { hit.pane_rect.height - TAB_BAR_HEIGHT } else { self.view_height - TAB_BAR_HEIGHT },
+                    &wrap_layout,
+                    viewport.scroll_fraction_px(),
+                    viewport.first_visible_line(),
+                    buffer.line_count(),
+                    |line| buffer.line_len(line),
+                    |line| buffer.line_content(line),
+                );
+
+                // Set cursor to the click position and mark for go-to-def
+                buffer.set_cursor(position);
+                self.invalidation.merge(InvalidationKind::Layout);
+                // Exit borrow scope and call goto_definition after the if-let
+            }
+
+            // Only handle other mouse events if NOT a cmd+click
+            if !is_cmd_click {
+                // Ensure cursor is visible when clicking
             if !self.cursor_visible {
                 self.cursor_visible = true;
                 // Mark cursor line dirty to show it
@@ -2568,6 +2825,13 @@ impl EditorState {
             // Chunk: docs/chunks/invalidation_separation - Convert to Content invalidation
             if ctx_dirty_region.is_dirty() {
                 self.invalidation.merge(InvalidationKind::Content(ctx_dirty_region));
+            }
+            } // End of: if !is_cmd_click
+
+            // Chunk: docs/chunks/treesitter_gotodef - Cmd+click: call goto_definition after borrow ends
+            if is_cmd_click {
+                self.goto_definition();
+                return;
             }
         } else if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
             // Chunk: docs/chunks/terminal_mouse_offset - Fixed terminal mouse Y coordinate calculation
@@ -12138,5 +12402,89 @@ mod tests {
         let buffer = TextBuffer::from_str("hello\nworld");
         let pos = clamp_position_to_buffer(Position::new(0, 0), &buffer);
         assert_eq!(pos, Position::new(0, 0)); // unchanged
+    }
+
+    // =========================================================================
+    // Status Message Tests (Chunk: docs/chunks/treesitter_gotodef)
+    // =========================================================================
+
+    #[test]
+    fn test_status_message_creation() {
+        let msg = StatusMessage::new("Test message");
+        assert_eq!(msg.text, "Test message");
+        assert!(!msg.is_expired());
+    }
+
+    #[test]
+    fn test_status_message_expiry() {
+        use std::thread;
+
+        // Create a message with a very short duration
+        let mut msg = StatusMessage::new("Test");
+        msg.duration = Duration::from_millis(50);
+
+        // Initially not expired
+        assert!(!msg.is_expired());
+
+        // Wait for expiry
+        thread::sleep(Duration::from_millis(60));
+        assert!(msg.is_expired());
+    }
+
+    #[test]
+    fn test_status_message_cleared_on_keypress() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Set a status message
+        state.status_message = Some(StatusMessage::new("Test message"));
+        assert!(state.status_message.is_some());
+
+        // Handle a key event
+        state.handle_key(KeyEvent::char('a'));
+
+        // Status message should be cleared
+        assert!(state.status_message.is_none());
+    }
+
+    #[test]
+    fn test_current_status_message_returns_text() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // No message initially
+        assert!(state.current_status_message().is_none());
+
+        // Set a message
+        state.status_message = Some(StatusMessage::new("Definition not found"));
+
+        // Should return the message text
+        assert_eq!(
+            state.current_status_message(),
+            Some("Definition not found")
+        );
+    }
+
+    #[test]
+    fn test_current_status_message_clears_expired() {
+        use std::thread;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Set a message with short expiry
+        let mut msg = StatusMessage::new("Test");
+        msg.duration = Duration::from_millis(50);
+        state.status_message = Some(msg);
+
+        // Initially present
+        assert!(state.current_status_message().is_some());
+
+        // Wait for expiry
+        thread::sleep(Duration::from_millis(60));
+
+        // Should return None and clear the message
+        assert!(state.current_status_message().is_none());
+        assert!(state.status_message.is_none());
     }
 }
