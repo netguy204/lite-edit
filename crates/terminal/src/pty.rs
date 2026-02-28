@@ -15,6 +15,37 @@ use crate::event::TerminalEvent;
 // Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
 use crate::pty_wakeup::PtyWakeup;
 
+// Chunk: docs/chunks/terminal_unicode_env - UTF-8 locale environment setup
+/// Configures environment variables for PTY child processes.
+///
+/// Sets:
+/// - `TERM`: Terminal type for capability detection (xterm-256color)
+/// - `COLORTERM`: Truecolor support indicator (truecolor)
+/// - `LANG`: UTF-8 locale for Unicode support (inherited or en_US.UTF-8 fallback)
+/// - `TERM_PROGRAM`: Terminal emulator identification (lite-edit)
+///
+/// The locale handling ensures child processes can detect UTF-8 support and
+/// emit Unicode characters. This is critical for TUI applications that check
+/// locale environment variables before deciding to use Unicode box-drawing
+/// characters, geometric shapes, and other glyphs.
+fn configure_pty_environment(cmd: &mut CommandBuilder) {
+    // Terminal capabilities
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+
+    // UTF-8 locale: prefer inheriting parent's UTF-8 locale, fall back to en_US.UTF-8.
+    // This handles both terminal-launched (inherits user's locale) and Finder/Dock
+    // launched (minimal environment, needs explicit fallback) scenarios.
+    let lang = std::env::var("LANG")
+        .ok()
+        .filter(|v| v.ends_with(".UTF-8") || v.ends_with(".utf8"))
+        .unwrap_or_else(|| "en_US.UTF-8".to_string());
+    cmd.env("LANG", &lang);
+
+    // Terminal identification for application capability detection
+    cmd.env("TERM_PROGRAM", "lite-edit");
+}
+
 /// Handle to a PTY process and its I/O thread.
 pub struct PtyHandle {
     /// Writer to send input to PTY stdin.
@@ -94,9 +125,8 @@ impl PtyHandle {
         };
         cmd_builder.cwd(cwd);
 
-        // Set up environment
-        cmd_builder.env("TERM", "xterm-256color");
-        cmd_builder.env("COLORTERM", "truecolor");
+        // Set up environment (terminal capabilities + UTF-8 locale)
+        configure_pty_environment(&mut cmd_builder);
 
         // Spawn the child process
         let child = pair
@@ -214,9 +244,8 @@ impl PtyHandle {
         };
         cmd_builder.cwd(cwd);
 
-        // Set up environment
-        cmd_builder.env("TERM", "xterm-256color");
-        cmd_builder.env("COLORTERM", "truecolor");
+        // Set up environment (terminal capabilities + UTF-8 locale)
+        configure_pty_environment(&mut cmd_builder);
 
         // Spawn the child process
         let child = pair
@@ -407,6 +436,108 @@ mod tests {
         // Check exit code
         let exit_code = handle.try_wait();
         assert_eq!(exit_code, Some(0));
+    }
+
+    // Chunk: docs/chunks/terminal_unicode_env - UTF-8 locale environment tests
+    #[test]
+    fn test_env_lang_utf8() {
+        // Verify that LANG is set to a UTF-8 locale in child processes.
+        // This ensures applications can detect UTF-8 support and emit Unicode.
+        let handle = PtyHandle::spawn(
+            "printenv",
+            &["LANG"],
+            Path::new("/tmp"),
+            24,
+            80,
+            false,
+        )
+        .expect("Failed to spawn PTY");
+
+        // Wait for output
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Collect output
+        let mut output = String::new();
+        while let Some(event) = handle.try_recv() {
+            if let TerminalEvent::PtyOutput(data) = event {
+                output.push_str(&String::from_utf8_lossy(&data));
+            }
+        }
+
+        // LANG should contain .UTF-8 (e.g., "en_US.UTF-8")
+        assert!(
+            output.contains(".UTF-8") || output.contains(".utf8"),
+            "Expected LANG to contain UTF-8, got: {}",
+            output.trim()
+        );
+    }
+
+    // Chunk: docs/chunks/terminal_unicode_env - Terminal program identification test
+    #[test]
+    fn test_env_term_program() {
+        // Verify that TERM_PROGRAM is set to "lite-edit" in child processes.
+        // This allows applications to identify the terminal emulator.
+        let handle = PtyHandle::spawn(
+            "printenv",
+            &["TERM_PROGRAM"],
+            Path::new("/tmp"),
+            24,
+            80,
+            false,
+        )
+        .expect("Failed to spawn PTY");
+
+        // Wait for output
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Collect output
+        let mut output = String::new();
+        while let Some(event) = handle.try_recv() {
+            if let TerminalEvent::PtyOutput(data) = event {
+                output.push_str(&String::from_utf8_lossy(&data));
+            }
+        }
+
+        assert!(
+            output.trim().contains("lite-edit"),
+            "Expected TERM_PROGRAM=lite-edit, got: {}",
+            output.trim()
+        );
+    }
+
+    // Chunk: docs/chunks/terminal_unicode_env - Unicode output preservation test
+    #[test]
+    fn test_unicode_output_preserved() {
+        // Regression test: verify that Unicode characters are passed through intact.
+        // This catches the original bug where TUI applications would emit underscores
+        // instead of Unicode glyphs due to missing locale environment variables.
+        let handle = PtyHandle::spawn(
+            "echo",
+            &["●"],
+            Path::new("/tmp"),
+            24,
+            80,
+            false,
+        )
+        .expect("Failed to spawn PTY");
+
+        // Wait for output
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Collect output
+        let mut output = String::new();
+        while let Some(event) = handle.try_recv() {
+            if let TerminalEvent::PtyOutput(data) = event {
+                output.push_str(&String::from_utf8_lossy(&data));
+            }
+        }
+
+        // The exact Unicode character should be preserved, not replaced with underscore
+        assert!(
+            output.contains('●'),
+            "Expected Unicode bullet '●' in output, got: {}",
+            output.trim()
+        );
     }
 
     // Chunk: docs/chunks/terminal_shell_env - Login shell integration test
