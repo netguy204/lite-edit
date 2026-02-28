@@ -88,11 +88,36 @@ pub const LOCALS_QUERY: &str = r#"
 (static_item
   name: (identifier) @local.definition)
 
+; Chunk: docs/chunks/treesitter_gotodef_type_resolution - Type-defining constructs
+; Struct definitions
+(struct_item
+  name: (type_identifier) @local.definition)
+
+; Enum definitions
+(enum_item
+  name: (type_identifier) @local.definition)
+
+; Trait definitions
+(trait_item
+  name: (type_identifier) @local.definition)
+
+; Type alias definitions
+(type_item
+  name: (type_identifier) @local.definition)
+
+; Union definitions
+(union_item
+  name: (type_identifier) @local.definition)
+
 ; References
 ; ----------
 ; All identifiers are potential references
 
 (identifier) @local.reference
+
+; Type identifiers (struct names, enum names, etc.) are also references
+; Chunk: docs/chunks/treesitter_gotodef_type_resolution - Type identifier references
+(type_identifier) @local.reference
 "#;
 
 #[cfg(test)]

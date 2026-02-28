@@ -1,8 +1,10 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/syntax/src/queries/rust.rs
+  - crates/syntax/src/gotodef.rs
 code_references: []
 narrative: null
 investigation: null
@@ -10,9 +12,12 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["treesitter_gotodef", "treesitter_symbol_index", "viewport_keystroke_jostle", "indent_multiline"]
+created_after:
+- treesitter_gotodef
+- treesitter_symbol_index
+- viewport_keystroke_jostle
+- indent_multiline
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

@@ -770,4 +770,202 @@ fn foo() {
 
         assert_eq!(result, None);
     }
+
+    // Chunk: docs/chunks/treesitter_gotodef_type_resolution - Type identifier resolution tests
+    #[test]
+    fn test_rust_type_identifier_in_function_parameter() {
+        let resolver = make_rust_resolver();
+        let code = r#"
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+fn distance(p: Point) -> f64 {
+    ((p.x * p.x + p.y * p.y) as f64).sqrt()
+}
+"#;
+        let tree = parse_rust(code);
+        let source = code.as_bytes();
+
+        // Find the reference to Point in the function parameter
+        let ref_pos = code.find("p: Point").unwrap() + 3; // Position on "Point"
+        let result = resolver.find_definition(&tree, source, ref_pos);
+
+        assert!(result.is_some(), "Should find definition for type Point");
+        let range = result.unwrap();
+        let def_text = &code[range.clone()];
+        assert_eq!(
+            def_text, "Point",
+            "Definition should be 'Point', got '{}'",
+            def_text
+        );
+    }
+
+    #[test]
+    fn test_rust_enum_type_in_variable_binding() {
+        let resolver = make_rust_resolver();
+        let code = r#"
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+fn paint() {
+    let fg: Color = Color::Red;
+}
+"#;
+        let tree = parse_rust(code);
+        let source = code.as_bytes();
+
+        // Find the reference to Color in "let fg: Color"
+        let ref_pos = code.find("fg: Color").unwrap() + 4; // Position on "Color"
+        let result = resolver.find_definition(&tree, source, ref_pos);
+
+        assert!(result.is_some(), "Should find definition for enum Color");
+        let range = result.unwrap();
+        let def_text = &code[range.clone()];
+        assert_eq!(
+            def_text, "Color",
+            "Definition should be 'Color', got '{}'",
+            def_text
+        );
+    }
+
+    #[test]
+    fn test_rust_type_alias_resolution() {
+        let resolver = make_rust_resolver();
+        let code = r#"
+type Distance = f64;
+
+fn measure() -> Distance {
+    42.0
+}
+"#;
+        let tree = parse_rust(code);
+        let source = code.as_bytes();
+
+        // Find the reference to Distance in return type
+        let ref_pos = code.find("-> Distance").unwrap() + 3; // Position on "Distance"
+        let result = resolver.find_definition(&tree, source, ref_pos);
+
+        assert!(result.is_some(), "Should find definition for type alias Distance");
+        let range = result.unwrap();
+        let def_text = &code[range.clone()];
+        assert_eq!(
+            def_text, "Distance",
+            "Definition should be 'Distance', got '{}'",
+            def_text
+        );
+    }
+
+    #[test]
+    fn test_rust_trait_resolution() {
+        let resolver = make_rust_resolver();
+        let code = r#"
+trait Drawable {
+    fn draw(&self);
+}
+
+impl Drawable for Point {
+    fn draw(&self) {}
+}
+"#;
+        let tree = parse_rust(code);
+        let source = code.as_bytes();
+
+        // Find the reference to Drawable in "impl Drawable"
+        let ref_pos = code.find("impl Drawable").unwrap() + 5; // Position on "Drawable"
+        let result = resolver.find_definition(&tree, source, ref_pos);
+
+        assert!(result.is_some(), "Should find definition for trait Drawable");
+        let range = result.unwrap();
+        let def_text = &code[range.clone()];
+        assert_eq!(
+            def_text, "Drawable",
+            "Definition should be 'Drawable', got '{}'",
+            def_text
+        );
+    }
+
+    #[test]
+    fn test_rust_struct_in_generic_type() {
+        let resolver = make_rust_resolver();
+        let code = r#"
+struct Span {
+    start: usize,
+    end: usize,
+}
+
+fn spans() -> Vec<Span> {
+    Vec::new()
+}
+"#;
+        let tree = parse_rust(code);
+        let source = code.as_bytes();
+
+        // Find the reference to Span in Vec<Span>
+        let ref_pos = code.find("Vec<Span>").unwrap() + 4; // Position on "Span"
+        let result = resolver.find_definition(&tree, source, ref_pos);
+
+        assert!(result.is_some(), "Should find definition for Span in generic");
+        let range = result.unwrap();
+        let def_text = &code[range.clone()];
+        assert_eq!(
+            def_text, "Span",
+            "Definition should be 'Span', got '{}'",
+            def_text
+        );
+    }
+
+    #[test]
+    fn test_rust_on_type_definition_returns_none() {
+        let resolver = make_rust_resolver();
+        let code = r#"
+struct Point {
+    x: i32,
+}
+"#;
+        let tree = parse_rust(code);
+        let source = code.as_bytes();
+
+        // Try to go to definition when already on the definition
+        let def_pos = code.find("struct Point").unwrap() + 7; // Position on "Point"
+        let result = resolver.find_definition(&tree, source, def_pos);
+
+        assert!(
+            result.is_none(),
+            "Should return None when on type definition itself"
+        );
+    }
+
+    #[test]
+    fn test_rust_type_in_struct_field() {
+        let resolver = make_rust_resolver();
+        let code = r#"
+struct Inner {
+    value: i32,
+}
+
+struct Outer {
+    inner: Inner,
+}
+"#;
+        let tree = parse_rust(code);
+        let source = code.as_bytes();
+
+        // Find the reference to Inner in "inner: Inner"
+        let ref_pos = code.find("inner: Inner").unwrap() + 7; // Position on "Inner"
+        let result = resolver.find_definition(&tree, source, ref_pos);
+
+        assert!(result.is_some(), "Should find definition for Inner in struct field");
+        let range = result.unwrap();
+        let def_text = &code[range.clone()];
+        assert_eq!(
+            def_text, "Inner",
+            "Definition should be 'Inner', got '{}'",
+            def_text
+        );
+    }
 }
