@@ -239,6 +239,65 @@ impl LocalsResolver {
     }
 }
 
+// Chunk: docs/chunks/treesitter_symbol_index - Extract identifier at cursor for cross-file lookup
+/// Extracts the identifier name at the given byte position.
+///
+/// Walks down the tree from the root to find the smallest node containing the byte
+/// position, then checks if it or its immediate parent is an identifier-like node.
+///
+/// Returns the identifier text if found, `None` otherwise.
+///
+/// This is used for cross-file go-to-definition: when same-file resolution fails,
+/// we extract the identifier name and look it up in the workspace symbol index.
+pub fn identifier_at_position(tree: &Tree, source: &[u8], byte_offset: usize) -> Option<String> {
+    let root = tree.root_node();
+
+    // Find the deepest node containing this position
+    let node = root.descendant_for_byte_range(byte_offset, byte_offset)?;
+
+    // Check if this node or its parent is an identifier
+    // Different languages use different node kinds for identifiers:
+    // - Rust: "identifier", "type_identifier"
+    // - Python: "identifier"
+    // - JavaScript/TypeScript: "identifier", "property_identifier"
+    // - Go: "identifier", "type_identifier"
+    const IDENTIFIER_KINDS: &[&str] = &[
+        "identifier",
+        "type_identifier",
+        "property_identifier",
+        "field_identifier",
+        "shorthand_property_identifier",
+    ];
+
+    // Check current node
+    if IDENTIFIER_KINDS.contains(&node.kind()) {
+        return node.utf8_text(source).ok().map(String::from);
+    }
+
+    // Check parent (handles cases where cursor is inside an identifier pattern)
+    if let Some(parent) = node.parent() {
+        if IDENTIFIER_KINDS.contains(&parent.kind()) {
+            return parent.utf8_text(source).ok().map(String::from);
+        }
+
+        // Also check if we're on a name field of a definition node
+        // This handles patterns like function names, struct names, etc.
+        for i in 0..parent.child_count() {
+            if let Some(field_name) = parent.field_name_for_child(i as u32) {
+                if field_name == "name" || field_name == "identifier" {
+                    if let Some(name_child) = parent.child(i) {
+                        if name_child.start_byte() <= byte_offset && name_child.end_byte() > byte_offset {
+                            return name_child.utf8_text(source).ok().map(String::from);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -640,5 +699,75 @@ function greet(name: string): void {
             "Definition should be 'message', got '{}'",
             def_text
         );
+    }
+
+    // Chunk: docs/chunks/treesitter_symbol_index - Tests for identifier_at_position
+    #[test]
+    fn test_identifier_at_position_rust_variable() {
+        let code = r#"
+fn foo() {
+    let name = 42;
+    println!("{}", name);
+}
+"#;
+        let tree = parse_rust(code);
+        let source = code.as_bytes();
+
+        // Point at "name" in println
+        let pos = code.rfind("name").unwrap();
+        let result = super::identifier_at_position(&tree, source, pos);
+
+        assert_eq!(result, Some("name".to_string()));
+    }
+
+    #[test]
+    fn test_identifier_at_position_rust_function_name() {
+        let code = r#"
+fn my_function() {
+    println!("Hello");
+}
+"#;
+        let tree = parse_rust(code);
+        let source = code.as_bytes();
+
+        // Point at "my_function"
+        let pos = code.find("my_function").unwrap();
+        let result = super::identifier_at_position(&tree, source, pos);
+
+        assert_eq!(result, Some("my_function".to_string()));
+    }
+
+    #[test]
+    fn test_identifier_at_position_python_variable() {
+        let code = r#"
+def greet():
+    name = "World"
+    print(name)
+"#;
+        let tree = parse_python(code);
+        let source = code.as_bytes();
+
+        // Point at "name" in print
+        let pos = code.rfind("name").unwrap();
+        let result = super::identifier_at_position(&tree, source, pos);
+
+        assert_eq!(result, Some("name".to_string()));
+    }
+
+    #[test]
+    fn test_identifier_at_position_no_identifier() {
+        let code = r#"
+fn foo() {
+    // Just a comment
+}
+"#;
+        let tree = parse_rust(code);
+        let source = code.as_bytes();
+
+        // Point at whitespace
+        let pos = code.find("// Just").unwrap() - 1;
+        let result = super::identifier_at_position(&tree, source, pos);
+
+        assert_eq!(result, None);
     }
 }

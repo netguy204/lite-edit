@@ -17,6 +17,7 @@
 //! focus target event handling.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 // Chunk: docs/chunks/app_nap_activity_assertions - Activity assertion and MainThreadMarker for App Nap
@@ -69,7 +70,8 @@ use crate::workspace::Editor;
 use lite_edit_buffer::{DirtyLines, Position, TextBuffer};
 // Chunk: docs/chunks/syntax_highlighting - Syntax highlighting support
 // Chunk: docs/chunks/treesitter_gotodef - LocalsResolver for go-to-definition
-use lite_edit_syntax::{LanguageRegistry, LocalsResolver, SyntaxTheme};
+// Chunk: docs/chunks/treesitter_symbol_index - identifier_at_position for cross-file lookup
+use lite_edit_syntax::{identifier_at_position, LanguageRegistry, LocalsResolver, SyntaxTheme};
 // Chunk: docs/chunks/dragdrop_file_paste - Shell escaping for dropped file paths
 use lite_edit::shell_escape::shell_escape_paths;
 // Chunk: docs/chunks/terminal_active_tab_safety - Terminal input encoding
@@ -187,8 +189,9 @@ pub struct EditorState {
     /// Set by main.rs during setup. PtyWakeup handles signal through this sender.
     event_sender: Option<EventSender>,
     // Chunk: docs/chunks/syntax_highlighting - Language registry for extension lookup
-    /// Language registry for syntax highlighting.
-    language_registry: LanguageRegistry,
+    // Chunk: docs/chunks/treesitter_symbol_index - Shared via Arc for symbol indexer
+    /// Language registry for syntax highlighting and symbol indexing.
+    language_registry: Arc<LanguageRegistry>,
     // Chunk: docs/chunks/file_change_events - Self-write suppression
     /// Registry of paths whose file change events should be suppressed.
     /// Prevents our own file saves from triggering reload/merge flows.
@@ -213,6 +216,10 @@ pub struct EditorState {
     /// Set by operations like go-to-definition when no definition is found.
     /// Automatically expires after 2 seconds or on next keypress.
     pub status_message: Option<StatusMessage>,
+    // Chunk: docs/chunks/treesitter_symbol_index - Definition disambiguation selector context
+    /// Context for the definition disambiguation selector.
+    /// Set when multiple cross-file definitions match a symbol.
+    definition_selector_context: Option<DefinitionSelectorContext>,
     /// Flag set by Ctrl+Shift+P to trigger an on-demand perf stats dump.
     #[cfg(feature = "perf-instrumentation")]
     pub dump_perf_stats: bool,
@@ -259,6 +266,22 @@ impl StatusMessage {
     pub fn is_expired(&self) -> bool {
         self.created_at.elapsed() >= self.duration
     }
+}
+
+// Chunk: docs/chunks/treesitter_symbol_index - Context for definition disambiguation selector
+/// Context saved when showing the definition disambiguation selector.
+///
+/// When multiple cross-file definitions match a symbol, we show a selector
+/// overlay listing all matches. This struct stores the context needed to
+/// complete the navigation when the user selects an item.
+#[derive(Clone)]
+pub struct DefinitionSelectorContext {
+    /// The pane ID where go-to-definition was triggered.
+    pub pane_id: PaneId,
+    /// The cursor position before navigating (for the jump stack).
+    pub from_pos: Position,
+    /// The list of matching definition locations.
+    pub locations: Vec<lite_edit_syntax::SymbolLocation>,
 }
 
 // =============================================================================
@@ -496,7 +519,8 @@ impl EditorState {
             // Chunk: docs/chunks/terminal_pty_wakeup - Initialize wakeup factory as None
             event_sender: None,
             // Chunk: docs/chunks/syntax_highlighting - Initialize language registry
-            language_registry: LanguageRegistry::new(),
+            // Chunk: docs/chunks/treesitter_symbol_index - Wrapped in Arc for sharing with symbol indexer
+            language_registry: Arc::new(LanguageRegistry::new()),
             // Chunk: docs/chunks/file_change_events - Initialize self-write suppression
             file_change_suppression: FileChangeSuppression::new(),
             // Chunk: docs/chunks/buffer_file_watching - Initialize per-buffer file watcher
@@ -508,6 +532,8 @@ impl EditorState {
             paused_watcher_state: None,
             // Chunk: docs/chunks/treesitter_gotodef - Initialize status message
             status_message: None,
+            // Chunk: docs/chunks/treesitter_symbol_index - Initialize definition selector context
+            definition_selector_context: None,
             #[cfg(feature = "perf-instrumentation")]
             dump_perf_stats: false,
         }
@@ -567,7 +593,9 @@ impl EditorState {
             confirm_dialog: None,
             confirm_context: None,
             event_sender: None,
-            language_registry: LanguageRegistry::new(),
+            // Chunk: docs/chunks/syntax_highlighting - Initialize language registry
+            // Chunk: docs/chunks/treesitter_symbol_index - Wrapped in Arc for sharing with symbol indexer
+            language_registry: Arc::new(LanguageRegistry::new()),
             // Chunk: docs/chunks/file_change_events - Initialize self-write suppression
             file_change_suppression: FileChangeSuppression::new(),
             // Chunk: docs/chunks/buffer_file_watching - Initialize per-buffer file watcher
@@ -579,6 +607,8 @@ impl EditorState {
             paused_watcher_state: None,
             // Chunk: docs/chunks/treesitter_gotodef - Initialize status message
             status_message: None,
+            // Chunk: docs/chunks/treesitter_symbol_index - Initialize definition selector context
+            definition_selector_context: None,
             #[cfg(feature = "perf-instrumentation")]
             dump_perf_stats: false,
         }
@@ -603,6 +633,12 @@ impl EditorState {
 
         // Create the workspace with the selected directory
         self.editor.new_workspace(label, root_path.clone());
+
+        // Chunk: docs/chunks/treesitter_symbol_index - Start symbol indexing for cross-file go-to-def
+        // Start background symbol indexing for the new workspace
+        if let Some(ws) = self.editor.active_workspace_mut() {
+            ws.start_symbol_indexing(Arc::clone(&self.language_registry));
+        }
 
         // Chunk: docs/chunks/buffer_file_watching - Set initial workspace root
         // Set the buffer file watcher's workspace root for the initial workspace.
@@ -1302,6 +1338,9 @@ impl EditorState {
         // Chunk: docs/chunks/focus_stack - Pop selector focus target from stack
         self.focus_stack.pop();
 
+        // Chunk: docs/chunks/treesitter_symbol_index - Clear definition selector context
+        self.definition_selector_context = None;
+
         // Chunk: docs/chunks/cursor_blink_focus - Reset cursor states on focus transition
         // Buffer cursor resumes blinking (start visible, record keystroke to prevent immediate blink-off)
         self.cursor_visible = true;
@@ -1315,15 +1354,19 @@ impl EditorState {
     // =========================================================================
 
     // Chunk: docs/chunks/treesitter_gotodef - Go-to-definition using tree-sitter locals queries
+    // Chunk: docs/chunks/treesitter_symbol_index - Cross-file symbol index fallback
     /// Navigates to the definition of the symbol under the cursor.
     ///
-    /// Uses tree-sitter locals queries to find the definition of the identifier
-    /// at the cursor position. If found:
-    /// - Pushes the current position onto the jump stack
-    /// - Moves the cursor to the definition
+    /// Uses a two-stage resolution:
+    /// 1. Same-file: Uses tree-sitter locals queries to find definitions within the current file
+    /// 2. Cross-file: Falls back to the workspace symbol index for definitions in other files
     ///
-    /// If no definition is found (e.g., the cursor is not on an identifier,
-    /// or the symbol is defined in another file), displays a status message.
+    /// If found:
+    /// - Pushes the current position onto the jump stack
+    /// - Opens the target file (if cross-file) and moves the cursor to the definition
+    ///
+    /// If multiple cross-file matches are found, presents a disambiguation selector.
+    /// If no definition is found, displays a status message.
     fn goto_definition(&mut self) {
         // Only works on file tabs with syntax highlighting
         let workspace = match self.editor.active_workspace_mut() {
@@ -1362,15 +1405,6 @@ impl EditorState {
             None => return,
         };
 
-        // Create the locals resolver
-        let resolver = match LocalsResolver::new(config.language.clone(), config.locals_query) {
-            Some(r) => r,
-            None => {
-                // No locals query = no go-to-def support
-                return;
-            }
-        };
-
         // Get current cursor position
         let cursor_pos = buffer.cursor_position();
         let source = buffer.content();
@@ -1378,41 +1412,158 @@ impl EditorState {
         // Convert cursor position to byte offset
         let cursor_byte = lite_edit_syntax::position_to_byte_offset(&source, cursor_pos.line, cursor_pos.col);
 
-        // Try to find the definition
+        // Try same-file resolution first using locals query
         let tree = highlighter.tree();
-        let result = resolver.find_definition(tree, source.as_bytes(), cursor_byte);
 
-        match result {
-            Some(def_range) => {
-                // Found a definition - push current position to jump stack
-                let workspace = self.editor.active_workspace_mut().unwrap();
-                let tab = workspace.active_tab().unwrap();
-                let tab_id = tab.id;
+        // Try to create a locals resolver (may not exist for all languages)
+        let same_file_result = LocalsResolver::new(config.language.clone(), config.locals_query)
+            .and_then(|resolver| resolver.find_definition(tree, source.as_bytes(), cursor_byte));
 
-                workspace.jump_stack.push(crate::workspace::JumpPosition {
-                    tab_id,
-                    pane_id,
-                    line: cursor_pos.line,
-                    col: cursor_pos.col,
-                });
+        if let Some(def_range) = same_file_result {
+            // Found a same-file definition - push current position to jump stack
+            let workspace = self.editor.active_workspace_mut().unwrap();
+            let tab = workspace.active_tab().unwrap();
+            let tab_id = tab.id;
 
-                // Convert byte offset to position
-                let (def_line, def_col) = lite_edit_syntax::byte_offset_to_position(&source, def_range.start);
+            workspace.jump_stack.push(crate::workspace::JumpPosition {
+                tab_id,
+                pane_id,
+                line: cursor_pos.line,
+                col: cursor_pos.col,
+            });
 
-                // Move cursor to definition
-                let tab = workspace.active_tab_mut().unwrap();
-                if let Some(buffer) = tab.as_text_buffer_mut() {
-                    buffer.set_cursor(Position::new(def_line, def_col));
-                }
+            // Convert byte offset to position
+            let (def_line, def_col) = lite_edit_syntax::byte_offset_to_position(&source, def_range.start);
 
-                // Ensure the new cursor position is visible
-                self.invalidation.merge(InvalidationKind::Layout);
+            // Move cursor to definition
+            let tab = workspace.active_tab_mut().unwrap();
+            if let Some(buffer) = tab.as_text_buffer_mut() {
+                buffer.set_cursor(Position::new(def_line, def_col));
             }
+
+            // Ensure the new cursor position is visible
+            self.invalidation.merge(InvalidationKind::Layout);
+            return;
+        }
+
+        // Same-file resolution failed - try cross-file lookup via symbol index
+        // Chunk: docs/chunks/treesitter_symbol_index - Cross-file symbol index fallback
+
+        // Extract the identifier at cursor position
+        let identifier = match identifier_at_position(tree, source.as_bytes(), cursor_byte) {
+            Some(id) => id,
             None => {
-                // No definition found - show status message
-                self.status_message = Some(StatusMessage::new("Definition not found in this file"));
+                self.status_message = Some(StatusMessage::new("No identifier at cursor"));
+                return;
+            }
+        };
+
+        // Check if workspace has a symbol index
+        let workspace = self.editor.active_workspace_mut().unwrap();
+        let symbol_index = match &workspace.symbol_index {
+            Some(idx) => idx,
+            None => {
+                self.status_message = Some(StatusMessage::new("Symbol index not initialized"));
+                return;
+            }
+        };
+
+        // Check if still indexing
+        if symbol_index.is_indexing() {
+            self.status_message = Some(StatusMessage::new("Indexing workspace..."));
+            return;
+        }
+
+        // Look up the identifier in the symbol index
+        let locations = symbol_index.lookup(&identifier);
+
+        match locations.len() {
+            0 => {
+                self.status_message = Some(StatusMessage::new("Definition not found"));
+            }
+            1 => {
+                // Single match - jump directly
+                let loc = &locations[0];
+                self.goto_cross_file_definition(pane_id, cursor_pos, loc.file_path.clone(), loc.line, loc.col);
+            }
+            _ => {
+                // Multiple matches - show disambiguation selector
+                self.show_definition_selector(pane_id, cursor_pos, locations);
             }
         }
+    }
+
+    // Chunk: docs/chunks/treesitter_symbol_index - Jump to cross-file definition
+    /// Navigates to a definition in another file.
+    ///
+    /// Opens the target file (or switches to it if already open), moves the cursor
+    /// to the definition position, and pushes the current position onto the jump stack.
+    fn goto_cross_file_definition(
+        &mut self,
+        pane_id: PaneId,
+        from_pos: Position,
+        target_file: PathBuf,
+        target_line: usize,
+        target_col: usize,
+    ) {
+        // Push current position to jump stack before navigating
+        let workspace = self.editor.active_workspace_mut().unwrap();
+        let tab = workspace.active_tab().unwrap();
+        let tab_id = tab.id;
+
+        workspace.jump_stack.push(crate::workspace::JumpPosition {
+            tab_id,
+            pane_id,
+            line: from_pos.line,
+            col: from_pos.col,
+        });
+
+        // Open the target file (associate_file handles both new tabs and existing ones)
+        self.associate_file(target_file);
+
+        // Move cursor to the definition position
+        if let Some(ws) = self.editor.active_workspace_mut() {
+            if let Some(tab) = ws.active_tab_mut() {
+                if let Some(buffer) = tab.as_text_buffer_mut() {
+                    buffer.set_cursor(Position::new(target_line, target_col));
+                }
+            }
+        }
+
+        // Ensure the new cursor position is visible
+        self.invalidation.merge(InvalidationKind::Layout);
+    }
+
+    // Chunk: docs/chunks/treesitter_symbol_index - Disambiguation selector for multiple matches
+    /// Shows a selector overlay for choosing between multiple definition matches.
+    fn show_definition_selector(
+        &mut self,
+        pane_id: PaneId,
+        from_pos: Position,
+        locations: Vec<lite_edit_syntax::SymbolLocation>,
+    ) {
+        // Store context for the selector
+        self.definition_selector_context = Some(DefinitionSelectorContext {
+            pane_id,
+            from_pos,
+            locations: locations.clone(),
+        });
+
+        // Create selector with formatted items showing file:line
+        let items: Vec<String> = locations
+            .iter()
+            .map(|loc| {
+                // Show relative path if possible, falling back to display
+                format!("{}:{}", loc.file_path.display(), loc.line + 1)
+            })
+            .collect();
+
+        let mut selector = SelectorWidget::new();
+        selector.set_items(items);
+
+        self.active_selector = Some(selector);
+        self.focus = EditorFocus::Selector;
+        self.invalidation.merge(InvalidationKind::Layout);
     }
 
     // Chunk: docs/chunks/treesitter_gotodef - Status message accessor with expiry
@@ -2209,7 +2360,15 @@ impl EditorState {
     /// Chunk: docs/chunks/file_picker - Path resolution, recency recording, and resolved_path storage on Enter
     // Chunk: docs/chunks/file_save - Integrates file picker confirmation with associate_file
     // Chunk: docs/chunks/workspace_dir_picker - Use workspace's file index and root_path
+    // Chunk: docs/chunks/treesitter_symbol_index - Definition disambiguation selector handling
     fn handle_selector_confirm(&mut self, idx: usize) {
+        // Chunk: docs/chunks/treesitter_symbol_index - Check if this is a definition selector
+        // If we have a definition selector context, handle it specially
+        if let Some(context) = self.definition_selector_context.take() {
+            self.handle_definition_selector_confirm(idx, context);
+            return;
+        }
+
         // Get the workspace root_path as the base directory for path resolution
         let base_dir = self.editor.active_workspace()
             .map(|ws| ws.root_path.clone())
@@ -2239,6 +2398,33 @@ impl EditorState {
 
         // Close the selector
         self.close_selector();
+    }
+
+    // Chunk: docs/chunks/treesitter_symbol_index - Handle definition selector confirmation
+    /// Handles confirmation of the definition disambiguation selector.
+    fn handle_definition_selector_confirm(&mut self, idx: usize, context: DefinitionSelectorContext) {
+        // Ensure idx is valid
+        if idx >= context.locations.len() {
+            self.close_selector();
+            return;
+        }
+
+        let loc = &context.locations[idx];
+        let target_file = loc.file_path.clone();
+        let target_line = loc.line;
+        let target_col = loc.col;
+
+        // Close selector first
+        self.close_selector();
+
+        // Navigate to the selected definition
+        self.goto_cross_file_definition(
+            context.pane_id,
+            context.from_pos,
+            target_file,
+            target_line,
+            target_col,
+        );
     }
 
     /// Resolves the path from a selector confirmation.
@@ -4067,6 +4253,12 @@ impl EditorState {
                 }
             }
 
+            // Chunk: docs/chunks/treesitter_symbol_index - Update symbol index for saved file
+            // Re-index the saved file to update cross-file go-to-definition
+            if let Some(ws) = self.editor.active_workspace_mut() {
+                ws.update_symbol_index_for_file(&path, &self.language_registry);
+            }
+
             // Chunk: docs/chunks/conflict_mode_lifecycle - Re-check disk after conflict resolution
             // If we were in conflict mode, check if the disk has changed since our save.
             // This catches the case where another process modified the file while we
@@ -4398,6 +4590,12 @@ impl EditorState {
         } else {
             // First workspace gets empty file tab (for welcome screen)
             self.editor.new_workspace(label, selected_dir.clone());
+        }
+
+        // Chunk: docs/chunks/treesitter_symbol_index - Start symbol indexing for cross-file go-to-def
+        // Start background symbol indexing for the new workspace
+        if let Some(ws) = self.editor.active_workspace_mut() {
+            ws.start_symbol_indexing(Arc::clone(&self.language_registry));
         }
 
         // Chunk: docs/chunks/buffer_file_watching - Update buffer file watcher root
