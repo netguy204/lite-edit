@@ -2873,18 +2873,25 @@ impl EditorState {
     }
 
     // Chunk: docs/chunks/dragdrop_file_paste - File drop handling
+    // Chunk: docs/chunks/terminal_image_paste - Position-aware pane routing
     /// Handles file drop events by inserting shell-escaped file paths.
     ///
     /// When files are dropped onto the view, this method:
-    /// 1. Shell-escapes each path (single-quote escaping for POSIX shells)
-    /// 2. Joins multiple paths with spaces
-    /// 3. Inserts the result as text based on the current focus:
+    /// 1. Uses the drop position to determine which pane the drop landed on
+    /// 2. Shell-escapes each path (single-quote escaping for POSIX shells)
+    /// 3. Joins multiple paths with spaces
+    /// 4. Inserts the result as text into the target pane:
     ///    - Terminal tab: Uses bracketed paste encoding
     ///    - File tab: Inserts directly into the buffer
     ///    - Other modes (Selector, FindInFile, ConfirmDialog): Ignored
+    ///    - Tab bar drops: Ignored
     ///
-    /// This mirrors how macOS Terminal.app and Alacritty handle file drops.
-    pub fn handle_file_drop(&mut self, paths: Vec<String>) {
+    /// This mirrors how macOS Terminal.app and Alacritty handle file drops,
+    /// but adds pane-aware routing so the drop goes to the pane under the
+    /// cursor rather than whichever pane was last active.
+    pub fn handle_file_drop(&mut self, paths: Vec<String>, position: (f64, f64)) {
+        use crate::pane_layout::{resolve_pane_hit, HitZone};
+
         // Only handle drops when in Buffer focus mode
         // (Selector/FindInFile/ConfirmDialog don't accept file drops)
         if self.focus != EditorFocus::Buffer {
@@ -2895,21 +2902,58 @@ impl EditorState {
             return;
         }
 
+        let (screen_x, screen_y) = position;
+
+        // Use renderer-consistent bounds for pane hit resolution
+        let bounds = (
+            RAIL_WIDTH,
+            0.0,
+            self.view_width - RAIL_WIDTH,
+            self.view_height,
+        );
+
+        // Resolve which pane the drop landed on
+        let hit = if let Some(workspace) = self.editor.active_workspace() {
+            resolve_pane_hit(
+                screen_x as f32,
+                screen_y as f32,
+                bounds,
+                &workspace.pane_root,
+                TAB_BAR_HEIGHT,
+            )
+        } else {
+            return;
+        };
+
+        let Some(hit) = hit else {
+            return; // Drop outside any pane (e.g., in rail area)
+        };
+
+        // Ignore drops in the tab bar region - we only route to pane content
+        if hit.zone == HitZone::TabBar {
+            return;
+        }
+
         // Shell-escape and join the paths
         let escaped_text = shell_escape_paths(&paths);
 
-        // Get the active tab and route based on type
+        // Get the specific pane that was hit (not active_pane_id)
         let ws = match self.editor.active_workspace_mut() {
             Some(ws) => ws,
             None => return,
         };
 
-        let tab = match ws.active_tab_mut() {
+        let pane = match ws.pane_root.get_pane_mut(hit.pane_id) {
+            Some(pane) => pane,
+            None => return,
+        };
+
+        let tab = match pane.active_tab_mut() {
             Some(tab) => tab,
             None => return,
         };
 
-        // Check for terminal tab first
+        // Route to terminal or buffer based on tab type
         if let Some((terminal, _viewport)) = tab.terminal_and_viewport_mut() {
             // Terminal tab: use bracketed paste encoding (same as Cmd+V)
             let modes = terminal.term_mode();
@@ -10791,7 +10835,12 @@ mod tests {
 
     // =========================================================================
     // File Drop Tests (Chunk: docs/chunks/dragdrop_file_paste)
+    // Chunk: docs/chunks/terminal_image_paste - Updated tests to include position
     // =========================================================================
+
+    /// Default position for file drop tests - within the content area of a single pane.
+    /// Uses coordinates well inside the pane (past RAIL_WIDTH and TAB_BAR_HEIGHT).
+    const FILE_DROP_TEST_POSITION: (f64, f64) = (100.0, 100.0);
 
     #[test]
     fn test_file_drop_inserts_shell_escaped_path_in_buffer() {
@@ -10799,7 +10848,7 @@ mod tests {
         state.update_viewport_size(320.0);
 
         // Drop a single file
-        state.handle_file_drop(vec!["/Users/test/file.txt".to_string()]);
+        state.handle_file_drop(vec!["/Users/test/file.txt".to_string()], FILE_DROP_TEST_POSITION);
 
         // Should be shell-escaped with single quotes
         assert_eq!(state.buffer().content(), "'/Users/test/file.txt'");
@@ -10811,7 +10860,7 @@ mod tests {
         state.update_viewport_size(320.0);
 
         // Drop a file with spaces in the name
-        state.handle_file_drop(vec!["/Users/test/my file.txt".to_string()]);
+        state.handle_file_drop(vec!["/Users/test/my file.txt".to_string()], FILE_DROP_TEST_POSITION);
 
         // Spaces inside single quotes don't need extra escaping
         assert_eq!(state.buffer().content(), "'/Users/test/my file.txt'");
@@ -10823,7 +10872,7 @@ mod tests {
         state.update_viewport_size(320.0);
 
         // Drop a file with single quote in the name
-        state.handle_file_drop(vec!["/Users/test/foo's.txt".to_string()]);
+        state.handle_file_drop(vec!["/Users/test/foo's.txt".to_string()], FILE_DROP_TEST_POSITION);
 
         // Single quotes escaped with the '\'' pattern
         assert_eq!(state.buffer().content(), "'/Users/test/foo'\\''s.txt'");
@@ -10838,7 +10887,7 @@ mod tests {
         state.handle_file_drop(vec![
             "/path/to/file1.txt".to_string(),
             "/path/to/file2.txt".to_string(),
-        ]);
+        ], FILE_DROP_TEST_POSITION);
 
         // Should be space-separated
         assert_eq!(
@@ -10853,7 +10902,7 @@ mod tests {
         state.update_viewport_size(320.0);
 
         // Drop no files
-        state.handle_file_drop(vec![]);
+        state.handle_file_drop(vec![], FILE_DROP_TEST_POSITION);
 
         // Buffer should remain empty
         assert!(state.buffer().is_empty());
@@ -10868,7 +10917,7 @@ mod tests {
         state.focus = EditorFocus::Selector;
 
         // Try to drop a file
-        state.handle_file_drop(vec!["/Users/test/file.txt".to_string()]);
+        state.handle_file_drop(vec!["/Users/test/file.txt".to_string()], FILE_DROP_TEST_POSITION);
 
         // Buffer should remain empty because selector mode ignores drops
         assert!(state.buffer().is_empty());
@@ -10889,7 +10938,7 @@ mod tests {
         assert!(!tab.dirty);
 
         // Drop a file
-        state.handle_file_drop(vec!["/path/to/file.txt".to_string()]);
+        state.handle_file_drop(vec!["/path/to/file.txt".to_string()], FILE_DROP_TEST_POSITION);
 
         // Tab should now be marked dirty
         let tab = state
@@ -10899,6 +10948,32 @@ mod tests {
             .active_tab()
             .unwrap();
         assert!(tab.dirty, "Tab should be marked dirty after file drop");
+    }
+
+    #[test]
+    fn test_file_drop_in_rail_area_ignored() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(320.0);
+
+        // Drop in the left rail area (x < RAIL_WIDTH)
+        let rail_position = (10.0, 100.0); // 10px is within the ~28px rail width
+        state.handle_file_drop(vec!["/Users/test/file.txt".to_string()], rail_position);
+
+        // Buffer should remain empty because drop was in rail area
+        assert!(state.buffer().is_empty());
+    }
+
+    #[test]
+    fn test_file_drop_in_tab_bar_ignored() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(320.0);
+
+        // Drop in the tab bar area (y < TAB_BAR_HEIGHT, which is 32px)
+        let tab_bar_position = (100.0, 10.0); // 10px is within the 32px tab bar height
+        state.handle_file_drop(vec!["/Users/test/file.txt".to_string()], tab_bar_position);
+
+        // Buffer should remain empty because drop was in tab bar
+        assert!(state.buffer().is_empty());
     }
 
     // =========================================================================

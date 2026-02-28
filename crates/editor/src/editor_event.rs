@@ -45,10 +45,17 @@ pub enum EditorEvent {
 
     /// Files were dropped onto the view
     ///
-    /// Contains the list of file paths (as UTF-8 strings) that were dropped.
+    /// Contains the list of file paths (as UTF-8 strings) that were dropped,
+    /// along with the drop position in screen coordinates (y=0 at top).
     /// The paths are absolute and need shell escaping before insertion.
     // Chunk: docs/chunks/dragdrop_file_paste - File drop event for drag-and-drop
-    FileDrop(Vec<String>),
+    // Chunk: docs/chunks/terminal_image_paste - Added position for pane-aware routing
+    FileDrop {
+        /// List of file paths that were dropped
+        paths: Vec<String>,
+        /// Drop position in screen coordinates (pixels, y=0 at top)
+        position: (f64, f64),
+    },
 
     // Chunk: docs/chunks/file_change_events - External file modification detection
     /// A file was modified externally (on disk)
@@ -138,7 +145,7 @@ impl EditorEvent {
             EditorEvent::Key(_)
                 | EditorEvent::Mouse(_)
                 | EditorEvent::Scroll(_)
-                | EditorEvent::FileDrop(_)
+                | EditorEvent::FileDrop { .. }
                 | EditorEvent::InsertText(_)
                 | EditorEvent::SetMarkedText(_)
                 | EditorEvent::UnmarkText
@@ -163,7 +170,7 @@ impl EditorEvent {
             EditorEvent::Key(_)
                 | EditorEvent::Mouse(_)
                 | EditorEvent::Scroll(_)
-                | EditorEvent::FileDrop(_)
+                | EditorEvent::FileDrop { .. }
                 | EditorEvent::Resize
                 | EditorEvent::FileChanged(_)
                 | EditorEvent::FileDeleted(_)
@@ -217,7 +224,10 @@ mod tests {
 
     #[test]
     fn test_file_drop_is_priority() {
-        let event = EditorEvent::FileDrop(vec!["/path/to/file.txt".to_string()]);
+        let event = EditorEvent::FileDrop {
+            paths: vec!["/path/to/file.txt".to_string()],
+            position: (100.0, 100.0),
+        };
         assert!(event.is_priority_event());
     }
 
@@ -300,7 +310,10 @@ mod tests {
                 dy: 0.0,
                 mouse_position: None,
             }),
-            EditorEvent::FileDrop(vec![]),
+            EditorEvent::FileDrop {
+                paths: vec![],
+                position: (0.0, 0.0),
+            },
         ];
 
         for event in user_input_events {
