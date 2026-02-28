@@ -1569,6 +1569,7 @@ impl SyntaxHighlighter {
     }
 }
 
+// Chunk: docs/chunks/syntax_highlighting - Merge adjacent spans with same style
 /// Merges adjacent spans that have the same style.
 fn merge_spans(spans: Vec<Span>) -> Vec<Span> {
     let mut result: Vec<Span> = Vec::with_capacity(spans.len());
