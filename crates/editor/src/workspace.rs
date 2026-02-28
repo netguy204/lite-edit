@@ -2295,13 +2295,13 @@ mod tests {
 
         let pos1 = JumpPosition {
             tab_id: 1,
-            pane_id: PaneId(0),
+            pane_id: 0,
             line: 10,
             col: 5,
         };
         let pos2 = JumpPosition {
             tab_id: 1,
-            pane_id: PaneId(0),
+            pane_id: 0,
             line: 20,
             col: 8,
         };
@@ -2336,7 +2336,7 @@ mod tests {
         for i in 0..5 {
             stack.push(JumpPosition {
                 tab_id: 1,
-                pane_id: PaneId(0),
+                pane_id: 0,
                 line: i,
                 col: 0,
             });
@@ -2360,13 +2360,13 @@ mod tests {
         let mut stack = JumpStack::new(10);
         stack.push(JumpPosition {
             tab_id: 1,
-            pane_id: PaneId(0),
+            pane_id: 0,
             line: 10,
             col: 5,
         });
         stack.push(JumpPosition {
             tab_id: 1,
-            pane_id: PaneId(0),
+            pane_id: 0,
             line: 20,
             col: 8,
         });
