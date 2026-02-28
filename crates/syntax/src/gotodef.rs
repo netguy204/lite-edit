@@ -21,6 +21,7 @@
 //! - Cross-file definitions (imports, external modules)
 //! - Standard library or third-party symbols
 
+use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Query, QueryCapture, QueryCursor, Tree};
 
 /// Index values for capture names in the locals query.
@@ -104,11 +105,15 @@ impl LocalsResolver {
         let root = tree.root_node();
 
         // Run the query to get all captures
+        // NOTE: QueryCaptures implements StreamingIterator, not Iterator,
+        // so we need to use a while loop with .next() instead of iterator adapters.
         let mut cursor = QueryCursor::new();
-        let captures: Vec<QueryCapture> = cursor
-            .captures(&self.query, root, source)
-            .flat_map(|(m, _)| m.captures.iter().copied())
-            .collect();
+        let mut captures: Vec<QueryCapture> = Vec::new();
+        let mut captures_iter = cursor.captures(&self.query, root, source);
+        while let Some((mat, capture_idx)) = captures_iter.next() {
+            let capture = mat.captures[*capture_idx];
+            captures.push(capture);
+        }
 
         // Find the reference at the cursor position
         let reference = self.find_reference_at(&captures, byte_offset)?;
