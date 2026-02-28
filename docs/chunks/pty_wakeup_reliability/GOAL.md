@@ -1,11 +1,13 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
 code_paths:
 - crates/terminal/src/pty_wakeup.rs
+- crates/terminal/Cargo.toml
 - crates/editor/src/event_channel.rs
 - crates/editor/src/drain_loop.rs
+- crates/terminal/tests/wakeup_integration.rs
 code_references: []
 narrative: null
 investigation: null
@@ -13,9 +15,11 @@ subsystems: []
 friction_entries: []
 bug_type: semantic
 depends_on: []
-created_after: ["terminal_fullscreen_paint", "terminal_image_paste", "terminal_word_delete"]
+created_after:
+- terminal_fullscreen_paint
+- terminal_image_paste
+- terminal_word_delete
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

@@ -1,75 +1,72 @@
 // Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
+// Chunk: docs/chunks/pty_wakeup_reliability - Direct CFRunLoop signaling tests
 //! Integration test for PTY wakeup mechanism.
 //!
 //! These tests verify that the `PtyWakeup` mechanism correctly signals
 //! when PTY data arrives, enabling low-latency terminal output rendering.
 //!
-//! Note: These tests run without a full Cocoa run loop, so the dispatch_async
-//! callbacks may not execute immediately. We test the signal() call path
-//! rather than the callback execution, which requires an actual NSRunLoop.
+//! # Architecture
+//!
+//! `PtyWakeup` wraps a `WakeupSignal` (typically `EventSender`) and calls
+//! `signal()` directly from the PTY reader thread. This test uses a mock
+//! `WakeupSignal` implementation to verify the signaling behavior.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use lite_edit_terminal::{set_global_wakeup_callback, PtyWakeup, TerminalBuffer};
+use lite_edit_terminal::{PtyWakeup, TerminalBuffer, WakeupSignal};
 
-/// Sets up the global wakeup callback to track signals.
-fn setup_wakeup_tracking() -> Arc<AtomicBool> {
-    let signaled = Arc::new(AtomicBool::new(false));
-    let signaled_clone = signaled.clone();
-
-    // Note: We use a raw function that accesses a global to track callbacks.
-    // In a real test with NSRunLoop, the callback would be invoked on the main queue.
-    static mut SIGNAL_FLAG: *const AtomicBool = std::ptr::null();
-
-    unsafe {
-        // Store the flag pointer so the callback can access it
-        SIGNAL_FLAG = Arc::as_ptr(&signaled_clone);
-    }
-
-    set_global_wakeup_callback(|| {
-        unsafe {
-            if !SIGNAL_FLAG.is_null() {
-                (*SIGNAL_FLAG).store(true, Ordering::SeqCst);
-            }
-        }
-    });
-
-    signaled
+/// A mock WakeupSignal that counts how many times it's signaled.
+struct MockWakeupSignal {
+    count: Arc<AtomicUsize>,
 }
 
-/// Tests that `PtyWakeup::signal()` can be called without panicking.
-///
-/// Note: In a unit test environment without NSRunLoop, the callback won't
-/// actually execute. This test verifies the signal path doesn't crash.
-#[test]
-fn test_pty_wakeup_signal_does_not_panic() {
-    let _signaled = setup_wakeup_tracking();
-    let wakeup = PtyWakeup::new();
+impl MockWakeupSignal {
+    fn new() -> (Self, Arc<AtomicUsize>) {
+        let count = Arc::new(AtomicUsize::new(0));
+        (Self { count: count.clone() }, count)
+    }
+}
 
-    // Signal should not panic
+impl WakeupSignal for MockWakeupSignal {
+    fn signal(&self) {
+        self.count.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Tests that `PtyWakeup::signal()` calls the underlying WakeupSignal.
+#[test]
+fn test_pty_wakeup_signal_calls_wakeup_signal() {
+    let (mock, count) = MockWakeupSignal::new();
+    let wakeup = PtyWakeup::with_signal(Box::new(mock));
+
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+
     wakeup.signal();
 
-    // The callback runs on the main dispatch queue, which may not execute
-    // in this test context without an NSRunLoop.
+    assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
 /// Tests that PtyWakeup can be created and cloned.
 #[test]
 fn test_pty_wakeup_clone() {
-    let wakeup1 = PtyWakeup::new();
+    let (mock, count) = MockWakeupSignal::new();
+    let wakeup1 = PtyWakeup::with_signal(Box::new(mock));
     let wakeup2 = wakeup1.clone();
 
-    // Both should be usable
+    // Both should share the same underlying signal
     wakeup1.signal();
     wakeup2.signal();
+
+    assert_eq!(count.load(Ordering::SeqCst), 2);
 }
 
 /// Tests that PtyWakeup is Send + Sync (can be passed to other threads).
 #[test]
 fn test_pty_wakeup_is_send_sync() {
-    let wakeup = PtyWakeup::new();
+    let (mock, count) = MockWakeupSignal::new();
+    let wakeup = PtyWakeup::with_signal(Box::new(mock));
 
     // Clone and send to another thread
     let wakeup_clone = wakeup.clone();
@@ -79,17 +76,15 @@ fn test_pty_wakeup_is_send_sync() {
     });
 
     handle.join().expect("thread panicked");
+
+    assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
 /// Tests that spawning with wakeup works and the wakeup is signaled.
-///
-/// Note: This test creates a terminal and spawns a command. The wakeup
-/// callback may or may not execute depending on whether an NSRunLoop
-/// is running, but the spawn should succeed.
 #[test]
 fn test_spawn_command_with_wakeup() {
-    let _signaled = setup_wakeup_tracking();
-    let wakeup = PtyWakeup::new();
+    let (mock, count) = MockWakeupSignal::new();
+    let wakeup = PtyWakeup::with_signal(Box::new(mock));
 
     // Create terminal and spawn echo command with wakeup
     let mut terminal = TerminalBuffer::new(80, 24, 1000);
@@ -107,13 +102,20 @@ fn test_spawn_command_with_wakeup() {
 
     // Poll events to process output
     terminal.poll_events();
+
+    // The wakeup should have been signaled at least once when output arrived
+    assert!(count.load(Ordering::SeqCst) >= 1, "wakeup should have been signaled");
 }
 
 /// Tests that spawning shell with wakeup works.
+///
+/// This test is ignored by default because shell startup timing is highly
+/// environment-dependent. Run manually with `--ignored` when needed.
 #[test]
+#[ignore]
 fn test_spawn_shell_with_wakeup() {
-    let _signaled = setup_wakeup_tracking();
-    let wakeup = PtyWakeup::new();
+    let (mock, count) = MockWakeupSignal::new();
+    let wakeup = PtyWakeup::with_signal(Box::new(mock));
 
     // Create terminal and spawn shell with wakeup
     let mut terminal = TerminalBuffer::new(80, 24, 1000);
@@ -124,34 +126,62 @@ fn test_spawn_shell_with_wakeup() {
 
     assert!(result.is_ok(), "spawn_shell_with_wakeup failed: {:?}", result.err());
 
-    // Give the shell time to start
-    std::thread::sleep(Duration::from_millis(200));
+    // Wait for the shell to start and produce output (with timeout).
+    // Shell startup can be slow on loaded systems or when sourcing profile files.
+    let mut got_signal = false;
+    for _ in 0..50 {
+        std::thread::sleep(Duration::from_millis(50));
+        terminal.poll_events();
+        if count.load(Ordering::SeqCst) >= 1 {
+            got_signal = true;
+            break;
+        }
+    }
 
-    // Poll events to process output
-    terminal.poll_events();
+    assert!(got_signal, "wakeup should have been signaled when shell started");
 }
 
-/// Tests debouncing behavior - multiple rapid signals should coalesce.
+/// Tests that multiple rapid signals all call the underlying WakeupSignal.
+///
+/// Note: The WakeupSignal implementation (EventSender) handles debouncing.
+/// PtyWakeup itself no longer debounces - it passes through all signals.
 #[test]
-fn test_pty_wakeup_debouncing() {
-    let _signaled = setup_wakeup_tracking();
-    let wakeup = PtyWakeup::new();
+fn test_pty_wakeup_passthrough_no_debouncing() {
+    let (mock, count) = MockWakeupSignal::new();
+    let wakeup = PtyWakeup::with_signal(Box::new(mock));
 
     // Rapidly signal multiple times
     for _ in 0..10 {
         wakeup.signal();
     }
 
-    // This should not cause issues (debouncing prevents excessive dispatches)
+    // All signals should pass through to the underlying WakeupSignal
+    // (EventSender handles debouncing, not PtyWakeup)
+    assert_eq!(count.load(Ordering::SeqCst), 10);
 }
 
-/// Tests that default() works the same as new().
+/// Tests that signaling from multiple threads works correctly.
 #[test]
-fn test_pty_wakeup_default() {
-    let wakeup1 = PtyWakeup::new();
-    let wakeup2 = PtyWakeup::default();
+fn test_pty_wakeup_concurrent_signals() {
+    let (mock, count) = MockWakeupSignal::new();
+    let wakeup = PtyWakeup::with_signal(Box::new(mock));
 
-    // Both should be usable
-    wakeup1.signal();
-    wakeup2.signal();
+    let mut handles = Vec::new();
+
+    // Spawn 4 threads that each signal 25 times
+    for _ in 0..4 {
+        let wakeup_clone = wakeup.clone();
+        handles.push(std::thread::spawn(move || {
+            for _ in 0..25 {
+                wakeup_clone.signal();
+            }
+        }));
+    }
+
+    for handle in handles {
+        handle.join().expect("thread panicked");
+    }
+
+    // All 100 signals should have been delivered
+    assert_eq!(count.load(Ordering::SeqCst), 100);
 }

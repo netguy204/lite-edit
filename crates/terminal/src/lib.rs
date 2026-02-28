@@ -86,7 +86,8 @@ pub use agent::{AgentConfig, AgentHandle, AgentState, AgentStateMachine};
 pub use input_encoder::InputEncoder;
 // Chunk: docs/chunks/terminal_pty_wakeup - Run-loop wakeup for PTY output
 // Chunk: docs/chunks/pty_wakeup_reentrant - WakeupSignal trait re-export
-pub use pty_wakeup::{set_global_wakeup_callback, PtyWakeup};
+// Chunk: docs/chunks/pty_wakeup_reliability - Removed legacy set_global_wakeup_callback
+pub use pty_wakeup::PtyWakeup;
 // Re-export WakeupSignal trait for use by editor crate
 pub use lite_edit_input::WakeupSignal;
 // Chunk: docs/chunks/terminal_flood_starvation - Byte-budgeted VTE processing
