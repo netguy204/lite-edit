@@ -3055,6 +3055,8 @@ impl EditorState {
         } else if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
             // Chunk: docs/chunks/terminal_mouse_offset - Fixed terminal mouse Y coordinate calculation
             // Chunk: docs/chunks/terminal_clipboard_selection - Terminal mouse selection
+            // Chunk: docs/chunks/terminal_selection_offset - Wrap-aware terminal click coordinates
+            // Subsystem: docs/subsystems/viewport_scroll - Wrap-aware buffer line lookup
             // Terminal tab: handle mouse events for selection or forward to PTY
             let modes = terminal.term_mode();
 
@@ -3072,6 +3074,8 @@ impl EditorState {
             let row = (adjusted_y / cell_height as f64) as usize;
 
             // Check if any mouse mode is active - forward to PTY
+            // Note: PTY mouse encoding uses viewport-relative row (correct as-is),
+            // not buffer line. The wrap-aware mapping only applies to selection.
             if modes.intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG) {
                 let bytes = InputEncoder::encode_mouse(&event, col, row, modes);
                 if !bytes.is_empty() {
@@ -3079,8 +3083,39 @@ impl EditorState {
                 }
             } else {
                 // No mouse mode active - handle selection
-                // Convert screen row to document line (accounting for viewport scroll)
-                let doc_line = viewport.first_visible_line() + row;
+                // Chunk: docs/chunks/terminal_selection_offset - Wrap-aware screen row to buffer line mapping
+                // Use the same wrap-aware approach as file editor (buffer_target.rs) and renderer
+                // (glyph_buffer.rs) to correctly handle soft-wrapped terminal lines.
+                use crate::wrap_layout::WrapLayout;
+
+                // Get pane width for wrap layout calculation
+                let pane_width = if let Some(ref hit) = hit {
+                    hit.pane_rect.width
+                } else {
+                    self.view_width - RAIL_WIDTH
+                };
+
+                // Terminal lines are always the terminal width (cols), unlike text buffers
+                // which have variable-length lines. This simplifies wrap calculation.
+                let terminal_cols = terminal.size().0;
+                let line_count = terminal.line_count();
+
+                // Create WrapLayout to compute screen row to buffer line mapping
+                let wrap_layout = WrapLayout::new(pane_width, &self.font_metrics);
+
+                // Compute absolute screen row from viewport-relative row
+                let first_visible_screen_row = viewport.first_visible_screen_row();
+                let absolute_screen_row = first_visible_screen_row + row;
+
+                // Map absolute screen row to buffer line using wrap-aware lookup
+                // This correctly accounts for terminal lines that soft-wrap to multiple screen rows
+                let (doc_line, _row_offset_in_line, _) = Viewport::buffer_line_for_screen_row(
+                    absolute_screen_row,
+                    line_count,
+                    &wrap_layout,
+                    |_line| terminal_cols, // All terminal lines have the same width
+                );
+
                 let pos = Position::new(doc_line, col);
 
                 match event.kind {
