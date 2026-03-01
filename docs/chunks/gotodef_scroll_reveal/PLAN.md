@@ -8,170 +8,178 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The bug is a missing call to `ensure_visible` after cursor movement in the goto-definition
+flow. The existing `goto_definition()` method (and its helper `goto_cross_file_definition()`)
+correctly moves the cursor with `buffer.set_cursor()` and merges `InvalidationKind::Layout`,
+but never scrolls the viewport to reveal the new cursor position.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The fix follows the established pattern used elsewhere in `editor_state.rs`, such as in
+`run_live_search()` (line ~1894) where `self.viewport_mut().ensure_visible_with_margin()`
+is called after cursor movement. We'll add `ensure_visible()` calls at the three jump sites:
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. **Same-file jump** (locals resolution) - after setting cursor at definition position
+2. **Cross-file jump** - in `goto_cross_file_definition()` after opening file and setting cursor
+3. **Go-back navigation** - in `go_back()` after restoring cursor from jump stack
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/gotodef_scroll_reveal/GOAL.md)
-with references to the files that you expect to touch.
--->
+For wrap-mode compatibility, we use `Viewport::ensure_visible()` which handles the common
+unwrapped case. The `ensure_visible_wrapped()` variant requires `WrapLayout` context that
+isn't readily available at these call sites, and the simpler variant is sufficient for
+discrete navigation operations (as opposed to continuous typing where wrap-row tracking
+matters more).
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+- **docs/subsystems/viewport_scroll** (DOCUMENTED): This chunk IMPLEMENTS the viewport
+  scroll subsystem's `ensure_visible()` pattern at three additional call sites.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+The viewport_scroll subsystem's invariant #6 states: "`ensure_visible` snaps to whole-row
+boundaries." This chunk uses `Viewport::ensure_visible()` to scroll after goto-definition
+jumps, following the established pattern used in find-in-file and other cursor-movement
+operations.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add test for same-file goto-definition scroll reveal
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Write a failing test that verifies the viewport scrolls after a same-file
+goto-definition jump. The test should:
 
-Example:
+1. Create an `EditorState` with a buffer containing many lines (e.g., 50 lines)
+2. Set up a definition at line 40 (off-screen when viewport shows lines 0-9)
+3. Position cursor at a reference to that definition near line 0
+4. Call `goto_definition()` (simulating F12)
+5. Assert that `first_visible_line()` has scrolled to reveal line 40
 
-### Step 1: Define the SegmentHeader struct
+Location: `crates/editor/src/editor_state.rs` in the `#[cfg(test)]` module
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Note: Since `goto_definition` requires tree-sitter locals queries, this test
+may need to use mock/simplified resolution or test at a different abstraction
+level. Consider testing the scroll behavior by directly calling the internal
+cursor-setting and scroll logic.
 
-Location: src/segment/format.rs
+### Step 2: Fix same-file goto-definition scroll
 
-### Step 2: Implement header serialization
+In `EditorState::goto_definition()`, after setting the cursor to the definition
+position (~line 1442), add a call to `ensure_visible`:
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+```rust
+// Move cursor to definition
+let tab = workspace.active_tab_mut().unwrap();
+if let Some(buffer) = tab.as_text_buffer_mut() {
+    buffer.set_cursor(Position::new(def_line, def_col));
+}
 
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+// Chunk: docs/chunks/gotodef_scroll_reveal - Scroll viewport to reveal cursor
+let workspace = self.editor.active_workspace_mut().unwrap();
+let tab = workspace.active_tab().unwrap();
+let line_count = tab.as_text_buffer().map(|b| b.line_count()).unwrap_or(0);
+let viewport = workspace.active_pane_mut().unwrap().active_tab_mut().unwrap();
+if viewport.viewport.ensure_visible(def_line, line_count) {
+    self.invalidation.merge(InvalidationKind::Layout);
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `crates/editor/src/editor_state.rs`, `goto_definition()` method
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 3: Add test for cross-file goto-definition scroll reveal
+
+Write a test that verifies viewport scrolls after `goto_cross_file_definition()`.
+This is harder to test in isolation since it involves file opening, but the
+scroll pattern is identical. Consider testing that after the method completes,
+the viewport's `first_visible_line()` has been adjusted appropriately.
+
+### Step 4: Fix cross-file goto-definition scroll
+
+In `EditorState::goto_cross_file_definition()`, after setting the cursor to
+the target position (~line 1529), add the same scroll-to-reveal pattern:
+
+```rust
+// Move cursor to the definition position
+if let Some(ws) = self.editor.active_workspace_mut() {
+    if let Some(tab) = ws.active_tab_mut() {
+        if let Some(buffer) = tab.as_text_buffer_mut() {
+            buffer.set_cursor(Position::new(target_line, target_col));
+        }
+    }
+}
+
+// Chunk: docs/chunks/gotodef_scroll_reveal - Scroll viewport to reveal cursor
+let line_count = self.buffer().line_count();
+if self.viewport_mut().ensure_visible(target_line, line_count) {
+    self.invalidation.merge(InvalidationKind::Layout);
+}
+```
+
+Location: `crates/editor/src/editor_state.rs`, `goto_cross_file_definition()` method
+
+### Step 5: Add test for go-back navigation scroll reveal
+
+Write a test that verifies viewport scrolls after `go_back()` returns to a
+previous cursor position that's now off-screen.
+
+### Step 6: Fix go-back navigation scroll
+
+In `EditorState::go_back()`, after restoring the cursor position from the
+jump stack (~line 1611), add scroll-to-reveal:
+
+```rust
+// Restore cursor position
+if let Some(buffer) = tab.as_text_buffer_mut() {
+    buffer.set_cursor(Position::new(pos.line, pos.col));
+}
+
+// Chunk: docs/chunks/gotodef_scroll_reveal - Scroll viewport to reveal cursor after go-back
+let line_count = tab.as_text_buffer().map(|b| b.line_count()).unwrap_or(0);
+if tab.viewport.ensure_visible(pos.line, line_count) {
+    self.invalidation.merge(InvalidationKind::Layout);
+}
+```
+
+Location: `crates/editor/src/editor_state.rs`, `go_back()` method
+
+### Step 7: Manual verification
+
+Test the fix manually:
+
+1. Open a large Rust file (e.g., `crates/editor/src/editor_state.rs`)
+2. Scroll to a function near the top of the file
+3. Cmd+click on a symbol whose definition is hundreds of lines away
+4. Verify the viewport scrolls to show the definition
+
+Repeat for:
+- Same-file definitions (locals resolution)
+- Cross-file definitions (symbol index)
+- Go-back (Ctrl+-) returning to original position
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+None. The `Viewport::ensure_visible()` method already exists and is used elsewhere
+in the codebase. This chunk only adds calls to it at new locations.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Wrap mode handling**: The `ensure_visible()` method uses unwrapped line-to-screen
+   mapping. For most goto-definition use cases (jumping to function/type definitions),
+   this is fine because definitions typically start at column 0 or low columns.
+   However, if the definition is deep within a very long wrapped line, the cursor
+   might land on a screen row that's still off-screen. The `ensure_visible_wrapped()`
+   variant would handle this correctly but requires `WrapLayout` context that isn't
+   readily available at the call sites.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+   **Decision**: Use `ensure_visible()` for now. This is consistent with how
+   `run_live_search` handles scroll-to-match. If users report issues with wrapped
+   definitions, consider creating a helper method that constructs the necessary
+   `WrapLayout` context.
+
+2. **Borrow checker complexity**: The `goto_definition()` method has complex borrow
+   patterns due to multiple mutable borrows of `self.editor`. The `ensure_visible`
+   call needs access to both the viewport (via active tab) and the line count
+   (via buffer). May need to restructure code to avoid borrow conflicts.
+
+3. **Double invalidation**: The current code already calls `self.invalidation.merge(InvalidationKind::Layout)`. Adding another conditional merge when scrolling
+   occurs is harmless (Layout merges with itself) but may look redundant. Consider
+   whether to remove the unconditional merge and rely only on the scroll-triggered one.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- POPULATE DURING IMPLEMENTATION -->

@@ -9,7 +9,6 @@ code_paths:
   - crates/syntax/Cargo.toml
   - crates/editor/src/workspace.rs
   - crates/editor/src/editor_state.rs
-  - crates/editor/src/definition_selector.rs
 code_references:
   - ref: crates/syntax/src/symbol_index.rs#SymbolIndex
     implements: "Thread-safe symbol index data structure with background indexing and incremental updates"

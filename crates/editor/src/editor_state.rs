@@ -1438,11 +1438,16 @@ impl EditorState {
 
             // Move cursor to definition
             let tab = workspace.active_tab_mut().unwrap();
+            let line_count = tab.as_text_buffer().map(|b| b.line_count()).unwrap_or(0);
             if let Some(buffer) = tab.as_text_buffer_mut() {
                 buffer.set_cursor(Position::new(def_line, def_col));
             }
 
-            // Ensure the new cursor position is visible
+            // Chunk: docs/chunks/gotodef_scroll_reveal - Scroll viewport to reveal cursor
+            if tab.viewport.ensure_visible(def_line, line_count) {
+                self.invalidation.merge(InvalidationKind::Layout);
+            }
+
             self.invalidation.merge(InvalidationKind::Layout);
             return;
         }
@@ -1544,11 +1549,16 @@ impl EditorState {
             self.open_file_in_new_tab(target_file);
         }
 
-        // Move cursor to the definition position
+        // Move cursor to the definition position and scroll to reveal
         if let Some(ws) = self.editor.active_workspace_mut() {
             if let Some(tab) = ws.active_tab_mut() {
+                let line_count = tab.as_text_buffer().map(|b| b.line_count()).unwrap_or(0);
                 if let Some(buffer) = tab.as_text_buffer_mut() {
                     buffer.set_cursor(Position::new(target_line, target_col));
+                }
+                // Chunk: docs/chunks/gotodef_scroll_reveal - Scroll viewport to reveal cursor
+                if tab.viewport.ensure_visible(target_line, line_count) {
+                    self.invalidation.merge(InvalidationKind::Layout);
                 }
             }
         }
