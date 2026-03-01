@@ -8,170 +8,154 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This is an implementation bug fix in `insert_str_tracked`. The root cause is clear from the GOAL.md analysis: the method captures `start_col` and `start_line` BEFORE calling `delete_selection()`, then incorrectly reuses those stale values for cursor positioning AFTER the selection is deleted.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The fix strategy mirrors what `insert_str` already does correctly:
+1. Capture pre-deletion position ONLY for `EditInfo` (tree-sitter needs the original selection range)
+2. After `delete_selection()`, re-read the cursor position for insertion logic
+3. Use the post-deletion cursor position for the final cursor update
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+For `EditInfo`, when there's a selection, we need to correctly describe the edit as:
+- `start_byte/start_row/start_col`: Selection START position (where text will end up)
+- `old_end_byte/old_end_row/old_end_col`: Selection END position (what was deleted)
+- `new_end_byte/new_end_row/new_end_col`: Where cursor ends up after insertion
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/doubleclick_drag_wordsnap/GOAL.md)
-with references to the files that you expect to touch.
--->
+The current code incorrectly uses cursor position (selection END) as the start, which is wrong when there's a selection.
+
+**TDD approach**: Per TESTING_PHILOSOPHY.md, write the failing test first that demonstrates the bug (select word, insert replacement, verify cursor position and content), then fix the implementation.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems are relevant to this bug fix. This is a self-contained fix within the text buffer's mutation logic.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing test for selection-replace cursor bug
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create a test that reproduces the exact bug scenario:
+1. Create buffer with text (e.g., "ticket: null")
+2. Call `select_word_at(0)` to select "ticket" (columns 0-5, cursor at 6)
+3. Call `insert_str_tracked("test")`
+4. Assert buffer content is "test: null"
+5. Assert cursor position is (0, 4) — immediately after "test"
+6. Assert `EditInfo` correctly describes the edit:
+   - `start_byte = 0` (selection start)
+   - `old_end_byte = 6` (selection end, 6 bytes deleted)
+   - `new_end_byte = 4` (4 bytes inserted at position 0)
 
-Example:
+Location: `crates/buffer/src/text_buffer.rs` in the `#[cfg(test)]` module, near existing `test_insert_str_tracked*` tests.
 
-### Step 1: Define the SegmentHeader struct
+### Step 2: Fix cursor position capture in `insert_str_tracked`
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Modify `insert_str_tracked` (lines 2062-2132) to:
 
-Location: src/segment/format.rs
+1. **Preserve pre-deletion capture for EditInfo (lines 2067-2070)**: Keep the existing capture of `start_line`, `start_col`, `start_byte` — but ONLY when there's no selection. When there's a selection, we need to capture the selection START, not the cursor (which is at selection END).
 
-### Step 2: Implement header serialization
+2. **Capture selection range BEFORE deletion (new logic)**:
+   - Check if there's a selection using `self.selection_range()`
+   - If selection exists, capture selection START position for `EditInfo.start_*` and selection END position for `EditInfo.old_end_*`
+   - If no selection, keep the current behavior (edit starts at cursor, old_end = start)
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+3. **Re-read cursor position AFTER `delete_selection()` (lines 2073-2075)**:
+   - After `delete_selection()` returns, re-capture `self.cursor.line` and `self.cursor.col` as the true insertion point
+   - Use these values for `start_offset` calculation (line 2075 is already correct)
+   - Use these values for cursor update (lines 2104-2109)
 
-### Step 3: ...
+4. **Fix cursor update (lines 2104-2109)**: Currently uses `start_col` which was captured before deletion. Change to use the post-deletion cursor position.
 
----
+The key insight: separate the values needed for EditInfo (which needs the full before/after picture including deletion) from the values needed for insertion logic (which only cares about post-deletion state).
 
-**BACKREFERENCE COMMENTS**
+**Pseudo-code for the fix:**
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+```rust
+pub fn insert_str_tracked(&mut self, s: &str) -> MutationResult {
+    if s.is_empty() {
+        return MutationResult::none();
+    }
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+    // Capture info for EditInfo BEFORE any mutations
+    let had_selection = self.has_selection();
+    let (edit_start_byte, edit_start_line, edit_start_col, old_end_byte, old_end_line, old_end_col) =
+        if let Some((sel_start, sel_end)) = self.selection_range() {
+            // Selection: edit range spans from selection start to selection end
+            let start_byte = self.byte_offset_at(sel_start.line, sel_start.col);
+            let end_byte = self.byte_offset_at(sel_end.line, sel_end.col);
+            (start_byte, sel_start.line, sel_start.col, end_byte, sel_end.line, sel_end.col)
+        } else {
+            // No selection: edit starts at cursor, old_end = start (pure insertion)
+            let start_byte = self.byte_offset_at(self.cursor.line, self.cursor.col);
+            (start_byte, self.cursor.line, self.cursor.col, start_byte, self.cursor.line, self.cursor.col)
+        };
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+    // Delete any active selection first
+    let mut dirty = self.delete_selection();
 
-Format (place immediately before the symbol):
+    // NOW capture the insertion point (cursor is at selection start after deletion)
+    let insert_line = self.cursor.line;
+    let insert_col = self.cursor.col;
+    let start_offset = self.position_to_offset(self.cursor);
+
+    // ... rest of insertion logic uses insert_line/insert_col ...
+
+    // Cursor update uses insert_col, not edit_start_col
+    if newline_count > 0 {
+        self.cursor.line = insert_line + newline_count;
+        self.cursor.col = chars_since_last_newline;
+    } else {
+        self.cursor.col = insert_col + char_count;
+    }
+
+    // EditInfo uses the captured before-state for old range
+    // BUT for new_end, we need the actual cursor position after insertion
+    let edit_info = Some(EditInfo {
+        start_byte: edit_start_byte,
+        old_end_byte,
+        new_end_byte: edit_start_byte + s.len(),
+        start_row: edit_start_line,
+        start_col: edit_start_col,
+        old_end_row: old_end_line,
+        old_end_col: old_end_col,
+        new_end_row: self.cursor.line,
+        new_end_col: self.cursor.col,
+    });
+
+    MutationResult::new(dirty_lines, edit_info)
+}
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `crates/buffer/src/text_buffer.rs`, lines 2062-2132
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 3: Verify existing tests still pass
+
+Run the existing test suite to ensure no regressions:
+- `test_insert_str_tracked`
+- `test_insert_str_tracked_multiline`
+- `test_insert_str_with_selection_replaces`
+- `test_insert_str_replaces_selection`
+
+The existing tests verify basic functionality; they should continue passing. The new test from Step 1 verifies the specific bug scenario.
+
+### Step 4: Add additional edge case tests
+
+Add tests for:
+1. **Multi-line selection replacement**: Select across multiple lines, replace with single-line text
+2. **Replacement with newlines**: Select text, replace with multi-line text
+3. **Cursor at selection start vs end**: Verify behavior is consistent regardless of which direction the selection was made
+
+Location: `crates/buffer/src/text_buffer.rs` in the `#[cfg(test)]` module
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+None. This is a self-contained bug fix.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **EditInfo semantics for replacements**: The current `EditInfo::for_insert` assumes `old_end = start` (pure insertion). For selection replacement, we need `old_end = selection_end` and `start = selection_start`. We may need to construct `EditInfo` directly rather than using `for_insert`. This is addressed in Step 2.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Tree-sitter behavior**: The fix changes what `EditInfo` is reported for selection replacements. Need to verify tree-sitter handles this correctly. The correct semantics should be: "at position X, we deleted Y bytes (to position Z), and inserted W bytes (to position A)". This is exactly what `EditInfo` fields represent.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->
