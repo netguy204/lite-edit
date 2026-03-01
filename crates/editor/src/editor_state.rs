@@ -4189,6 +4189,11 @@ impl EditorState {
         // (handles case of file picker confirming into a newly created tab)
         self.sync_active_tab_viewport();
         self.invalidation.merge(InvalidationKind::Layout);
+
+        // Chunk: docs/chunks/cache_reload_invalidation - Clear cache on buffer replace
+        // The buffer content was replaced (or the tab identity changed), so the
+        // styled line cache must be fully cleared to prevent stale rendered lines.
+        self.clear_styled_line_cache = true;
     }
 
     // Chunk: docs/chunks/gotodef_cross_file_nav - Open file in new tab for cross-file navigation
@@ -4650,6 +4655,11 @@ impl EditorState {
 
         // Mark full viewport dirty
         self.invalidation.merge(InvalidationKind::Layout);
+
+        // Chunk: docs/chunks/cache_reload_invalidation - Clear cache on buffer replace
+        // The buffer content was replaced from disk, so the styled line cache
+        // must be fully cleared to prevent stale rendered lines.
+        self.clear_styled_line_cache = true;
 
         true
     }
@@ -6676,6 +6686,37 @@ mod tests {
 
         // Should be dirty after association
         assert!(state.is_dirty());
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    // Chunk: docs/chunks/cache_reload_invalidation - Test cache clear on associate_file
+    #[test]
+    fn test_associate_file_clears_styled_line_cache() {
+        use std::io::Write;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Clear any pre-existing cache flag
+        let _ = state.take_clear_styled_line_cache();
+        assert!(!state.take_clear_styled_line_cache(), "should start false");
+
+        // Create a temporary file with content
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_associate_cache.txt");
+        {
+            let mut f = std::fs::File::create(&temp_file).unwrap();
+            f.write_all(b"File content").unwrap();
+        }
+
+        state.associate_file(temp_file.clone());
+
+        // Cache flag should be set after associating a file
+        assert!(
+            state.take_clear_styled_line_cache(),
+            "associate_file should set clear_styled_line_cache"
+        );
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_file);
@@ -12938,6 +12979,51 @@ mod tests {
         let buffer = TextBuffer::from_str("hello\nworld");
         let pos = clamp_position_to_buffer(Position::new(0, 0), &buffer);
         assert_eq!(pos, Position::new(0, 0)); // unchanged
+    }
+
+    // =========================================================================
+    // Cache Invalidation Tests (Chunk: docs/chunks/cache_reload_invalidation)
+    // =========================================================================
+
+    #[test]
+    fn test_reload_file_tab_clears_styled_line_cache() {
+        use std::io::Write;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Create a temporary file with initial content
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_reload_cache.txt");
+        {
+            let mut f = std::fs::File::create(&temp_file).unwrap();
+            f.write_all(b"Initial content").unwrap();
+        }
+
+        // Associate the file with the current tab (loads it and makes it "clean")
+        state.associate_file(temp_file.clone());
+
+        // Clear any pre-existing cache flag (from associate_file)
+        let _ = state.take_clear_styled_line_cache();
+        assert!(!state.take_clear_styled_line_cache(), "should start false after take");
+
+        // Modify the file on disk
+        {
+            let mut f = std::fs::File::create(&temp_file).unwrap();
+            f.write_all(b"Modified content").unwrap();
+        }
+
+        // Reload the file tab
+        let reloaded = state.reload_file_tab(&temp_file);
+        assert!(reloaded, "reload_file_tab should succeed");
+
+        // Cache flag should be set after reload
+        assert!(
+            state.take_clear_styled_line_cache(),
+            "reload_file_tab should set clear_styled_line_cache"
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_file);
     }
 
     // =========================================================================

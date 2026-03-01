@@ -8,153 +8,155 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This is a small semantic bug fix that uses the existing cache invalidation
+infrastructure established by the `styled_line_cache` chunk. The fix requires
+adding a single assignment (`self.clear_styled_line_cache = true`) in two
+locations where buffer content is wholesale-replaced:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **`reload_file_tab()`** — Called when a `FileChanged` event arrives for a
+   clean tab. After the `TextBuffer::from_str()` call replaces the buffer.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **`associate_file()`** — Called when the file picker confirms a selection
+   or Cmd+O opens a file. After the buffer is replaced with loaded content.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/cache_reload_invalidation/GOAL.md)
-with references to the files that you expect to touch.
--->
+Both methods already call `self.invalidation.merge(InvalidationKind::Layout)`,
+which triggers a full viewport render. The missing piece is that the styled
+line cache is not cleared, so the renderer serves stale cached lines instead
+of re-computing styled content from the new buffer.
+
+**Testing strategy**: Per TESTING_PHILOSOPHY.md, this is a testable behavior
+at the state layer. The `clear_styled_line_cache` flag is observable via
+`take_clear_styled_line_cache()`. We can write unit tests that:
+- Call `associate_file()` with a real file
+- Assert that `take_clear_styled_line_cache()` returns `true`
+- Do the same for `reload_file_tab()`
+
+This verifies the semantic guarantee without requiring a Metal renderer.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+- **docs/subsystems/renderer** (DOCUMENTED): This chunk USES the renderer
+  subsystem's styled line cache invalidation mechanism. The fix sets the
+  `clear_styled_line_cache` flag that the renderer consumes via
+  `take_clear_styled_line_cache()` during the render pass.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+The renderer subsystem (status: DOCUMENTED) defines the styled line cache as
+part of its scope. This chunk does not modify the cache mechanism itself—it
+only ensures the existing invalidation flag is set in two previously-missed
+code paths.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing tests for cache invalidation on associate_file
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add a test in `crates/editor/src/editor_state.rs` that:
+1. Creates an `EditorState` with a file tab
+2. Creates a temporary file with content
+3. Calls `associate_file()` with that file path
+4. Asserts that `take_clear_styled_line_cache()` returns `true`
 
-Example:
+This test will fail initially because `associate_file()` does not set the flag.
 
-### Step 1: Define the SegmentHeader struct
+**Location**: `crates/editor/src/editor_state.rs` (in the `#[cfg(test)]` module,
+near the existing `test_associate_file_*` tests around line 6317)
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Write failing tests for cache invalidation on reload_file_tab
 
-Location: src/segment/format.rs
+Add a test that:
+1. Creates an `EditorState` with a file tab associated to a temporary file
+2. Modifies the file on disk
+3. Calls `reload_file_tab()` with that path
+4. Asserts that `take_clear_styled_line_cache()` returns `true`
 
-### Step 2: Implement header serialization
+This test will also fail initially.
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+**Location**: `crates/editor/src/editor_state.rs` (in the `#[cfg(test)]` module,
+near the existing `reload_file_tab` tests)
 
-### Step 3: ...
+### Step 3: Fix associate_file to set clear_styled_line_cache
+
+In `associate_file()` (line ~4053), add:
+```rust
+self.clear_styled_line_cache = true;
+```
+
+This should be placed after the buffer replacement inside the `Ok(bytes)` branch
+(around line 4065-4076), and also unconditionally at the end of the method since
+even loading a non-existent file changes the tab's identity.
+
+**Location**: `crates/editor/src/editor_state.rs` function `associate_file()`
+
+Add a chunk backreference comment:
+```rust
+// Chunk: docs/chunks/cache_reload_invalidation - Clear cache on buffer replace
+```
+
+### Step 4: Fix reload_file_tab to set clear_styled_line_cache
+
+In `reload_file_tab()` (line ~4382), add:
+```rust
+self.clear_styled_line_cache = true;
+```
+
+This should be placed after the `*buffer = TextBuffer::from_str(&new_content);`
+line (around line 4429), alongside the existing `self.invalidation.merge(...)`.
+
+**Location**: `crates/editor/src/editor_state.rs` function `reload_file_tab()`
+
+Add a chunk backreference comment:
+```rust
+// Chunk: docs/chunks/cache_reload_invalidation - Clear cache on buffer replace
+```
+
+### Step 5: Verify tests pass
+
+Run the tests:
+```bash
+cargo test -p lite-edit-editor --lib -- associate_file
+cargo test -p lite-edit-editor --lib -- reload_file_tab
+```
+
+Both tests written in Steps 1-2 should now pass.
+
+### Step 6: Run full test suite
+
+Ensure no regressions:
+```bash
+cargo test --workspace
+```
 
 ---
 
 **BACKREFERENCE COMMENTS**
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
-
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
-
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+This chunk adds backreferences at the method level in `reload_file_tab()` and
+`associate_file()` to explain why `clear_styled_line_cache = true` is set.
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+- **styled_line_cache** (ACTIVE): This chunk depends on the `clear_styled_line_cache`
+  flag and `take_clear_styled_line_cache()` method introduced by that chunk.
+- **base_snapshot_reload** (ACTIVE): The `reload_file_tab()` method was introduced
+  by this chunk.
 
-If there are no dependencies, delete this section.
--->
+Both dependencies are already merged (ACTIVE status).
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+**Low risk**: This is a minimal fix that adds a single flag assignment in two
+well-understood code paths. The flag mechanism is already proven by tab-switch
+cache clearing.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+**Potential edge case**: If `associate_file()` is called but the file read fails
+(the `Err(_)` branch at line 4078), should the cache still be cleared? Currently
+the buffer is left as-is, so arguably the cache is still valid. However, the
+method still changes `associated_file` and calls `setup_active_tab_highlighting()`,
+which could change the highlighter. For safety, we clear the cache unconditionally
+in `associate_file()` after the file read attempt—the cost is one extra full
+cache invalidation, which is negligible compared to the cost of stale rendering.
+
+**No performance concern**: Cache clearing only occurs on explicit buffer
+replacement operations (file reload, file open), not on every frame or keystroke.
 
 ## Deviations
 
