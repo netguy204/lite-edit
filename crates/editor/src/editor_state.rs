@@ -919,8 +919,14 @@ impl EditorState {
                     let rows = (pane_content_height as f64 / line_height).floor() as usize;
                     let cols = (pane_width as f64 / advance_width).floor() as usize;
 
-                    // Only resize if dimensions actually changed (avoid PTY thrashing)
+                    // Chunk: docs/chunks/terminal_size_accuracy - Diagnostic logging for terminal resize
                     let (current_cols, current_rows) = terminal.size();
+                    if cols != current_cols || rows != current_rows {
+                        eprintln!("[DIAG sync_pane_viewports] pane_width={:.2}, pane_content_height={:.2}, advance_width={:.4}, line_height={:.4}, cols={}, rows={} (was {}x{})",
+                                  pane_width, pane_content_height, advance_width, line_height, cols, rows, current_cols, current_rows);
+                    }
+
+                    // Only resize if dimensions actually changed (avoid PTY thrashing)
                     if (cols != current_cols || rows != current_rows) && cols > 0 && rows > 0 {
                         terminal.resize(cols, rows);
                     }
@@ -11543,6 +11549,126 @@ mod tests {
         assert_eq!(
             actual_rows, expected_rows,
             "Terminal rows should match pane height"
+        );
+    }
+
+    // Chunk: docs/chunks/terminal_size_accuracy - Terminal size vs render width test
+    /// Tests that the terminal column count matches the renderer's cols_per_row.
+    ///
+    /// This is the key test for the terminal_size_accuracy chunk. The terminal's
+    /// column count (used by the PTY for line wrapping) must match the renderer's
+    /// cols_per_row (used for visual wrapping) to prevent misalignment.
+    #[test]
+    fn test_terminal_cols_matches_wrap_layout_cols_per_row() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        use crate::left_rail::RAIL_WIDTH;
+        use crate::wrap_layout::WrapLayout;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        let fm = test_font_metrics();
+
+        // Set up viewport with typical dimensions
+        let view_width = 800.0;
+        let view_height = 600.0 + TAB_BAR_HEIGHT;
+        state.update_viewport_dimensions(view_width, view_height);
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Get terminal column count
+        let terminal_cols = {
+            let ws = state.editor.active_workspace().unwrap();
+            let tab = ws.active_pane().unwrap().active_tab().unwrap();
+            let term = tab.as_terminal_buffer().unwrap();
+            term.size().0 // columns
+        };
+
+        // Calculate what the renderer would use for cols_per_row
+        // The renderer uses content_width = view_width - RAIL_WIDTH for single-pane
+        let content_width = view_width - RAIL_WIDTH;
+        let wrap_layout = WrapLayout::new(content_width, &fm);
+        let render_cols = wrap_layout.cols_per_row();
+
+        eprintln!(
+            "[TEST] view_width={}, RAIL_WIDTH={}, content_width={}, advance_width={:.4}",
+            view_width, RAIL_WIDTH, content_width, fm.advance_width
+        );
+        eprintln!(
+            "[TEST] terminal_cols={}, render_cols={}, expected_cols={}",
+            terminal_cols,
+            render_cols,
+            (content_width as f64 / fm.advance_width).floor() as usize
+        );
+
+        assert_eq!(
+            terminal_cols, render_cols,
+            "Terminal columns ({}) should match renderer's cols_per_row ({}). \
+             content_width={}, advance_width={:.4}",
+            terminal_cols, render_cols, content_width, fm.advance_width
+        );
+    }
+
+    // Chunk: docs/chunks/terminal_size_accuracy - Test with realistic font metrics
+    /// Tests terminal cols vs render cols with Intel One Mono at 2x scale.
+    ///
+    /// This simulates production conditions where advance_width is ~17.19 pixels.
+    #[test]
+    fn test_terminal_cols_with_realistic_font_metrics() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        use crate::left_rail::RAIL_WIDTH;
+        use crate::wrap_layout::WrapLayout;
+        use crate::font::FontMetrics;
+
+        // Simulate Intel One Mono at 2x scale (based on actual measurements)
+        let fm = FontMetrics {
+            advance_width: 17.1920,
+            line_height: 38.6397,
+            ascent: 30.5199,
+            descent: 8.1198,
+            leading: 0.0,
+            point_size: 28.0,
+        };
+
+        let mut state = EditorState::empty(fm);
+
+        // Use typical Retina display dimensions (scaled)
+        // e.g., 1400px window * 2 = 2800 physical pixels
+        let view_width = 2800.0;
+        let view_height = 1200.0 + TAB_BAR_HEIGHT;
+        state.update_viewport_dimensions(view_width, view_height);
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Get terminal column count
+        let terminal_cols = {
+            let ws = state.editor.active_workspace().unwrap();
+            let tab = ws.active_pane().unwrap().active_tab().unwrap();
+            let term = tab.as_terminal_buffer().unwrap();
+            term.size().0 // columns
+        };
+
+        // Calculate what the renderer would use for cols_per_row
+        let content_width = view_width - RAIL_WIDTH;
+        let wrap_layout = WrapLayout::new(content_width, &fm);
+        let render_cols = wrap_layout.cols_per_row();
+
+        eprintln!(
+            "[TEST realistic] view_width={}, RAIL_WIDTH={}, content_width={}, advance_width={:.4}",
+            view_width, RAIL_WIDTH, content_width, fm.advance_width
+        );
+        eprintln!(
+            "[TEST realistic] terminal_cols={}, render_cols={}, expected_cols={}",
+            terminal_cols,
+            render_cols,
+            (content_width as f64 / fm.advance_width).floor() as usize
+        );
+
+        assert_eq!(
+            terminal_cols, render_cols,
+            "Terminal columns ({}) should match renderer's cols_per_row ({}). \
+             This test uses realistic font metrics (Intel One Mono at 2x scale).",
+            terminal_cols, render_cols
         );
     }
 

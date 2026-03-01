@@ -8,170 +8,250 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The problem is that the terminal PTY receives a column/row count wider than what the
+pane can actually render. After investigation of the related chunks:
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+- **`terminal_resize_sync` (ACTIVE)**: Propagates resize events to terminal grid when
+  viewport dimensions change — this works correctly for resize events
+- **`terminal_pane_initial_sizing` (ACTIVE)**: Fixed initial sizing to use pane-specific
+  dimensions and added `sync_pane_viewports()` call after terminal creation
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+Despite these fixes, the column count still exceeds the visible rendering area. The
+issue must be in the calculation itself — either the `content_width` used in
+`cols = (content_width / advance_width).floor()` is too large, or the rendering area
+calculation in the renderer doesn't match the PTY size calculation.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/terminal_size_accuracy/GOAL.md)
-with references to the files that you expect to touch.
--->
+### Diagnosis Strategy
+
+The bug has two manifestations:
+1. **Column count too wide**: `ls` output wraps incorrectly (the reported problem)
+2. **Prompt unreachable**: After repeated wrapped output, scrolling to bottom doesn't
+   reach the prompt
+
+Both symptoms suggest the PTY's column count exceeds the actual rendered character
+grid. The root cause could be:
+
+1. **Padding/margin not subtracted**: The renderer may account for horizontal padding
+   (e.g., left margin for line numbers) that isn't subtracted from `content_width`
+   before computing `cols`
+
+2. **Fractional glyph math**: `floor(content_width / advance_width)` may include a
+   partial character that doesn't actually fit
+
+3. **Stale dimensions on first resize**: There may be a timing issue where the PTY
+   gets initial dimensions before the pane layout is fully calculated
+
+The fix follows the humble view architecture from TESTING_PHILOSOPHY.md: the model
+(TerminalBuffer dimensions) must match what the renderer projects. We'll instrument
+the calculation, identify the discrepancy, and fix the sizing math.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
+- **docs/subsystems/spatial_layout** (DOCUMENTED): This chunk USES the spatial layout
+  subsystem. The pane rect calculations from `calculate_pane_rects()` provide the
+  `content_width` for terminal sizing. If the subsystem's output doesn't account for
+  all rendering constraints (like terminal-specific margins), this chunk will need to
+  adjust the values downstream.
 
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+- **docs/subsystems/viewport_scroll** (DOCUMENTED): This chunk USES the viewport
+  subsystem. The `sync_pane_viewports()` function already handles terminal resize
+  on layout changes. This chunk may need to adjust the dimension calculation
+  within that function.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Instrument the terminal sizing calculation
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add diagnostic logging to understand the actual values being used. In both
+`new_terminal_tab()` and `sync_pane_viewports()`, print:
 
-Example:
+- `content_width` (the pane width used for calculation)
+- `advance_width` (font metric for character width)
+- Computed `cols` result
+- The PTY's actual reported size after creation (`stty size` equivalent)
 
-### Step 1: Define the SegmentHeader struct
+Run the editor, create a terminal, and capture these values. Compare `cols` to
+`tput cols` from inside the shell.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+// Temporary diagnostic (remove before commit)
+eprintln!("[DIAG] Terminal sizing: content_width={:.2}, advance_width={:.4}, cols={}",
+          content_width, self.font_metrics.advance_width, cols);
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `crates/editor/src/editor_state.rs#new_terminal_tab` and `sync_pane_viewports`
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 2: Compare rendering width calculation
+
+Examine the terminal renderer to understand how it computes the character grid
+bounds. Look for:
+
+- How `content_width` is derived in the render path
+- Whether any horizontal padding/margins are applied
+- The actual `x` coordinates used for character positioning
+
+The renderer is in `crates/editor/src/renderer/`. Find the terminal rendering code
+and trace the width calculation back to its source.
+
+Verify: Does the renderer use the same `pane_width` as the sizing calculation?
+
+Location: `crates/editor/src/renderer/` (search for terminal rendering)
+
+### Step 3: Identify the sizing discrepancy
+
+Based on Steps 1-2, identify where the mismatch originates:
+
+**Hypothesis A**: The renderer applies padding that `new_terminal_tab()`/`sync_pane_viewports()` don't subtract
+
+**Hypothesis B**: `calculate_pane_rects()` returns the full pane width but the
+renderer uses a smaller content rect
+
+**Hypothesis C**: Font metrics rounding causes an off-by-one in column count
+
+Document the specific discrepancy and which component is "correct" (the renderer,
+since it determines what's actually visible).
+
+### Step 4: Fix the column calculation
+
+Based on the identified discrepancy, modify the terminal sizing calculation to
+match the renderer's actual character grid.
+
+**If Hypothesis A (renderer padding):**
+```rust
+// Chunk: docs/chunks/terminal_size_accuracy - Account for terminal padding
+// The terminal renderer applies TERMINAL_PADDING on left/right edges.
+// Subtract this from content_width before computing columns.
+let terminal_content_width = pane_width - (2.0 * TERMINAL_PADDING);
+let cols = (terminal_content_width as f64 / advance_width).floor() as usize;
+```
+
+**If Hypothesis B (pane rect vs content rect):**
+The fix would be in the rect calculation or extracting a different dimension.
+
+**If Hypothesis C (rounding issue):**
+```rust
+// Use ceil for advance_width to ensure characters always fit
+let cols = (content_width as f64 / advance_width).floor() as usize - 1;
+```
+
+Apply the fix to both locations:
+- `crates/editor/src/editor_state.rs#new_terminal_tab`
+- `crates/editor/src/editor_state.rs#sync_pane_viewports`
+
+### Step 5: Write failing test for correct column count
+
+Create a test that verifies the terminal column count matches the actual renderable
+character grid. The test should:
+
+1. Create a terminal with known window dimensions and font metrics
+2. Verify that `tput cols` (simulated via terminal size) matches the expected
+   renderable columns
+
+```rust
+#[test]
+fn test_terminal_columns_match_renderable_width() {
+    use crate::tab_bar::TAB_BAR_HEIGHT;
+    use crate::left_rail::RAIL_WIDTH;
+
+    let mut state = EditorState::empty(test_font_metrics());
+    // Use a window width that would expose off-by-one errors
+    // 800px - RAIL_WIDTH = content_width
+    // content_width / advance_width should equal terminal cols
+    state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+    state.new_terminal_tab();
+
+    let (term_cols, _term_rows) = {
+        let ws = state.editor.active_workspace().unwrap();
+        let tab = ws.active_pane().unwrap().active_tab().unwrap();
+        let term = tab.as_terminal_buffer().unwrap();
+        term.size()
+    };
+
+    // Calculate expected columns based on the same formula the renderer uses
+    // (this is the key: we're asserting model matches view)
+    let content_width = 800.0 - RAIL_WIDTH;
+    // Apply any padding the renderer applies
+    let renderable_width = content_width; // Adjust this if padding is found
+    let expected_cols = (renderable_width as f64 / test_font_metrics().advance_width).floor() as usize;
+
+    assert_eq!(term_cols, expected_cols,
+        "Terminal cols ({}) should match renderable cols ({}) for width {}",
+        term_cols, expected_cols, content_width);
+}
+```
+
+Location: `crates/editor/src/editor_state.rs` (in `#[cfg(test)]` module)
+
+### Step 6: Test scrollback accessibility after wrapping
+
+Write a test that verifies the prompt is reachable after output that wraps:
+
+```rust
+#[test]
+fn test_terminal_prompt_reachable_after_wrapped_output() {
+    // This test is more of an integration/manual test since it requires
+    // simulating PTY output and verifying scroll behavior
+    // For now, document as a manual verification step
+}
+```
+
+The key assertion: after scroll_to_bottom(), the terminal's cursor row should be
+within the visible viewport.
+
+Location: Manual verification or integration test
+
+### Step 7: Remove diagnostic logging
+
+Remove the `eprintln!` diagnostic statements added in Step 1.
+
+### Step 8: Run full test suite
+
+Run `cargo test -p lite-edit` to verify:
+- New tests pass
+- No regressions in existing terminal tests
+- No regressions in pane layout tests
+
+### Step 9: Manual verification
+
+1. Open the editor with a terminal
+2. Run `tput cols` and verify it matches visible character columns
+3. Run `ls -la` in a directory with long filenames — verify columns wrap at the
+   visible boundary, not beyond
+4. Generate many lines of output (e.g., `seq 1 500`)
+5. Verify the prompt is reachable by scrolling to bottom
+
+### Step 10: Update GOAL.md code_paths
+
+Add files touched to the chunk's GOAL.md frontmatter:
+- `crates/editor/src/editor_state.rs`
+- Any renderer files if modified
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **terminal_resize_sync** (ACTIVE): Established the `sync_pane_viewports()` pattern
+  for propagating dimensions to terminal grid
+- **terminal_pane_initial_sizing** (ACTIVE): Added pane-aware initial sizing and
+  `sync_pane_viewports()` call after terminal creation
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **What if the renderer doesn't have explicit padding?** The discrepancy may be
+  more subtle (floating-point accumulation, rounding direction). Step 3's diagnosis
+  must be thorough.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Multiple terminal tabs**: The fix must work for all terminals, not just the
+  active one. `sync_pane_viewports()` already iterates all panes, but verify.
+
+- **Edge case: very narrow panes**: When a pane is split many times, the column
+  count may approach minimum values. Ensure guards against cols < 1 are in place.
+
+- **Font metrics accuracy**: `advance_width` is a single value but some fonts
+  have variable-width glyphs. For monospace fonts this should be consistent, but
+  verify the test font metrics match production behavior.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

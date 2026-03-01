@@ -672,6 +672,13 @@ mod tests {
     fn test_from_data_loading() {
         let font = Font::from_data(INTEL_ONE_MONO, 14.0, 1.0);
 
+        eprintln!("[DIAG font 1x] advance_width={:.4}, line_height={:.4}, ascent={:.4}, descent={:.4}",
+                  font.metrics.advance_width, font.metrics.line_height, font.metrics.ascent, font.metrics.descent);
+
+        let font_2x = Font::from_data(INTEL_ONE_MONO, 14.0, 2.0);
+        eprintln!("[DIAG font 2x] advance_width={:.4}, line_height={:.4}, ascent={:.4}, descent={:.4}",
+                  font_2x.metrics.advance_width, font_2x.metrics.line_height, font_2x.metrics.ascent, font_2x.metrics.descent);
+
         assert!(font.metrics.advance_width > 0.0, "advance_width should be positive");
         assert!(font.metrics.line_height > 0.0, "line_height should be positive");
         assert!(font.metrics.ascent > 0.0, "ascent should be positive");

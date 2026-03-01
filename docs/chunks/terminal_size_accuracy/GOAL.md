@@ -1,8 +1,9 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/editor/src/editor_state.rs
 code_references: []
 narrative: null
 investigation: null
@@ -10,9 +11,10 @@ subsystems: []
 friction_entries: []
 bug_type: semantic
 depends_on: []
-created_after: ["cache_reload_invalidation", "gotodef_cross_file_nav"]
+created_after:
+- cache_reload_invalidation
+- gotodef_cross_file_nav
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
