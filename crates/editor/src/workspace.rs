@@ -1179,6 +1179,35 @@ impl Workspace {
     }
 
     // =========================================================================
+    // Cross-tab navigation (Chunk: docs/chunks/gotodef_cross_file_nav)
+    // =========================================================================
+
+    /// Switches to a tab by ID, searching across all panes.
+    ///
+    /// If the tab is found in a different pane, that pane becomes active.
+    /// Returns `true` if the tab was found and switched to, `false` otherwise.
+    // Chunk: docs/chunks/gotodef_cross_file_nav - Cross-pane tab switching for goto-definition
+    pub fn switch_to_tab_by_id(&mut self, tab_id: TabId) -> bool {
+        // Search all panes for the tab
+        for pane in self.pane_root.all_panes() {
+            for (index, tab) in pane.tabs.iter().enumerate() {
+                if tab.id == tab_id {
+                    // Found it! Need to switch to this pane and this tab
+                    let pane_id = pane.id;
+                    // Switch to the pane
+                    self.active_pane_id = pane_id;
+                    // Switch to the tab within the pane
+                    if let Some(pane) = self.active_pane_mut() {
+                        pane.switch_tab(index);
+                    }
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    // =========================================================================
     // Agent lifecycle methods (Chunk: docs/chunks/agent_lifecycle)
     // =========================================================================
 
@@ -2724,5 +2753,83 @@ mod tests {
         assert_eq!(view.line_count(), 5);
         assert!(!view.is_editable());
         assert!(view.cursor_info().is_none());
+    }
+
+    // =========================================================================
+    // switch_to_tab_by_id Tests (Chunk: docs/chunks/gotodef_cross_file_nav)
+    // =========================================================================
+
+    #[test]
+    fn test_switch_to_tab_by_id_same_pane() {
+        let mut ws = Workspace::with_empty_tab(1, 1, "test".to_string(), PathBuf::from("/test"), TEST_LINE_HEIGHT);
+        // Add a second tab with ID 2
+        ws.add_tab(Tab::empty_file(2, TEST_LINE_HEIGHT));
+        // Switch back to tab 1 (which is now at index 0)
+        ws.active_pane_mut().unwrap().switch_tab(0);
+
+        // Now switch to tab 2 using switch_to_tab_by_id
+        let result = ws.switch_to_tab_by_id(2);
+
+        assert!(result, "Should successfully switch to tab 2");
+        assert_eq!(ws.active_tab().unwrap().id, 2, "Active tab should be tab 2");
+    }
+
+    #[test]
+    fn test_switch_to_tab_by_id_not_found() {
+        let mut ws = Workspace::with_empty_tab(1, 1, "test".to_string(), PathBuf::from("/test"), TEST_LINE_HEIGHT);
+
+        // Try to switch to a non-existent tab
+        let result = ws.switch_to_tab_by_id(999);
+
+        assert!(!result, "Should return false for non-existent tab");
+        assert_eq!(ws.active_tab().unwrap().id, 1, "Active tab should still be tab 1");
+    }
+
+    #[test]
+    fn test_switch_to_tab_by_id_cross_pane() {
+        let mut ws = create_hsplit_workspace();
+        // create_hsplit_workspace creates:
+        // - Pane 1 (left): tabs with IDs 1, 2 (active is tab 2)
+        // - Pane 2 (right): tab with ID 3
+        // - ws.active_pane_id = 1 (left pane)
+
+        // Currently on pane 1, switch to tab 3 which is in pane 2
+        let result = ws.switch_to_tab_by_id(3);
+
+        assert!(result, "Should successfully switch to tab 3 in pane 2");
+        assert_eq!(ws.active_pane_id, 2, "Active pane should be pane 2");
+        assert_eq!(ws.active_tab().unwrap().id, 3, "Active tab should be tab 3");
+    }
+
+    #[test]
+    fn test_switch_to_tab_by_id_already_active() {
+        let mut ws = Workspace::with_empty_tab(1, 1, "test".to_string(), PathBuf::from("/test"), TEST_LINE_HEIGHT);
+
+        // Switch to the already active tab
+        let result = ws.switch_to_tab_by_id(1);
+
+        assert!(result, "Should return true even if tab is already active");
+        assert_eq!(ws.active_tab().unwrap().id, 1, "Active tab should still be tab 1");
+    }
+
+    #[test]
+    fn test_switch_to_tab_by_id_clears_unread() {
+        let mut ws = Workspace::with_empty_tab(1, 1, "test".to_string(), PathBuf::from("/test"), TEST_LINE_HEIGHT);
+        // Add a second tab and mark it as unread
+        let mut tab2 = Tab::empty_file(2, TEST_LINE_HEIGHT);
+        tab2.unread = true;
+        ws.add_tab(tab2);
+
+        // Switch back to tab 1
+        ws.active_pane_mut().unwrap().switch_tab(0);
+
+        // Verify tab 2 has unread set
+        assert!(ws.active_pane().unwrap().tabs[1].unread, "Tab 2 should be marked unread");
+
+        // Switch to tab 2 using switch_to_tab_by_id
+        ws.switch_to_tab_by_id(2);
+
+        // Verify unread was cleared
+        assert!(!ws.active_tab().unwrap().unread, "Unread flag should be cleared after switching");
     }
 }
