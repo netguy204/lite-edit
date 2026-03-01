@@ -12978,4 +12978,368 @@ mod tests {
         assert!(state.current_status_message().is_none());
         assert!(state.status_message.is_none());
     }
+
+    // =========================================================================
+    // Cross-file goto-definition tests (Chunk: docs/chunks/gotodef_cross_file_nav)
+    // =========================================================================
+
+    /// Test: Cross-file goto opens new tab when target file is not already open.
+    ///
+    /// Setup: workspace with one tab containing file A
+    /// Action: call `goto_cross_file_definition` with target file B
+    /// Assert: workspace now has two tabs, active tab is file B, cursor at definition
+    #[test]
+    fn test_goto_cross_file_definition_opens_new_tab() {
+        use tempfile::TempDir;
+        use std::fs;
+
+        // Create temp files
+        let temp = TempDir::new().unwrap();
+        let file_a = temp.path().join("file_a.rs");
+        let file_b = temp.path().join("file_b.rs");
+
+        fs::write(&file_a, "fn main() {}\n").unwrap();
+        fs::write(&file_b, "pub struct Foo;\npub fn bar() {}\n").unwrap();
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Associate file_a with the initial tab
+        state.associate_file(file_a.clone());
+
+        // Verify initial state: one tab with file_a
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.tab_count(), 1, "Should have 1 tab initially");
+        let initial_tab_id = ws.active_tab().unwrap().id;
+        assert_eq!(
+            ws.active_tab().unwrap().associated_file.as_ref(),
+            Some(&file_a),
+            "Initial tab should be file_a"
+        );
+
+        // Get the pane_id and current position for the goto call
+        let pane_id = ws.active_pane_id;
+        let from_pos = Position::new(0, 5);
+
+        // Call goto_cross_file_definition targeting file_b, line 1, col 7
+        // (where "bar" function starts)
+        state.goto_cross_file_definition(pane_id, from_pos, file_b.clone(), 1, 7);
+
+        // Verify result: two tabs, active is file_b, cursor at (1, 7)
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.tab_count(), 2, "Should now have 2 tabs");
+
+        let active_tab = ws.active_tab().unwrap();
+        assert_eq!(
+            active_tab.associated_file.as_ref(),
+            Some(&file_b),
+            "Active tab should be file_b"
+        );
+        assert_ne!(
+            active_tab.id, initial_tab_id,
+            "Active tab should be the new tab"
+        );
+
+        // Check cursor position
+        if let Some(buffer) = active_tab.as_text_buffer() {
+            let cursor = buffer.cursor_position();
+            assert_eq!(cursor.line, 1, "Cursor should be at line 1");
+            assert_eq!(cursor.col, 7, "Cursor should be at col 7");
+        } else {
+            panic!("Active tab should have a text buffer");
+        }
+    }
+
+    /// Test: Cross-file goto switches to existing tab when target file is already open.
+    ///
+    /// Setup: workspace with tab A (active) and tab B
+    /// Action: call `goto_cross_file_definition` targeting file B
+    /// Assert: still two tabs, active tab is now B, cursor at definition
+    #[test]
+    fn test_goto_cross_file_definition_switches_to_existing_tab() {
+        use tempfile::TempDir;
+        use std::fs;
+        use crate::workspace::Tab;
+        use lite_edit_buffer::TextBuffer;
+
+        let temp = TempDir::new().unwrap();
+        let file_a = temp.path().join("file_a.rs");
+        let file_b = temp.path().join("file_b.rs");
+
+        fs::write(&file_a, "fn main() {}\n").unwrap();
+        fs::write(&file_b, "pub struct Foo;\npub fn bar() {}\n").unwrap();
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Associate file_a with the initial tab
+        state.associate_file(file_a.clone());
+
+        // Add a second tab for file_b
+        let line_height = state.editor.line_height();
+        let tab_id_b = state.editor.gen_tab_id();
+        let content_b = fs::read_to_string(&file_b).unwrap();
+        let buffer_b = TextBuffer::from_str(&content_b);
+        let tab_b = Tab::new_file(tab_id_b, buffer_b, "file_b.rs".to_string(), Some(file_b.clone()), line_height);
+
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.add_tab(tab_b);
+        }
+
+        // Switch back to the first tab (file_a)
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.active_pane_mut().unwrap().switch_tab(0);
+        }
+
+        // Verify initial state
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.tab_count(), 2, "Should have 2 tabs");
+        // Tab A is now active after switching back to tab 0
+        assert_eq!(
+            ws.active_tab().unwrap().associated_file.as_ref(),
+            Some(&file_a),
+            "Should be on file_a tab"
+        );
+
+        // Get the pane_id and position for the goto call
+        let pane_id = ws.active_pane_id;
+        let from_pos = Position::new(0, 3);
+
+        // Call goto_cross_file_definition targeting file_b
+        state.goto_cross_file_definition(pane_id, from_pos, file_b.clone(), 1, 4);
+
+        // Verify result: still 2 tabs, active is file_b with cursor at (1, 4)
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.tab_count(), 2, "Should still have 2 tabs");
+
+        let active_tab = ws.active_tab().unwrap();
+        assert_eq!(
+            active_tab.associated_file.as_ref(),
+            Some(&file_b),
+            "Active tab should be file_b"
+        );
+        assert_eq!(active_tab.id, tab_id_b, "Should have switched to the existing file_b tab");
+
+        // Check cursor position
+        if let Some(buffer) = active_tab.as_text_buffer() {
+            let cursor = buffer.cursor_position();
+            assert_eq!(cursor.line, 1, "Cursor should be at line 1");
+            assert_eq!(cursor.col, 4, "Cursor should be at col 4");
+        } else {
+            panic!("Active tab should have a text buffer");
+        }
+    }
+
+    /// Test: Cross-file goto preserves the original file's content.
+    ///
+    /// Setup: workspace with tab A containing edits
+    /// Action: call `goto_cross_file_definition` targeting file B
+    /// Assert: tab A still exists with original content unchanged
+    #[test]
+    fn test_goto_cross_file_definition_preserves_original_file() {
+        use tempfile::TempDir;
+        use std::fs;
+
+        let temp = TempDir::new().unwrap();
+        let file_a = temp.path().join("file_a.rs");
+        let file_b = temp.path().join("file_b.rs");
+
+        fs::write(&file_a, "fn main() {}\n").unwrap();
+        fs::write(&file_b, "pub struct Foo;\n").unwrap();
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Associate file_a with the initial tab
+        state.associate_file(file_a.clone());
+
+        // Make an edit to the buffer (simulating user edits)
+        state.buffer_mut().insert_str("// Edited content\n");
+        let edited_content = state.buffer().content().to_string();
+        let original_tab_id = state.editor.active_workspace().unwrap().active_tab().unwrap().id;
+
+        // Get the pane_id and position
+        let ws = state.editor.active_workspace().unwrap();
+        let pane_id = ws.active_pane_id;
+        let from_pos = Position::new(0, 0);
+
+        // Call goto_cross_file_definition
+        state.goto_cross_file_definition(pane_id, from_pos, file_b.clone(), 0, 0);
+
+        // Switch back to the original tab
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.switch_to_tab_by_id(original_tab_id);
+        }
+
+        // Verify original content is preserved
+        let ws = state.editor.active_workspace().unwrap();
+        let original_tab = ws.active_tab().unwrap();
+        assert_eq!(
+            original_tab.id, original_tab_id,
+            "Should be back on original tab"
+        );
+        if let Some(buffer) = original_tab.as_text_buffer() {
+            assert_eq!(
+                buffer.content(),
+                edited_content,
+                "Original tab content should be unchanged"
+            );
+        } else {
+            panic!("Original tab should have a text buffer");
+        }
+    }
+
+    /// Test: Go-back navigates to a different tab.
+    ///
+    /// Setup: workspace with tabs A and B, jump stack has entry for A, active is B
+    /// Action: call `go_back()`
+    /// Assert: active tab is now A, cursor at jump stack position
+    #[test]
+    fn test_go_back_navigates_to_different_tab() {
+        use tempfile::TempDir;
+        use std::fs;
+        use crate::workspace::{Tab, JumpPosition};
+        use lite_edit_buffer::TextBuffer;
+
+        let temp = TempDir::new().unwrap();
+        let file_a = temp.path().join("file_a.rs");
+        let file_b = temp.path().join("file_b.rs");
+
+        fs::write(&file_a, "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
+        fs::write(&file_b, "pub struct Foo;\n").unwrap();
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Set up two tabs
+        state.associate_file(file_a.clone());
+        let tab_a_id = state.editor.active_workspace().unwrap().active_tab().unwrap().id;
+
+        let line_height = state.editor.line_height();
+        let tab_b_id = state.editor.gen_tab_id();
+        let content_b = fs::read_to_string(&file_b).unwrap();
+        let buffer_b = TextBuffer::from_str(&content_b);
+        let tab_b = Tab::new_file(tab_b_id, buffer_b, "file_b.rs".to_string(), Some(file_b.clone()), line_height);
+
+        // Get pane_id before adding the tab
+        let pane_id = state.editor.active_workspace().unwrap().active_pane_id;
+
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.add_tab(tab_b);
+        }
+
+        // Now active is tab B (add_tab switches to it)
+
+        // Push a jump position for tab A (as if we just navigated from A to B)
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.jump_stack.push(JumpPosition {
+                tab_id: tab_a_id,
+                pane_id,
+                line: 1,
+                col: 4,
+            });
+        }
+
+        // Verify we're on tab B
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(
+            ws.active_tab().unwrap().id, tab_b_id,
+            "Should be on tab B"
+        );
+
+        // Call go_back
+        state.go_back();
+
+        // Verify we're now on tab A with cursor at (1, 4)
+        let ws = state.editor.active_workspace().unwrap();
+        let active_tab = ws.active_tab().unwrap();
+        assert_eq!(
+            active_tab.id, tab_a_id,
+            "Should have switched to tab A"
+        );
+        assert_eq!(
+            active_tab.associated_file.as_ref(),
+            Some(&file_a),
+            "Active tab should be file_a"
+        );
+
+        // Check cursor position
+        if let Some(buffer) = active_tab.as_text_buffer() {
+            let cursor = buffer.cursor_position();
+            assert_eq!(cursor.line, 1, "Cursor should be at line 1");
+            assert_eq!(cursor.col, 4, "Cursor should be at col 4");
+        } else {
+            panic!("Active tab should have a text buffer");
+        }
+    }
+
+    /// Test: Go-back + goto round-trip.
+    ///
+    /// Setup: file A with cursor at a position, then goto-definition to file B
+    /// Action: goto_definition from A, then go_back
+    /// Assert: back in file A at original position
+    #[test]
+    fn test_goto_and_go_back_round_trip() {
+        use tempfile::TempDir;
+        use std::fs;
+
+        let temp = TempDir::new().unwrap();
+        let file_a = temp.path().join("file_a.rs");
+        let file_b = temp.path().join("file_b.rs");
+
+        fs::write(&file_a, "fn main() {\n    let x = Foo::new();\n}\n").unwrap();
+        fs::write(&file_b, "pub struct Foo;\nimpl Foo {\n    pub fn new() -> Self { Foo }\n}\n").unwrap();
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Set up file A
+        state.associate_file(file_a.clone());
+        let tab_a_id = state.editor.active_workspace().unwrap().active_tab().unwrap().id;
+
+        // Position cursor in file A at line 1, col 12 (on "Foo")
+        state.buffer_mut().set_cursor(Position::new(1, 12));
+
+        // Get pane_id and from_pos
+        let ws = state.editor.active_workspace().unwrap();
+        let pane_id = ws.active_pane_id;
+        let from_pos = Position::new(1, 12); // on "Foo"
+
+        // Call goto_cross_file_definition to file_b line 2 col 11 (inside new())
+        state.goto_cross_file_definition(pane_id, from_pos, file_b.clone(), 2, 11);
+
+        // Verify we're now in file_b
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(
+            ws.active_tab().unwrap().associated_file.as_ref(),
+            Some(&file_b),
+            "Should be in file_b after goto"
+        );
+        assert_eq!(ws.tab_count(), 2, "Should have 2 tabs");
+
+        // Call go_back
+        state.go_back();
+
+        // Verify we're back in file_a at original position
+        let ws = state.editor.active_workspace().unwrap();
+        let active_tab = ws.active_tab().unwrap();
+        assert_eq!(
+            active_tab.id, tab_a_id,
+            "Should be back on tab A"
+        );
+        assert_eq!(
+            active_tab.associated_file.as_ref(),
+            Some(&file_a),
+            "Should be in file_a after go_back"
+        );
+
+        // Check cursor position is restored
+        if let Some(buffer) = active_tab.as_text_buffer() {
+            let cursor = buffer.cursor_position();
+            assert_eq!(cursor.line, 1, "Cursor should be at line 1 (original position)");
+            assert_eq!(cursor.col, 12, "Cursor should be at col 12 (original position)");
+        } else {
+            panic!("Active tab should have a text buffer");
+        }
+    }
 }
