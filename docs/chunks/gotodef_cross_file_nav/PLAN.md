@@ -8,153 +8,169 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The current `goto_cross_file_definition()` function calls `associate_file()` which
+replaces the content of the current tab with the target file. This is incorrect —
+it should either switch to an existing tab containing the file or create a new tab.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The fix follows the standard editor pattern for cross-file navigation:
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. **Check for existing tab**: Use `Workspace::find_tab_by_path()` to check if the
+   target file is already open
+2. **Switch or open**: If found, switch to that tab; if not, create a new tab with
+   the target file's content
+3. **Position cursor**: Set cursor to the definition position
+4. **Scroll to reveal**: Use `ensure_visible_wrapped()` to scroll the viewport
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/gotodef_cross_file_nav/GOAL.md)
-with references to the files that you expect to touch.
--->
+We also need to enhance `go_back()` to support cross-tab navigation, since the
+jump stack records tab IDs but the current implementation only handles same-tab
+jumps.
+
+The implementation will build on existing patterns:
+- `Workspace::find_tab_by_path()` from chunk `base_snapshot_reload`
+- `Workspace::add_tab()` and `Pane::switch_tab()` for tab management
+- `Viewport::ensure_visible_wrapped()` from the `viewport_scroll` subsystem
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+- **docs/subsystems/viewport_scroll** (DOCUMENTED): This chunk USES the viewport
+  scroll subsystem's `ensure_visible_wrapped()` to scroll the target file's viewport
+  to reveal the definition. The relationship is marked as `uses` in the GOAL.md
+  frontmatter.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add `switch_to_tab_by_id` method to Workspace
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add a method that finds a tab by ID across all panes and switches to it:
+- Search all panes for a tab with the given ID
+- If found, set that pane as active and switch to that tab within the pane
+- Return `true` if the tab was found and switched to, `false` otherwise
 
-Example:
+Location: `crates/editor/src/workspace.rs`
 
-### Step 1: Define the SegmentHeader struct
+This method is needed by both `goto_cross_file_definition()` (to switch to an
+existing tab) and `go_back()` (to navigate to a different tab from the jump stack).
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+### Step 2: Add `open_file_in_new_tab` helper to EditorState
 
-Location: src/segment/format.rs
+Create a helper method that:
+- Creates a new file tab with the given path
+- Loads the file content into the tab's buffer
+- Sets up syntax highlighting
+- Adds the tab to the workspace
+- Syncs viewport dimensions
 
-### Step 2: Implement header serialization
+This consolidates logic currently split across `associate_file()` and `new_tab()`,
+and provides a clean API for opening a file in a new tab rather than replacing
+the current tab's content.
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Location: `crates/editor/src/editor_state.rs`
 
-### Step 3: ...
+### Step 3: Rewrite `goto_cross_file_definition` to properly navigate
 
----
+Replace the current implementation that calls `associate_file()`:
 
-**BACKREFERENCE COMMENTS**
+1. Push current position to jump stack (existing code)
+2. Check if target file is already open: `workspace.find_tab_by_path(&target_file)`
+3. If found:
+   - Call `workspace.switch_to_tab_by_id(tab_id)` to switch to it
+4. If not found:
+   - Call `open_file_in_new_tab(target_file)` to open in a new tab
+5. Move cursor to definition position (existing code, but now on correct tab)
+6. Call `ensure_cursor_visible()` or equivalent to scroll viewport
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+Location: `crates/editor/src/editor_state.rs`
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
+### Step 4: Enhance `go_back` to support cross-tab navigation
 
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
+The current `go_back()` only handles same-tab jumps (it checks `tab.id == pos.tab_id`
+and does nothing if they differ). Extend it to:
 
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
-```
+1. Pop from jump stack (existing)
+2. Check if target tab ID matches current tab
+3. If different, call `workspace.switch_to_tab_by_id(pos.tab_id)`
+4. Set cursor to saved position (existing)
+5. Scroll to reveal cursor position
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+This completes the navigation round-trip: goto-definition can cross files, and
+go-back can return to the original file.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Location: `crates/editor/src/editor_state.rs`
+
+### Step 5: Add ensure_cursor_visible helper
+
+Create a helper method that triggers viewport scrolling to reveal the current cursor
+position after navigation. This should:
+
+1. Get the active tab's buffer and viewport
+2. Build the necessary context for `ensure_visible_wrapped()` (cursor position,
+   line count, wrap layout, line length function)
+3. Call `ensure_visible_wrapped()`
+4. Mark viewport as dirty if scrolling occurred
+
+This will be called after setting the cursor in both `goto_cross_file_definition()`
+and `go_back()`.
+
+Location: `crates/editor/src/editor_state.rs`
+
+### Step 6: Write unit tests
+
+Add tests per docs/trunk/TESTING_PHILOSOPHY.md that verify the semantic behavior:
+
+**Test: Cross-file goto opens new tab (target not already open)**
+- Set up: workspace with one tab containing file A
+- Action: call `goto_cross_file_definition` with target file B
+- Assert: workspace now has two tabs, active tab is file B, cursor at definition
+
+**Test: Cross-file goto switches to existing tab**
+- Set up: workspace with tab A (active) and tab B
+- Action: call `goto_cross_file_definition` targeting file B
+- Assert: still two tabs, active tab is now B, cursor at definition
+
+**Test: Cross-file goto preserves original file**
+- Set up: workspace with tab A containing edits
+- Action: call `goto_cross_file_definition` targeting file B
+- Assert: tab A still exists with original content unchanged
+
+**Test: Go-back navigates to different tab**
+- Set up: workspace with tabs A and B, jump stack has entry for A, active is B
+- Action: call `go_back()`
+- Assert: active tab is now A, cursor at jump stack position
+
+**Test: Go-back + goto round-trip**
+- Set up: file A with symbol referencing definition in file B
+- Action: goto_definition from A, then go_back
+- Assert: back in file A at original position
+
+Location: `crates/editor/src/editor_state.rs` (in `#[cfg(test)]` module)
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+This chunk depends on:
+- `treesitter_symbol_index` (ACTIVE): Provides the cross-file symbol lookup and
+  calls `goto_cross_file_definition()` with the target file/position
+- `treesitter_gotodef` (ACTIVE): Original goto-definition implementation with
+  jump stack
 
-If there are no dependencies, delete this section.
--->
+Both are already ACTIVE (merged), so no blocking dependencies.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Multi-pane navigation**: The current design searches all panes for a tab by path.
+   When the target file is open in a different pane, should we switch to that pane
+   or open a new tab in the current pane? The simpler approach (switch to existing
+   tab's pane) maintains the principle of not duplicating open files.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **File loading errors**: If the target file cannot be read when opening a new tab,
+   how should we handle this? Options:
+   - Show a status message and abort navigation
+   - Open an empty tab with the path set (consistent with `associate_file` behavior)
+   We'll follow the existing `associate_file` pattern of gracefully handling read
+   errors.
+
+3. **Jump stack tab ID validity**: The jump stack stores tab IDs, but tabs can be
+   closed. If `go_back()` tries to navigate to a closed tab, it should silently
+   skip that entry (current behavior is acceptable).
 
 ## Deviations
 
@@ -169,9 +185,4 @@ When reality diverges from the plan, document it here:
 Minor deviations (renamed a function, used a different helper) don't need
 documentation. Significant deviations (changed the approach, skipped a step,
 added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

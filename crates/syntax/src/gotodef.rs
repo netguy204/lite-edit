@@ -24,6 +24,7 @@
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Query, QueryCapture, QueryCursor, Tree};
 
+// Chunk: docs/chunks/treesitter_gotodef - Capture index lookup for @local.scope, @local.definition, @local.reference
 /// Index values for capture names in the locals query.
 struct CaptureIndices {
     scope: Option<u32>,
