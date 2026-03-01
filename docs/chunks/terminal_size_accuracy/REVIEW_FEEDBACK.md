@@ -1,31 +1,25 @@
 # Review Feedback
 
-**Iteration:** 1
+**Iteration:** 2
 **Decision:** FEEDBACK
 
 ## Summary
 
-Diagnostic logging not removed from production code per PLAN Step 7; implementation appears incomplete as no actual fix was made to address the terminal sizing bug
+Diagnostic logging removed (Issue 1 fixed), but Deviations section still empty and no documentation of findings or manual verification results
 
 ## Issues to Address
 
-### Issue 1: crates/editor/src/editor_state.rs:922-927, crates/editor/src/renderer/content.rs:51-56
+### Issue 1: docs/chunks/terminal_size_accuracy/PLAN.md:253-257
 
-**Concern:** PLAN.md Step 7 explicitly states 'Remove diagnostic logging' but the [DIAG sync_pane_viewports] and [DIAG renderer] eprintln! statements remain in production code. This will spam stderr during normal editor operation.
+**Concern:** The Deviations section says 'POPULATE DURING IMPLEMENTATION' but remains empty. The investigation appears to have proven the existing formulas are correct, which is an important finding that should be documented.
 
-**Suggestion:** Remove the diagnostic eprintln! statements from production code. Keep the test eprintln! statements which are acceptable.
+**Suggestion:** Document what was learned during diagnosis. The tests prove terminal cols == renderer cols, suggesting either: (a) the bug was fixed by prior chunks, (b) the bug is elsewhere, or (c) the original report was based on specific conditions not yet reproduced.
 
-### Issue 2: docs/chunks/terminal_size_accuracy/PLAN.md:253-257
+### Issue 2: PLAN.md Steps 6 and 9
 
-**Concern:** The Deviations section says 'POPULATE DURING IMPLEMENTATION' but remains empty. If diagnosis revealed the existing code was correct, this should be documented.
+**Concern:** PLAN.md Step 9 lists specific manual verification steps that were not documented: run tput cols, run ls -la, generate output with seq 1 500, verify prompt is reachable.
 
-**Suggestion:** Document what was learned during diagnosis and why no fix was needed (if that's the conclusion).
-
-### Issue 3: Implementation as a whole
-
-**Concern:** No actual fix was made to the sizing calculation. Tests prove existing formulas are consistent, suggesting either the bug is elsewhere, upstream, or the report was invalid. None of these outcomes are documented.
-
-**Suggestion:** Either: (1) Document that diagnosis proved existing code is correct, OR (2) Continue investigation to find actual root cause, OR (3) Perform manual testing and document results.
+**Suggestion:** Either: (1) Document manual verification results confirming success criteria are met, OR (2) Document in Deviations if the bug persists or cannot be reproduced.
 
 
 ---
