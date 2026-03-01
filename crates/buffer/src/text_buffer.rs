@@ -2057,6 +2057,7 @@ impl TextBuffer {
     // Chunk: docs/chunks/incremental_parse - Tracked string insertion for incremental parsing
     /// Inserts a string at the cursor position and returns edit info.
     ///
+    // Chunk: docs/chunks/selection_replace_cursor - Fixed cursor position capture
     /// Like `insert_str`, but also returns byte offset information needed for
     /// tree-sitter's incremental parsing API.
     pub fn insert_str_tracked(&mut self, s: &str) -> MutationResult {
@@ -2064,14 +2065,27 @@ impl TextBuffer {
             return MutationResult::none();
         }
 
-        // Capture start position before any mutations
-        let start_line = self.cursor.line;
-        let start_col = self.cursor.col;
-        let start_byte = self.byte_offset_at(start_line, start_col);
+        // Capture info for EditInfo BEFORE any mutations
+        // When there's a selection, the edit spans from selection start to selection end.
+        // When there's no selection, it's a pure insertion at cursor.
+        let (edit_start_byte, edit_start_line, edit_start_col, old_end_byte, old_end_line, old_end_col) =
+            if let Some((sel_start, sel_end)) = self.selection_range() {
+                // Selection: edit range spans from selection start to selection end
+                let start_byte = self.byte_offset_at(sel_start.line, sel_start.col);
+                let end_byte = self.byte_offset_at(sel_end.line, sel_end.col);
+                (start_byte, sel_start.line, sel_start.col, end_byte, sel_end.line, sel_end.col)
+            } else {
+                // No selection: edit starts at cursor, old_end = start (pure insertion)
+                let start_byte = self.byte_offset_at(self.cursor.line, self.cursor.col);
+                (start_byte, self.cursor.line, self.cursor.col, start_byte, self.cursor.line, self.cursor.col)
+            };
 
         // Delete any active selection first
         let mut dirty = self.delete_selection();
 
+        // NOW capture the insertion point (cursor is at selection start after deletion)
+        let insert_line = self.cursor.line;
+        let insert_col = self.cursor.col;
         let start_offset = self.position_to_offset(self.cursor);
 
         // Single-pass scan of the inserted string
@@ -2094,39 +2108,42 @@ impl TextBuffer {
         self.buffer.insert_str(s);
 
         // Bulk line-index update
-        for ls in self.line_index.line_starts_after_mut(start_line) {
+        for ls in self.line_index.line_starts_after_mut(insert_line) {
             *ls += char_count;
         }
-        self.line_index.insert_line_starts_after(start_line, &new_line_starts);
+        self.line_index.insert_line_starts_after(insert_line, &new_line_starts);
 
-        // Cursor update
+        // Cursor update - uses post-deletion cursor position (insert_col), not pre-deletion
         let newline_count = new_line_starts.len();
         if newline_count > 0 {
-            self.cursor.line = start_line + newline_count;
+            self.cursor.line = insert_line + newline_count;
             self.cursor.col = chars_since_last_newline;
         } else {
-            self.cursor.col = start_col + char_count;
+            self.cursor.col = insert_col + char_count;
         }
 
         self.assert_line_index_consistent();
 
         let insert_dirty = if newline_count > 0 {
-            DirtyLines::FromLineToEnd(start_line)
+            DirtyLines::FromLineToEnd(insert_line)
         } else {
-            DirtyLines::Single(start_line)
+            DirtyLines::Single(insert_line)
         };
         dirty.merge(insert_dirty);
         let dirty_lines = self.accumulate_dirty(dirty);
 
-        // Build edit info
-        let edit_info = Some(EditInfo::for_insert(
-            start_byte,
-            start_line,
-            start_col,
-            s.len(), // byte length of inserted string
-            self.cursor.line,
-            self.cursor.col,
-        ));
+        // Build edit info - uses pre-deletion info for old range, post-insertion cursor for new end
+        let edit_info = Some(EditInfo {
+            start_byte: edit_start_byte,
+            old_end_byte,
+            new_end_byte: edit_start_byte + s.len(),
+            start_row: edit_start_line,
+            start_col: edit_start_col,
+            old_end_row: old_end_line,
+            old_end_col,
+            new_end_row: self.cursor.line,
+            new_end_col: self.cursor.col,
+        });
 
         MutationResult::new(dirty_lines, edit_info)
     }
@@ -4683,6 +4700,141 @@ mod tests {
         assert_eq!(edit.start_col, 6);
         assert_eq!(edit.new_end_row, 2);
         assert_eq!(edit.new_end_col, 0);
+    }
+
+    // Chunk: docs/chunks/selection_replace_cursor - Selection replacement cursor bug fix
+    #[test]
+    fn test_insert_str_tracked_replaces_selection() {
+        // Bug scenario: select a word, type replacement text
+        // Expected: replacement text appears at selection position, cursor after it
+        // Bug: cursor position was captured BEFORE delete_selection(), causing:
+        //   - First char inserted correctly at selection start
+        //   - Subsequent chars inserted at original cursor (selection END)
+        let mut buf = TextBuffer::from_str("ticket: null");
+        buf.select_word_at(0); // Selects "ticket" (columns 0-5), cursor at 6
+
+        // Verify selection is set up correctly
+        assert!(buf.has_selection());
+        assert_eq!(buf.cursor_position(), Position::new(0, 6));
+
+        let result = buf.insert_str_tracked("test");
+
+        // Content should be "test: null" - word replaced
+        assert_eq!(buf.content(), "test: null");
+
+        // Cursor should be at column 4 (immediately after "test")
+        assert_eq!(buf.cursor_position(), Position::new(0, 4));
+
+        // EditInfo should correctly describe the edit:
+        // - Start at byte 0 (selection start)
+        // - Old end at byte 6 (selection end, 6 bytes "ticket" deleted)
+        // - New end at byte 4 (4 bytes "test" inserted)
+        let edit = result.edit_info.unwrap();
+        assert_eq!(edit.start_byte, 0, "start_byte should be selection start");
+        assert_eq!(edit.old_end_byte, 6, "old_end_byte should be selection end");
+        assert_eq!(edit.new_end_byte, 4, "new_end_byte should reflect inserted text");
+        assert_eq!(edit.start_row, 0);
+        assert_eq!(edit.start_col, 0);
+        assert_eq!(edit.old_end_row, 0);
+        assert_eq!(edit.old_end_col, 6);
+        assert_eq!(edit.new_end_row, 0);
+        assert_eq!(edit.new_end_col, 4);
+    }
+
+    // Chunk: docs/chunks/selection_replace_cursor - Multi-line selection replacement
+    #[test]
+    fn test_insert_str_tracked_replaces_multiline_selection() {
+        // Select text spanning multiple lines, replace with single-line text
+        let mut buf = TextBuffer::from_str("first\nsecond\nthird");
+        buf.set_cursor(Position::new(2, 5)); // End of "third"
+        buf.set_selection_anchor(Position::new(0, 0)); // Start of "first"
+
+        // Should have entire buffer selected
+        assert!(buf.has_selection());
+
+        let result = buf.insert_str_tracked("replaced");
+
+        // Content should just be "replaced"
+        assert_eq!(buf.content(), "replaced");
+
+        // Cursor should be at column 8 (after "replaced")
+        assert_eq!(buf.cursor_position(), Position::new(0, 8));
+
+        let edit = result.edit_info.unwrap();
+        // Start: byte 0, row 0, col 0 (selection start)
+        assert_eq!(edit.start_byte, 0);
+        assert_eq!(edit.start_row, 0);
+        assert_eq!(edit.start_col, 0);
+        // Old end: byte 18, row 2, col 5 (selection end - entire "first\nsecond\nthird")
+        assert_eq!(edit.old_end_byte, 18);
+        assert_eq!(edit.old_end_row, 2);
+        assert_eq!(edit.old_end_col, 5);
+        // New end: byte 8, row 0, col 8 (after "replaced")
+        assert_eq!(edit.new_end_byte, 8);
+        assert_eq!(edit.new_end_row, 0);
+        assert_eq!(edit.new_end_col, 8);
+    }
+
+    // Chunk: docs/chunks/selection_replace_cursor - Replacement with newlines
+    #[test]
+    fn test_insert_str_tracked_replaces_with_multiline_text() {
+        // Select single word, replace with multi-line text
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.select_word_at(0); // Select "hello" (columns 0-4), cursor at 5
+
+        let result = buf.insert_str_tracked("line1\nline2");
+
+        // Content should be "line1\nline2 world"
+        assert_eq!(buf.content(), "line1\nline2 world");
+
+        // Cursor should be at line 1, col 5 (after "line2")
+        assert_eq!(buf.cursor_position(), Position::new(1, 5));
+
+        let edit = result.edit_info.unwrap();
+        // Start: byte 0, row 0, col 0 (selection start)
+        assert_eq!(edit.start_byte, 0);
+        assert_eq!(edit.start_row, 0);
+        assert_eq!(edit.start_col, 0);
+        // Old end: byte 5, row 0, col 5 ("hello" deleted)
+        assert_eq!(edit.old_end_byte, 5);
+        assert_eq!(edit.old_end_row, 0);
+        assert_eq!(edit.old_end_col, 5);
+        // New end: byte 11, row 1, col 5 (after "line1\nline2")
+        assert_eq!(edit.new_end_byte, 11);
+        assert_eq!(edit.new_end_row, 1);
+        assert_eq!(edit.new_end_col, 5);
+    }
+
+    // Chunk: docs/chunks/selection_replace_cursor - Backward selection replacement
+    #[test]
+    fn test_insert_str_tracked_replaces_backward_selection() {
+        // Selection made backwards (anchor after cursor in document order)
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 0)); // Start of buffer
+        buf.set_selection_anchor(Position::new(0, 5)); // After "hello"
+
+        // This is a backward selection - anchor is AFTER cursor
+        assert!(buf.has_selection());
+
+        let result = buf.insert_str_tracked("hi");
+
+        // Content should be "hi world" - "hello" replaced
+        assert_eq!(buf.content(), "hi world");
+
+        // Cursor should be at column 2 (after "hi")
+        assert_eq!(buf.cursor_position(), Position::new(0, 2));
+
+        let edit = result.edit_info.unwrap();
+        // EditInfo should still use document order (start <= end)
+        assert_eq!(edit.start_byte, 0);
+        assert_eq!(edit.start_row, 0);
+        assert_eq!(edit.start_col, 0);
+        assert_eq!(edit.old_end_byte, 5);
+        assert_eq!(edit.old_end_row, 0);
+        assert_eq!(edit.old_end_col, 5);
+        assert_eq!(edit.new_end_byte, 2);
+        assert_eq!(edit.new_end_row, 0);
+        assert_eq!(edit.new_end_col, 2);
     }
 
     #[test]
