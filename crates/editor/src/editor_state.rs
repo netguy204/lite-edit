@@ -1495,10 +1495,18 @@ impl EditorState {
     }
 
     // Chunk: docs/chunks/treesitter_symbol_index - Jump to cross-file definition
+    // Chunk: docs/chunks/gotodef_cross_file_nav - Fixed cross-file navigation
     /// Navigates to a definition in another file.
     ///
     /// Opens the target file (or switches to it if already open), moves the cursor
     /// to the definition position, and pushes the current position onto the jump stack.
+    ///
+    /// This implementation:
+    /// 1. Pushes the current position to the jump stack
+    /// 2. Checks if the target file is already open in an existing tab
+    /// 3. If found, switches to that tab; if not, opens a new tab
+    /// 4. Positions the cursor at the definition location
+    /// 5. Scrolls the viewport to reveal the cursor
     fn goto_cross_file_definition(
         &mut self,
         pane_id: PaneId,
@@ -1508,8 +1516,14 @@ impl EditorState {
         target_col: usize,
     ) {
         // Push current position to jump stack before navigating
-        let workspace = self.editor.active_workspace_mut().unwrap();
-        let tab = workspace.active_tab().unwrap();
+        let workspace = match self.editor.active_workspace_mut() {
+            Some(ws) => ws,
+            None => return,
+        };
+        let tab = match workspace.active_tab() {
+            Some(t) => t,
+            None => return,
+        };
         let tab_id = tab.id;
 
         workspace.jump_stack.push(crate::workspace::JumpPosition {
@@ -1519,8 +1533,16 @@ impl EditorState {
             col: from_pos.col,
         });
 
-        // Open the target file (associate_file handles both new tabs and existing ones)
-        self.associate_file(target_file);
+        // Check if target file is already open in an existing tab
+        let existing_tab_id = workspace.find_tab_by_path(&target_file);
+
+        if let Some(target_tab_id) = existing_tab_id {
+            // File is already open - switch to that tab
+            workspace.switch_to_tab_by_id(target_tab_id);
+        } else {
+            // File is not open - create a new tab
+            self.open_file_in_new_tab(target_file);
+        }
 
         // Move cursor to the definition position
         if let Some(ws) = self.editor.active_workspace_mut() {
@@ -1531,7 +1553,9 @@ impl EditorState {
             }
         }
 
-        // Ensure the new cursor position is visible
+        // Ensure the cursor is visible by scrolling the viewport
+        self.ensure_cursor_visible_in_active_tab();
+
         self.invalidation.merge(InvalidationKind::Layout);
     }
 
@@ -1584,37 +1608,71 @@ impl EditorState {
     }
 
     // Chunk: docs/chunks/treesitter_gotodef - Go back to previous position from jump stack
+    // Chunk: docs/chunks/gotodef_cross_file_nav - Cross-tab navigation support
     /// Navigates back to the previous cursor position.
     ///
     /// Pops the most recent position from the jump stack and navigates to it.
-    /// If the tab still exists, moves the cursor to the saved position.
+    /// If the tab is in a different pane, switches to that pane/tab.
+    /// If the tab no longer exists, silently skips to the next entry.
     /// If the stack is empty, does nothing.
     fn go_back(&mut self) {
-        let workspace = match self.editor.active_workspace_mut() {
-            Some(ws) => ws,
-            None => return,
-        };
+        // Pop and process entries until we find a valid one or run out
+        loop {
+            // Pop from jump stack
+            let pos = {
+                let workspace = match self.editor.active_workspace_mut() {
+                    Some(ws) => ws,
+                    None => return,
+                };
+                match workspace.jump_stack.pop() {
+                    Some(p) => p,
+                    None => return, // Empty stack - nothing to go back to
+                }
+            };
 
-        // Pop from jump stack
-        let pos = match workspace.jump_stack.pop() {
-            Some(p) => p,
-            None => return, // Empty stack - nothing to go back to
-        };
+            // Check if we need to switch tabs
+            let current_tab_id = {
+                let workspace = match self.editor.active_workspace_mut() {
+                    Some(ws) => ws,
+                    None => return,
+                };
+                workspace.active_tab().map(|t| t.id)
+            };
 
-        // Check if the tab still exists and navigate to it
-        // For now, we only support same-tab jumps (the tab_id check)
-        // Cross-tab jumps would require finding the tab and switching to it
-        let tab = workspace.active_tab_mut();
-        if let Some(tab) = tab {
-            if tab.id == pos.tab_id {
-                if let Some(buffer) = tab.as_text_buffer_mut() {
-                    buffer.set_cursor(Position::new(pos.line, pos.col));
+            if current_tab_id != Some(pos.tab_id) {
+                // Different tab - try to switch to it
+                let switched = {
+                    let workspace = match self.editor.active_workspace_mut() {
+                        Some(ws) => ws,
+                        None => return,
+                    };
+                    workspace.switch_to_tab_by_id(pos.tab_id)
+                };
+
+                if !switched {
+                    // Tab doesn't exist anymore - try the next entry
+                    continue;
                 }
             }
-        }
 
-        // Mark dirty to redraw cursor at new position
-        self.invalidation.merge(InvalidationKind::Layout);
+            // Now we're on the target tab - set cursor position
+            if let Some(workspace) = self.editor.active_workspace_mut() {
+                if let Some(tab) = workspace.active_tab_mut() {
+                    if let Some(buffer) = tab.as_text_buffer_mut() {
+                        buffer.set_cursor(Position::new(pos.line, pos.col));
+                    }
+                }
+            }
+
+            // Ensure the cursor is visible by scrolling the viewport
+            self.ensure_cursor_visible_in_active_tab();
+
+            // Mark dirty to redraw cursor at new position
+            self.invalidation.merge(InvalidationKind::Layout);
+
+            // Successfully navigated - exit the loop
+            break;
+        }
     }
 
     // =========================================================================
@@ -4086,6 +4144,126 @@ impl EditorState {
         // (handles case of file picker confirming into a newly created tab)
         self.sync_active_tab_viewport();
         self.invalidation.merge(InvalidationKind::Layout);
+    }
+
+    // Chunk: docs/chunks/gotodef_cross_file_nav - Open file in new tab for cross-file navigation
+    /// Opens a file in a new tab and switches to it.
+    ///
+    /// Creates a new file tab, loads the file content, sets up syntax highlighting,
+    /// and adds the tab to the active workspace. The new tab becomes the active tab.
+    ///
+    /// Returns the tab ID of the newly created tab, or None if the operation failed.
+    fn open_file_in_new_tab(&mut self, path: PathBuf) -> Option<crate::workspace::TabId> {
+        let tab_id = self.editor.gen_tab_id();
+        let line_height = self.editor.line_height();
+
+        // Create the buffer with file contents
+        let (buffer, base_content) = if path.exists() {
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    let contents = String::from_utf8_lossy(&bytes);
+                    (TextBuffer::from_str(&contents), Some(contents.to_string()))
+                }
+                Err(_) => {
+                    // Silently ignore read errors, create empty buffer
+                    (TextBuffer::new(), None)
+                }
+            }
+        } else {
+            // Non-existent file, create empty buffer
+            (TextBuffer::new(), None)
+        };
+
+        // Get the label from the file name
+        let label = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Untitled".to_string());
+
+        // Create the tab
+        let mut new_tab = crate::workspace::Tab::new_file(
+            tab_id,
+            buffer,
+            label,
+            Some(path.clone()),
+            line_height,
+        );
+
+        // Set base content for merge tracking
+        new_tab.base_content = base_content;
+
+        // Set up syntax highlighting
+        let theme = SyntaxTheme::catppuccin_mocha();
+        new_tab.setup_highlighting(&self.language_registry, theme);
+
+        // Add the tab to the workspace
+        if let Some(workspace) = self.editor.active_workspace_mut() {
+            workspace.add_tab(new_tab);
+        } else {
+            return None;
+        }
+
+        // Register file watch for external changes
+        if let Err(e) = self.buffer_file_watcher.register(&path) {
+            eprintln!("Failed to watch external file {:?}: {}", path, e);
+        }
+
+        // Sync viewport to ensure dirty region calculations work correctly
+        self.sync_active_tab_viewport();
+
+        Some(tab_id)
+    }
+
+    // Chunk: docs/chunks/gotodef_cross_file_nav - Ensure cursor visibility after navigation
+    /// Scrolls the viewport of the active tab to ensure the cursor is visible.
+    ///
+    /// This is used after cross-file navigation (goto-definition, go-back) to
+    /// ensure the cursor is centered or at least visible in the viewport.
+    fn ensure_cursor_visible_in_active_tab(&mut self) {
+        // Need to get cursor position, buffer line count, and line lengths
+        // before we can call ensure_visible_wrapped on the viewport
+
+        // First, gather the necessary information from the active tab
+        let cursor_info = if let Some(ws) = self.editor.active_workspace_mut() {
+            if let Some(tab) = ws.active_tab_mut() {
+                if let Some(buffer) = tab.as_text_buffer() {
+                    let cursor = buffer.cursor_position();
+                    let line_count = buffer.line_count();
+                    // Collect line lengths for the closure
+                    let line_lens: Vec<usize> = (0..line_count)
+                        .map(|line| buffer.line_len(line))
+                        .collect();
+                    Some((cursor.line, cursor.col, line_count, line_lens, tab.viewport.first_visible_line()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Now use that information to scroll the viewport
+        if let Some((cursor_line, cursor_col, line_count, line_lens, first_visible)) = cursor_info {
+            let wrap_layout = crate::wrap_layout::WrapLayout::new(self.view_width, &self.font_metrics);
+
+            if let Some(ws) = self.editor.active_workspace_mut() {
+                if let Some(tab) = ws.active_tab_mut() {
+                    if tab.viewport.ensure_visible_wrapped(
+                        cursor_line,
+                        cursor_col,
+                        first_visible,
+                        line_count,
+                        &wrap_layout,
+                        |line| line_lens.get(line).copied().unwrap_or(0),
+                    ) {
+                        // Viewport scrolled
+                        self.invalidation.merge(InvalidationKind::Layout);
+                    }
+                }
+            }
+        }
     }
 
     // Chunk: docs/chunks/syntax_highlighting - Setup syntax highlighting helper
