@@ -48,13 +48,6 @@ impl Renderer {
         // here as in wrap_layout(), which is used for click hit-testing.
         let wrap_layout = WrapLayout::new(self.content_width_px, &self.font.metrics);
 
-        // Chunk: docs/chunks/terminal_size_accuracy - Diagnostic logging for renderer wrap layout
-        static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            eprintln!("[DIAG renderer] content_width_px={:.2}, advance_width={:.4}, cols_per_row={}",
-                      self.content_width_px, self.font.metrics.advance_width, wrap_layout.cols_per_row());
-        }
-
         // Use wrap-aware rendering with mutable atlas for on-demand glyph addition
         self.glyph_buffer.update_from_buffer_with_wrap(
             &self.device,

@@ -919,14 +919,8 @@ impl EditorState {
                     let rows = (pane_content_height as f64 / line_height).floor() as usize;
                     let cols = (pane_width as f64 / advance_width).floor() as usize;
 
-                    // Chunk: docs/chunks/terminal_size_accuracy - Diagnostic logging for terminal resize
-                    let (current_cols, current_rows) = terminal.size();
-                    if cols != current_cols || rows != current_rows {
-                        eprintln!("[DIAG sync_pane_viewports] pane_width={:.2}, pane_content_height={:.2}, advance_width={:.4}, line_height={:.4}, cols={}, rows={} (was {}x{})",
-                                  pane_width, pane_content_height, advance_width, line_height, cols, rows, current_cols, current_rows);
-                    }
-
                     // Only resize if dimensions actually changed (avoid PTY thrashing)
+                    let (current_cols, current_rows) = terminal.size();
                     if (cols != current_cols || rows != current_rows) && cols > 0 && rows > 0 {
                         terminal.resize(cols, rows);
                     }
