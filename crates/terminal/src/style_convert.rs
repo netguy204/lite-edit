@@ -151,8 +151,13 @@ where
         let ch = cell.c;
 
         // Get the character to render
-        let char_str = if ch == ' ' || ch == '\0' {
-            // Space or null character
+        let char_str = if ch == ' ' || ch == '\0' || ch == '\t' {
+            // Space, null, or tab — terminal cells should never expose raw
+            // control characters. Alacritty stores '\t' in the first cell of
+            // a tab stop expansion; the remaining cells are spaces. Rendering
+            // the tab literally would cause the renderer's tab-width expansion
+            // to inflate the visual width beyond terminal.cols, triggering
+            // unwanted soft-wrapping.
             " ".to_string()
         } else {
             ch.to_string()
