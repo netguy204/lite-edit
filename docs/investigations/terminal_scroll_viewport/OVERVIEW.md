@@ -21,7 +21,7 @@ proposed_chunks:
       `viewport.scroll_to_bottom(terminal.line_count())`. Since alt-screen line_count
       equals screen_lines and screen_lines <= visible_lines, this effectively sets
       scroll_offset_px to 0.
-    chunk_directory:
+    chunk_directory: alt_screen_viewport_reset
     depends_on: []
 created_after: ["terminal_shell_flakiness"]
 ---
