@@ -1352,6 +1352,7 @@ impl Workspace {
     // Chunk: docs/chunks/tiling_workspace_integration - Iterate all panes
     // Chunk: docs/chunks/terminal_tab_spawn - Polls PTY events for all standalone terminal tabs
     // Chunk: docs/chunks/terminal_flood_starvation - Needs rewakeup propagation
+    // Chunk: docs/chunks/terminal_flood_starvation - Propagate needs_rewakeup flag
     /// Polls PTY events for all standalone terminal tabs across all panes.
     ///
     /// This method also handles auto-follow behavior: when the viewport is at
