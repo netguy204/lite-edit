@@ -102,6 +102,8 @@ mod viewport;
 mod welcome_screen;
 mod workspace;
 mod wrap_layout;
+// Chunk: docs/chunks/tab_rendering - Tab character rendering and tab-aware coordinate mapping
+mod tab_width;
 // Chunk: docs/chunks/workspace_session_persistence - Session persistence
 mod session;
 #[cfg(feature = "perf-instrumentation")]
@@ -287,6 +289,7 @@ define_class!(
     }
 );
 
+// Chunk: docs/chunks/metal_surface - Application delegate handling lifecycle and window setup
 impl AppDelegate {
     /// Creates a new application delegate
     fn new(mtm: MainThreadMarker) -> Retained<Self> {

@@ -1,4 +1,5 @@
 // Chunk: docs/chunks/pty_wakeup_reentrant - Event channel for unified event queue
+// Chunk: docs/chunks/pty_wakeup_reliability - Thread-safe direct wakeup signaling
 //! Event channel for the unified event queue architecture.
 //!
 //! This module provides the sender/receiver pair for the editor event queue.
@@ -15,6 +16,28 @@
 //!
 //! The `EventSender` wrapper provides typed convenience methods and implements
 //! `WakeupSignal` from the input crate for cross-crate PTY wakeup.
+//!
+//! # Thread Safety for PTY Wakeup
+//!
+//! `EventSender` implements `WakeupSignal`, which is called directly from the
+//! PTY reader thread (no GCD intermediation). This is thread-safe because:
+//!
+//! 1. **mpsc::Sender** is `Send` and safe to call from any thread
+//! 2. **run_loop_waker** calls `CFRunLoopSourceSignal()` and `CFRunLoopWakeUp()`,
+//!    both of which are explicitly documented by Apple as thread-safe
+//! 3. **wakeup_pending** is an `AtomicBool` for lock-free debouncing
+//!
+//! # Debouncing
+//!
+//! The `wakeup_pending` atomic flag provides at-most-one-wakeup-per-drain-cycle
+//! coalescing. This is the single debounce point for PTY wakeups:
+//!
+//! 1. `send_pty_wakeup()` checks `wakeup_pending` and skips if already set
+//! 2. The drain loop calls `clear_wakeup_pending()` after processing PtyWakeup
+//! 3. This allows new PTY data to trigger another wakeup for the next cycle
+//!
+//! The follow-up wakeup path (`send_pty_wakeup_followup`) bypasses debouncing
+//! to ensure byte-budget continuations are always delivered.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, SendError, Sender};
@@ -106,11 +129,28 @@ impl EventSender {
         result
     }
 
+    // Chunk: docs/chunks/pty_wakeup_reliability - Thread-safe direct wakeup from PTY thread
     /// Sends a PTY wakeup event to the channel and wakes the run loop.
     ///
-    /// This is called from the PTY reader thread when data arrives.
-    /// Includes debouncing: if a wakeup is already pending, skips the send
+    /// This is called directly from the PTY reader thread when data arrives.
+    /// No GCD intermediation is used - the mpsc send and CFRunLoop wake are
+    /// both thread-safe operations.
+    ///
+    /// # Thread Safety
+    ///
+    /// Safe to call from any thread:
+    /// - `mpsc::Sender::send()` is `Send` and lock-free
+    /// - `run_loop_waker` calls `CFRunLoopSourceSignal()` + `CFRunLoopWakeUp()`,
+    ///   both of which are documented by Apple as thread-safe
+    ///
+    /// # Debouncing
+    ///
+    /// Uses the `wakeup_pending` atomic flag to provide at-most-one-wakeup-per-
+    /// drain-cycle coalescing. If a wakeup is already pending, skips the send
     /// to avoid flooding the channel with duplicate wakeup events.
+    ///
+    /// The drain loop clears this flag after processing PtyWakeup events,
+    /// allowing new PTY data to trigger another wakeup for the next cycle.
     pub fn send_pty_wakeup(&self) -> Result<(), SendError<EditorEvent>> {
         // Debouncing: only send if not already pending
         if self.inner.wakeup_pending.swap(true, Ordering::SeqCst) {

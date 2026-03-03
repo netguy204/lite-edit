@@ -14,7 +14,8 @@ use crate::gap_buffer::GapBuffer;
 // Chunk: docs/chunks/grapheme_cluster_awareness - Import grapheme cluster boundary helpers
 use crate::grapheme::{grapheme_boundary_left, grapheme_boundary_right, grapheme_len_at, grapheme_len_before, is_grapheme_boundary};
 use crate::line_index::LineIndex;
-use crate::types::{DirtyLines, Position};
+// Chunk: docs/chunks/incremental_parse - Import EditInfo and MutationResult for tracked mutations
+use crate::types::{DirtyLines, EditInfo, MutationResult, Position};
 
 // Chunk: docs/chunks/word_triclass_boundaries - Three-class word boundary classification
 // Spec: docs/trunk/SPEC.md#word-model
@@ -245,6 +246,42 @@ impl TextBuffer {
     /// Returns the entire buffer content as a String.
     pub fn content(&self) -> String {
         self.buffer.to_string()
+    }
+
+    // Chunk: docs/chunks/incremental_parse - Byte offset calculation for tree-sitter
+    /// Returns the byte offset for a (line, col) position.
+    ///
+    /// This is useful for incremental parsing where tree-sitter needs byte offsets.
+    /// Column is in characters (not bytes). Returns the byte offset at the start
+    /// of the character at the given position.
+    ///
+    /// If the position is past the end of the buffer, returns the total byte length.
+    pub fn byte_offset_at(&self, line: usize, col: usize) -> usize {
+        let char_offset = self.position_to_offset(Position::new(line, col));
+        self.char_offset_to_byte_offset(char_offset)
+    }
+
+    // Chunk: docs/chunks/incremental_parse - Convert character offset to byte offset
+    /// Converts a character offset to a byte offset.
+    ///
+    /// Iterates through characters up to the given offset, summing their UTF-8 byte lengths.
+    fn char_offset_to_byte_offset(&self, char_offset: usize) -> usize {
+        let mut byte_offset = 0;
+        for (i, ch) in self.buffer.chars().enumerate() {
+            if i >= char_offset {
+                break;
+            }
+            byte_offset += ch.len_utf8();
+        }
+        byte_offset
+    }
+
+    // Chunk: docs/chunks/incremental_parse - Total byte length for tree-sitter
+    /// Returns the total byte length of the buffer content.
+    ///
+    /// This is the byte length of the UTF-8 encoded content, not the character count.
+    pub fn byte_len(&self) -> usize {
+        self.buffer.chars().map(|c| c.len_utf8()).sum()
     }
 
     // ==================== Selection ====================
@@ -865,6 +902,131 @@ impl TextBuffer {
         self.accumulate_dirty(dirty)
     }
 
+    // Chunk: docs/chunks/incremental_parse - Tracked character insertion for incremental parsing
+    /// Inserts a character at the cursor position and returns edit info for incremental parsing.
+    ///
+    /// Like `insert_char`, but also returns byte offset information needed for
+    /// tree-sitter's incremental parsing API. Use this when you need to update
+    /// the syntax tree incrementally rather than doing a full reparse.
+    ///
+    /// If there is an active selection, deletes it first. The returned edit info
+    /// will only cover the insertion, not the deletion (which can be handled separately).
+    pub fn insert_char_tracked(&mut self, ch: char) -> MutationResult {
+        if ch == '\n' {
+            return self.insert_newline_tracked();
+        }
+
+        // Handle selection deletion first - this produces its own edit
+        // For selection-then-insert, we capture the selection bounds first,
+        // delete the selection, then insert at the resulting cursor position.
+        // Tree-sitter handles this as: delete old text, insert new text at same position.
+        let had_selection = self.has_selection();
+
+        // Delete selection first if present
+        let mut dirty = if had_selection {
+            self.delete_selection()
+        } else {
+            DirtyLines::None
+        };
+
+        // Capture start position for edit info (after any selection deletion)
+        let start_row = self.cursor.line;
+        let start_col = self.cursor.col;
+        let start_byte = self.byte_offset_at(start_row, start_col);
+
+        // Perform the insertion
+        self.sync_gap_to_cursor();
+        self.buffer.insert(ch);
+        self.line_index.insert_char(self.cursor.line);
+
+        let dirty_line = self.cursor.line;
+        self.cursor.col += 1;
+
+        self.assert_line_index_consistent();
+        dirty.merge(DirtyLines::Single(dirty_line));
+        let dirty_lines = self.accumulate_dirty(dirty);
+
+        // Build edit info
+        // Note: If a selection was deleted, the caller should handle that edit separately.
+        // This edit info covers only the insertion that happened.
+        let edit_info = Some(EditInfo::for_insert(
+            start_byte,
+            start_row,
+            start_col,
+            ch.len_utf8(),
+            self.cursor.line,
+            self.cursor.col,
+        ));
+
+        MutationResult::new(dirty_lines, edit_info)
+    }
+
+    // Chunk: docs/chunks/incremental_parse - Tracked newline insertion for incremental parsing
+    /// Inserts a newline at the cursor position and returns edit info for incremental parsing.
+    ///
+    /// Like `insert_newline`, but also returns byte offset information needed for
+    /// tree-sitter's incremental parsing API.
+    pub fn insert_newline_tracked(&mut self) -> MutationResult {
+        // Handle selection deletion first
+        let had_selection = self.has_selection();
+
+        // Capture start position for edit info
+        let start_row = self.cursor.line;
+        let start_col = self.cursor.col;
+        let start_byte = self.byte_offset_at(start_row, start_col);
+
+        // If there was a selection, delete it now
+        let mut dirty = if had_selection {
+            self.delete_selection()
+        } else {
+            DirtyLines::None
+        };
+
+        // Perform the insertion
+        self.sync_gap_to_cursor();
+        let offset = self.position_to_offset(self.cursor);
+
+        self.buffer.insert('\n');
+        self.line_index.insert_newline(offset);
+
+        let dirty_from = self.cursor.line;
+
+        // Move cursor to the start of the new line
+        self.cursor.line += 1;
+        self.cursor.col = 0;
+
+        self.assert_line_index_consistent();
+        dirty.merge(DirtyLines::FromLineToEnd(dirty_from));
+        let dirty_lines = self.accumulate_dirty(dirty);
+
+        // Build edit info: newline is 1 byte, ends at new line col 0
+        let edit_info = Some(EditInfo::for_insert(
+            start_byte,
+            start_row,
+            start_col,
+            1, // newline is always 1 byte
+            self.cursor.line,
+            self.cursor.col,
+        ));
+
+        MutationResult::new(dirty_lines, edit_info)
+    }
+
+    // Chunk: docs/chunks/incremental_parse - Helper to capture selection info before deletion
+    /// Captures the byte offset information for a selection before deleting it.
+    /// Returns (start_byte, end_byte, start_row, start_col, end_row, end_col).
+    #[allow(dead_code)]  // Used for selection-then-insert tracking (future enhancement)
+    fn capture_selection_delete_info(&self) -> (usize, usize, usize, usize, usize, usize) {
+        if let Some((start, end)) = self.selection_range() {
+            let start_byte = self.byte_offset_at(start.line, start.col);
+            let end_byte = self.byte_offset_at(end.line, end.col);
+            (start_byte, end_byte, start.line, start.col, end.line, end.col)
+        } else {
+            let byte = self.byte_offset_at(self.cursor.line, self.cursor.col);
+            (byte, byte, self.cursor.line, self.cursor.col, self.cursor.line, self.cursor.col)
+        }
+    }
+
     // Chunk: docs/chunks/grapheme_cluster_awareness - Grapheme-aware backspace deletion
     /// Deletes the grapheme cluster before the cursor (Backspace).
     ///
@@ -1026,6 +1188,279 @@ impl TextBuffer {
         }
     }
 
+    // Chunk: docs/chunks/incremental_parse - Tracked backward deletion for incremental parsing
+    /// Deletes the character/grapheme before the cursor and returns edit info.
+    ///
+    /// Like `delete_backward`, but also returns byte offset information needed for
+    /// tree-sitter's incremental parsing API.
+    pub fn delete_backward_tracked(&mut self) -> MutationResult {
+        // If there's a selection, delete it and return
+        if self.has_selection() {
+            return self.delete_selection_tracked();
+        }
+
+        if self.cursor.col == 0 && self.cursor.line == 0 {
+            // At the very beginning of the buffer - no-op
+            return MutationResult::none();
+        }
+
+        // Capture position BEFORE deletion for old_end
+        let old_end_row = self.cursor.line;
+        let old_end_col = self.cursor.col;
+
+        self.sync_gap_to_cursor();
+
+        if self.cursor.col == 0 {
+            // At the beginning of a line - delete the newline, joining with previous line
+            let deleted = self.buffer.delete_backward();
+            if deleted != Some('\n') {
+                return MutationResult::none();
+            }
+
+            let prev_line = self.cursor.line - 1;
+            let prev_line_len = self.line_len(prev_line);
+
+            self.line_index.remove_newline(prev_line);
+
+            self.cursor.line = prev_line;
+            self.cursor.col = prev_line_len;
+
+            self.assert_line_index_consistent();
+            let dirty_lines = self.accumulate_dirty(DirtyLines::FromLineToEnd(prev_line));
+
+            // Calculate byte offset at the new cursor position (start of edit)
+            let start_byte = self.byte_offset_at(self.cursor.line, self.cursor.col);
+
+            let edit_info = Some(EditInfo::for_delete(
+                start_byte,
+                self.cursor.line,
+                self.cursor.col,
+                1, // newline is 1 byte
+                old_end_row,
+                old_end_col,
+            ));
+
+            MutationResult::new(dirty_lines, edit_info)
+        } else {
+            // Delete the grapheme cluster before the cursor
+            let cursor_offset = self.position_to_offset(self.cursor);
+
+            // Calculate bytes that will be deleted
+            let mut deleted_bytes = 0;
+            let chars_to_delete;
+
+            if cursor_offset > 0 {
+                if let Some(prev_char) = self.buffer.char_at(cursor_offset - 1) {
+                    if prev_char.is_ascii() {
+                        // ASCII char is always a single-char grapheme
+                        deleted_bytes = 1;
+                        chars_to_delete = 1;
+                    } else {
+                        // Slow path: analyze grapheme boundaries
+                        let line_content = self.line_content(self.cursor.line);
+                        let line_chars: Vec<char> = line_content.chars().collect();
+                        chars_to_delete = grapheme_len_before(&line_chars, self.cursor.col);
+
+                        // Calculate byte length of the grapheme
+                        for i in (self.cursor.col - chars_to_delete)..self.cursor.col {
+                            if i < line_chars.len() {
+                                deleted_bytes += line_chars[i].len_utf8();
+                            }
+                        }
+                    }
+                } else {
+                    return MutationResult::none();
+                }
+            } else {
+                return MutationResult::none();
+            }
+
+            if chars_to_delete == 0 {
+                return MutationResult::none();
+            }
+
+            // Delete all chars in the grapheme cluster
+            for _ in 0..chars_to_delete {
+                self.buffer.delete_backward();
+                self.line_index.remove_char(self.cursor.line);
+            }
+
+            self.cursor.col -= chars_to_delete;
+
+            self.assert_line_index_consistent();
+            let dirty_lines = self.accumulate_dirty(DirtyLines::Single(self.cursor.line));
+
+            // Calculate byte offset at the new cursor position (start of edit)
+            let start_byte = self.byte_offset_at(self.cursor.line, self.cursor.col);
+
+            let edit_info = Some(EditInfo::for_delete(
+                start_byte,
+                self.cursor.line,
+                self.cursor.col,
+                deleted_bytes,
+                old_end_row,
+                old_end_col,
+            ));
+
+            MutationResult::new(dirty_lines, edit_info)
+        }
+    }
+
+    // Chunk: docs/chunks/incremental_parse - Tracked forward deletion for incremental parsing
+    /// Deletes the character/grapheme after the cursor and returns edit info.
+    ///
+    /// Like `delete_forward`, but also returns byte offset information needed for
+    /// tree-sitter's incremental parsing API.
+    pub fn delete_forward_tracked(&mut self) -> MutationResult {
+        // If there's a selection, delete it and return
+        if self.has_selection() {
+            return self.delete_selection_tracked();
+        }
+
+        let line_len = self.line_len(self.cursor.line);
+        let is_last_line = self.cursor.line + 1 >= self.line_count();
+
+        if self.cursor.col >= line_len && is_last_line {
+            // At the very end of the buffer - no-op
+            return MutationResult::none();
+        }
+
+        // Capture position for edit info
+        let start_row = self.cursor.line;
+        let start_col = self.cursor.col;
+        let start_byte = self.byte_offset_at(start_row, start_col);
+
+        self.sync_gap_to_cursor();
+
+        if self.cursor.col >= line_len {
+            // At the end of a line (but not last line) - delete the newline
+            let deleted = self.buffer.delete_forward();
+            if deleted != Some('\n') {
+                return MutationResult::none();
+            }
+
+            self.line_index.remove_newline(self.cursor.line);
+
+            // Cursor stays in place
+            self.assert_line_index_consistent();
+            let dirty_lines = self.accumulate_dirty(DirtyLines::FromLineToEnd(self.cursor.line));
+
+            let edit_info = Some(EditInfo::for_delete(
+                start_byte,
+                start_row,
+                start_col,
+                1, // newline is 1 byte
+                start_row + 1, // old end was at start of next line
+                0,
+            ));
+
+            MutationResult::new(dirty_lines, edit_info)
+        } else {
+            // Delete the grapheme cluster at the cursor
+            let cursor_offset = self.position_to_offset(self.cursor);
+            let mut deleted_bytes = 0;
+            let chars_to_delete;
+
+            if let Some(current_char) = self.buffer.char_at(cursor_offset) {
+                if current_char.is_ascii() {
+                    let next_is_ascii = self
+                        .buffer
+                        .char_at(cursor_offset + 1)
+                        .is_none_or(|c| c.is_ascii());
+                    if next_is_ascii {
+                        // ASCII char = single-char grapheme
+                        deleted_bytes = 1;
+                        chars_to_delete = 1;
+                    } else {
+                        // Slow path
+                        let line_content = self.line_content(self.cursor.line);
+                        let line_chars: Vec<char> = line_content.chars().collect();
+                        chars_to_delete = grapheme_len_at(&line_chars, self.cursor.col);
+
+                        // Calculate byte length
+                        for i in self.cursor.col..(self.cursor.col + chars_to_delete) {
+                            if i < line_chars.len() {
+                                deleted_bytes += line_chars[i].len_utf8();
+                            }
+                        }
+                    }
+                } else {
+                    // Non-ASCII first char, use slow path
+                    let line_content = self.line_content(self.cursor.line);
+                    let line_chars: Vec<char> = line_content.chars().collect();
+                    chars_to_delete = grapheme_len_at(&line_chars, self.cursor.col);
+
+                    for i in self.cursor.col..(self.cursor.col + chars_to_delete) {
+                        if i < line_chars.len() {
+                            deleted_bytes += line_chars[i].len_utf8();
+                        }
+                    }
+                }
+            } else {
+                return MutationResult::none();
+            }
+
+            if chars_to_delete == 0 {
+                return MutationResult::none();
+            }
+
+            // Calculate old_end position (before deletion)
+            let old_end_col = start_col + chars_to_delete;
+
+            // Delete all chars in the grapheme cluster
+            for _ in 0..chars_to_delete {
+                self.buffer.delete_forward();
+                self.line_index.remove_char(self.cursor.line);
+            }
+
+            // Cursor stays in place
+            self.assert_line_index_consistent();
+            let dirty_lines = self.accumulate_dirty(DirtyLines::Single(self.cursor.line));
+
+            let edit_info = Some(EditInfo::for_delete(
+                start_byte,
+                start_row,
+                start_col,
+                deleted_bytes,
+                start_row,
+                old_end_col,
+            ));
+
+            MutationResult::new(dirty_lines, edit_info)
+        }
+    }
+
+    // Chunk: docs/chunks/incremental_parse - Tracked selection deletion for incremental parsing
+    /// Deletes the selected text and returns edit info.
+    ///
+    /// Like `delete_selection`, but also returns byte offset information needed for
+    /// tree-sitter's incremental parsing API.
+    pub fn delete_selection_tracked(&mut self) -> MutationResult {
+        let (start, end) = match self.selection_range() {
+            Some(range) => range,
+            None => return MutationResult::none(),
+        };
+
+        // Capture byte offsets before deletion
+        let start_byte = self.byte_offset_at(start.line, start.col);
+        let end_byte = self.byte_offset_at(end.line, end.col);
+        let deleted_bytes = end_byte - start_byte;
+
+        // Perform the deletion
+        let dirty_lines = self.delete_selection();
+
+        let edit_info = Some(EditInfo::for_delete(
+            start_byte,
+            start.line,
+            start.col,
+            deleted_bytes,
+            end.line,
+            end.col,
+        ));
+
+        MutationResult::new(dirty_lines, edit_info)
+    }
+
     // Chunk: docs/chunks/delete_backward_word - Alt+Backspace word deletion
     // Chunk: docs/chunks/delete_backward_word - Character-class based backward word deletion
     /// Deletes backward by one word (Alt+Backspace).
@@ -1073,6 +1508,72 @@ impl TextBuffer {
 
         self.assert_line_index_consistent();
         self.accumulate_dirty(DirtyLines::Single(self.cursor.line))
+    }
+
+    // Chunk: docs/chunks/incremental_parse - Tracked backward word deletion for incremental parsing
+    /// Deletes backward by one word and returns edit info.
+    ///
+    /// Like `delete_backward_word`, but also returns byte offset information needed for
+    /// tree-sitter's incremental parsing API.
+    pub fn delete_backward_word_tracked(&mut self) -> MutationResult {
+        // If there's a selection, delete it and return
+        if self.has_selection() {
+            return self.delete_selection_tracked();
+        }
+
+        // At column 0, no-op
+        if self.cursor.col == 0 {
+            return MutationResult::none();
+        }
+
+        // Get the current line content to analyze character classes
+        let line_content = self.line_content(self.cursor.line);
+        let line_chars: Vec<char> = line_content.chars().collect();
+
+        // Use word_boundary_left to find the start of the run
+        let word_start = word_boundary_left(&line_chars, self.cursor.col);
+        let chars_to_delete = self.cursor.col - word_start;
+
+        if chars_to_delete == 0 {
+            return MutationResult::none();
+        }
+
+        // Capture old end position BEFORE deletion
+        let old_end_row = self.cursor.line;
+        let old_end_col = self.cursor.col;
+
+        // Calculate bytes to be deleted
+        let deleted_bytes: usize = line_chars[word_start..self.cursor.col]
+            .iter()
+            .map(|c| c.len_utf8())
+            .sum();
+
+        self.sync_gap_to_cursor();
+
+        // Delete characters backward
+        for _ in 0..chars_to_delete {
+            self.buffer.delete_backward();
+            self.line_index.remove_char(self.cursor.line);
+        }
+
+        self.cursor.col -= chars_to_delete;
+
+        self.assert_line_index_consistent();
+        let dirty_lines = self.accumulate_dirty(DirtyLines::Single(self.cursor.line));
+
+        // Calculate byte offset at the new cursor position (start of edit)
+        let start_byte = self.byte_offset_at(self.cursor.line, self.cursor.col);
+
+        let edit_info = Some(EditInfo::for_delete(
+            start_byte,
+            self.cursor.line,
+            self.cursor.col,
+            deleted_bytes,
+            old_end_row,
+            old_end_col,
+        ));
+
+        MutationResult::new(dirty_lines, edit_info)
     }
 
     // Chunk: docs/chunks/word_forward_delete - Alt+D forward word deletion
@@ -1125,6 +1626,73 @@ impl TextBuffer {
         self.accumulate_dirty(DirtyLines::Single(self.cursor.line))
     }
 
+    // Chunk: docs/chunks/incremental_parse - Tracked forward word deletion for incremental parsing
+    /// Deletes forward by one word and returns edit info.
+    ///
+    /// Like `delete_forward_word`, but also returns byte offset information needed for
+    /// tree-sitter's incremental parsing API.
+    pub fn delete_forward_word_tracked(&mut self) -> MutationResult {
+        // If there's a selection, delete it and return
+        if self.has_selection() {
+            return self.delete_selection_tracked();
+        }
+
+        // Get the current line content to analyze character classes
+        let line_content = self.line_content(self.cursor.line);
+        let line_chars: Vec<char> = line_content.chars().collect();
+
+        // At line end, no-op
+        if self.cursor.col >= line_chars.len() {
+            return MutationResult::none();
+        }
+
+        // Use word_boundary_right to find the end of the run
+        let word_end = word_boundary_right(&line_chars, self.cursor.col);
+        let chars_to_delete = word_end - self.cursor.col;
+
+        if chars_to_delete == 0 {
+            return MutationResult::none();
+        }
+
+        // Capture positions for edit info
+        let start_row = self.cursor.line;
+        let start_col = self.cursor.col;
+        let start_byte = self.byte_offset_at(start_row, start_col);
+
+        // Old end is where the word ends (same line, different column)
+        let old_end_col = word_end;
+
+        // Calculate bytes to be deleted
+        let deleted_bytes: usize = line_chars[self.cursor.col..word_end]
+            .iter()
+            .map(|c| c.len_utf8())
+            .sum();
+
+        self.sync_gap_to_cursor();
+
+        // Delete characters forward
+        for _ in 0..chars_to_delete {
+            self.buffer.delete_forward();
+            self.line_index.remove_char(self.cursor.line);
+        }
+
+        // Cursor stays in place (forward deletion doesn't move cursor)
+
+        self.assert_line_index_consistent();
+        let dirty_lines = self.accumulate_dirty(DirtyLines::Single(self.cursor.line));
+
+        let edit_info = Some(EditInfo::for_delete(
+            start_byte,
+            start_row,
+            start_col,
+            deleted_bytes,
+            start_row, // old end row is same line
+            old_end_col,
+        ));
+
+        MutationResult::new(dirty_lines, edit_info)
+    }
+
     // Chunk: docs/chunks/kill_line - Delete from cursor to end of line (Ctrl+K)
     /// Deletes all characters from the cursor to the end of the current line.
     ///
@@ -1172,6 +1740,91 @@ impl TextBuffer {
             // Cursor stays in place
             self.assert_line_index_consistent();
             self.accumulate_dirty(DirtyLines::Single(self.cursor.line))
+        }
+    }
+
+    // Chunk: docs/chunks/incremental_parse - Tracked delete to line end for incremental parsing
+    /// Deletes to end of line and returns edit info.
+    ///
+    /// Like `delete_to_line_end`, but also returns byte offset information needed for
+    /// tree-sitter's incremental parsing API.
+    pub fn delete_to_line_end_tracked(&mut self) -> MutationResult {
+        let line_len = self.line_len(self.cursor.line);
+        let is_last_line = self.cursor.line + 1 >= self.line_count();
+
+        if self.cursor.col >= line_len {
+            // Cursor is at end of line
+            if is_last_line {
+                // At the very end of the buffer - nothing to delete
+                return MutationResult::none();
+            }
+
+            // Capture positions for edit info before deletion
+            let start_row = self.cursor.line;
+            let start_col = self.cursor.col;
+            let start_byte = self.byte_offset_at(start_row, start_col);
+
+            // Delete the newline, joining with the next line
+            self.sync_gap_to_cursor();
+            let deleted = self.buffer.delete_forward();
+            if deleted != Some('\n') {
+                return MutationResult::none();
+            }
+
+            self.line_index.remove_newline(self.cursor.line);
+
+            // Cursor stays in place
+            self.assert_line_index_consistent();
+            let dirty_lines = self.accumulate_dirty(DirtyLines::FromLineToEnd(self.cursor.line));
+
+            let edit_info = Some(EditInfo::for_delete(
+                start_byte,
+                start_row,
+                start_col,
+                1, // newline is 1 byte
+                start_row + 1, // old end was at start of next line
+                0,
+            ));
+
+            MutationResult::new(dirty_lines, edit_info)
+        } else {
+            // Cursor is mid-line: delete from cursor to end of line
+            let chars_to_delete = line_len - self.cursor.col;
+
+            // Capture positions for edit info
+            let start_row = self.cursor.line;
+            let start_col = self.cursor.col;
+            let start_byte = self.byte_offset_at(start_row, start_col);
+
+            // Calculate bytes to be deleted
+            let line_content = self.line_content(self.cursor.line);
+            let line_chars: Vec<char> = line_content.chars().collect();
+            let deleted_bytes: usize = line_chars[self.cursor.col..]
+                .iter()
+                .map(|c| c.len_utf8())
+                .sum();
+
+            self.sync_gap_to_cursor();
+
+            for _ in 0..chars_to_delete {
+                let _ = self.buffer.delete_forward();
+                self.line_index.remove_char(self.cursor.line);
+            }
+
+            // Cursor stays in place
+            self.assert_line_index_consistent();
+            let dirty_lines = self.accumulate_dirty(DirtyLines::Single(self.cursor.line));
+
+            let edit_info = Some(EditInfo::for_delete(
+                start_byte,
+                start_row,
+                start_col,
+                deleted_bytes,
+                start_row, // old end row is same line
+                line_len,  // old end col was at end of line
+            ));
+
+            MutationResult::new(dirty_lines, edit_info)
         }
     }
 
@@ -1232,6 +1885,102 @@ impl TextBuffer {
 
         self.assert_line_index_consistent();
         self.accumulate_dirty(DirtyLines::Single(current_line))
+    }
+
+    // Chunk: docs/chunks/incremental_parse - Tracked delete to line start for incremental parsing
+    /// Deletes to start of line and returns edit info.
+    ///
+    /// Like `delete_to_line_start`, but also returns byte offset information needed for
+    /// tree-sitter's incremental parsing API.
+    pub fn delete_to_line_start_tracked(&mut self) -> MutationResult {
+        // If there's a selection, delete it and return
+        if self.has_selection() {
+            return self.delete_selection_tracked();
+        }
+
+        // At column 0: either a no-op (line 0) or a line join (line > 0)
+        if self.cursor.col == 0 {
+            if self.cursor.line == 0 {
+                return MutationResult::none();
+            }
+
+            // Capture old end position BEFORE deletion
+            let old_end_row = self.cursor.line;
+            let old_end_col = self.cursor.col;
+
+            // Join with the previous line by deleting the preceding newline
+            let prev_line = self.cursor.line - 1;
+            let prev_line_len = self.line_len(prev_line);
+
+            self.sync_gap_to_cursor();
+            let deleted = self.buffer.delete_backward();
+            if deleted != Some('\n') {
+                return MutationResult::none();
+            }
+
+            self.line_index.remove_newline(prev_line);
+            self.cursor.line = prev_line;
+            self.cursor.col = prev_line_len;
+
+            self.assert_line_index_consistent();
+            let dirty_lines = self.accumulate_dirty(DirtyLines::FromLineToEnd(prev_line));
+
+            // Calculate byte offset at the new cursor position (start of edit)
+            let start_byte = self.byte_offset_at(self.cursor.line, self.cursor.col);
+
+            let edit_info = Some(EditInfo::for_delete(
+                start_byte,
+                self.cursor.line,
+                self.cursor.col,
+                1, // newline is 1 byte
+                old_end_row,
+                old_end_col,
+            ));
+
+            return MutationResult::new(dirty_lines, edit_info);
+        }
+
+        // Capture positions BEFORE deletion
+        let old_end_row = self.cursor.line;
+        let old_end_col = self.cursor.col;
+        let chars_to_delete = self.cursor.col;
+        let current_line = self.cursor.line;
+
+        // Calculate bytes to be deleted
+        let line_content = self.line_content(current_line);
+        let line_chars: Vec<char> = line_content.chars().collect();
+        let deleted_bytes: usize = line_chars[..self.cursor.col]
+            .iter()
+            .map(|c| c.len_utf8())
+            .sum();
+
+        self.sync_gap_to_cursor();
+
+        // Delete backward from cursor to column 0
+        for _ in 0..chars_to_delete {
+            let _ = self.buffer.delete_backward();
+            self.line_index.remove_char(current_line);
+        }
+
+        // Move cursor to column 0
+        self.cursor.col = 0;
+
+        self.assert_line_index_consistent();
+        let dirty_lines = self.accumulate_dirty(DirtyLines::Single(current_line));
+
+        // Calculate byte offset at the new cursor position (start of edit)
+        let start_byte = self.byte_offset_at(self.cursor.line, self.cursor.col);
+
+        let edit_info = Some(EditInfo::for_delete(
+            start_byte,
+            self.cursor.line,
+            self.cursor.col,
+            deleted_bytes,
+            old_end_row,
+            old_end_col,
+        ));
+
+        MutationResult::new(dirty_lines, edit_info)
     }
 
     // Chunk: docs/chunks/clipboard_operations - Bulk O(n) paste insertion
@@ -1303,6 +2052,100 @@ impl TextBuffer {
         };
         dirty.merge(insert_dirty);
         self.accumulate_dirty(dirty)
+    }
+
+    // Chunk: docs/chunks/incremental_parse - Tracked string insertion for incremental parsing
+    /// Inserts a string at the cursor position and returns edit info.
+    ///
+    // Chunk: docs/chunks/selection_replace_cursor - Fixed cursor position capture
+    /// Like `insert_str`, but also returns byte offset information needed for
+    /// tree-sitter's incremental parsing API.
+    pub fn insert_str_tracked(&mut self, s: &str) -> MutationResult {
+        if s.is_empty() {
+            return MutationResult::none();
+        }
+
+        // Capture info for EditInfo BEFORE any mutations
+        // When there's a selection, the edit spans from selection start to selection end.
+        // When there's no selection, it's a pure insertion at cursor.
+        let (edit_start_byte, edit_start_line, edit_start_col, old_end_byte, old_end_line, old_end_col) =
+            if let Some((sel_start, sel_end)) = self.selection_range() {
+                // Selection: edit range spans from selection start to selection end
+                let start_byte = self.byte_offset_at(sel_start.line, sel_start.col);
+                let end_byte = self.byte_offset_at(sel_end.line, sel_end.col);
+                (start_byte, sel_start.line, sel_start.col, end_byte, sel_end.line, sel_end.col)
+            } else {
+                // No selection: edit starts at cursor, old_end = start (pure insertion)
+                let start_byte = self.byte_offset_at(self.cursor.line, self.cursor.col);
+                (start_byte, self.cursor.line, self.cursor.col, start_byte, self.cursor.line, self.cursor.col)
+            };
+
+        // Delete any active selection first
+        let mut dirty = self.delete_selection();
+
+        // NOW capture the insertion point (cursor is at selection start after deletion)
+        let insert_line = self.cursor.line;
+        let insert_col = self.cursor.col;
+        let start_offset = self.position_to_offset(self.cursor);
+
+        // Single-pass scan of the inserted string
+        let mut new_line_starts: Vec<usize> = Vec::new();
+        let mut char_count: usize = 0;
+        let mut chars_since_last_newline: usize = 0;
+
+        for ch in s.chars() {
+            char_count += 1;
+            if ch == '\n' {
+                new_line_starts.push(start_offset + char_count);
+                chars_since_last_newline = 0;
+            } else {
+                chars_since_last_newline += 1;
+            }
+        }
+
+        // Bulk gap-buffer insertion
+        self.sync_gap_to_cursor();
+        self.buffer.insert_str(s);
+
+        // Bulk line-index update
+        for ls in self.line_index.line_starts_after_mut(insert_line) {
+            *ls += char_count;
+        }
+        self.line_index.insert_line_starts_after(insert_line, &new_line_starts);
+
+        // Cursor update - uses post-deletion cursor position (insert_col), not pre-deletion
+        let newline_count = new_line_starts.len();
+        if newline_count > 0 {
+            self.cursor.line = insert_line + newline_count;
+            self.cursor.col = chars_since_last_newline;
+        } else {
+            self.cursor.col = insert_col + char_count;
+        }
+
+        self.assert_line_index_consistent();
+
+        let insert_dirty = if newline_count > 0 {
+            DirtyLines::FromLineToEnd(insert_line)
+        } else {
+            DirtyLines::Single(insert_line)
+        };
+        dirty.merge(insert_dirty);
+        let dirty_lines = self.accumulate_dirty(dirty);
+
+        // Build edit info - uses pre-deletion info for old range, post-insertion cursor for new end
+        let edit_info = Some(EditInfo {
+            start_byte: edit_start_byte,
+            old_end_byte,
+            new_end_byte: edit_start_byte + s.len(),
+            start_row: edit_start_line,
+            start_col: edit_start_col,
+            old_end_row: old_end_line,
+            old_end_col,
+            new_end_row: self.cursor.line,
+            new_end_col: self.cursor.col,
+        });
+
+        MutationResult::new(dirty_lines, edit_info)
     }
 
     // ==================== Dirty Tracking ====================
@@ -3676,5 +4519,420 @@ mod tests {
 
         let marked = buf.marked_text().unwrap();
         assert_eq!(marked.selected_range, 0..2);
+    }
+
+    // ==================== Incremental Parsing Tests ====================
+    // Chunk: docs/chunks/incremental_parse - Verification tests for tracked mutations
+
+    #[test]
+    fn test_byte_offset_at_ascii() {
+        let buf = TextBuffer::from_str("hello\nworld");
+        // "hello" = 5 bytes, "\n" = 1 byte, total to line 1 start = 6 bytes
+        assert_eq!(buf.byte_offset_at(0, 0), 0);
+        assert_eq!(buf.byte_offset_at(0, 5), 5);  // end of "hello"
+        assert_eq!(buf.byte_offset_at(1, 0), 6);  // start of "world"
+        assert_eq!(buf.byte_offset_at(1, 5), 11); // end of "world"
+    }
+
+    #[test]
+    fn test_byte_offset_at_multibyte() {
+        // "日本" = 2 chars, 6 bytes (3 bytes each)
+        let buf = TextBuffer::from_str("日本\ntest");
+        assert_eq!(buf.byte_offset_at(0, 0), 0);
+        assert_eq!(buf.byte_offset_at(0, 1), 3);  // after first kanji
+        assert_eq!(buf.byte_offset_at(0, 2), 6);  // end of line 0
+        assert_eq!(buf.byte_offset_at(1, 0), 7);  // after newline
+    }
+
+    #[test]
+    fn test_byte_len() {
+        let buf = TextBuffer::from_str("hello");
+        assert_eq!(buf.byte_len(), 5);
+
+        let buf_multi = TextBuffer::from_str("日本");
+        assert_eq!(buf_multi.byte_len(), 6);
+
+        let buf_mixed = TextBuffer::from_str("a日b");
+        assert_eq!(buf_mixed.byte_len(), 5); // 1 + 3 + 1
+    }
+
+    #[test]
+    fn test_insert_char_tracked_ascii() {
+        let mut buf = TextBuffer::from_str("hllo");
+        buf.set_cursor(Position::new(0, 1));
+
+        let result = buf.insert_char_tracked('e');
+
+        assert_eq!(buf.content(), "hello");
+        assert!(result.edit_info.is_some());
+
+        let edit = result.edit_info.unwrap();
+        assert_eq!(edit.start_byte, 1);
+        assert_eq!(edit.old_end_byte, 1);
+        assert_eq!(edit.new_end_byte, 2); // 1 byte inserted
+        assert_eq!(edit.start_row, 0);
+        assert_eq!(edit.start_col, 1);
+        assert_eq!(edit.new_end_row, 0);
+        assert_eq!(edit.new_end_col, 2);
+    }
+
+    #[test]
+    fn test_insert_char_tracked_multibyte() {
+        let mut buf = TextBuffer::from_str("ab");
+        buf.set_cursor(Position::new(0, 1));
+
+        let result = buf.insert_char_tracked('日');
+
+        assert_eq!(buf.content(), "a日b");
+        let edit = result.edit_info.unwrap();
+        assert_eq!(edit.start_byte, 1);
+        assert_eq!(edit.new_end_byte, 4); // 3 bytes for '日'
+        assert_eq!(edit.new_end_col, 2);  // column advances by 1 char
+    }
+
+    #[test]
+    fn test_insert_newline_tracked() {
+        let mut buf = TextBuffer::from_str("helloworld");
+        buf.set_cursor(Position::new(0, 5));
+
+        let result = buf.insert_newline_tracked();
+
+        assert_eq!(buf.content(), "hello\nworld");
+        let edit = result.edit_info.unwrap();
+        assert_eq!(edit.start_byte, 5);
+        assert_eq!(edit.new_end_byte, 6); // newline is 1 byte
+        assert_eq!(edit.start_row, 0);
+        assert_eq!(edit.new_end_row, 1);
+        assert_eq!(edit.new_end_col, 0);
+    }
+
+    #[test]
+    fn test_delete_backward_tracked_ascii() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 3));
+
+        let result = buf.delete_backward_tracked();
+
+        assert_eq!(buf.content(), "helo");
+        let edit = result.edit_info.unwrap();
+        assert_eq!(edit.start_byte, 2);
+        assert_eq!(edit.old_end_byte, 3); // 1 byte deleted
+        assert_eq!(edit.new_end_byte, 2);
+        assert_eq!(edit.old_end_col, 3);
+        assert_eq!(edit.new_end_col, 2);
+    }
+
+    #[test]
+    fn test_delete_backward_tracked_newline() {
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.set_cursor(Position::new(1, 0));
+
+        let result = buf.delete_backward_tracked();
+
+        assert_eq!(buf.content(), "helloworld");
+        let edit = result.edit_info.unwrap();
+        // After deletion, cursor is at (0, 5)
+        assert_eq!(edit.start_byte, 5);
+        assert_eq!(edit.old_end_byte, 6);  // newline was 1 byte
+        assert_eq!(edit.new_end_byte, 5);
+        assert_eq!(edit.old_end_row, 1);
+        assert_eq!(edit.old_end_col, 0);
+        assert_eq!(edit.new_end_row, 0);
+        assert_eq!(edit.new_end_col, 5);
+    }
+
+    #[test]
+    fn test_delete_forward_tracked() {
+        let mut buf = TextBuffer::from_str("hello");
+        buf.set_cursor(Position::new(0, 2));
+
+        let result = buf.delete_forward_tracked();
+
+        assert_eq!(buf.content(), "helo");
+        let edit = result.edit_info.unwrap();
+        assert_eq!(edit.start_byte, 2);
+        assert_eq!(edit.old_end_byte, 3);
+        assert_eq!(edit.new_end_byte, 2);
+        assert_eq!(edit.old_end_col, 3);
+    }
+
+    #[test]
+    fn test_delete_selection_tracked() {
+        let mut buf = TextBuffer::from_str("hello world");
+        // Set cursor first, then anchor, to avoid set_cursor clearing the selection
+        buf.set_cursor(Position::new(0, 11));
+        buf.set_selection_anchor(Position::new(0, 6));
+
+        let result = buf.delete_selection_tracked();
+
+        assert_eq!(buf.content(), "hello ");
+        let edit = result.edit_info.unwrap();
+        assert_eq!(edit.start_byte, 6);
+        assert_eq!(edit.old_end_byte, 11); // "world" = 5 bytes
+        assert_eq!(edit.new_end_byte, 6);
+    }
+
+    #[test]
+    fn test_insert_str_tracked() {
+        let mut buf = TextBuffer::from_str("ac");
+        buf.set_cursor(Position::new(0, 1));
+
+        let result = buf.insert_str_tracked("bb");
+
+        assert_eq!(buf.content(), "abbc");
+        let edit = result.edit_info.unwrap();
+        assert_eq!(edit.start_byte, 1);
+        assert_eq!(edit.new_end_byte, 3); // 2 bytes inserted
+        assert_eq!(edit.new_end_col, 3);
+    }
+
+    #[test]
+    fn test_insert_str_tracked_multiline() {
+        let mut buf = TextBuffer::from_str("start end");
+        buf.set_cursor(Position::new(0, 6));
+
+        let result = buf.insert_str_tracked("line1\nline2\n");
+
+        assert_eq!(buf.content(), "start line1\nline2\nend");
+        let edit = result.edit_info.unwrap();
+        assert_eq!(edit.start_byte, 6);
+        assert_eq!(edit.start_row, 0);
+        assert_eq!(edit.start_col, 6);
+        assert_eq!(edit.new_end_row, 2);
+        assert_eq!(edit.new_end_col, 0);
+    }
+
+    // Chunk: docs/chunks/selection_replace_cursor - Selection replacement cursor bug fix
+    #[test]
+    fn test_insert_str_tracked_replaces_selection() {
+        // Bug scenario: select a word, type replacement text
+        // Expected: replacement text appears at selection position, cursor after it
+        // Bug: cursor position was captured BEFORE delete_selection(), causing:
+        //   - First char inserted correctly at selection start
+        //   - Subsequent chars inserted at original cursor (selection END)
+        let mut buf = TextBuffer::from_str("ticket: null");
+        buf.select_word_at(0); // Selects "ticket" (columns 0-5), cursor at 6
+
+        // Verify selection is set up correctly
+        assert!(buf.has_selection());
+        assert_eq!(buf.cursor_position(), Position::new(0, 6));
+
+        let result = buf.insert_str_tracked("test");
+
+        // Content should be "test: null" - word replaced
+        assert_eq!(buf.content(), "test: null");
+
+        // Cursor should be at column 4 (immediately after "test")
+        assert_eq!(buf.cursor_position(), Position::new(0, 4));
+
+        // EditInfo should correctly describe the edit:
+        // - Start at byte 0 (selection start)
+        // - Old end at byte 6 (selection end, 6 bytes "ticket" deleted)
+        // - New end at byte 4 (4 bytes "test" inserted)
+        let edit = result.edit_info.unwrap();
+        assert_eq!(edit.start_byte, 0, "start_byte should be selection start");
+        assert_eq!(edit.old_end_byte, 6, "old_end_byte should be selection end");
+        assert_eq!(edit.new_end_byte, 4, "new_end_byte should reflect inserted text");
+        assert_eq!(edit.start_row, 0);
+        assert_eq!(edit.start_col, 0);
+        assert_eq!(edit.old_end_row, 0);
+        assert_eq!(edit.old_end_col, 6);
+        assert_eq!(edit.new_end_row, 0);
+        assert_eq!(edit.new_end_col, 4);
+    }
+
+    // Chunk: docs/chunks/selection_replace_cursor - Multi-line selection replacement
+    #[test]
+    fn test_insert_str_tracked_replaces_multiline_selection() {
+        // Select text spanning multiple lines, replace with single-line text
+        let mut buf = TextBuffer::from_str("first\nsecond\nthird");
+        buf.set_cursor(Position::new(2, 5)); // End of "third"
+        buf.set_selection_anchor(Position::new(0, 0)); // Start of "first"
+
+        // Should have entire buffer selected
+        assert!(buf.has_selection());
+
+        let result = buf.insert_str_tracked("replaced");
+
+        // Content should just be "replaced"
+        assert_eq!(buf.content(), "replaced");
+
+        // Cursor should be at column 8 (after "replaced")
+        assert_eq!(buf.cursor_position(), Position::new(0, 8));
+
+        let edit = result.edit_info.unwrap();
+        // Start: byte 0, row 0, col 0 (selection start)
+        assert_eq!(edit.start_byte, 0);
+        assert_eq!(edit.start_row, 0);
+        assert_eq!(edit.start_col, 0);
+        // Old end: byte 18, row 2, col 5 (selection end - entire "first\nsecond\nthird")
+        assert_eq!(edit.old_end_byte, 18);
+        assert_eq!(edit.old_end_row, 2);
+        assert_eq!(edit.old_end_col, 5);
+        // New end: byte 8, row 0, col 8 (after "replaced")
+        assert_eq!(edit.new_end_byte, 8);
+        assert_eq!(edit.new_end_row, 0);
+        assert_eq!(edit.new_end_col, 8);
+    }
+
+    // Chunk: docs/chunks/selection_replace_cursor - Replacement with newlines
+    #[test]
+    fn test_insert_str_tracked_replaces_with_multiline_text() {
+        // Select single word, replace with multi-line text
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.select_word_at(0); // Select "hello" (columns 0-4), cursor at 5
+
+        let result = buf.insert_str_tracked("line1\nline2");
+
+        // Content should be "line1\nline2 world"
+        assert_eq!(buf.content(), "line1\nline2 world");
+
+        // Cursor should be at line 1, col 5 (after "line2")
+        assert_eq!(buf.cursor_position(), Position::new(1, 5));
+
+        let edit = result.edit_info.unwrap();
+        // Start: byte 0, row 0, col 0 (selection start)
+        assert_eq!(edit.start_byte, 0);
+        assert_eq!(edit.start_row, 0);
+        assert_eq!(edit.start_col, 0);
+        // Old end: byte 5, row 0, col 5 ("hello" deleted)
+        assert_eq!(edit.old_end_byte, 5);
+        assert_eq!(edit.old_end_row, 0);
+        assert_eq!(edit.old_end_col, 5);
+        // New end: byte 11, row 1, col 5 (after "line1\nline2")
+        assert_eq!(edit.new_end_byte, 11);
+        assert_eq!(edit.new_end_row, 1);
+        assert_eq!(edit.new_end_col, 5);
+    }
+
+    // Chunk: docs/chunks/selection_replace_cursor - Backward selection replacement
+    #[test]
+    fn test_insert_str_tracked_replaces_backward_selection() {
+        // Selection made backwards (anchor after cursor in document order)
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 0)); // Start of buffer
+        buf.set_selection_anchor(Position::new(0, 5)); // After "hello"
+
+        // This is a backward selection - anchor is AFTER cursor
+        assert!(buf.has_selection());
+
+        let result = buf.insert_str_tracked("hi");
+
+        // Content should be "hi world" - "hello" replaced
+        assert_eq!(buf.content(), "hi world");
+
+        // Cursor should be at column 2 (after "hi")
+        assert_eq!(buf.cursor_position(), Position::new(0, 2));
+
+        let edit = result.edit_info.unwrap();
+        // EditInfo should still use document order (start <= end)
+        assert_eq!(edit.start_byte, 0);
+        assert_eq!(edit.start_row, 0);
+        assert_eq!(edit.start_col, 0);
+        assert_eq!(edit.old_end_byte, 5);
+        assert_eq!(edit.old_end_row, 0);
+        assert_eq!(edit.old_end_col, 5);
+        assert_eq!(edit.new_end_byte, 2);
+        assert_eq!(edit.new_end_row, 0);
+        assert_eq!(edit.new_end_col, 2);
+    }
+
+    #[test]
+    fn test_delete_backward_word_tracked() {
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 5)); // After "hello"
+
+        let result = buf.delete_backward_word_tracked();
+
+        assert_eq!(buf.content(), " world");
+        let edit = result.edit_info.unwrap();
+        assert_eq!(edit.start_byte, 0);
+        assert_eq!(edit.old_end_byte, 5);
+        assert_eq!(edit.new_end_byte, 0);
+        assert_eq!(edit.start_row, 0);
+        assert_eq!(edit.start_col, 0);
+        assert_eq!(edit.old_end_row, 0);
+        assert_eq!(edit.old_end_col, 5);
+    }
+
+    #[test]
+    fn test_delete_forward_word_tracked() {
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 0));
+
+        let result = buf.delete_forward_word_tracked();
+
+        assert_eq!(buf.content(), " world");
+        let edit = result.edit_info.unwrap();
+        assert_eq!(edit.start_byte, 0);
+        assert_eq!(edit.old_end_byte, 5);
+        assert_eq!(edit.new_end_byte, 0);
+        assert_eq!(edit.start_row, 0);
+        assert_eq!(edit.start_col, 0);
+        assert_eq!(edit.old_end_row, 0);
+        assert_eq!(edit.old_end_col, 5);
+    }
+
+    #[test]
+    fn test_delete_to_line_end_tracked_mid_line() {
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 6)); // After "hello "
+
+        let result = buf.delete_to_line_end_tracked();
+
+        assert_eq!(buf.content(), "hello ");
+        let edit = result.edit_info.unwrap();
+        assert_eq!(edit.start_byte, 6);
+        assert_eq!(edit.old_end_byte, 11);
+        assert_eq!(edit.new_end_byte, 6);
+        assert_eq!(edit.old_end_col, 11);
+    }
+
+    #[test]
+    fn test_delete_to_line_end_tracked_at_end_joins_line() {
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.set_cursor(Position::new(0, 5)); // At end of "hello"
+
+        let result = buf.delete_to_line_end_tracked();
+
+        assert_eq!(buf.content(), "helloworld");
+        let edit = result.edit_info.unwrap();
+        assert_eq!(edit.start_byte, 5);
+        assert_eq!(edit.old_end_byte, 6); // newline is 1 byte
+        assert_eq!(edit.new_end_byte, 5);
+        assert_eq!(edit.old_end_row, 1); // was start of line 1
+        assert_eq!(edit.old_end_col, 0);
+    }
+
+    #[test]
+    fn test_delete_to_line_start_tracked_mid_line() {
+        let mut buf = TextBuffer::from_str("hello world");
+        buf.set_cursor(Position::new(0, 6)); // After "hello "
+
+        let result = buf.delete_to_line_start_tracked();
+
+        assert_eq!(buf.content(), "world");
+        let edit = result.edit_info.unwrap();
+        assert_eq!(edit.start_byte, 0);
+        assert_eq!(edit.old_end_byte, 6);
+        assert_eq!(edit.new_end_byte, 0);
+        assert_eq!(edit.old_end_row, 0);
+        assert_eq!(edit.old_end_col, 6);
+    }
+
+    #[test]
+    fn test_delete_to_line_start_tracked_at_start_joins_line() {
+        let mut buf = TextBuffer::from_str("hello\nworld");
+        buf.set_cursor(Position::new(1, 0)); // At start of "world"
+
+        let result = buf.delete_to_line_start_tracked();
+
+        assert_eq!(buf.content(), "helloworld");
+        let edit = result.edit_info.unwrap();
+        assert_eq!(edit.start_byte, 5); // at end of "hello"
+        assert_eq!(edit.old_end_byte, 6); // newline was 1 byte
+        assert_eq!(edit.new_end_byte, 5);
+        assert_eq!(edit.old_end_row, 1);
+        assert_eq!(edit.old_end_col, 0);
     }
 }

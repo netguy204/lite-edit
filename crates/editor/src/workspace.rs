@@ -12,13 +12,15 @@
 //! workspace represents an independent working context.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::event_channel::EventSender;
 use crate::file_index::FileIndex;
 use crate::pane_layout::{gen_pane_id, Pane, PaneId, PaneLayoutNode};
 use crate::viewport::Viewport;
-use lite_edit_buffer::{BufferView, TextBuffer};
-use lite_edit_syntax::{LanguageRegistry, SyntaxHighlighter, SyntaxTheme};
+use lite_edit_buffer::{BufferView, DirtyLines, StyledLine, TextBuffer};
+// Chunk: docs/chunks/treesitter_symbol_index - Symbol index for cross-file go-to-definition
+use lite_edit_syntax::{LanguageRegistry, SymbolIndex, SyntaxHighlighter, SyntaxTheme};
 // Chunk: docs/chunks/terminal_flood_starvation - PollResult for byte-budgeted polling
 use lite_edit_terminal::{AgentConfig, AgentHandle, AgentState, PollResult, TerminalBuffer};
 
@@ -75,6 +77,73 @@ pub enum TabKind {
 }
 
 // =============================================================================
+// ErrorBuffer
+// =============================================================================
+
+// Chunk: docs/chunks/terminal_spawn_reliability - Error buffer for failed terminal spawns
+/// A read-only buffer that displays an error message.
+///
+/// This is used when terminal spawning fails, displaying the error and offering
+/// a retry action. It implements `BufferView` for rendering through the standard
+/// buffer pipeline.
+#[derive(Debug, Clone)]
+pub struct ErrorBuffer {
+    /// The error message to display.
+    pub message: String,
+}
+
+impl ErrorBuffer {
+    /// Creates a new error buffer with the given message.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl BufferView for ErrorBuffer {
+    fn line_count(&self) -> usize {
+        // Title, blank line, error message, blank line, retry hint
+        5
+    }
+
+    fn styled_line(&self, line: usize) -> Option<StyledLine> {
+        match line {
+            0 => Some(StyledLine::plain("Failed to create terminal")),
+            1 => Some(StyledLine::empty()),
+            2 => Some(StyledLine::plain(&self.message)),
+            3 => Some(StyledLine::empty()),
+            4 => Some(StyledLine::plain("Press Enter to retry")),
+            _ => None,
+        }
+    }
+
+    fn line_len(&self, line: usize) -> usize {
+        match line {
+            0 => "Failed to create terminal".len(),
+            1 => 0,
+            2 => self.message.chars().count(),
+            3 => 0,
+            4 => "Press Enter to retry".len(),
+            _ => 0,
+        }
+    }
+
+    fn take_dirty(&mut self) -> DirtyLines {
+        // Error buffer is static, never dirty after initial render
+        DirtyLines::None
+    }
+
+    fn is_editable(&self) -> bool {
+        false
+    }
+
+    fn cursor_info(&self) -> Option<lite_edit_buffer::CursorInfo> {
+        None
+    }
+}
+
+// =============================================================================
 // TabBuffer
 // =============================================================================
 
@@ -92,6 +161,12 @@ pub enum TabBuffer {
     /// The actual terminal buffer lives in `Workspace.agent`. When rendering
     /// a tab with this variant, access `workspace.agent.terminal()` instead.
     AgentTerminal,
+    /// An error state for failed terminal spawns.
+    ///
+    /// Displays an error message and allows retry. This is analogous to
+    /// Chrome's "Aw, Snap!" error page for terminals.
+    // Chunk: docs/chunks/terminal_spawn_reliability - Error state for failed terminal spawns
+    Error(ErrorBuffer),
 }
 
 impl std::fmt::Debug for TabBuffer {
@@ -100,6 +175,7 @@ impl std::fmt::Debug for TabBuffer {
             TabBuffer::File(buf) => f.debug_tuple("File").field(buf).finish(),
             TabBuffer::Terminal(_) => f.debug_tuple("Terminal").field(&"<TerminalBuffer>").finish(),
             TabBuffer::AgentTerminal => write!(f, "AgentTerminal"),
+            TabBuffer::Error(buf) => f.debug_tuple("Error").field(&buf.message).finish(),
         }
     }
 }
@@ -118,6 +194,7 @@ impl TabBuffer {
             TabBuffer::AgentTerminal => {
                 panic!("AgentTerminal is a placeholder - use Workspace::agent_terminal()")
             }
+            TabBuffer::Error(buf) => buf,
         }
     }
 
@@ -134,6 +211,7 @@ impl TabBuffer {
             TabBuffer::AgentTerminal => {
                 panic!("AgentTerminal is a placeholder - use Workspace::agent_terminal_mut()")
             }
+            TabBuffer::Error(buf) => buf,
         }
     }
 
@@ -143,7 +221,7 @@ impl TabBuffer {
     pub fn as_text_buffer(&self) -> Option<&TextBuffer> {
         match self {
             TabBuffer::File(buf) => Some(buf),
-            TabBuffer::Terminal(_) | TabBuffer::AgentTerminal => None,
+            TabBuffer::Terminal(_) | TabBuffer::AgentTerminal | TabBuffer::Error(_) => None,
         }
     }
 
@@ -153,7 +231,7 @@ impl TabBuffer {
     pub fn as_text_buffer_mut(&mut self) -> Option<&mut TextBuffer> {
         match self {
             TabBuffer::File(buf) => Some(buf),
-            TabBuffer::Terminal(_) | TabBuffer::AgentTerminal => None,
+            TabBuffer::Terminal(_) | TabBuffer::AgentTerminal | TabBuffer::Error(_) => None,
         }
     }
 
@@ -164,7 +242,7 @@ impl TabBuffer {
     pub fn as_terminal_buffer(&self) -> Option<&TerminalBuffer> {
         match self {
             TabBuffer::Terminal(buf) => Some(buf),
-            TabBuffer::File(_) | TabBuffer::AgentTerminal => None,
+            TabBuffer::File(_) | TabBuffer::AgentTerminal | TabBuffer::Error(_) => None,
         }
     }
 
@@ -175,13 +253,19 @@ impl TabBuffer {
     pub fn as_terminal_buffer_mut(&mut self) -> Option<&mut TerminalBuffer> {
         match self {
             TabBuffer::Terminal(buf) => Some(buf),
-            TabBuffer::File(_) | TabBuffer::AgentTerminal => None,
+            TabBuffer::File(_) | TabBuffer::AgentTerminal | TabBuffer::Error(_) => None,
         }
     }
 
     /// Returns true if this is an agent terminal placeholder.
     pub fn is_agent_terminal(&self) -> bool {
         matches!(self, TabBuffer::AgentTerminal)
+    }
+
+    /// Returns true if this is an error buffer (failed terminal spawn).
+    // Chunk: docs/chunks/terminal_spawn_reliability - Error state detection
+    pub fn is_error(&self) -> bool {
+        matches!(self, TabBuffer::Error(_))
     }
 }
 
@@ -307,9 +391,37 @@ impl Tab {
         }
     }
 
+    // Chunk: docs/chunks/terminal_spawn_reliability - Error tab for failed terminal spawns
+    /// Creates a new error tab for a failed terminal spawn.
+    ///
+    /// The tab displays the error message and offers a retry action (Enter key).
+    /// It uses `TabKind::Terminal` so it's visually treated like a terminal tab.
+    pub fn new_error(id: TabId, error_message: String, label: String, line_height: f32) -> Self {
+        Self {
+            id,
+            label,
+            buffer: TabBuffer::Error(ErrorBuffer::new(error_message)),
+            viewport: Viewport::new(line_height),
+            kind: TabKind::Terminal, // Same visual treatment as terminal tabs
+            dirty: false,
+            unread: false,
+            associated_file: None,
+            highlighter: None,
+            welcome_scroll_offset_px: 0.0,
+            base_content: None,
+            conflict_mode: false,
+        }
+    }
+
     /// Returns true if this is an agent terminal tab.
     pub fn is_agent_tab(&self) -> bool {
         self.buffer.is_agent_terminal()
+    }
+
+    // Chunk: docs/chunks/terminal_spawn_reliability - Error tab detection
+    /// Returns true if this is an error tab (failed terminal spawn).
+    pub fn is_error_tab(&self) -> bool {
+        self.buffer.is_error()
     }
 
     /// Returns a reference to the buffer as a `BufferView`.
@@ -351,7 +463,7 @@ impl Tab {
     pub fn buffer_and_viewport_mut(&mut self) -> Option<(&mut TextBuffer, &mut Viewport)> {
         match &mut self.buffer {
             TabBuffer::File(buf) => Some((buf, &mut self.viewport)),
-            TabBuffer::Terminal(_) | TabBuffer::AgentTerminal => None,
+            TabBuffer::Terminal(_) | TabBuffer::AgentTerminal | TabBuffer::Error(_) => None,
         }
     }
 
@@ -366,7 +478,7 @@ impl Tab {
     pub fn terminal_and_viewport_mut(&mut self) -> Option<(&mut TerminalBuffer, &mut Viewport)> {
         match &mut self.buffer {
             TabBuffer::Terminal(term) => Some((term, &mut self.viewport)),
-            TabBuffer::File(_) | TabBuffer::AgentTerminal => None,
+            TabBuffer::File(_) | TabBuffer::AgentTerminal | TabBuffer::Error(_) => None,
         }
     }
 
@@ -481,6 +593,29 @@ impl Tab {
             hl.update_source(&source);
         }
     }
+
+    // Chunk: docs/chunks/treesitter_indent - Expose indent computation to editor
+    /// Computes the indentation for a new line.
+    ///
+    /// Returns the indent string to insert, or empty string if:
+    /// - No highlighter is configured
+    /// - Language has no indent query
+    /// - Computation fails
+    ///
+    /// # Arguments
+    ///
+    /// * `line` - The line number to compute indent for
+    /// * `config` - Indentation configuration (tabs vs spaces, width)
+    pub fn compute_indent_for_line(
+        &self,
+        line: usize,
+        config: &lite_edit_syntax::IndentConfig,
+    ) -> String {
+        self.highlighter
+            .as_ref()
+            .map(|hl| hl.compute_indent(line, config))
+            .unwrap_or_default()
+    }
 }
 
 impl std::fmt::Debug for Tab {
@@ -494,6 +629,88 @@ impl std::fmt::Debug for Tab {
             .field("associated_file", &self.associated_file)
             .field("highlighter", &self.highlighter.as_ref().map(|_| "<SyntaxHighlighter>"))
             .finish()
+    }
+}
+
+// =============================================================================
+// Workspace
+// =============================================================================
+
+// =============================================================================
+// JumpStack (Chunk: docs/chunks/treesitter_gotodef)
+// =============================================================================
+
+// Chunk: docs/chunks/treesitter_gotodef - Jump stack for go-to-definition back navigation
+/// A position in a buffer for the jump stack.
+///
+/// Records the location (tab, pane, line, column) before a jump so that
+/// the user can navigate back with a "go back" command.
+#[derive(Clone, Debug)]
+pub struct JumpPosition {
+    /// The tab ID where the jump originated
+    pub tab_id: TabId,
+    /// The pane ID containing the tab
+    pub pane_id: PaneId,
+    /// The line number (0-indexed)
+    pub line: usize,
+    /// The column number (0-indexed)
+    pub col: usize,
+}
+
+// Chunk: docs/chunks/treesitter_gotodef - Jump stack for go-to-definition
+/// A bounded stack of jump positions for back-navigation.
+///
+/// Used by go-to-definition to record the cursor position before jumping,
+/// enabling the user to navigate back to previous locations.
+#[derive(Debug)]
+pub struct JumpStack {
+    positions: Vec<JumpPosition>,
+    max_size: usize,
+}
+
+impl JumpStack {
+    /// Creates a new jump stack with the given maximum size.
+    pub fn new(max_size: usize) -> Self {
+        Self {
+            positions: Vec::new(),
+            max_size,
+        }
+    }
+
+    /// Pushes a position onto the stack.
+    ///
+    /// If the stack is at capacity, the oldest position is removed.
+    pub fn push(&mut self, pos: JumpPosition) {
+        if self.positions.len() >= self.max_size {
+            self.positions.remove(0);
+        }
+        self.positions.push(pos);
+    }
+
+    /// Pops and returns the most recent position, if any.
+    pub fn pop(&mut self) -> Option<JumpPosition> {
+        self.positions.pop()
+    }
+
+    /// Returns the number of positions in the stack.
+    pub fn len(&self) -> usize {
+        self.positions.len()
+    }
+
+    /// Returns true if the stack is empty.
+    pub fn is_empty(&self) -> bool {
+        self.positions.is_empty()
+    }
+
+    /// Clears all positions from the stack.
+    pub fn clear(&mut self) {
+        self.positions.clear();
+    }
+}
+
+impl Default for JumpStack {
+    fn default() -> Self {
+        Self::new(100) // Default max size of 100 positions
     }
 }
 
@@ -545,6 +762,22 @@ pub struct Workspace {
     pub file_index: FileIndex,
     /// The cache version at the last query (for streaming refresh during indexing).
     pub last_cache_version: u64,
+    // Chunk: docs/chunks/treesitter_gotodef - Jump stack for go-to-definition
+    /// Stack of cursor positions for go-back navigation after go-to-definition.
+    ///
+    /// When the user invokes go-to-definition, the current position is pushed
+    /// onto this stack. The "go back" command pops and restores the previous position.
+    pub jump_stack: JumpStack,
+    // Chunk: docs/chunks/treesitter_symbol_index - Symbol index for cross-file go-to-definition
+    /// The symbol index for cross-file go-to-definition.
+    ///
+    /// This index maps symbol names (functions, classes, etc.) to their definition
+    /// locations across all files in the workspace. It is built on a background thread
+    /// when the workspace is created, and updated incrementally when files are saved.
+    ///
+    /// The index is initialized via `start_symbol_indexing()` after workspace creation.
+    /// It's `None` until initialization.
+    pub symbol_index: Option<SymbolIndex>,
 }
 
 impl Workspace {
@@ -611,6 +844,10 @@ impl Workspace {
             agent: None,
             file_index,
             last_cache_version: 0,
+            jump_stack: JumpStack::default(),
+            // Chunk: docs/chunks/treesitter_symbol_index - Initialize symbol_index as None
+            // Call start_symbol_indexing() to begin background indexing
+            symbol_index: None,
         }
     }
 
@@ -647,6 +884,38 @@ impl Workspace {
     /// Generates a new unique pane ID.
     pub fn gen_pane_id(&mut self) -> PaneId {
         gen_pane_id(&mut self.next_pane_id)
+    }
+
+    // Chunk: docs/chunks/treesitter_symbol_index - Start symbol indexing
+    /// Starts background symbol indexing for this workspace.
+    ///
+    /// This initializes the symbol index with the workspace's root path and starts
+    /// a background thread to scan all source files. Once complete, the index can
+    /// be used for cross-file go-to-definition.
+    ///
+    /// # Arguments
+    ///
+    /// * `registry` - The language registry for extension-to-language mapping
+    pub fn start_symbol_indexing(&mut self, registry: Arc<LanguageRegistry>) {
+        self.symbol_index = Some(SymbolIndex::start_indexing(self.root_path.clone(), registry));
+    }
+
+    // Chunk: docs/chunks/treesitter_symbol_index - Update symbol index for a file
+    /// Updates the symbol index for a single file.
+    ///
+    /// Call this when a file is saved to keep the index up-to-date. The update
+    /// removes all existing entries for the file and re-indexes it.
+    ///
+    /// If the symbol index hasn't been initialized, this is a no-op.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Absolute path to the file that was saved
+    /// * `registry` - The language registry for extension-to-language mapping
+    pub fn update_symbol_index_for_file(&self, file_path: &std::path::Path, registry: &LanguageRegistry) {
+        if let Some(ref index) = self.symbol_index {
+            index.update_file(file_path, registry);
+        }
     }
 
     // Chunk: docs/chunks/pane_mirror_restore - next_pane_id synchronization
@@ -907,6 +1176,35 @@ impl Workspace {
             }
         }
         None
+    }
+
+    // =========================================================================
+    // Cross-tab navigation (Chunk: docs/chunks/gotodef_cross_file_nav)
+    // =========================================================================
+
+    /// Switches to a tab by ID, searching across all panes.
+    ///
+    /// If the tab is found in a different pane, that pane becomes active.
+    /// Returns `true` if the tab was found and switched to, `false` otherwise.
+    // Chunk: docs/chunks/gotodef_cross_file_nav - Cross-pane tab switching for goto-definition
+    pub fn switch_to_tab_by_id(&mut self, tab_id: TabId) -> bool {
+        // Search all panes for the tab
+        for pane in self.pane_root.all_panes() {
+            for (index, tab) in pane.tabs.iter().enumerate() {
+                if tab.id == tab_id {
+                    // Found it! Need to switch to this pane and this tab
+                    let pane_id = pane.id;
+                    // Switch to the pane
+                    self.active_pane_id = pane_id;
+                    // Switch to the tab within the pane
+                    if let Some(pane) = self.active_pane_mut() {
+                        pane.switch_tab(index);
+                    }
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     // =========================================================================
@@ -2192,5 +2490,346 @@ mod tests {
         let mut tab = Tab::empty_file(1, TEST_LINE_HEIGHT);
         tab.base_content = Some("file content".to_string());
         assert_eq!(tab.base_content, Some("file content".to_string()));
+    }
+
+    // =========================================================================
+    // JumpStack Tests (Chunk: docs/chunks/treesitter_gotodef)
+    // =========================================================================
+
+    #[test]
+    fn test_jump_stack_push_and_pop() {
+        let mut stack = JumpStack::new(10);
+        assert!(stack.is_empty());
+        assert_eq!(stack.len(), 0);
+
+        let pos1 = JumpPosition {
+            tab_id: 1,
+            pane_id: 0,
+            line: 10,
+            col: 5,
+        };
+        let pos2 = JumpPosition {
+            tab_id: 1,
+            pane_id: 0,
+            line: 20,
+            col: 8,
+        };
+
+        stack.push(pos1.clone());
+        assert_eq!(stack.len(), 1);
+        assert!(!stack.is_empty());
+
+        stack.push(pos2.clone());
+        assert_eq!(stack.len(), 2);
+
+        // Pop should return in LIFO order
+        let popped = stack.pop().unwrap();
+        assert_eq!(popped.line, 20);
+        assert_eq!(popped.col, 8);
+        assert_eq!(stack.len(), 1);
+
+        let popped = stack.pop().unwrap();
+        assert_eq!(popped.line, 10);
+        assert_eq!(popped.col, 5);
+        assert!(stack.is_empty());
+
+        // Pop from empty stack returns None
+        assert!(stack.pop().is_none());
+    }
+
+    #[test]
+    fn test_jump_stack_max_size() {
+        let mut stack = JumpStack::new(3);
+
+        // Push 5 items into a stack with max 3
+        for i in 0..5 {
+            stack.push(JumpPosition {
+                tab_id: 1,
+                pane_id: 0,
+                line: i,
+                col: 0,
+            });
+        }
+
+        // Stack should only have 3 items
+        assert_eq!(stack.len(), 3);
+
+        // The oldest items should have been removed, so we should have lines 2, 3, 4
+        let p1 = stack.pop().unwrap();
+        assert_eq!(p1.line, 4);
+        let p2 = stack.pop().unwrap();
+        assert_eq!(p2.line, 3);
+        let p3 = stack.pop().unwrap();
+        assert_eq!(p3.line, 2);
+        assert!(stack.pop().is_none());
+    }
+
+    #[test]
+    fn test_jump_stack_clear() {
+        let mut stack = JumpStack::new(10);
+        stack.push(JumpPosition {
+            tab_id: 1,
+            pane_id: 0,
+            line: 10,
+            col: 5,
+        });
+        stack.push(JumpPosition {
+            tab_id: 1,
+            pane_id: 0,
+            line: 20,
+            col: 8,
+        });
+
+        assert_eq!(stack.len(), 2);
+        stack.clear();
+        assert!(stack.is_empty());
+        assert_eq!(stack.len(), 0);
+    }
+
+    #[test]
+    fn test_jump_stack_default() {
+        let stack = JumpStack::default();
+        assert!(stack.is_empty());
+        // Default max size should be 100
+        // (We test this indirectly by checking the stack works)
+    }
+
+    // =========================================================================
+    // Indent Computation Tests (Chunk: docs/chunks/treesitter_indent)
+    // =========================================================================
+
+    #[test]
+    fn test_tab_compute_indent_without_highlighter() {
+        // Without a highlighter, compute_indent_for_line should return empty string
+        let tab = Tab::empty_file(1, TEST_LINE_HEIGHT);
+        let config = lite_edit_syntax::IndentConfig::default();
+
+        let indent = tab.compute_indent_for_line(0, &config);
+        assert_eq!(indent, "", "Should return empty string without highlighter");
+    }
+
+    #[test]
+    fn test_tab_compute_indent_with_highlighter() {
+        // Create a tab with Rust source and setup highlighting
+        let mut buffer = TextBuffer::from_str("fn main() {\n");
+        // Move cursor to the new line
+        buffer.set_cursor(lite_edit_buffer::Position { line: 1, col: 0 });
+
+        let mut tab = Tab::new_file(
+            1,
+            buffer,
+            "test.rs".to_string(),
+            Some(PathBuf::from("/test/test.rs")),
+            TEST_LINE_HEIGHT,
+        );
+
+        // Setup highlighting
+        let registry = LanguageRegistry::new();
+        let theme = SyntaxTheme::catppuccin_mocha();
+        let setup_ok = tab.setup_highlighting(&registry, theme);
+        assert!(setup_ok, "Highlighting setup should succeed for .rs file");
+
+        // Compute indent for line 1 (after opening brace)
+        let config = lite_edit_syntax::IndentConfig::default();
+        let indent = tab.compute_indent_for_line(1, &config);
+
+        assert_eq!(indent, "    ", "Should indent after opening brace");
+    }
+
+    #[test]
+    fn test_tab_compute_indent_python() {
+        // Create a tab with Python source
+        let mut buffer = TextBuffer::from_str("def foo():\n");
+        buffer.set_cursor(lite_edit_buffer::Position { line: 1, col: 0 });
+
+        let mut tab = Tab::new_file(
+            1,
+            buffer,
+            "test.py".to_string(),
+            Some(PathBuf::from("/test/test.py")),
+            TEST_LINE_HEIGHT,
+        );
+
+        // Setup highlighting
+        let registry = LanguageRegistry::new();
+        let theme = SyntaxTheme::catppuccin_mocha();
+        let setup_ok = tab.setup_highlighting(&registry, theme);
+        assert!(setup_ok, "Highlighting setup should succeed for .py file");
+
+        // Compute indent for line 1 (after colon)
+        let config = lite_edit_syntax::IndentConfig::default();
+        let indent = tab.compute_indent_for_line(1, &config);
+
+        assert_eq!(indent, "    ", "Should indent after function def colon");
+    }
+
+    // =========================================================================
+    // ErrorBuffer Tests (Chunk: docs/chunks/terminal_spawn_reliability)
+    // =========================================================================
+
+    #[test]
+    fn test_error_buffer_line_count() {
+        let error_buf = ErrorBuffer::new("openpty: ENXIO");
+        assert_eq!(error_buf.line_count(), 5);
+    }
+
+    #[test]
+    fn test_error_buffer_styled_line() {
+        let error_buf = ErrorBuffer::new("openpty: ENXIO");
+
+        // Line 0: Title
+        let line0 = error_buf.styled_line(0).unwrap();
+        assert!(!line0.is_empty());
+
+        // Line 1: Empty
+        let line1 = error_buf.styled_line(1).unwrap();
+        assert!(line1.is_empty());
+
+        // Line 2: Error message
+        let line2 = error_buf.styled_line(2).unwrap();
+        assert_eq!(line2.spans.len(), 1);
+        assert!(line2.spans[0].text.contains("ENXIO"));
+
+        // Line 3: Empty
+        let line3 = error_buf.styled_line(3).unwrap();
+        assert!(line3.is_empty());
+
+        // Line 4: Retry hint
+        let line4 = error_buf.styled_line(4).unwrap();
+        assert!(line4.spans[0].text.contains("retry"));
+
+        // Line 5: Out of bounds
+        assert!(error_buf.styled_line(5).is_none());
+    }
+
+    #[test]
+    fn test_error_buffer_is_not_editable() {
+        let error_buf = ErrorBuffer::new("test error");
+        assert!(!error_buf.is_editable());
+    }
+
+    #[test]
+    fn test_error_buffer_no_cursor() {
+        let error_buf = ErrorBuffer::new("test error");
+        assert!(error_buf.cursor_info().is_none());
+    }
+
+    #[test]
+    fn test_error_buffer_take_dirty() {
+        let mut error_buf = ErrorBuffer::new("test error");
+        let dirty = error_buf.take_dirty();
+        assert_eq!(dirty, DirtyLines::None);
+    }
+
+    #[test]
+    fn test_tab_buffer_error_variant() {
+        let error_buf = ErrorBuffer::new("spawn failed");
+        let tab_buffer = TabBuffer::Error(error_buf);
+
+        assert!(tab_buffer.is_error());
+        assert!(!tab_buffer.is_agent_terminal());
+        assert!(tab_buffer.as_text_buffer().is_none());
+        assert!(tab_buffer.as_terminal_buffer().is_none());
+    }
+
+    #[test]
+    fn test_tab_new_error() {
+        let tab = Tab::new_error(1, "spawn failed".to_string(), "Terminal".to_string(), TEST_LINE_HEIGHT);
+
+        assert_eq!(tab.id, 1);
+        assert_eq!(tab.label, "Terminal");
+        assert_eq!(tab.kind, TabKind::Terminal); // Error tabs use Terminal kind
+        assert!(!tab.dirty);
+        assert!(!tab.unread);
+        assert!(tab.is_error_tab());
+        assert!(!tab.is_agent_tab());
+    }
+
+    #[test]
+    fn test_tab_error_buffer_view() {
+        let tab = Tab::new_error(1, "ENXIO".to_string(), "Terminal".to_string(), TEST_LINE_HEIGHT);
+
+        let view = tab.buffer();
+        assert_eq!(view.line_count(), 5);
+        assert!(!view.is_editable());
+        assert!(view.cursor_info().is_none());
+    }
+
+    // =========================================================================
+    // switch_to_tab_by_id Tests (Chunk: docs/chunks/gotodef_cross_file_nav)
+    // =========================================================================
+
+    #[test]
+    fn test_switch_to_tab_by_id_same_pane() {
+        let mut ws = Workspace::with_empty_tab(1, 1, "test".to_string(), PathBuf::from("/test"), TEST_LINE_HEIGHT);
+        // Add a second tab with ID 2
+        ws.add_tab(Tab::empty_file(2, TEST_LINE_HEIGHT));
+        // Switch back to tab 1 (which is now at index 0)
+        ws.active_pane_mut().unwrap().switch_tab(0);
+
+        // Now switch to tab 2 using switch_to_tab_by_id
+        let result = ws.switch_to_tab_by_id(2);
+
+        assert!(result, "Should successfully switch to tab 2");
+        assert_eq!(ws.active_tab().unwrap().id, 2, "Active tab should be tab 2");
+    }
+
+    #[test]
+    fn test_switch_to_tab_by_id_not_found() {
+        let mut ws = Workspace::with_empty_tab(1, 1, "test".to_string(), PathBuf::from("/test"), TEST_LINE_HEIGHT);
+
+        // Try to switch to a non-existent tab
+        let result = ws.switch_to_tab_by_id(999);
+
+        assert!(!result, "Should return false for non-existent tab");
+        assert_eq!(ws.active_tab().unwrap().id, 1, "Active tab should still be tab 1");
+    }
+
+    #[test]
+    fn test_switch_to_tab_by_id_cross_pane() {
+        let mut ws = create_hsplit_workspace();
+        // create_hsplit_workspace creates:
+        // - Pane 1 (left): tabs with IDs 1, 2 (active is tab 2)
+        // - Pane 2 (right): tab with ID 3
+        // - ws.active_pane_id = 1 (left pane)
+
+        // Currently on pane 1, switch to tab 3 which is in pane 2
+        let result = ws.switch_to_tab_by_id(3);
+
+        assert!(result, "Should successfully switch to tab 3 in pane 2");
+        assert_eq!(ws.active_pane_id, 2, "Active pane should be pane 2");
+        assert_eq!(ws.active_tab().unwrap().id, 3, "Active tab should be tab 3");
+    }
+
+    #[test]
+    fn test_switch_to_tab_by_id_already_active() {
+        let mut ws = Workspace::with_empty_tab(1, 1, "test".to_string(), PathBuf::from("/test"), TEST_LINE_HEIGHT);
+
+        // Switch to the already active tab
+        let result = ws.switch_to_tab_by_id(1);
+
+        assert!(result, "Should return true even if tab is already active");
+        assert_eq!(ws.active_tab().unwrap().id, 1, "Active tab should still be tab 1");
+    }
+
+    #[test]
+    fn test_switch_to_tab_by_id_clears_unread() {
+        let mut ws = Workspace::with_empty_tab(1, 1, "test".to_string(), PathBuf::from("/test"), TEST_LINE_HEIGHT);
+        // Add a second tab and mark it as unread
+        let mut tab2 = Tab::empty_file(2, TEST_LINE_HEIGHT);
+        tab2.unread = true;
+        ws.add_tab(tab2);
+
+        // Switch back to tab 1
+        ws.active_pane_mut().unwrap().switch_tab(0);
+
+        // Verify tab 2 has unread set
+        assert!(ws.active_pane().unwrap().tabs[1].unread, "Tab 2 should be marked unread");
+
+        // Switch to tab 2 using switch_to_tab_by_id
+        ws.switch_to_tab_by_id(2);
+
+        // Verify unread was cleared
+        assert!(!ws.active_tab().unwrap().unread, "Unread flag should be cleared after switching");
     }
 }

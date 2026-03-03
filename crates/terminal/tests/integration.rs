@@ -316,9 +316,10 @@ fn test_shell_prompt_appears() {
     // Use /bin/sh as it's always available
     terminal.spawn_shell(Path::new("/tmp")).unwrap();
 
-    // Poll until we see a prompt ($ or #)
+    // Poll until we see a prompt ($ or #).
+    // Use generous timeout (10s) because shell startup is slow under parallel test load.
     let mut attempts = 0;
-    while attempts < 100 {
+    while attempts < 500 {
         if matches!(terminal.poll_events(), PollResult::Processed | PollResult::MorePending) {
             for line in 0..terminal.line_count() {
                 if let Some(styled) = terminal.styled_line(line) {
@@ -875,9 +876,9 @@ fn test_shell_produces_content_after_poll() {
 
     // Poll multiple times with brief delays to give shell time to produce output.
     // Login shells source profile files (~/.zprofile, ~/.zshrc) which can take
-    // longer than a simple shell, so we use a generous timeout.
+    // longer than a simple shell, so we use a generous timeout (10s).
     let mut has_content = false;
-    for _ in 0..50 {
+    for _ in 0..200 {
         std::thread::sleep(Duration::from_millis(50));
         terminal.poll_events();
 
@@ -913,8 +914,9 @@ fn test_poll_events_returns_processed_on_output() {
 
     // The shell should produce output (prompt) shortly after spawning.
     // Poll until we get Processed/MorePending from poll_events.
+    // Use generous timeout (10s) because shell startup is slow under parallel test load.
     let mut got_output = false;
-    for _ in 0..50 {
+    for _ in 0..500 {
         std::thread::sleep(Duration::from_millis(20));
         if matches!(terminal.poll_events(), PollResult::Processed | PollResult::MorePending) {
             got_output = true;

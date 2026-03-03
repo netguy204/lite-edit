@@ -5,7 +5,8 @@ parent_chunk: null
 code_paths:
   - crates/editor/src/color_palette.rs
   - crates/editor/src/glyph_buffer.rs
-  - crates/editor/src/renderer.rs
+  - crates/editor/src/renderer/mod.rs
+  - crates/editor/src/renderer/content.rs
   - crates/editor/src/shader.rs
   - crates/editor/src/lib.rs
   - crates/editor/shaders/glyph.metal
@@ -30,7 +31,7 @@ code_references:
     implements: "Vertex descriptor with color attribute at offset 16"
   - ref: crates/editor/shaders/glyph.metal
     implements: "Metal shader with per-vertex color input for styled text and cursor rendering"
-  - ref: crates/editor/src/renderer.rs#Renderer::render_text
+  - ref: crates/editor/src/renderer/content.rs#Renderer::render_text
     implements: "Multi-pass rendering with per-vertex colors for background, selection, glyphs, underlines, cursor"
 narrative: null
 investigation: hierarchical_terminal_tabs

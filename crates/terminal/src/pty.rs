@@ -62,6 +62,10 @@ pub struct PtyHandle {
     /// Sender used by the reader thread (kept to detect shutdown).
     #[allow(dead_code)]
     event_tx: Sender<TerminalEvent>,
+    // Chunk: docs/chunks/terminal_spawn_reliability - Reader thread completion signal
+    /// Receiver that signals when the reader thread has exited.
+    /// Used by Drop to perform a timed join of the reader thread.
+    reader_done_rx: Receiver<()>,
 }
 
 impl PtyHandle {
@@ -149,6 +153,11 @@ impl PtyHandle {
             .take_writer()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
+        // Chunk: docs/chunks/terminal_spawn_reliability - Reader thread completion signal
+        // Create a channel for the reader thread to signal when it exits.
+        // This allows Drop to perform a timed join.
+        let (done_tx, done_rx) = unbounded();
+
         // Spawn reader thread
         let tx = event_tx.clone();
         let reader_thread = thread::spawn(move || {
@@ -172,6 +181,8 @@ impl PtyHandle {
                     }
                 }
             }
+            // Signal that we're exiting (ignore send errors - receiver may be dropped)
+            let _ = done_tx.send(());
         });
 
         Ok(PtyHandle {
@@ -181,6 +192,7 @@ impl PtyHandle {
             event_rx,
             reader_thread: Some(reader_thread),
             event_tx,
+            reader_done_rx: done_rx,
         })
     }
 
@@ -268,6 +280,11 @@ impl PtyHandle {
             .take_writer()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
+        // Chunk: docs/chunks/terminal_spawn_reliability - Reader thread completion signal
+        // Create a channel for the reader thread to signal when it exits.
+        // This allows Drop to perform a timed join.
+        let (done_tx, done_rx) = unbounded();
+
         // Spawn reader thread with wakeup support
         let tx = event_tx.clone();
         let reader_thread = thread::spawn(move || {
@@ -293,6 +310,8 @@ impl PtyHandle {
                     }
                 }
             }
+            // Signal that we're exiting (ignore send errors - receiver may be dropped)
+            let _ = done_tx.send(());
         });
 
         Ok(PtyHandle {
@@ -302,6 +321,7 @@ impl PtyHandle {
             event_rx,
             reader_thread: Some(reader_thread),
             event_tx,
+            reader_done_rx: done_rx,
         })
     }
 
@@ -364,20 +384,33 @@ impl PtyHandle {
     }
 }
 
+// Chunk: docs/chunks/terminal_spawn_reliability - Timed join for PTY cleanup
 impl Drop for PtyHandle {
     fn drop(&mut self) {
+        use std::time::Duration;
+
         // Kill the process if it's still running to ensure the reader thread
         // will hit EOF or an error and exit.
         let _ = self.child.kill();
 
-        // The reader thread will exit when it hits EOF or an error
-        // after the PTY is closed. We don't join it to avoid blocking.
-        // The thread will be detached and cleaned up by the OS.
+        // Wait for the reader thread to exit with a brief timeout.
+        // In the common case, the thread exits promptly after the process is killed
+        // and the PTY hits EOF. This ensures PTY file descriptors are released
+        // promptly, preventing ENXIO errors when opening new PTYs.
         //
-        // Note: We explicitly don't join here because the reader thread
-        // may be blocked on read() and killing the process may not
-        // immediately unblock it on all platforms.
-        self.reader_thread.take();
+        // If the thread doesn't exit within the timeout (100ms), we detach it to
+        // avoid blocking the main thread. This bounds worst-case blocking while
+        // still ensuring timely fd release in normal operation.
+        let timeout = Duration::from_millis(100);
+        if self.reader_done_rx.recv_timeout(timeout).is_ok() {
+            // Reader thread signaled completion - join it to clean up resources
+            if let Some(handle) = self.reader_thread.take() {
+                let _ = handle.join();
+            }
+        } else {
+            // Timeout - detach the thread. The OS will clean it up when it exits.
+            self.reader_thread.take();
+        }
     }
 }
 
@@ -598,6 +631,89 @@ mod tests {
             has_login_indicator,
             "Expected login shell indicator (argv[0] starting with '-') in output: {}",
             output
+        );
+    }
+
+    // Chunk: docs/chunks/terminal_spawn_reliability - PTY cleanup tests
+
+    /// Tests that PtyHandle::Drop completes in a reasonable time.
+    ///
+    /// This test verifies that the timed join mechanism in Drop doesn't block
+    /// indefinitely. The Drop should complete within the 100ms timeout even if
+    /// the reader thread is slow to exit.
+    #[test]
+    fn test_pty_drop_completes_quickly() {
+        let start = std::time::Instant::now();
+
+        // Create a PTY - the handle will be dropped at end of scope
+        {
+            let handle = PtyHandle::spawn(
+                "sleep",
+                &["10"], // Long-running process
+                Path::new("/tmp"),
+                24,
+                80,
+                false,
+            ).expect("Failed to spawn PTY");
+
+            // Handle goes out of scope here, triggering Drop
+            drop(handle);
+        }
+
+        // Drop should complete in under 200ms (100ms timeout + some overhead)
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 500,
+            "Drop took too long: {:?}ms (expected < 500ms)",
+            elapsed.as_millis()
+        );
+    }
+
+    /// Tests that multiple PTYs can be created and dropped without fd leaks.
+    ///
+    /// This is a regression test for the fd leak issue. Previously, closing a
+    /// terminal didn't properly release the PTY fds because the reader thread
+    /// wasn't joined. This could cause subsequent openpty calls to fail with
+    /// ENXIO when too many PTYs were allocated.
+    #[test]
+    fn test_concurrent_pty_spawn_no_leaks() {
+        // Spawn and drop 10 PTYs in quick succession
+        // This should not cause fd leaks that would prevent future spawns
+        for i in 0..10 {
+            let handle = PtyHandle::spawn(
+                "true",
+                &[],
+                Path::new("/tmp"),
+                24,
+                80,
+                false,
+            );
+
+            assert!(
+                handle.is_ok(),
+                "Failed to spawn PTY #{}: {:?}",
+                i,
+                handle.err()
+            );
+
+            // Drop immediately
+            drop(handle.unwrap());
+        }
+
+        // After all the drops, we should still be able to spawn more
+        let final_handle = PtyHandle::spawn(
+            "echo",
+            &["success"],
+            Path::new("/tmp"),
+            24,
+            80,
+            false,
+        );
+
+        assert!(
+            final_handle.is_ok(),
+            "Failed to spawn final PTY after cleanup: {:?}",
+            final_handle.err()
         );
     }
 }

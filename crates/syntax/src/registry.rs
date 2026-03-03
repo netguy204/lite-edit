@@ -1,11 +1,13 @@
 // Chunk: docs/chunks/syntax_highlighting - Language registry for 13 languages
 // Chunk: docs/chunks/syntax_highlight_perf - LanguageConfig highlights_query for direct QueryCursor usage
+// Chunk: docs/chunks/treesitter_gotodef - Locals query support for go-to-definition
 
 //! Language registry mapping file extensions to tree-sitter configurations.
 //!
 //! This module provides `LanguageRegistry` which maps file extensions to
 //! tree-sitter `Language` objects and their associated highlight queries.
 
+use crate::queries;
 use std::collections::HashMap;
 use tree_sitter::Language;
 
@@ -21,13 +23,23 @@ pub struct LanguageConfig {
     // Chunk: docs/chunks/highlight_injection - Injection query now used for embedded language highlighting
     /// The injections query (for embedded languages like Markdown code blocks, HTML script tags)
     pub injections_query: &'static str,
-    /// The locals query (for scope-based highlighting)
-    #[allow(dead_code)] // Reserved for future locals support
+    // Chunk: docs/chunks/treesitter_gotodef - Locals query for go-to-definition
+    /// The locals query (for scope-aware go-to-definition and highlighting).
+    /// Defines `@local.scope`, `@local.definition`, and `@local.reference` captures.
     pub locals_query: &'static str,
     // Chunk: docs/chunks/highlight_injection - Language name for same-language injection filtering
     /// The canonical language name (e.g., "rust", "python", "javascript").
     /// Used to skip redundant same-language injections.
     pub language_name: &'static str,
+    // Chunk: docs/chunks/treesitter_indent - Indent query for intelligent indentation
+    /// The indents query (for computing line indentation from parse tree structure).
+    /// Empty string means no indent query is configured for this language.
+    pub indents_query: &'static str,
+    // Chunk: docs/chunks/treesitter_symbol_index - Tags query for cross-file symbol index
+    /// The tags query (for extracting top-level symbol definitions like functions, classes, etc.).
+    /// Used to build a workspace-wide symbol index for cross-file go-to-definition.
+    /// Empty string means no tags query is configured for this language.
+    pub tags_query: &'static str,
 }
 
 impl LanguageConfig {
@@ -38,6 +50,8 @@ impl LanguageConfig {
         injections_query: &'static str,
         locals_query: &'static str,
         language_name: &'static str,
+        indents_query: &'static str,
+        tags_query: &'static str,
     ) -> Self {
         Self {
             language,
@@ -45,6 +59,8 @@ impl LanguageConfig {
             injections_query,
             locals_query,
             language_name,
+            indents_query,
+            tags_query,
         }
     }
 }
@@ -74,13 +90,18 @@ impl LanguageRegistry {
     pub fn new() -> Self {
         let mut configs = HashMap::new();
 
-        // Rust (uses HIGHLIGHTS_QUERY)
+        // Rust (uses HIGHLIGHTS_QUERY and custom locals query for go-to-def)
+        // Chunk: docs/chunks/treesitter_gotodef - Use custom locals query for Rust
+        // Chunk: docs/chunks/treesitter_indent - Rust indent query
+        // Chunk: docs/chunks/treesitter_symbol_index - Rust tags query for cross-file go-to-def
         let rust_config = LanguageConfig::new(
             tree_sitter_rust::LANGUAGE.into(),
             tree_sitter_rust::HIGHLIGHTS_QUERY,
             tree_sitter_rust::INJECTIONS_QUERY,
-            "",
+            queries::rust::LOCALS_QUERY,
             "rust",
+            include_str!("../queries/rust/indents.scm"),
+            tree_sitter_rust::TAGS_QUERY,
         );
         configs.insert("rs", rust_config);
 
@@ -92,12 +113,16 @@ impl LanguageRegistry {
             format!("{}\n{}", tree_sitter_c::HIGHLIGHT_QUERY, tree_sitter_cpp::HIGHLIGHT_QUERY)
                 .into_boxed_str(),
         );
+        // Chunk: docs/chunks/treesitter_indent - C++ indent query
+        // Chunk: docs/chunks/treesitter_symbol_index - No tags query for C++
         let cpp_config = LanguageConfig::new(
             tree_sitter_cpp::LANGUAGE.into(),
             cpp_combined_query,
             "",
             "",
             "cpp",
+            include_str!("../queries/cpp/indents.scm"),
+            "", // No tags query for C++
         );
         configs.insert("cpp", cpp_config.clone());
         configs.insert("cc", cpp_config.clone());
@@ -106,22 +131,31 @@ impl LanguageRegistry {
         configs.insert("h", cpp_config); // .h is ambiguous, default to C++
 
         // C (uses HIGHLIGHT_QUERY - no S)
+        // Chunk: docs/chunks/treesitter_indent - C indent query
+        // Chunk: docs/chunks/treesitter_symbol_index - No tags query for C
         let c_config = LanguageConfig::new(
             tree_sitter_c::LANGUAGE.into(),
             tree_sitter_c::HIGHLIGHT_QUERY,
             "",
             "",
             "c",
+            include_str!("../queries/c/indents.scm"),
+            "", // No tags query for C
         );
         configs.insert("c", c_config);
 
-        // Python (uses HIGHLIGHTS_QUERY)
+        // Python (uses HIGHLIGHTS_QUERY and custom locals query for go-to-def)
+        // Chunk: docs/chunks/treesitter_gotodef - Use custom locals query for Python
+        // Chunk: docs/chunks/treesitter_indent - Python indent query
+        // Chunk: docs/chunks/treesitter_symbol_index - Python tags query for cross-file go-to-def
         let python_config = LanguageConfig::new(
             tree_sitter_python::LANGUAGE.into(),
             tree_sitter_python::HIGHLIGHTS_QUERY,
             "",
-            "",
+            queries::python::LOCALS_QUERY,
             "python",
+            include_str!("../queries/python/indents.scm"),
+            tree_sitter_python::TAGS_QUERY,
         );
         configs.insert("py", python_config);
 
@@ -132,106 +166,146 @@ impl LanguageRegistry {
             format!("{}\n{}", tree_sitter_javascript::HIGHLIGHT_QUERY, tree_sitter_typescript::HIGHLIGHTS_QUERY)
                 .into_boxed_str(),
         );
+        // Chunk: docs/chunks/treesitter_indent - TypeScript indent query
+        // Chunk: docs/chunks/treesitter_symbol_index - TypeScript tags query for cross-file go-to-def
         let typescript_config = LanguageConfig::new(
             tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             ts_combined_query,
             "",
             tree_sitter_typescript::LOCALS_QUERY,
             "typescript",
+            include_str!("../queries/typescript/indents.scm"),
+            tree_sitter_typescript::TAGS_QUERY,
         );
         configs.insert("ts", typescript_config);
 
         // TSX also needs the JavaScript base (it extends TypeScript which extends JavaScript)
+        // Chunk: docs/chunks/treesitter_indent - TSX shares TypeScript indent query
+        // Chunk: docs/chunks/treesitter_symbol_index - TSX shares TypeScript tags query
         let tsx_config = LanguageConfig::new(
             tree_sitter_typescript::LANGUAGE_TSX.into(),
             ts_combined_query,  // Reuse the combined query
             "",
             tree_sitter_typescript::LOCALS_QUERY,
             "tsx",
+            include_str!("../queries/typescript/indents.scm"),  // Reuse TS indent query
+            tree_sitter_typescript::TAGS_QUERY,  // Reuse TS tags query
         );
         configs.insert("tsx", tsx_config);
 
         // JavaScript (uses HIGHLIGHT_QUERY - no S)
+        // Chunk: docs/chunks/treesitter_indent - JavaScript indent query
+        // Chunk: docs/chunks/treesitter_symbol_index - JavaScript tags query for cross-file go-to-def
         let javascript_config = LanguageConfig::new(
             tree_sitter_javascript::LANGUAGE.into(),
             tree_sitter_javascript::HIGHLIGHT_QUERY,
             tree_sitter_javascript::INJECTIONS_QUERY,
             tree_sitter_javascript::LOCALS_QUERY,
             "javascript",
+            include_str!("../queries/javascript/indents.scm"),
+            tree_sitter_javascript::TAGS_QUERY,
         );
         configs.insert("js", javascript_config.clone());
         configs.insert("jsx", javascript_config.clone());
         configs.insert("mjs", javascript_config);
 
         // Go (uses HIGHLIGHTS_QUERY)
+        // Chunk: docs/chunks/treesitter_indent - Go indent query
+        // Chunk: docs/chunks/treesitter_symbol_index - Go tags query for cross-file go-to-def
         let go_config = LanguageConfig::new(
             tree_sitter_go::LANGUAGE.into(),
             tree_sitter_go::HIGHLIGHTS_QUERY,
             "",
             "",
             "go",
+            include_str!("../queries/go/indents.scm"),
+            tree_sitter_go::TAGS_QUERY,
         );
         configs.insert("go", go_config);
 
         // JSON (uses HIGHLIGHTS_QUERY)
+        // Chunk: docs/chunks/treesitter_indent - JSON indent query
+        // Chunk: docs/chunks/treesitter_symbol_index - No tags query for JSON (data format)
         let json_config = LanguageConfig::new(
             tree_sitter_json::LANGUAGE.into(),
             tree_sitter_json::HIGHLIGHTS_QUERY,
             "",
             "",
             "json",
+            include_str!("../queries/json/indents.scm"),
+            "", // No tags query for JSON
         );
         configs.insert("json", json_config);
 
         // TOML (uses tree-sitter-toml-ng with LANGUAGE and HIGHLIGHTS_QUERY)
+        // Chunk: docs/chunks/treesitter_indent - TOML indent query
+        // Chunk: docs/chunks/treesitter_symbol_index - No tags query for TOML (config format)
         let toml_config = LanguageConfig::new(
             tree_sitter_toml_ng::LANGUAGE.into(),
             tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
             "",
             "",
             "toml",
+            include_str!("../queries/toml/indents.scm"),
+            "", // No tags query for TOML
         );
         configs.insert("toml", toml_config);
 
         // Markdown (uses HIGHLIGHT_QUERY_BLOCK for the block parser)
+        // Chunk: docs/chunks/treesitter_indent - Markdown indent query
+        // Chunk: docs/chunks/treesitter_symbol_index - No tags query for Markdown (doc format)
         let md_config = LanguageConfig::new(
             tree_sitter_md::LANGUAGE.into(),
             tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
             tree_sitter_md::INJECTION_QUERY_BLOCK,
             "",
             "markdown",
+            include_str!("../queries/markdown/indents.scm"),
+            "", // No tags query for Markdown
         );
         configs.insert("md", md_config.clone());
         configs.insert("markdown", md_config);
 
         // HTML (uses HIGHLIGHTS_QUERY)
+        // Chunk: docs/chunks/treesitter_indent - HTML indent query
+        // Chunk: docs/chunks/treesitter_symbol_index - No tags query for HTML (markup format)
         let html_config = LanguageConfig::new(
             tree_sitter_html::LANGUAGE.into(),
             tree_sitter_html::HIGHLIGHTS_QUERY,
             tree_sitter_html::INJECTIONS_QUERY,
             "",
             "html",
+            include_str!("../queries/html/indents.scm"),
+            "", // No tags query for HTML
         );
         configs.insert("html", html_config.clone());
         configs.insert("htm", html_config);
 
         // CSS (uses HIGHLIGHTS_QUERY)
+        // Chunk: docs/chunks/treesitter_indent - CSS indent query
+        // Chunk: docs/chunks/treesitter_symbol_index - No tags query for CSS (stylesheet format)
         let css_config = LanguageConfig::new(
             tree_sitter_css::LANGUAGE.into(),
             tree_sitter_css::HIGHLIGHTS_QUERY,
             "",
             "",
             "css",
+            include_str!("../queries/css/indents.scm"),
+            "", // No tags query for CSS
         );
         configs.insert("css", css_config);
 
         // Bash (uses HIGHLIGHT_QUERY - no S)
+        // Chunk: docs/chunks/treesitter_indent - Bash indent query
+        // Chunk: docs/chunks/treesitter_symbol_index - No tags query for Bash (shell scripts)
         let bash_config = LanguageConfig::new(
             tree_sitter_bash::LANGUAGE.into(),
             tree_sitter_bash::HIGHLIGHT_QUERY,
             "",
             "",
             "bash",
+            include_str!("../queries/bash/indents.scm"),
+            "", // No tags query for Bash
         );
         configs.insert("sh", bash_config.clone());
         configs.insert("bash", bash_config.clone());
@@ -326,6 +400,8 @@ impl Clone for LanguageConfig {
             injections_query: self.injections_query,
             locals_query: self.locals_query,
             language_name: self.language_name,
+            indents_query: self.indents_query,
+            tags_query: self.tags_query,
         }
     }
 }
@@ -634,6 +710,42 @@ mod tests {
         // The Rust injections query is NOT empty - it contains patterns for doc comments
         // This is why we need to optimize the injection path
         assert!(config.injections_query.len() > 0, "Expected non-empty injections query");
+    }
+
+    // Chunk: docs/chunks/treesitter_symbol_index - Tags query tests
+    #[test]
+    fn test_tags_query_available_for_supported_languages() {
+        let registry = LanguageRegistry::new();
+
+        // Languages that should have tags queries
+        let languages_with_tags = ["rs", "py", "go", "js", "ts", "tsx"];
+        for ext in languages_with_tags {
+            let config = registry.config_for_extension(ext)
+                .unwrap_or_else(|| panic!("Extension '{}' should be supported", ext));
+            assert!(
+                !config.tags_query.is_empty(),
+                "Expected non-empty tags_query for extension '{}'",
+                ext
+            );
+        }
+    }
+
+    #[test]
+    fn test_tags_query_empty_for_unsupported_languages() {
+        let registry = LanguageRegistry::new();
+
+        // Languages that should NOT have tags queries
+        let languages_without_tags = ["c", "cpp", "json", "toml", "md", "html", "css", "sh"];
+        for ext in languages_without_tags {
+            let config = registry.config_for_extension(ext)
+                .unwrap_or_else(|| panic!("Extension '{}' should be supported", ext));
+            assert!(
+                config.tags_query.is_empty(),
+                "Expected empty tags_query for extension '{}', but got {} bytes",
+                ext,
+                config.tags_query.len()
+            );
+        }
     }
 
     #[test]

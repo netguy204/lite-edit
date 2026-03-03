@@ -143,6 +143,12 @@ pub struct TerminalBuffer {
     /// Receiver for terminal events from alacritty_terminal.
     /// Used to receive Event::PtyWrite (DSR responses, etc.) for write-back to PTY.
     event_rx: Receiver<Event>,
+    // Chunk: docs/chunks/terminal_fullscreen_paint - Alt screen mode transition tracking
+    /// Previous alternate screen mode state (for detecting transitions).
+    /// When the terminal transitions between primary and alternate screen modes,
+    /// we force a full viewport repaint to ensure fullscreen apps like Vim paint
+    /// their initial content immediately.
+    was_alt_screen: bool,
 }
 
 impl TerminalBuffer {
@@ -205,6 +211,7 @@ impl TerminalBuffer {
             selection_anchor: None,
             selection_head: None,
             event_rx,
+            was_alt_screen: false, // Terminal starts in primary screen mode
         }
     }
 
@@ -372,6 +379,19 @@ impl TerminalBuffer {
 
             // Update dirty tracking based on terminal damage
             self.update_damage();
+
+            // Chunk: docs/chunks/terminal_fullscreen_paint - Detect alt screen mode transitions
+            // When the terminal transitions between primary and alternate screen modes,
+            // force a full viewport repaint. This ensures fullscreen apps like Vim paint
+            // their initial content immediately, rather than waiting for further PTY output.
+            // Without this, static apps that draw once and then wait for input would
+            // appear blank until the user triggers a repaint (e.g., by resizing).
+            let is_alt = self.is_alt_screen();
+            if is_alt != self.was_alt_screen {
+                // Mode transition detected - force full viewport dirty
+                self.dirty = DirtyLines::FromLineToEnd(0);
+                self.was_alt_screen = is_alt;
+            }
 
             // Check if we need to flush lines to cold storage
             self.check_scrollback_overflow();
@@ -624,31 +644,49 @@ impl TerminalBuffer {
     ///
     /// This is called after processing PTY events. When the hot scrollback
     /// exceeds `hot_scrollback_limit`, oldest lines are captured to cold storage.
-    fn check_scrollback_overflow(&mut self) {
+    ///
+    /// # Returns
+    /// The number of lines captured to cold storage (0 if no capture occurred).
+    // Chunk: docs/chunks/viewport_keystroke_jostle - Fix terminal jostle bug
+    pub(crate) fn check_scrollback_overflow(&mut self) -> usize {
         // Don't capture during alternate screen mode
         if self.is_alt_screen() {
-            return;
+            return 0;
         }
 
         let history_size = self.history_size();
 
-        // Check if we need to capture lines
-        if history_size <= self.hot_scrollback_limit {
-            self.last_history_size = history_size;
-            return;
+        // Only capture if history has grown since last capture.
+        // This prevents re-capturing the same lines when history_size > limit
+        // but no new output has arrived (alacritty keeps old lines in grid).
+        //
+        // The bug fixed here: After history_size exceeds hot_scrollback_limit,
+        // the old condition (history_size > hot_scrollback_limit) was always true,
+        // causing recapture on every PTY event. This inflated cold_line_count,
+        // which inflated line_count(), causing viewport jostling.
+        if history_size <= self.last_history_size {
+            return 0;
         }
 
-        // Calculate how many lines to capture
-        // We capture enough to bring history back under the limit, plus a buffer
-        // to avoid capturing on every single output
-        let lines_over_limit = history_size - self.hot_scrollback_limit;
-        let capture_count = lines_over_limit;
+        // Calculate how many NEW lines to capture (lines added since last check)
+        let new_lines = history_size - self.last_history_size;
+
+        // Only capture if we're over the limit
+        if history_size <= self.hot_scrollback_limit {
+            self.last_history_size = history_size;
+            return 0;
+        }
+
+        // Capture the new lines that pushed us over the limit
+        // (or all new lines if we were already over)
+        let capture_count = new_lines;
 
         if capture_count > 0 {
             self.capture_cold_lines(capture_count);
         }
 
         self.last_history_size = history_size;
+        capture_count
     }
 
     // Chunk: docs/chunks/terminal_file_backed_scrollback - Capture oldest lines to cold storage
@@ -960,6 +998,8 @@ impl TerminalBuffer {
     #[cfg(test)]
     pub fn feed_bytes(&mut self, data: &[u8]) {
         self.processor.advance(&mut self.term, data);
+        // Track mode transitions for consistency with poll_events()
+        self.was_alt_screen = self.is_alt_screen();
         self.dirty = DirtyLines::FromLineToEnd(0);
     }
 }
@@ -1609,5 +1649,224 @@ mod tests {
             }
         }
         assert!(found, "INVERSE should be preserved when cursor is hidden");
+    }
+
+    // =========================================================================
+    // Alt Screen Mode Transition Tests
+    // Chunk: docs/chunks/terminal_fullscreen_paint - Mode transition dirty tracking
+    // =========================================================================
+
+    #[test]
+    fn test_alt_screen_entry_forces_full_dirty() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+        // Clear initial dirty state
+        let _ = terminal.take_dirty();
+
+        // Enter alternate screen mode (ESC[?1049h)
+        terminal.feed_bytes(b"\x1b[?1049h");
+
+        // Verify we're in alt screen mode
+        assert!(terminal.is_alt_screen(), "Should be in alternate screen mode");
+
+        // Dirty should indicate full viewport (from line 0)
+        let dirty = terminal.take_dirty();
+        assert!(
+            matches!(dirty, DirtyLines::FromLineToEnd(0)),
+            "Expected DirtyLines::FromLineToEnd(0), got {:?}",
+            dirty
+        );
+    }
+
+    #[test]
+    fn test_alt_screen_exit_forces_full_dirty() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+        // Enter alternate screen mode first
+        terminal.feed_bytes(b"\x1b[?1049h");
+        let _ = terminal.take_dirty();
+
+        // Exit alternate screen mode (ESC[?1049l)
+        terminal.feed_bytes(b"\x1b[?1049l");
+
+        // Verify we're back in primary screen mode
+        assert!(!terminal.is_alt_screen(), "Should be in primary screen mode");
+
+        // Dirty should indicate full viewport (from line 0)
+        let dirty = terminal.take_dirty();
+        assert!(
+            matches!(dirty, DirtyLines::FromLineToEnd(0)),
+            "Expected DirtyLines::FromLineToEnd(0), got {:?}",
+            dirty
+        );
+    }
+
+    #[test]
+    fn test_no_mode_transition_normal_dirty() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+        // Clear initial dirty state
+        let _ = terminal.take_dirty();
+
+        // Just type some text (no mode transition)
+        terminal.feed_bytes(b"Hello, World!");
+
+        // Dirty should still be set (but we're not changing modes)
+        let dirty = terminal.take_dirty();
+        assert!(
+            matches!(dirty, DirtyLines::FromLineToEnd(0)),
+            "Expected dirty state after typing, got {:?}",
+            dirty
+        );
+
+        // Verify we're still in primary screen mode
+        assert!(!terminal.is_alt_screen(), "Should still be in primary screen mode");
+    }
+
+    #[test]
+    fn test_alt_screen_mode_tracking() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+
+        // Start in primary screen
+        assert!(!terminal.is_alt_screen());
+
+        // Enter alt screen
+        terminal.feed_bytes(b"\x1b[?1049h");
+        assert!(terminal.is_alt_screen());
+
+        // Exit alt screen
+        terminal.feed_bytes(b"\x1b[?1049l");
+        assert!(!terminal.is_alt_screen());
+
+        // Enter again
+        terminal.feed_bytes(b"\x1b[?1049h");
+        assert!(terminal.is_alt_screen());
+    }
+
+    #[test]
+    fn test_alt_screen_with_content_draw() {
+        let mut terminal = TerminalBuffer::new(80, 24, 1000);
+        let _ = terminal.take_dirty();
+
+        // Simulate what Vim does: enter alt screen, clear screen, draw content
+        terminal.feed_bytes(b"\x1b[?1049h\x1b[2J\x1b[HVim Editor Content");
+
+        // Should be in alt screen
+        assert!(terminal.is_alt_screen());
+
+        // Dirty should be set from line 0
+        let dirty = terminal.take_dirty();
+        assert!(
+            matches!(dirty, DirtyLines::FromLineToEnd(0)),
+            "Expected DirtyLines::FromLineToEnd(0), got {:?}",
+            dirty
+        );
+
+        // Content should be there
+        let line = terminal.styled_line(0).unwrap();
+        let text: String = line.spans.iter().map(|s| &s.text[..]).collect();
+        assert!(text.contains("Vim Editor Content"), "Content should be present");
+    }
+
+    // =========================================================================
+    // Cold Scrollback Recapture Bug Tests
+    // Chunk: docs/chunks/viewport_keystroke_jostle - Fix terminal jostle bug
+    // =========================================================================
+
+    #[test]
+    fn test_check_scrollback_overflow_does_not_recapture_same_lines() {
+        // This test verifies that check_scrollback_overflow() does not
+        // increment cold_line_count when called multiple times without
+        // new output arriving.
+        //
+        // The bug: after history_size > hot_scrollback_limit, the overflow
+        // condition is always true, causing recapture on every PTY event.
+        // This inflates cold_line_count, which inflates line_count(), which
+        // causes viewport jostling when scroll_to_bottom() is called.
+
+        let mut terminal = TerminalBuffer::new(80, 24, 10000);
+        terminal.set_hot_scrollback_limit(50); // Small limit for testing
+
+        // Generate enough lines to exceed the hot scrollback limit
+        // Each line is a CRLF-terminated line to populate scrollback
+        for i in 0..100 {
+            terminal.feed_bytes(format!("Line {:03}\r\n", i).as_bytes());
+        }
+
+        // First call to check_scrollback_overflow should capture lines
+        let captured_first = terminal.check_scrollback_overflow();
+        let cold_count_after_first = terminal.cold_line_count();
+
+        // The overflow happened, so some lines should have been captured
+        assert!(
+            captured_first > 0,
+            "First overflow check should capture lines, but captured {}",
+            captured_first
+        );
+        assert!(
+            cold_count_after_first > 0,
+            "cold_line_count should be positive after first overflow"
+        );
+
+        // Second call WITHOUT any new output should NOT capture more lines
+        let captured_second = terminal.check_scrollback_overflow();
+        let cold_count_after_second = terminal.cold_line_count();
+
+        assert_eq!(
+            captured_second, 0,
+            "Second overflow check should NOT capture lines (captured {})",
+            captured_second
+        );
+        assert_eq!(
+            cold_count_after_second, cold_count_after_first,
+            "cold_line_count should be unchanged: {} vs {}",
+            cold_count_after_second, cold_count_after_first
+        );
+
+        // Third call also should NOT capture
+        let captured_third = terminal.check_scrollback_overflow();
+        let cold_count_after_third = terminal.cold_line_count();
+
+        assert_eq!(
+            captured_third, 0,
+            "Third overflow check should NOT capture lines"
+        );
+        assert_eq!(
+            cold_count_after_third, cold_count_after_first,
+            "cold_line_count should still be unchanged after third call"
+        );
+    }
+
+    #[test]
+    fn test_check_scrollback_overflow_captures_on_new_output() {
+        // Verify that new output DOES trigger capture (normal behavior)
+        let mut terminal = TerminalBuffer::new(80, 24, 10000);
+        terminal.set_hot_scrollback_limit(50);
+
+        // Generate enough lines to exceed the limit
+        for i in 0..100 {
+            terminal.feed_bytes(format!("Line {:03}\r\n", i).as_bytes());
+        }
+
+        // First overflow
+        terminal.check_scrollback_overflow();
+        let cold_count_first = terminal.cold_line_count();
+
+        // Add more output
+        for i in 100..150 {
+            terminal.feed_bytes(format!("Line {:03}\r\n", i).as_bytes());
+        }
+
+        // This should capture more lines
+        let captured = terminal.check_scrollback_overflow();
+        let cold_count_second = terminal.cold_line_count();
+
+        assert!(
+            captured > 0,
+            "Should capture lines after new output, but captured {}",
+            captured
+        );
+        assert!(
+            cold_count_second > cold_count_first,
+            "cold_line_count should increase: {} > {}",
+            cold_count_second, cold_count_first
+        );
     }
 }

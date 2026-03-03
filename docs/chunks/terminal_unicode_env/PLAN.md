@@ -183,17 +183,6 @@ After the automated tests pass, manually verify the fix works end-to-end:
    - Launch lite-edit from a terminal (inherits locale)
    - Launch lite-edit from Finder/Dock (minimal environment, uses fallback)
 
----
-
-**BACKREFERENCE COMMENTS**
-
-Add a chunk backreference to the `configure_pty_environment()` helper function:
-
-```rust
-// Chunk: docs/chunks/terminal_unicode_env - UTF-8 locale environment setup
-fn configure_pty_environment(cmd: &mut CommandBuilder) { ... }
-```
-
 ## Dependencies
 
 None. The `portable-pty` crate's `CommandBuilder::env()` method is already available
@@ -222,18 +211,4 @@ and used by the existing code. No new dependencies are required.
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

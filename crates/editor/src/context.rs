@@ -13,7 +13,8 @@ use crate::dirty_region::DirtyRegion;
 use crate::font::FontMetrics;
 use crate::viewport::Viewport;
 use crate::wrap_layout::WrapLayout;
-use lite_edit_buffer::{DirtyLines, TextBuffer};
+// Chunk: docs/chunks/incremental_parse - Import EditInfo for incremental parsing
+use lite_edit_buffer::{DirtyLines, EditInfo, TextBuffer};
 
 // Chunk: docs/chunks/mouse_click_cursor - Font metrics (char_width, line_height) and view_height for pixel-to-position conversion
 /// Context providing mutable access to editor state.
@@ -47,6 +48,14 @@ pub struct EditorContext<'a> {
     /// operations (cursor movement, selection, scrolling) that also set dirty_region
     /// for rendering purposes.
     pub content_mutated: bool,
+    // Chunk: docs/chunks/incremental_parse - Edit info for incremental syntax parsing
+    /// Edit info for incremental syntax parsing.
+    ///
+    /// When a mutation command is executed using a `_tracked` variant, it sets this
+    /// field with the byte offset information needed for tree-sitter's incremental
+    /// parsing API. The caller (e.g., `handle_key_buffer`) should check this field
+    /// after handling the event and call `Tab::notify_edit()` if set.
+    pub edit_info: Option<EditInfo>,
 }
 
 impl<'a> EditorContext<'a> {
@@ -79,6 +88,8 @@ impl<'a> EditorContext<'a> {
             view_height,
             view_width,
             content_mutated: false,
+            // Chunk: docs/chunks/incremental_parse - Initialize edit_info to None
+            edit_info: None,
         }
     }
 

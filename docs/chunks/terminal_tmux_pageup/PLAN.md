@@ -8,153 +8,130 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The fix extends the `is_function_key` bypass check in `metal_view.rs:__key_down` to include navigation keys that currently fall through to `interpretKeyEvents:` and fail to reach the terminal input path reliably.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Root cause analysis confirmed:**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+The `keyDown:` method (line 312) has a bypass path for "function keys" that routes directly to `convert_key_event()` → `send_key()`. This bypass exists because certain keys don't produce useful text input through macOS's text input system and need direct handling.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/terminal_tmux_pageup/GOAL.md)
-with references to the files that you expect to touch.
--->
+The current `is_function_key` check (lines 325-329):
+```rust
+let is_function_key = matches!(key_code,
+    0x7A..=0x7F | // F1-F4 and some system keys
+    0x60..=0x6F | // F5-F12 and other function keys
+    0x72         // Insert/Help
+);
+```
+
+This covers:
+- `0x7A-0x7F`: F1-F4, arrow keys (7B-7E), some system keys
+- `0x60-0x6F`: F5-F12
+- `0x72`: Insert/Help
+
+But it misses keyCodes in the `0x73-0x79` gap:
+- `0x73`: Home
+- `0x74`: PageUp
+- `0x75`: Forward Delete
+- `0x77`: End
+- `0x79`: PageDown
+
+These keys go through `interpretKeyEvents:` → `doCommandBySelector` (e.g., `"pageUp:"`). While `doCommandBySelector` does map `"pageUp:"` to `Key::PageUp` (line 588-589), this route through the macOS text input system is unreliable in some keyboard/IME configurations and inside tmux copy mode.
+
+**Fix strategy:**
+
+Add explicit keyCode checks for the missing navigation keys to route them through the direct bypass path, matching how other terminal emulators (Alacritty) handle these keys. This is a minimal, low-risk change that doesn't affect the general text input path.
+
+**Testing strategy:**
+
+Per `docs/trunk/TESTING_PHILOSOPHY.md`, GPU rendering and macOS event handling are "humble objects" that can't be unit-tested meaningfully. The key mapping logic in `convert_key()` is already tested implicitly by existing tests (arrow keys, function keys work). The fix changes routing, not encoding.
+
+Manual verification:
+1. Open a terminal tab
+2. Run `tmux`
+3. Press Ctrl+B then `[` to enter copy mode
+4. Press PageUp → should scroll back in scrollback buffer
+5. Press PageDown → should scroll forward
+6. Press Home → should jump to start of line/buffer
+7. Press End → should jump to end of line/buffer
+
+Regression check:
+1. File buffer tabs should still handle PageUp/PageDown for viewport scrolling
+2. Arrow keys, F1-F12, Tab, Return, Backspace should continue working
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/0001-validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/0002-error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/0001-validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems are directly relevant. This chunk modifies the macOS key event routing in `metal_view.rs`, which is a platform-specific input handling layer. The existing subsystems (`renderer`, `spatial_layout`, `viewport_scroll`) don't govern keyboard input dispatch.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Extend the bypass keyCode check to include navigation keys
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+**Location:** `crates/editor/src/metal_view.rs`, `__key_down` method (~line 325)
 
-Example:
+Modify the `is_function_key` variable to include the missing navigation keyCodes:
+- `0x73`: Home (KEY_HOME)
+- `0x74`: PageUp (KEY_PAGE_UP)
+- `0x75`: Forward Delete (KEY_FORWARD_DELETE)
+- `0x77`: End (KEY_END)
+- `0x79`: PageDown (KEY_PAGE_DOWN)
 
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+**Option A (preferred)**: Add a separate `is_navigation_key` variable for clarity:
+```rust
+let is_navigation_key = matches!(key_code,
+    0x73 | // Home
+    0x74 | // PageUp
+    0x75 | // Forward Delete
+    0x77 | // End
+    0x79   // PageDown
+);
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Then include it in the bypass condition:
+```rust
+if has_command || has_control || has_option || is_escape || is_function_key || is_navigation_key {
+```
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+**Option B**: Extend the existing ranges, but this is less clear since these aren't function keys.
+
+Add a chunk backreference comment before the new variable.
+
+### Step 2: Add comment explaining why navigation keys bypass text input
+
+Add a doc comment explaining that navigation keys (PageUp, PageDown, Home, End, Forward Delete) need to bypass `interpretKeyEvents:` because the text input system's selector-based routing (`pageUp:`, etc.) is unreliable in some keyboard configurations and terminal environments like tmux copy mode.
+
+### Step 3: Manual verification
+
+1. Build the project: `cargo build --release`
+2. Launch the editor and open a terminal tab
+3. Run `tmux` in the terminal
+4. Enter copy mode with `Ctrl+B [`
+5. Test PageUp → scrolls back
+6. Test PageDown → scrolls forward
+7. Test Home → jumps to start
+8. Test End → jumps to end
+9. Exit tmux and verify the same keys work in regular shell (less, man, etc.)
+
+### Step 4: Regression check
+
+1. Open a file buffer tab
+2. Verify PageUp/PageDown scroll the viewport
+3. Verify Home/End move cursor to line start/end
+4. Verify arrow keys, Tab, Return, Backspace all work normally
+5. Verify F1-F12 work (if testable in a TUI app)
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+None. This chunk modifies existing code in `metal_view.rs`. The `convert_key()` function already handles these keyCodes correctly (PageUp → `Key::PageUp`, etc.), so no changes are needed to key mapping or terminal encoding.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+**Low risk.** This is a minimal change to routing logic:
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+1. **Could bypassing break something?** Unlikely. The `doCommandBySelector` path was a fallback, not the intended path. The bypass path (`convert_key_event()` → `send_key()`) is the same path used for arrow keys, F1-F12, and all modifier combinations. It's well-tested.
+
+2. **What about file buffer behavior?** File buffers receive the same `KeyEvent` from either path. The `FocusTarget::handle_key` dispatch handles PageUp/PageDown for viewport scrolling regardless of how the event was routed through macOS.
+
+3. **IME interference?** Navigation keys don't produce composed text, so bypassing the text input system won't affect IME composition sequences for CJK input.
 
 ## Deviations
 

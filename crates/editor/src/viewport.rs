@@ -345,7 +345,13 @@ impl Viewport {
             // Cursor is at or after first_visible_line
             let cursor_screen_row = cumulative_screen_row + cursor_row_offset;
 
-            if cursor_screen_row >= visible_lines {
+            // Chunk: docs/chunks/viewport_keystroke_jostle - Fix off-by-one
+            // +1 accounts for partially visible bottom row (matching visible_range semantics)
+            // Subsystem: docs/subsystems/viewport_scroll - Invariant 5
+            //
+            // The change from `>=` to `>` means screen row `visible_lines` is now
+            // considered visible (it's the partial row that visible_range includes).
+            if cursor_screen_row > visible_lines {
                 // Cursor is below viewport - scroll down
                 // Put the cursor's screen row at the bottom of the viewport
                 let new_top_row = cursor_screen_row.saturating_sub(visible_lines.saturating_sub(1));
@@ -939,13 +945,19 @@ mod tests {
         let mut vp = Viewport::new(16.0);
         vp.update_size(160.0, 100); // 10 visible lines, showing 0..10
 
-        // Line 9 is the last visible line (0-indexed)
+        // Line 9 is the last fully visible line (0-indexed)
         let scrolled = vp.ensure_visible(9, 100);
         assert!(!scrolled);
 
-        // Line 10 is just beyond visible
+        // Chunk: docs/chunks/viewport_keystroke_jostle - Fix off-by-one
+        // Line 10 is the partial row (visible_range includes +1 for partial visibility).
+        // It IS rendered, so ensure_visible should NOT scroll.
         let scrolled = vp.ensure_visible(10, 100);
-        assert!(scrolled);
+        assert!(!scrolled, "Line 10 (partial row) is visible and should not scroll");
+
+        // Line 11 is the first line beyond the partial row - SHOULD scroll
+        let scrolled = vp.ensure_visible(11, 100);
+        assert!(scrolled, "Line 11 is beyond partial row and should scroll");
     }
 
     #[test]
@@ -1346,14 +1358,20 @@ mod tests {
 
     #[test]
     fn test_ensure_visible_with_margin_delegates_to_scroller() {
+        // Chunk: docs/chunks/viewport_keystroke_jostle - Updated for +1 partial row fix
         // Verify that Viewport.ensure_visible_with_margin delegates properly to RowScroller
         let mut vp = Viewport::new(16.0);
         vp.update_size(160.0, 100); // 10 visible lines
 
-        // With margin=1, line 9 should trigger scroll
+        // With margin=1, effective_visible = 9
+        // Line 9 is the effective partial row - should NOT scroll
         let scrolled = vp.ensure_visible_with_margin(9, 100, 1);
-        assert!(scrolled);
-        assert_eq!(vp.first_visible_line(), 1);
+        assert!(!scrolled, "Line 9 is the effective partial row, should not scroll");
+
+        // Line 10 is beyond effective viewport - SHOULD scroll
+        let scrolled = vp.ensure_visible_with_margin(10, 100, 1);
+        assert!(scrolled, "Line 10 is beyond effective viewport, should scroll");
+        assert_eq!(vp.first_visible_line(), 2);
     }
 
     #[test]
@@ -2529,6 +2547,231 @@ mod tests {
             region,
             DirtyRegion::FullViewport,
             "Zero visible lines should return FullViewport (degenerate viewport)"
+        );
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/viewport_keystroke_jostle - ensure_visible_wrapped +1 fix
+    // =========================================================================
+
+    #[test]
+    fn test_ensure_visible_wrapped_partial_row_should_not_scroll() {
+        use crate::wrap_layout::WrapLayout;
+        use crate::font::FontMetrics;
+
+        // visible_range includes visible_rows + 1 to account for the partially
+        // visible bottom row. ensure_visible_wrapped should match this behavior.
+        //
+        // With 10 visible rows (0..9 fully visible), screen row 10 is the partial row.
+        // A cursor at screen row 10 IS visible (rendered), so should NOT scroll.
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(160.0, 100); // 10 visible lines
+
+        // Set up wrap layout: 800px wide viewport, 8px per char = 100 cols per row
+        // Lines with 50 chars won't wrap (fit in one row)
+        let metrics = FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        };
+        let wrap_layout = WrapLayout::new(800.0, &metrics);
+
+        // Create 20 short lines (50 chars each, no wrapping needed)
+        let line_lengths: Vec<usize> = (0..20).map(|_| 50).collect();
+        let line_len_fn = |line: usize| line_lengths.get(line).copied().unwrap_or(0);
+
+        // Cursor at line 10 (screen row 10) - this is the partial row
+        // With first_visible_line = 0, cursor_screen_row = 10
+        // 10 >= 10 in old code: scrolls (BUG)
+        // 10 > 10 in fixed code: does not scroll (CORRECT)
+        let scrolled = vp.ensure_visible_wrapped(
+            10,    // cursor_line
+            0,     // cursor_col
+            0,     // first_visible_line
+            20,    // line_count
+            &wrap_layout,
+            line_len_fn,
+        );
+
+        assert!(
+            !scrolled,
+            "Screen row 10 (partial row) is visible via visible_range, should NOT scroll"
+        );
+        assert_eq!(vp.first_visible_line(), 0, "Should not have scrolled");
+
+        // Cursor at line 11 (screen row 11) - this is truly beyond the partial row
+        let scrolled = vp.ensure_visible_wrapped(
+            11,    // cursor_line
+            0,     // cursor_col
+            0,     // first_visible_line
+            20,    // line_count
+            &wrap_layout,
+            line_len_fn,
+        );
+
+        assert!(
+            scrolled,
+            "Screen row 11 is beyond the partial row, SHOULD scroll"
+        );
+        assert!(vp.first_visible_line() > 0, "Should have scrolled down");
+    }
+
+    // Chunk: docs/chunks/terminal_selection_offset - Terminal click coordinate mapping test
+    #[test]
+    fn test_buffer_line_for_screen_row_terminal_fixed_width_lines() {
+        // Test: Terminal lines all have the same width (terminal cols), which
+        // differs from text buffers with variable-length lines. This test verifies
+        // that buffer_line_for_screen_row correctly handles the terminal case.
+        //
+        // Scenario: Terminal with 80 cols, pane width allows 40 cols before wrap.
+        // Each terminal line (80 chars) wraps to 2 screen rows.
+        // Click on screen row 5 should map to buffer line 2 (lines 0, 1 each use 2 rows).
+
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(320.0, &crate::font::FontMetrics {
+            advance_width: 8.0,   // 320 / 8 = 40 cols per screen row
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        // Verify wrap layout: 40 cols per row, 80-char lines wrap to 2 rows
+        assert_eq!(wrap_layout.cols_per_row(), 40);
+        assert_eq!(wrap_layout.screen_rows_for_line(80), 2);
+
+        // Terminal with 10 lines, each 80 chars (terminal_cols = 80)
+        let terminal_cols = 80;
+        let line_count = 10;
+
+        // Total screen rows: 10 lines × 2 rows = 20 screen rows
+        let total_screen_rows: usize = (0..line_count)
+            .map(|_| wrap_layout.screen_rows_for_line(terminal_cols))
+            .sum();
+        assert_eq!(total_screen_rows, 20);
+
+        // Screen row 0 -> buffer line 0, row offset 0 (first row of line 0)
+        let (buf_line, row_off, _) = Viewport::buffer_line_for_screen_row(
+            0, line_count, &wrap_layout, |_line| terminal_cols
+        );
+        assert_eq!(buf_line, 0);
+        assert_eq!(row_off, 0);
+
+        // Screen row 1 -> buffer line 0, row offset 1 (second row of line 0)
+        let (buf_line, row_off, _) = Viewport::buffer_line_for_screen_row(
+            1, line_count, &wrap_layout, |_line| terminal_cols
+        );
+        assert_eq!(buf_line, 0);
+        assert_eq!(row_off, 1);
+
+        // Screen row 2 -> buffer line 1, row offset 0 (first row of line 1)
+        let (buf_line, row_off, _) = Viewport::buffer_line_for_screen_row(
+            2, line_count, &wrap_layout, |_line| terminal_cols
+        );
+        assert_eq!(buf_line, 1);
+        assert_eq!(row_off, 0);
+
+        // Screen row 4 -> buffer line 2, row offset 0 (first row of line 2)
+        let (buf_line, row_off, _) = Viewport::buffer_line_for_screen_row(
+            4, line_count, &wrap_layout, |_line| terminal_cols
+        );
+        assert_eq!(buf_line, 2);
+        assert_eq!(row_off, 0);
+
+        // Screen row 5 -> buffer line 2, row offset 1 (second row of line 2)
+        let (buf_line, row_off, _) = Viewport::buffer_line_for_screen_row(
+            5, line_count, &wrap_layout, |_line| terminal_cols
+        );
+        assert_eq!(buf_line, 2);
+        assert_eq!(row_off, 1);
+
+        // Screen row 18 -> buffer line 9, row offset 0 (first row of last line)
+        let (buf_line, row_off, _) = Viewport::buffer_line_for_screen_row(
+            18, line_count, &wrap_layout, |_line| terminal_cols
+        );
+        assert_eq!(buf_line, 9);
+        assert_eq!(row_off, 0);
+
+        // Screen row 19 -> buffer line 9, row offset 1 (last row)
+        let (buf_line, row_off, _) = Viewport::buffer_line_for_screen_row(
+            19, line_count, &wrap_layout, |_line| terminal_cols
+        );
+        assert_eq!(buf_line, 9);
+        assert_eq!(row_off, 1);
+    }
+
+    // Chunk: docs/chunks/terminal_selection_offset - Terminal selection offset regression test
+    #[test]
+    fn test_terminal_click_with_scroll_and_wrapping() {
+        // Regression test for the terminal selection offset bug.
+        // When clicking on a terminal line with wrapped lines above, the old code
+        // used first_visible_line() + row which gave incorrect results.
+        //
+        // The fix uses first_visible_screen_row() + row to get absolute_screen_row,
+        // then buffer_line_for_screen_row() to find the correct buffer line.
+        //
+        // Scenario: Terminal with 80 cols, pane width 320px (40 cols/row).
+        // Each 80-char line wraps to 2 screen rows.
+        // Scroll down 4 screen rows, then click on viewport row 2.
+        // Should map to buffer line 3 (not line 6 as the old buggy code would give).
+
+        let wrap_layout = crate::wrap_layout::WrapLayout::new(320.0, &crate::font::FontMetrics {
+            advance_width: 8.0,   // 40 cols per screen row
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        });
+
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(160.0, 100); // 10 visible rows
+
+        let terminal_cols = 80;
+        let line_count = 10;
+
+        // Scroll down 4 screen rows (64 pixels)
+        vp.set_scroll_offset_px_wrapped(64.0, line_count, &wrap_layout, |_| terminal_cols);
+        let first_visible_screen_row = vp.first_visible_screen_row();
+        assert_eq!(first_visible_screen_row, 4, "Should be scrolled to screen row 4");
+
+        // Simulate a click on viewport row 2 (the 3rd row visible on screen)
+        let viewport_relative_row = 2;
+
+        // OLD BUGGY CODE would do:
+        // let doc_line = vp.first_visible_line() + viewport_relative_row;
+        // This would give first_visible_line() which is also 2 (since each line = 2 rows),
+        // plus 2 = 4. This is wrong!
+        //
+        // Note: first_visible_line() returns the first buffer line that has any
+        // screen row visible. With 4 screen rows scrolled, that's buffer line 2
+        // (since line 0 uses rows 0-1, line 1 uses rows 2-3, line 2 starts at row 4).
+        //
+        // The buggy calculation: buffer_line = 2 + 2 = 4. WRONG!
+
+        // NEW CORRECT CODE:
+        let absolute_screen_row = first_visible_screen_row + viewport_relative_row;
+        assert_eq!(absolute_screen_row, 6, "Absolute screen row should be 6");
+
+        let (correct_doc_line, row_offset, _) = Viewport::buffer_line_for_screen_row(
+            absolute_screen_row,
+            line_count,
+            &wrap_layout,
+            |_line| terminal_cols,
+        );
+
+        // Screen row 6 is the first row of buffer line 3 (lines 0-2 use rows 0-5)
+        assert_eq!(correct_doc_line, 3, "Click on screen row 6 should map to buffer line 3");
+        assert_eq!(row_offset, 0, "Should be first row of buffer line 3");
+
+        // Verify we didn't get the buggy result
+        let buggy_doc_line = vp.first_visible_line() + viewport_relative_row;
+        assert_ne!(
+            correct_doc_line, buggy_doc_line,
+            "The fix should produce a different result than the buggy calculation"
         );
     }
 }

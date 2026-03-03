@@ -18,9 +18,9 @@ code_references:
   - ref: crates/editor/src/editor_state.rs#EditorState::handle_insert_text
     implements: "Added sync_active_tab_highlighter call after text insertion"
   - ref: crates/editor/src/editor_state.rs#EditorState::handle_set_marked_text
-    implements: "Added sync_active_tab_highlighter call after IME marked text"
+    implements: "IME marked text handling - no sync needed as marked text is overlay-rendered (superseded by incremental_parse)"
   - ref: crates/editor/src/editor_state.rs#EditorState::handle_unmark_text
-    implements: "Added sync_active_tab_highlighter call after IME cancellation"
+    implements: "IME cancellation handling - no sync needed as marked text doesn't modify buffer (superseded by incremental_parse)"
   - ref: crates/editor/src/editor_state.rs#EditorState::handle_file_drop
     implements: "Added sync_active_tab_highlighter call after file drop insertion"
 narrative: null

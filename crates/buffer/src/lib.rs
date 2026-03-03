@@ -65,4 +65,5 @@ pub use buffer_view::{
 };
 // Chunk: docs/chunks/unicode_ime_input - Export MarkedTextState for IME support
 pub use text_buffer::{MarkedTextState, TextBuffer};
-pub use types::{DirtyLines, Position};
+// Chunk: docs/chunks/incremental_parse - Export EditInfo and MutationResult for incremental parsing
+pub use types::{DirtyLines, EditInfo, MutationResult, Position};

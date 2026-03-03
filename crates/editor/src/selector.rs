@@ -520,6 +520,7 @@ mod tests {
     // Arrow key navigation with scroll adjustment
     // =========================================================================
 
+    // Chunk: docs/chunks/viewport_keystroke_jostle - Updated for +1 partial row fix
     #[test]
     fn down_past_visible_window_increments_first_visible_item() {
         let mut widget = SelectorWidget::new();
@@ -527,7 +528,7 @@ mod tests {
         widget.set_items((0..10).map(|i| format!("item{}", i)).collect());
         widget.update_visible_size(48.0); // 3 visible rows
 
-        // Start at index 0, first_visible_item 0 (items 0, 1, 2 visible)
+        // Start at index 0, first_visible_item 0 (items 0, 1, 2 fully visible, 3 partial)
         assert_eq!(widget.selected_index(), 0);
         assert_eq!(widget.first_visible_item(), 0);
 
@@ -537,14 +538,20 @@ mod tests {
         assert_eq!(widget.selected_index(), 2);
         assert_eq!(widget.first_visible_item(), 0); // Still visible
 
-        // Navigate down to index 3 (past visible window)
+        // Navigate down to index 3 (partial row - still visible with +1 fix)
         widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
         assert_eq!(widget.selected_index(), 3);
-        // first_visible_item should adjust to keep selection visible
-        // selected_index 3 should be visible, so first_visible_item = 3 - 3 + 1 = 1
-        assert_eq!(widget.first_visible_item(), 1);
+        // With +1 fix, index 3 is the partial row (visible), so no scroll yet
+        assert_eq!(widget.first_visible_item(), 0);
+
+        // Navigate down to index 4 (past partial row - NOW triggers scroll)
+        widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
+        assert_eq!(widget.selected_index(), 4);
+        // first_visible_item should adjust: 4 - (3 - 1) = 2
+        assert_eq!(widget.first_visible_item(), 2);
     }
 
+    // Chunk: docs/chunks/viewport_keystroke_jostle - Updated for +1 partial row fix
     #[test]
     fn up_past_visible_window_decrements_first_visible_item() {
         let mut widget = SelectorWidget::new();
@@ -553,29 +560,37 @@ mod tests {
         widget.update_visible_size(48.0); // 3 visible rows
 
         // Navigate down to item 5 first (this will auto-scroll as we go)
+        // With +1 fix, scrolling starts later, so let's trace through:
+        // - Items 0-3 visible (0,1,2 fully, 3 partial), first_visible = 0
+        // - Item 4: 4 > 0 + 3 = TRUE, scroll to 4 - 2 = 2, first_visible = 2
+        // - Item 5: 5 > 2 + 3 = FALSE (5 is partial at 2+3), first_visible = 2
         for _ in 0..5 {
             widget.handle_key(&KeyEvent::new(Key::Down, Modifiers::default()));
         }
         assert_eq!(widget.selected_index(), 5);
-        // first_visible_item should have scrolled to keep index 5 visible
-        // With visible_rows=3, keeping index 5 visible means first_visible_item=3
-        assert_eq!(widget.first_visible_item(), 3);
+        // With +1 fix: first_visible_item should be 2 (items 2,3,4 fully, 5 partial)
+        assert_eq!(widget.first_visible_item(), 2);
 
-        // Navigate up - selected_index goes from 5 to 4, still visible in window 3-5
+        // Navigate up - selected_index goes from 5 to 4, still visible in window 2-5
         widget.handle_key(&KeyEvent::new(Key::Up, Modifiers::default()));
         assert_eq!(widget.selected_index(), 4);
-        assert_eq!(widget.first_visible_item(), 3); // No change needed
+        assert_eq!(widget.first_visible_item(), 2); // No change needed
 
         // Navigate up again - selected_index goes to 3, still visible
         widget.handle_key(&KeyEvent::new(Key::Up, Modifiers::default()));
         assert_eq!(widget.selected_index(), 3);
-        assert_eq!(widget.first_visible_item(), 3); // No change needed
+        assert_eq!(widget.first_visible_item(), 2); // No change needed
 
-        // Navigate up again - selected_index goes to 2, which is above the window
+        // Navigate up again - selected_index goes to 2, still visible (first fully visible)
         widget.handle_key(&KeyEvent::new(Key::Up, Modifiers::default()));
         assert_eq!(widget.selected_index(), 2);
-        // first_visible_item should adjust to show index 2
-        assert_eq!(widget.first_visible_item(), 2);
+        assert_eq!(widget.first_visible_item(), 2); // No change needed
+
+        // Navigate up again - selected_index goes to 1, which is above the window
+        widget.handle_key(&KeyEvent::new(Key::Up, Modifiers::default()));
+        assert_eq!(widget.selected_index(), 1);
+        // first_visible_item should adjust to show index 1
+        assert_eq!(widget.first_visible_item(), 1);
     }
 
     #[test]
@@ -1786,6 +1801,7 @@ mod tests {
     /// This verifies ensure_visible keeps the selection within the scissor-clipped area.
     ///
     /// Chunk: docs/chunks/selector_scroll_bottom
+    /// Chunk: docs/chunks/viewport_keystroke_jostle - Updated for +1 partial row fix
     #[test]
     fn navigate_to_last_item_keeps_selection_at_bottom_of_viewport() {
         let mut widget = SelectorWidget::new();
@@ -1800,21 +1816,21 @@ mod tests {
 
         assert_eq!(widget.selected_index(), 19);
 
-        // The selection should be at draw_idx = visible_rows - 1 = 4
         // draw_idx = selected_index - first_visible_item()
         let first_visible = widget.first_visible_item();
         let draw_idx = widget.selected_index() - first_visible;
 
-        // With 20 items and 5 visible rows, when selection is at 19:
-        // first_visible should be 15 (so items 15-19 are visible)
-        // draw_idx = 19 - 15 = 4 = visible_rows - 1
+        // With +1 partial row fix and 20 items, 5 visible rows, when selection is at 19:
+        // Item 19 is the partial row when first_visible = 14
+        // (items 14,15,16,17,18 fully visible, 19 partial)
+        // draw_idx = 19 - 14 = 5 = visible_rows (the partial row position)
         assert_eq!(
-            first_visible, 15,
-            "first_visible_item should be 15 when selection is at last item"
+            first_visible, 14,
+            "first_visible_item should be 14 when selection is at last item (partial row)"
         );
         assert_eq!(
-            draw_idx, 4,
-            "Selection at last item should have draw_idx = visible_rows - 1 = 4"
+            draw_idx, 5,
+            "Selection at last item should have draw_idx = visible_rows = 5 (partial row)"
         );
 
         // Verify the selection is within visible_item_range
@@ -1831,6 +1847,7 @@ mod tests {
     /// keeps the selection within the visible window at every step.
     ///
     /// Chunk: docs/chunks/selector_scroll_bottom
+    /// Chunk: docs/chunks/viewport_keystroke_jostle - Updated for +1 partial row fix
     #[test]
     fn navigate_down_keeps_selection_visible_at_every_step() {
         let mut widget = SelectorWidget::new();
@@ -1849,12 +1866,12 @@ mod tests {
                 range
             );
 
-            // Also verify draw_idx is within [0, visible_rows - 1]
+            // With +1 fix, draw_idx can be up to visible_rows (the partial row position)
             let first_visible = widget.first_visible_item();
             let draw_idx = widget.selected_index().saturating_sub(first_visible);
             assert!(
-                draw_idx <= 4, // visible_rows - 1 = 4
-                "At step {}, draw_idx {} should be <= visible_rows - 1 (4)",
+                draw_idx <= 5, // visible_rows = 5 (partial row is valid)
+                "At step {}, draw_idx {} should be <= visible_rows (5)",
                 i,
                 draw_idx
             );
@@ -1989,6 +2006,7 @@ mod tests {
     /// draw_idx = visible_rows - 1, not outside the viewport.
     ///
     /// Chunk: docs/chunks/selector_scroll_end
+    /// Chunk: docs/chunks/viewport_keystroke_jostle - Updated for +1 partial row fix
     #[test]
     fn regression_ensure_visible_last_item_at_bottom() {
         let mut widget = SelectorWidget::new();
@@ -2008,23 +2026,29 @@ mod tests {
 
         assert_eq!(widget.selected_index(), total_items - 1);
 
-        // The last item should be at the bottom of the viewport
-        // first_visible should be total_items - visible_rows = 15
-        // draw_idx = 19 - 15 = 4 = visible_rows - 1 ✓
+        // The last item (19) should be visible as the partial row.
+        // With the +1 partial row fix, ensure_visible considers row `first + visible_rows`
+        // as the partial row (visible). So:
+        // - first_visible = 14, visible rows = 14, 15, 16, 17, 18 (fully), 19 (partial)
+        // - Item 19 is visible as the partial row, so no additional scroll is needed.
         let first_visible = widget.first_visible_item();
-        let expected_first_visible = total_items - visible_rows;
+        // Previously expected total_items - visible_rows = 15, but with partial row fix:
+        // Item 19 is visible when first_visible = 14 (as the +1 partial row)
+        let expected_first_visible = total_items - visible_rows - 1; // 14
         assert_eq!(
             first_visible, expected_first_visible,
-            "first_visible {} should be {} to show last item at bottom",
+            "first_visible {} should be {} to show last item as partial row",
             first_visible, expected_first_visible
         );
 
+        // draw_idx for the selected item
         let draw_idx = widget.selected_index() - first_visible;
+        // With first_visible = 14, item 19 is at draw_idx 5 (the partial row position)
         assert_eq!(
             draw_idx,
-            visible_rows - 1,
-            "Last item should be at draw_idx {} (bottom of viewport)",
-            visible_rows - 1
+            visible_rows, // 5, not visible_rows - 1
+            "Last item should be at draw_idx {} (partial row at bottom)",
+            visible_rows
         );
     }
 

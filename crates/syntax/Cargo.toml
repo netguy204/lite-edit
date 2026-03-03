@@ -31,4 +31,9 @@ tree-sitter-html = "0.23"
 tree-sitter-css = "0.23"
 tree-sitter-bash = "0.23"
 
+# Chunk: docs/chunks/treesitter_symbol_index - Recursive directory walking for symbol indexer
+ignore = "0.4"
+
 [dev-dependencies]
+# For symbol index performance tests
+tempfile = "3"

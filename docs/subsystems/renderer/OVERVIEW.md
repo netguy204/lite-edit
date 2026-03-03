@@ -84,7 +84,8 @@ The core problem is coordinating multiple rendering concerns (text content, sele
 
 ### Out of Scope
 
-- `Viewport` / `WrapLayout` / `Font` / font metrics - separate layout subsystem
+- `Viewport` / `WrapLayout` / `DirtyRegion` - viewport_scroll subsystem
+- `PaneLayoutNode` / `PaneRect` / `resolve_pane_hit` / coordinate mapping - spatial_layout subsystem
 - Color constants and themes - future theming subsystem
 - `MetalView` - platform abstraction (future platform subsystem)
 - Buffer implementations (`TextBuffer`, terminal buffers, etc.) - consumer of renderer

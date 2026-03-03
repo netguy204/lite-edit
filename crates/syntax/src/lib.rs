@@ -36,11 +36,23 @@
 //! ```
 
 mod edit;
+pub mod gotodef;
 mod highlighter;
+pub mod queries;
+// Chunk: docs/chunks/treesitter_indent - Indent computation module
+mod indent;
 mod registry;
+// Chunk: docs/chunks/treesitter_symbol_index - Cross-file symbol index
+mod symbol_index;
 mod theme;
 
 pub use edit::{byte_offset_to_position, delete_event, insert_event, position_to_byte_offset, EditEvent};
+// Chunk: docs/chunks/treesitter_symbol_index - Export identifier extraction helper
+pub use gotodef::{identifier_at_position, LocalsResolver};
 pub use highlighter::SyntaxHighlighter;
+// Chunk: docs/chunks/treesitter_indent - Export indent types
+pub use indent::{IndentComputer, IndentConfig};
 pub use registry::{LanguageConfig, LanguageRegistry};
+// Chunk: docs/chunks/treesitter_symbol_index - Export symbol index types
+pub use symbol_index::{SymbolIndex, SymbolKind, SymbolLocation};
 pub use theme::SyntaxTheme;

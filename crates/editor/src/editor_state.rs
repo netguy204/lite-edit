@@ -17,6 +17,7 @@
 //! focus target event handling.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 // Chunk: docs/chunks/app_nap_activity_assertions - Activity assertion and MainThreadMarker for App Nap
@@ -68,7 +69,9 @@ use crate::workspace::Editor;
 // Chunk: docs/chunks/styled_line_cache - DirtyLines for cache invalidation tracking
 use lite_edit_buffer::{DirtyLines, Position, TextBuffer};
 // Chunk: docs/chunks/syntax_highlighting - Syntax highlighting support
-use lite_edit_syntax::{LanguageRegistry, SyntaxTheme};
+// Chunk: docs/chunks/treesitter_gotodef - LocalsResolver for go-to-definition
+// Chunk: docs/chunks/treesitter_symbol_index - identifier_at_position for cross-file lookup
+use lite_edit_syntax::{identifier_at_position, LanguageRegistry, LocalsResolver, SyntaxTheme};
 // Chunk: docs/chunks/dragdrop_file_paste - Shell escaping for dropped file paths
 use lite_edit::shell_escape::shell_escape_paths;
 // Chunk: docs/chunks/terminal_active_tab_safety - Terminal input encoding
@@ -186,8 +189,9 @@ pub struct EditorState {
     /// Set by main.rs during setup. PtyWakeup handles signal through this sender.
     event_sender: Option<EventSender>,
     // Chunk: docs/chunks/syntax_highlighting - Language registry for extension lookup
-    /// Language registry for syntax highlighting.
-    language_registry: LanguageRegistry,
+    // Chunk: docs/chunks/treesitter_symbol_index - Shared via Arc for symbol indexer
+    /// Language registry for syntax highlighting and symbol indexing.
+    language_registry: Arc<LanguageRegistry>,
     // Chunk: docs/chunks/file_change_events - Self-write suppression
     /// Registry of paths whose file change events should be suppressed.
     /// Prevents our own file saves from triggering reload/merge flows.
@@ -207,6 +211,15 @@ pub struct EditorState {
     // Chunk: docs/chunks/app_nap_file_watcher_pause - Paused state storage
     /// Stored paused state for file watchers. When Some, watchers are paused.
     paused_watcher_state: Option<PausedFileWatchersState>,
+    // Chunk: docs/chunks/treesitter_gotodef - Status message field
+    /// Optional transient status message for user feedback.
+    /// Set by operations like go-to-definition when no definition is found.
+    /// Automatically expires after 2 seconds or on next keypress.
+    pub status_message: Option<StatusMessage>,
+    // Chunk: docs/chunks/treesitter_symbol_index - Definition disambiguation selector context
+    /// Context for the definition disambiguation selector.
+    /// Set when multiple cross-file definitions match a symbol.
+    definition_selector_context: Option<DefinitionSelectorContext>,
     /// Flag set by Ctrl+Shift+P to trigger an on-demand perf stats dump.
     #[cfg(feature = "perf-instrumentation")]
     pub dump_perf_stats: bool,
@@ -222,6 +235,53 @@ pub struct PausedFileWatchersState {
     buffer_watcher_state: PausedWatcherState,
     /// Paused states from each workspace's FileIndex, keyed by workspace ID.
     workspace_states: std::collections::HashMap<u64, PausedFileIndexState>,
+}
+
+// Chunk: docs/chunks/treesitter_gotodef - Status message for transient feedback
+/// A transient status message displayed to the user.
+///
+/// Status messages are shown briefly to provide feedback (e.g., "Definition not found")
+/// and automatically expire after a duration or on the next keypress.
+#[derive(Clone, Debug)]
+pub struct StatusMessage {
+    /// The message text to display.
+    pub text: String,
+    /// When the message was created.
+    pub created_at: Instant,
+    /// Duration after which the message should expire (default: 2 seconds).
+    pub duration: std::time::Duration,
+}
+
+impl StatusMessage {
+    /// Creates a new status message with the default 2-second duration.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            created_at: Instant::now(),
+            duration: std::time::Duration::from_secs(2),
+        }
+    }
+
+    /// Returns true if the message has expired.
+    pub fn is_expired(&self) -> bool {
+        self.created_at.elapsed() >= self.duration
+    }
+}
+
+// Chunk: docs/chunks/treesitter_symbol_index - Context for definition disambiguation selector
+/// Context saved when showing the definition disambiguation selector.
+///
+/// When multiple cross-file definitions match a symbol, we show a selector
+/// overlay listing all matches. This struct stores the context needed to
+/// complete the navigation when the user selects an item.
+#[derive(Clone)]
+pub struct DefinitionSelectorContext {
+    /// The pane ID where go-to-definition was triggered.
+    pub pane_id: PaneId,
+    /// The cursor position before navigating (for the jump stack).
+    pub from_pos: Position,
+    /// The list of matching definition locations.
+    pub locations: Vec<lite_edit_syntax::SymbolLocation>,
 }
 
 // =============================================================================
@@ -459,7 +519,8 @@ impl EditorState {
             // Chunk: docs/chunks/terminal_pty_wakeup - Initialize wakeup factory as None
             event_sender: None,
             // Chunk: docs/chunks/syntax_highlighting - Initialize language registry
-            language_registry: LanguageRegistry::new(),
+            // Chunk: docs/chunks/treesitter_symbol_index - Wrapped in Arc for sharing with symbol indexer
+            language_registry: Arc::new(LanguageRegistry::new()),
             // Chunk: docs/chunks/file_change_events - Initialize self-write suppression
             file_change_suppression: FileChangeSuppression::new(),
             // Chunk: docs/chunks/buffer_file_watching - Initialize per-buffer file watcher
@@ -469,6 +530,10 @@ impl EditorState {
             activity_assertion: ActivityAssertion::new(),
             // Chunk: docs/chunks/app_nap_file_watcher_pause - Initialize paused state
             paused_watcher_state: None,
+            // Chunk: docs/chunks/treesitter_gotodef - Initialize status message
+            status_message: None,
+            // Chunk: docs/chunks/treesitter_symbol_index - Initialize definition selector context
+            definition_selector_context: None,
             #[cfg(feature = "perf-instrumentation")]
             dump_perf_stats: false,
         }
@@ -528,7 +593,9 @@ impl EditorState {
             confirm_dialog: None,
             confirm_context: None,
             event_sender: None,
-            language_registry: LanguageRegistry::new(),
+            // Chunk: docs/chunks/syntax_highlighting - Initialize language registry
+            // Chunk: docs/chunks/treesitter_symbol_index - Wrapped in Arc for sharing with symbol indexer
+            language_registry: Arc::new(LanguageRegistry::new()),
             // Chunk: docs/chunks/file_change_events - Initialize self-write suppression
             file_change_suppression: FileChangeSuppression::new(),
             // Chunk: docs/chunks/buffer_file_watching - Initialize per-buffer file watcher
@@ -538,6 +605,10 @@ impl EditorState {
             activity_assertion: ActivityAssertion::new(),
             // Chunk: docs/chunks/app_nap_file_watcher_pause - Initialize paused state
             paused_watcher_state: None,
+            // Chunk: docs/chunks/treesitter_gotodef - Initialize status message
+            status_message: None,
+            // Chunk: docs/chunks/treesitter_symbol_index - Initialize definition selector context
+            definition_selector_context: None,
             #[cfg(feature = "perf-instrumentation")]
             dump_perf_stats: false,
         }
@@ -562,6 +633,12 @@ impl EditorState {
 
         // Create the workspace with the selected directory
         self.editor.new_workspace(label, root_path.clone());
+
+        // Chunk: docs/chunks/treesitter_symbol_index - Start symbol indexing for cross-file go-to-def
+        // Start background symbol indexing for the new workspace
+        if let Some(ws) = self.editor.active_workspace_mut() {
+            ws.start_symbol_indexing(Arc::clone(&self.language_registry));
+        }
 
         // Chunk: docs/chunks/buffer_file_watching - Set initial workspace root
         // Set the buffer file watcher's workspace root for the initial workspace.
@@ -588,6 +665,7 @@ impl EditorState {
         self.focus_stack.top_layer()
     }
 
+    // Chunk: docs/chunks/terminal_pty_wakeup - EventSender registration for creating PtyWakeup handles
     // Chunk: docs/chunks/pty_wakeup_reentrant - EventSender for PTY wakeup
     // Chunk: docs/chunks/buffer_file_watching - Wire up buffer file watcher callback
     /// Sets the event sender for creating PTY wakeup handles.
@@ -675,6 +753,7 @@ impl EditorState {
         }
     }
 
+    // Chunk: docs/chunks/terminal_pty_wakeup - Creates PtyWakeup handle from registered EventSender
     // Chunk: docs/chunks/pty_wakeup_reentrant - Creates PtyWakeup with WakeupSignal trait
     /// Creates a PTY wakeup handle using the stored event sender.
     ///
@@ -926,6 +1005,9 @@ impl EditorState {
     pub fn handle_key(&mut self, event: KeyEvent) {
         use crate::input::Key;
 
+        // Chunk: docs/chunks/treesitter_gotodef - Clear status message on any keypress
+        self.status_message = None;
+
         // Check for app-level shortcuts before delegating to focus target
         // Cmd+Q (without Ctrl) triggers quit
         if event.modifiers.command && !event.modifiers.control {
@@ -1058,6 +1140,7 @@ impl EditorState {
                         match result {
                             MoveResult::MovedToExisting { .. } | MoveResult::MovedToNew { .. } => {
                                 self.invalidation.merge(InvalidationKind::Layout);
+                                self.clear_styled_line_cache = true;
                             }
                             MoveResult::Rejected | MoveResult::SourceNotFound => {
                                 // No-op, no visual change
@@ -1102,6 +1185,25 @@ impl EditorState {
             if let Key::Char('p') | Key::Char('P') = event.key {
                 self.dump_perf_stats = true;
                 return;
+            }
+        }
+
+        // Chunk: docs/chunks/treesitter_gotodef - Go-to-definition key handling
+        // F12 → go to definition (only in Buffer focus)
+        if let Key::F12 = event.key {
+            if !event.modifiers.shift && self.focus == EditorFocus::Buffer {
+                self.goto_definition();
+                return;
+            }
+        }
+
+        // Ctrl+- → go back to previous position (only in Buffer focus)
+        if event.modifiers.control && !event.modifiers.command {
+            if let Key::Char('-') = event.key {
+                if self.focus == EditorFocus::Buffer {
+                    self.go_back();
+                    return;
+                }
             }
         }
 
@@ -1237,12 +1339,350 @@ impl EditorState {
         // Chunk: docs/chunks/focus_stack - Pop selector focus target from stack
         self.focus_stack.pop();
 
+        // Chunk: docs/chunks/treesitter_symbol_index - Clear definition selector context
+        self.definition_selector_context = None;
+
         // Chunk: docs/chunks/cursor_blink_focus - Reset cursor states on focus transition
         // Buffer cursor resumes blinking (start visible, record keystroke to prevent immediate blink-off)
         self.cursor_visible = true;
         self.last_keystroke = Instant::now();
 
         self.invalidation.merge(InvalidationKind::Layout);
+    }
+
+    // =========================================================================
+    // Go-to-Definition (Chunk: docs/chunks/treesitter_gotodef)
+    // =========================================================================
+
+    // Chunk: docs/chunks/treesitter_gotodef - Go-to-definition using tree-sitter locals queries
+    // Chunk: docs/chunks/treesitter_symbol_index - Cross-file symbol index fallback
+    /// Navigates to the definition of the symbol under the cursor.
+    ///
+    /// Uses a two-stage resolution:
+    /// 1. Same-file: Uses tree-sitter locals queries to find definitions within the current file
+    /// 2. Cross-file: Falls back to the workspace symbol index for definitions in other files
+    ///
+    /// If found:
+    /// - Pushes the current position onto the jump stack
+    /// - Opens the target file (if cross-file) and moves the cursor to the definition
+    ///
+    /// If multiple cross-file matches are found, presents a disambiguation selector.
+    /// If no definition is found, displays a status message.
+    fn goto_definition(&mut self) {
+        // Only works on file tabs with syntax highlighting
+        let workspace = match self.editor.active_workspace_mut() {
+            Some(ws) => ws,
+            None => return,
+        };
+
+        let pane_id = workspace.active_pane_id;
+        let tab = match workspace.active_tab() {
+            Some(t) => t,
+            None => return,
+        };
+
+        // Get the highlighter and buffer
+        let highlighter = match tab.highlighter() {
+            Some(h) => h,
+            None => {
+                // No highlighter = no syntax support for this file type
+                return;
+            }
+        };
+
+        let buffer = match tab.as_text_buffer() {
+            Some(b) => b,
+            None => return,
+        };
+
+        // Get the language config from the registry to create a LocalsResolver
+        let ext = match tab.associated_file.as_ref().and_then(|p| p.extension()).and_then(|e| e.to_str()) {
+            Some(e) => e,
+            None => return,
+        };
+
+        let config = match self.language_registry.config_for_extension(ext) {
+            Some(c) => c,
+            None => return,
+        };
+
+        // Get current cursor position
+        let cursor_pos = buffer.cursor_position();
+        let source = buffer.content();
+
+        // Convert cursor position to byte offset
+        let cursor_byte = lite_edit_syntax::position_to_byte_offset(&source, cursor_pos.line, cursor_pos.col);
+
+        // Try same-file resolution first using locals query
+        let tree = highlighter.tree();
+
+        // Try to create a locals resolver (may not exist for all languages)
+        let same_file_result = LocalsResolver::new(config.language.clone(), config.locals_query)
+            .and_then(|resolver| resolver.find_definition(tree, source.as_bytes(), cursor_byte));
+
+        if let Some(def_range) = same_file_result {
+            // Found a same-file definition - push current position to jump stack
+            let workspace = self.editor.active_workspace_mut().unwrap();
+            let tab = workspace.active_tab().unwrap();
+            let tab_id = tab.id;
+
+            workspace.jump_stack.push(crate::workspace::JumpPosition {
+                tab_id,
+                pane_id,
+                line: cursor_pos.line,
+                col: cursor_pos.col,
+            });
+
+            // Convert byte offset to position
+            let (def_line, def_col) = lite_edit_syntax::byte_offset_to_position(&source, def_range.start);
+
+            // Move cursor to definition
+            let tab = workspace.active_tab_mut().unwrap();
+            let line_count = tab.as_text_buffer().map(|b| b.line_count()).unwrap_or(0);
+            if let Some(buffer) = tab.as_text_buffer_mut() {
+                buffer.set_cursor(Position::new(def_line, def_col));
+            }
+
+            // Chunk: docs/chunks/gotodef_scroll_reveal - Scroll viewport to reveal cursor
+            if tab.viewport.ensure_visible(def_line, line_count) {
+                self.invalidation.merge(InvalidationKind::Layout);
+            }
+
+            self.invalidation.merge(InvalidationKind::Layout);
+            return;
+        }
+
+        // Same-file resolution failed - try cross-file lookup via symbol index
+        // Chunk: docs/chunks/treesitter_symbol_index - Cross-file symbol index fallback
+
+        // Extract the identifier at cursor position
+        let identifier = match identifier_at_position(tree, source.as_bytes(), cursor_byte) {
+            Some(id) => id,
+            None => {
+                self.status_message = Some(StatusMessage::new("No identifier at cursor"));
+                return;
+            }
+        };
+
+        // Check if workspace has a symbol index
+        let workspace = self.editor.active_workspace_mut().unwrap();
+        let symbol_index = match &workspace.symbol_index {
+            Some(idx) => idx,
+            None => {
+                self.status_message = Some(StatusMessage::new("Symbol index not initialized"));
+                return;
+            }
+        };
+
+        // Check if still indexing
+        if symbol_index.is_indexing() {
+            self.status_message = Some(StatusMessage::new("Indexing workspace..."));
+            return;
+        }
+
+        // Look up the identifier in the symbol index
+        let locations = symbol_index.lookup(&identifier);
+
+        match locations.len() {
+            0 => {
+                self.status_message = Some(StatusMessage::new("Definition not found"));
+            }
+            1 => {
+                // Single match - jump directly
+                let loc = &locations[0];
+                self.goto_cross_file_definition(pane_id, cursor_pos, loc.file_path.clone(), loc.line, loc.col);
+            }
+            _ => {
+                // Multiple matches - show disambiguation selector
+                self.show_definition_selector(pane_id, cursor_pos, locations);
+            }
+        }
+    }
+
+    // Chunk: docs/chunks/treesitter_symbol_index - Jump to cross-file definition
+    // Chunk: docs/chunks/gotodef_cross_file_nav - Fixed cross-file navigation
+    /// Navigates to a definition in another file.
+    ///
+    /// Opens the target file (or switches to it if already open), moves the cursor
+    /// to the definition position, and pushes the current position onto the jump stack.
+    ///
+    /// This implementation:
+    /// 1. Pushes the current position to the jump stack
+    /// 2. Checks if the target file is already open in an existing tab
+    /// 3. If found, switches to that tab; if not, opens a new tab
+    /// 4. Positions the cursor at the definition location
+    /// 5. Scrolls the viewport to reveal the cursor
+    fn goto_cross_file_definition(
+        &mut self,
+        pane_id: PaneId,
+        from_pos: Position,
+        target_file: PathBuf,
+        target_line: usize,
+        target_col: usize,
+    ) {
+        // Push current position to jump stack before navigating
+        let workspace = match self.editor.active_workspace_mut() {
+            Some(ws) => ws,
+            None => return,
+        };
+        let tab = match workspace.active_tab() {
+            Some(t) => t,
+            None => return,
+        };
+        let tab_id = tab.id;
+
+        workspace.jump_stack.push(crate::workspace::JumpPosition {
+            tab_id,
+            pane_id,
+            line: from_pos.line,
+            col: from_pos.col,
+        });
+
+        // Check if target file is already open in an existing tab
+        let existing_tab_id = workspace.find_tab_by_path(&target_file);
+
+        if let Some(target_tab_id) = existing_tab_id {
+            // File is already open - switch to that tab
+            workspace.switch_to_tab_by_id(target_tab_id);
+        } else {
+            // File is not open - create a new tab
+            self.open_file_in_new_tab(target_file);
+        }
+
+        // Move cursor to the definition position and scroll to reveal
+        if let Some(ws) = self.editor.active_workspace_mut() {
+            if let Some(tab) = ws.active_tab_mut() {
+                let line_count = tab.as_text_buffer().map(|b| b.line_count()).unwrap_or(0);
+                if let Some(buffer) = tab.as_text_buffer_mut() {
+                    buffer.set_cursor(Position::new(target_line, target_col));
+                }
+                // Chunk: docs/chunks/gotodef_scroll_reveal - Scroll viewport to reveal cursor
+                if tab.viewport.ensure_visible(target_line, line_count) {
+                    self.invalidation.merge(InvalidationKind::Layout);
+                }
+            }
+        }
+
+        // Ensure the cursor is visible by scrolling the viewport
+        self.ensure_cursor_visible_in_active_tab();
+
+        self.invalidation.merge(InvalidationKind::Layout);
+    }
+
+    // Chunk: docs/chunks/treesitter_symbol_index - Disambiguation selector for multiple matches
+    /// Shows a selector overlay for choosing between multiple definition matches.
+    fn show_definition_selector(
+        &mut self,
+        pane_id: PaneId,
+        from_pos: Position,
+        locations: Vec<lite_edit_syntax::SymbolLocation>,
+    ) {
+        // Store context for the selector
+        self.definition_selector_context = Some(DefinitionSelectorContext {
+            pane_id,
+            from_pos,
+            locations: locations.clone(),
+        });
+
+        // Create selector with formatted items showing file:line
+        let items: Vec<String> = locations
+            .iter()
+            .map(|loc| {
+                // Show relative path if possible, falling back to display
+                format!("{}:{}", loc.file_path.display(), loc.line + 1)
+            })
+            .collect();
+
+        let mut selector = SelectorWidget::new();
+        selector.set_items(items);
+
+        self.active_selector = Some(selector);
+        self.focus = EditorFocus::Selector;
+        self.invalidation.merge(InvalidationKind::Layout);
+    }
+
+    // Chunk: docs/chunks/treesitter_gotodef - Status message accessor with expiry
+    /// Returns the current status message, if any and not expired.
+    ///
+    /// Also clears the message if it has expired. Call this from the render
+    /// loop to both get the current message and trigger automatic expiry.
+    pub fn current_status_message(&mut self) -> Option<&str> {
+        // Check expiry and clear if needed
+        if let Some(ref msg) = self.status_message {
+            if msg.is_expired() {
+                self.status_message = None;
+                return None;
+            }
+        }
+        self.status_message.as_ref().map(|m| m.text.as_str())
+    }
+
+    // Chunk: docs/chunks/treesitter_gotodef - Go back to previous position from jump stack
+    // Chunk: docs/chunks/gotodef_cross_file_nav - Cross-tab navigation support
+    /// Navigates back to the previous cursor position.
+    ///
+    /// Pops the most recent position from the jump stack and navigates to it.
+    /// If the tab is in a different pane, switches to that pane/tab.
+    /// If the tab no longer exists, silently skips to the next entry.
+    /// If the stack is empty, does nothing.
+    fn go_back(&mut self) {
+        // Pop and process entries until we find a valid one or run out
+        loop {
+            // Pop from jump stack
+            let pos = {
+                let workspace = match self.editor.active_workspace_mut() {
+                    Some(ws) => ws,
+                    None => return,
+                };
+                match workspace.jump_stack.pop() {
+                    Some(p) => p,
+                    None => return, // Empty stack - nothing to go back to
+                }
+            };
+
+            // Check if we need to switch tabs
+            let current_tab_id = {
+                let workspace = match self.editor.active_workspace_mut() {
+                    Some(ws) => ws,
+                    None => return,
+                };
+                workspace.active_tab().map(|t| t.id)
+            };
+
+            if current_tab_id != Some(pos.tab_id) {
+                // Different tab - try to switch to it
+                let switched = {
+                    let workspace = match self.editor.active_workspace_mut() {
+                        Some(ws) => ws,
+                        None => return,
+                    };
+                    workspace.switch_to_tab_by_id(pos.tab_id)
+                };
+
+                if !switched {
+                    // Tab doesn't exist anymore - try the next entry
+                    continue;
+                }
+            }
+
+            // Now we're on the target tab - set cursor position
+            if let Some(workspace) = self.editor.active_workspace_mut() {
+                if let Some(tab) = workspace.active_tab_mut() {
+                    if let Some(buffer) = tab.as_text_buffer_mut() {
+                        buffer.set_cursor(Position::new(pos.line, pos.col));
+                    }
+                }
+            }
+
+            // Ensure the cursor is visible by scrolling the viewport
+            self.ensure_cursor_visible_in_active_tab();
+
+            // Mark dirty to redraw cursor at new position
+            self.invalidation.merge(InvalidationKind::Layout);
+
+            // Successfully navigated - exit the loop
+            break;
+        }
     }
 
     // =========================================================================
@@ -1989,7 +2429,15 @@ impl EditorState {
     /// Chunk: docs/chunks/file_picker - Path resolution, recency recording, and resolved_path storage on Enter
     // Chunk: docs/chunks/file_save - Integrates file picker confirmation with associate_file
     // Chunk: docs/chunks/workspace_dir_picker - Use workspace's file index and root_path
+    // Chunk: docs/chunks/treesitter_symbol_index - Definition disambiguation selector handling
     fn handle_selector_confirm(&mut self, idx: usize) {
+        // Chunk: docs/chunks/treesitter_symbol_index - Check if this is a definition selector
+        // If we have a definition selector context, handle it specially
+        if let Some(context) = self.definition_selector_context.take() {
+            self.handle_definition_selector_confirm(idx, context);
+            return;
+        }
+
         // Get the workspace root_path as the base directory for path resolution
         let base_dir = self.editor.active_workspace()
             .map(|ws| ws.root_path.clone())
@@ -2019,6 +2467,33 @@ impl EditorState {
 
         // Close the selector
         self.close_selector();
+    }
+
+    // Chunk: docs/chunks/treesitter_symbol_index - Handle definition selector confirmation
+    /// Handles confirmation of the definition disambiguation selector.
+    fn handle_definition_selector_confirm(&mut self, idx: usize, context: DefinitionSelectorContext) {
+        // Ensure idx is valid
+        if idx >= context.locations.len() {
+            self.close_selector();
+            return;
+        }
+
+        let loc = &context.locations[idx];
+        let target_file = loc.file_path.clone();
+        let target_line = loc.line;
+        let target_col = loc.col;
+
+        // Close selector first
+        self.close_selector();
+
+        // Navigate to the selected definition
+        self.goto_cross_file_definition(
+            context.pane_id,
+            context.from_pos,
+            target_file,
+            target_line,
+            target_col,
+        );
     }
 
     /// Resolves the path from a selector confirmation.
@@ -2063,6 +2538,14 @@ impl EditorState {
         let mut is_file_tab = false;
         // Chunk: docs/chunks/dirty_bit_navigation - Track whether content was mutated
         let mut content_mutated = false;
+        // Chunk: docs/chunks/incremental_parse - Capture edit info for incremental parsing
+        let mut captured_edit_info: Option<lite_edit_buffer::EditInfo> = None;
+        // Chunk: docs/chunks/treesitter_indent - Track if this is an Enter key for auto-indent
+        let is_enter_key = matches!(event.key, crate::input::Key::Return)
+            && !event.modifiers.command
+            && !event.modifiers.control;
+        // Chunk: docs/chunks/terminal_spawn_reliability - Track if we need to retry terminal spawn
+        let mut should_retry_terminal = false;
 
         // Check if the active tab is a file tab or terminal tab
         // Use a block to limit the borrow scope
@@ -2133,6 +2616,10 @@ impl EditorState {
             // Chunk: docs/chunks/dirty_bit_navigation - Capture content_mutated before ctx goes out of scope
             content_mutated = ctx.content_mutated;
 
+            // Chunk: docs/chunks/incremental_parse - Capture edit info for incremental parsing
+            // Store the edit info to use after the borrow scope ends
+            captured_edit_info = ctx.edit_info.take();
+
             // Chunk: docs/chunks/invalidation_separation - Convert to Content invalidation
             if ctx_dirty_region.is_dirty() {
                 self.invalidation.merge(InvalidationKind::Content(ctx_dirty_region));
@@ -2193,13 +2680,43 @@ impl EditorState {
 
             // Mark full viewport dirty since terminal output may change
             self.invalidation.merge(InvalidationKind::Layout);
+        } else if tab.is_error_tab() {
+            // Chunk: docs/chunks/terminal_spawn_reliability - Error tab retry on Enter
+            // Error tabs display "Press Enter to retry" - handle Enter key to retry terminal spawn
+            use crate::input::Key;
+            if matches!(event.key, Key::Return) && !event.modifiers.command && !event.modifiers.control {
+                // Set flag to retry after borrow scope ends
+                should_retry_terminal = true;
+            }
+            // Other keys are ignored on error tabs
         }
         // Other tab types (AgentOutput, Diff): no-op
         } // End of borrow scope
 
+        // Chunk: docs/chunks/terminal_spawn_reliability - Handle error tab retry
+        // After the borrow scope ends, we can safely call retry_terminal_spawn
+        if should_retry_terminal {
+            self.retry_terminal_spawn();
+            return;
+        }
+
         // Chunk: docs/chunks/syntax_highlighting - Sync highlighter after buffer mutation
+        // Chunk: docs/chunks/incremental_parse - Use incremental parsing when edit info available
         if needs_highlighter_sync {
-            self.sync_active_tab_highlighter();
+            if let Some(edit_info) = captured_edit_info {
+                // Use incremental parsing path - more efficient than full reparse
+                self.notify_active_tab_edit(edit_info.into());
+            } else {
+                // Fall back to full reparse for operations without tracked edits
+                self.sync_active_tab_highlighter();
+            }
+        }
+
+        // Chunk: docs/chunks/treesitter_indent - Apply intelligent indentation after Enter
+        // After syncing the highlighter (so the tree is up-to-date), compute and insert
+        // the appropriate indentation for the new line.
+        if is_file_tab && is_enter_key && needs_highlighter_sync {
+            self.apply_auto_indent();
         }
 
         // Chunk: docs/chunks/dirty_bit_navigation - Mark file tab dirty only for content mutations
@@ -2479,11 +2996,50 @@ impl EditorState {
             (fallback_x, fallback_y)
         };
 
+        // Chunk: docs/chunks/treesitter_gotodef - Cmd+click for go-to-definition
+        // Check for Cmd+click and handle it specially (before getting mutable refs)
+        let is_cmd_click = matches!(event.kind, MouseEventKind::Down)
+            && event.modifiers.command
+            && !event.modifiers.control
+            && !event.modifiers.option
+            && event.click_count == 1;
+
         // Try to get the text buffer and viewport for file tabs
         if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
             // File tab: use the existing BufferFocusTarget path
 
-            // Ensure cursor is visible when clicking
+            // Chunk: docs/chunks/treesitter_gotodef - Cmd+click for go-to-definition
+            if is_cmd_click {
+                // Position the cursor at the click location
+                use crate::buffer_target::pixel_to_buffer_position_wrapped;
+                use crate::wrap_layout::WrapLayout;
+
+                let font_metrics = self.font_metrics;
+                let wrap_layout = WrapLayout::new(
+                    if let Some(ref hit) = hit { hit.pane_rect.width } else { self.view_width - RAIL_WIDTH },
+                    &font_metrics,
+                );
+
+                let position = pixel_to_buffer_position_wrapped(
+                    (content_x, content_y),
+                    if let Some(ref hit) = hit { hit.pane_rect.height - TAB_BAR_HEIGHT } else { self.view_height - TAB_BAR_HEIGHT },
+                    &wrap_layout,
+                    viewport.scroll_fraction_px(),
+                    viewport.first_visible_line(),
+                    buffer.line_count(),
+                    |line| buffer.line_len(line),
+                    |line| buffer.line_content(line),
+                );
+
+                // Set cursor to the click position and mark for go-to-def
+                buffer.set_cursor(position);
+                self.invalidation.merge(InvalidationKind::Layout);
+                // Exit borrow scope and call goto_definition after the if-let
+            }
+
+            // Only handle other mouse events if NOT a cmd+click
+            if !is_cmd_click {
+                // Ensure cursor is visible when clicking
             if !self.cursor_visible {
                 self.cursor_visible = true;
                 // Mark cursor line dirty to show it
@@ -2543,9 +3099,18 @@ impl EditorState {
             if ctx_dirty_region.is_dirty() {
                 self.invalidation.merge(InvalidationKind::Content(ctx_dirty_region));
             }
+            } // End of: if !is_cmd_click
+
+            // Chunk: docs/chunks/treesitter_gotodef - Cmd+click: call goto_definition after borrow ends
+            if is_cmd_click {
+                self.goto_definition();
+                return;
+            }
         } else if let Some((terminal, viewport)) = tab.terminal_and_viewport_mut() {
             // Chunk: docs/chunks/terminal_mouse_offset - Fixed terminal mouse Y coordinate calculation
             // Chunk: docs/chunks/terminal_clipboard_selection - Terminal mouse selection
+            // Chunk: docs/chunks/terminal_selection_offset - Wrap-aware terminal click coordinates
+            // Subsystem: docs/subsystems/viewport_scroll - Wrap-aware buffer line lookup
             // Terminal tab: handle mouse events for selection or forward to PTY
             let modes = terminal.term_mode();
 
@@ -2563,6 +3128,8 @@ impl EditorState {
             let row = (adjusted_y / cell_height as f64) as usize;
 
             // Check if any mouse mode is active - forward to PTY
+            // Note: PTY mouse encoding uses viewport-relative row (correct as-is),
+            // not buffer line. The wrap-aware mapping only applies to selection.
             if modes.intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG) {
                 let bytes = InputEncoder::encode_mouse(&event, col, row, modes);
                 if !bytes.is_empty() {
@@ -2570,8 +3137,39 @@ impl EditorState {
                 }
             } else {
                 // No mouse mode active - handle selection
-                // Convert screen row to document line (accounting for viewport scroll)
-                let doc_line = viewport.first_visible_line() + row;
+                // Chunk: docs/chunks/terminal_selection_offset - Wrap-aware screen row to buffer line mapping
+                // Use the same wrap-aware approach as file editor (buffer_target.rs) and renderer
+                // (glyph_buffer.rs) to correctly handle soft-wrapped terminal lines.
+                use crate::wrap_layout::WrapLayout;
+
+                // Get pane width for wrap layout calculation
+                let pane_width = if let Some(ref hit) = hit {
+                    hit.pane_rect.width
+                } else {
+                    self.view_width - RAIL_WIDTH
+                };
+
+                // Terminal lines are always the terminal width (cols), unlike text buffers
+                // which have variable-length lines. This simplifies wrap calculation.
+                let terminal_cols = terminal.size().0;
+                let line_count = terminal.line_count();
+
+                // Create WrapLayout to compute screen row to buffer line mapping
+                let wrap_layout = WrapLayout::new(pane_width, &self.font_metrics);
+
+                // Compute absolute screen row from viewport-relative row
+                let first_visible_screen_row = viewport.first_visible_screen_row();
+                let absolute_screen_row = first_visible_screen_row + row;
+
+                // Map absolute screen row to buffer line using wrap-aware lookup
+                // This correctly accounts for terminal lines that soft-wrap to multiple screen rows
+                let (doc_line, _row_offset_in_line, _) = Viewport::buffer_line_for_screen_row(
+                    absolute_screen_row,
+                    line_count,
+                    &wrap_layout,
+                    |_line| terminal_cols, // All terminal lines have the same width
+                );
+
                 let pos = Position::new(doc_line, col);
 
                 match event.kind {
@@ -2733,6 +3331,7 @@ impl EditorState {
     /// Scrolls the tab in the specified pane without changing focus.
     // Chunk: docs/chunks/pane_hover_scroll - Pane-targeted scroll execution
     // Chunk: docs/chunks/vsplit_scroll - Use pane-specific dimensions for scroll clamping
+    // Chunk: docs/chunks/welcome_scroll - Routes scroll events on empty file tabs to the welcome scroll offset
     fn scroll_pane(&mut self, target_pane_id: crate::pane_layout::PaneId, delta: ScrollDelta) {
         // Chunk: docs/chunks/vsplit_scroll - Get pane-specific dimensions before borrowing workspace.
         // Using full-window dimensions here causes scroll clamping to use incorrect wrap
@@ -2966,13 +3565,14 @@ impl EditorState {
         }
 
         // File tab: insert text directly into buffer
+        // Chunk: docs/chunks/incremental_parse - Use tracked variant for incremental parsing
         if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
-            let dirty_lines = buffer.insert_str(&escaped_text);
-            let dirty = viewport.dirty_lines_to_region(&dirty_lines, buffer.line_count());
+            let result = buffer.insert_str_tracked(&escaped_text);
+            let dirty = viewport.dirty_lines_to_region(&result.dirty_lines, buffer.line_count());
             // Chunk: docs/chunks/invalidation_separation - Content invalidation for text insertion
             self.invalidation.merge(InvalidationKind::Content(dirty));
             // Chunk: docs/chunks/styled_line_cache - Track dirty lines for cache invalidation
-            self.dirty_lines.merge(dirty_lines);
+            self.dirty_lines.merge(result.dirty_lines);
 
             // Ensure cursor is visible after insertion
             let cursor_line = buffer.cursor_position().line;
@@ -2984,7 +3584,12 @@ impl EditorState {
             tab.dirty = true;
 
             // Chunk: docs/chunks/highlight_text_source - Sync highlighter after file drop insertion
-            self.sync_active_tab_highlighter();
+            // Chunk: docs/chunks/incremental_parse - Use incremental parsing when edit info available
+            if let Some(edit_info) = result.edit_info {
+                self.notify_active_tab_edit(edit_info.into());
+            } else {
+                self.sync_active_tab_highlighter();
+            }
         }
 
         // Other tab types (AgentOutput, Diff): no-op
@@ -3090,13 +3695,17 @@ impl EditorState {
                 }
 
                 // File tab: insert text into buffer
+                // Chunk: docs/chunks/incremental_parse - Use tracked variant for incremental parsing
+                let mut captured_edit_info: Option<lite_edit_buffer::EditInfo> = None;
+
                 if let Some((buffer, viewport)) = tab.buffer_and_viewport_mut() {
                     // Clear any marked text first (IME commit replaces marked text)
                     buffer.clear_marked_text();
 
-                    let dirty_lines = buffer.insert_str(text);
-                    self.dirty_lines.merge(dirty_lines.clone());
-                    let dirty = viewport.dirty_lines_to_region(&dirty_lines, buffer.line_count());
+                    let result = buffer.insert_str_tracked(text);
+                    captured_edit_info = result.edit_info;
+                    self.dirty_lines.merge(result.dirty_lines.clone());
+                    let dirty = viewport.dirty_lines_to_region(&result.dirty_lines, buffer.line_count());
                     // Chunk: docs/chunks/invalidation_separation - Content invalidation for text insertion
                     self.invalidation.merge(InvalidationKind::Content(dirty));
 
@@ -3110,7 +3719,12 @@ impl EditorState {
                 }
 
                 // Chunk: docs/chunks/highlight_text_source - Sync highlighter after text insertion
-                self.sync_active_tab_highlighter();
+                // Chunk: docs/chunks/incremental_parse - Use incremental parsing when edit info available
+                if let Some(edit_info) = captured_edit_info {
+                    self.notify_active_tab_edit(edit_info.into());
+                } else {
+                    self.sync_active_tab_highlighter();
+                }
             }
         }
     }
@@ -3151,10 +3765,13 @@ impl EditorState {
 
         // Terminal tabs don't support marked text - IME sends final text directly
 
-        // Chunk: docs/chunks/highlight_text_source - Sync highlighter after setting marked text
-        self.sync_active_tab_highlighter();
+        // Chunk: docs/chunks/highlight_text_source - IME marked text (no sync needed for overlay text)
+        // Chunk: docs/chunks/incremental_parse - Marked text is overlay-rendered, not committed
+        // to the buffer, so no syntax tree update is needed. The tree will be updated
+        // when the marked text is committed (via handle_insert_text) or cancelled.
     }
 
+    // Chunk: docs/chunks/highlight_text_source - IME cancellation (no sync needed, doesn't modify buffer)
     /// Handles IME composition cancellation.
     ///
     /// Clears any marked text without inserting it.
@@ -3183,8 +3800,9 @@ impl EditorState {
             self.invalidation.merge(InvalidationKind::Content(dirty));
         }
 
-        // Chunk: docs/chunks/highlight_text_source - Sync highlighter after clearing marked text
-        self.sync_active_tab_highlighter();
+        // Chunk: docs/chunks/incremental_parse - Marked text is overlay-rendered, not committed
+        // to the buffer. Cancelling marked text doesn't change buffer content, so no
+        // syntax tree update is needed.
     }
 
     // Chunk: docs/chunks/invalidation_separation - Updated to use InvalidationKind
@@ -3571,6 +4189,131 @@ impl EditorState {
         // (handles case of file picker confirming into a newly created tab)
         self.sync_active_tab_viewport();
         self.invalidation.merge(InvalidationKind::Layout);
+
+        // Chunk: docs/chunks/cache_reload_invalidation - Clear cache on buffer replace
+        // The buffer content was replaced (or the tab identity changed), so the
+        // styled line cache must be fully cleared to prevent stale rendered lines.
+        self.clear_styled_line_cache = true;
+    }
+
+    // Chunk: docs/chunks/gotodef_cross_file_nav - Open file in new tab for cross-file navigation
+    /// Opens a file in a new tab and switches to it.
+    ///
+    /// Creates a new file tab, loads the file content, sets up syntax highlighting,
+    /// and adds the tab to the active workspace. The new tab becomes the active tab.
+    ///
+    /// Returns the tab ID of the newly created tab, or None if the operation failed.
+    fn open_file_in_new_tab(&mut self, path: PathBuf) -> Option<crate::workspace::TabId> {
+        let tab_id = self.editor.gen_tab_id();
+        let line_height = self.editor.line_height();
+
+        // Create the buffer with file contents
+        let (buffer, base_content) = if path.exists() {
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    let contents = String::from_utf8_lossy(&bytes);
+                    (TextBuffer::from_str(&contents), Some(contents.to_string()))
+                }
+                Err(_) => {
+                    // Silently ignore read errors, create empty buffer
+                    (TextBuffer::new(), None)
+                }
+            }
+        } else {
+            // Non-existent file, create empty buffer
+            (TextBuffer::new(), None)
+        };
+
+        // Get the label from the file name
+        let label = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Untitled".to_string());
+
+        // Create the tab
+        let mut new_tab = crate::workspace::Tab::new_file(
+            tab_id,
+            buffer,
+            label,
+            Some(path.clone()),
+            line_height,
+        );
+
+        // Set base content for merge tracking
+        new_tab.base_content = base_content;
+
+        // Set up syntax highlighting
+        let theme = SyntaxTheme::catppuccin_mocha();
+        new_tab.setup_highlighting(&self.language_registry, theme);
+
+        // Add the tab to the workspace
+        if let Some(workspace) = self.editor.active_workspace_mut() {
+            workspace.add_tab(new_tab);
+        } else {
+            return None;
+        }
+
+        // Register file watch for external changes
+        if let Err(e) = self.buffer_file_watcher.register(&path) {
+            eprintln!("Failed to watch external file {:?}: {}", path, e);
+        }
+
+        // Sync viewport to ensure dirty region calculations work correctly
+        self.sync_active_tab_viewport();
+
+        Some(tab_id)
+    }
+
+    // Chunk: docs/chunks/gotodef_cross_file_nav - Ensure cursor visibility after navigation
+    /// Scrolls the viewport of the active tab to ensure the cursor is visible.
+    ///
+    /// This is used after cross-file navigation (goto-definition, go-back) to
+    /// ensure the cursor is centered or at least visible in the viewport.
+    fn ensure_cursor_visible_in_active_tab(&mut self) {
+        // Need to get cursor position, buffer line count, and line lengths
+        // before we can call ensure_visible_wrapped on the viewport
+
+        // First, gather the necessary information from the active tab
+        let cursor_info = if let Some(ws) = self.editor.active_workspace_mut() {
+            if let Some(tab) = ws.active_tab_mut() {
+                if let Some(buffer) = tab.as_text_buffer() {
+                    let cursor = buffer.cursor_position();
+                    let line_count = buffer.line_count();
+                    // Collect line lengths for the closure
+                    let line_lens: Vec<usize> = (0..line_count)
+                        .map(|line| buffer.line_len(line))
+                        .collect();
+                    Some((cursor.line, cursor.col, line_count, line_lens, tab.viewport.first_visible_line()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Now use that information to scroll the viewport
+        if let Some((cursor_line, cursor_col, line_count, line_lens, first_visible)) = cursor_info {
+            let wrap_layout = crate::wrap_layout::WrapLayout::new(self.view_width, &self.font_metrics);
+
+            if let Some(ws) = self.editor.active_workspace_mut() {
+                if let Some(tab) = ws.active_tab_mut() {
+                    if tab.viewport.ensure_visible_wrapped(
+                        cursor_line,
+                        cursor_col,
+                        first_visible,
+                        line_count,
+                        &wrap_layout,
+                        |line| line_lens.get(line).copied().unwrap_or(0),
+                    ) {
+                        // Viewport scrolled
+                        self.invalidation.merge(InvalidationKind::Layout);
+                    }
+                }
+            }
+        }
     }
 
     // Chunk: docs/chunks/syntax_highlighting - Setup syntax highlighting helper
@@ -3602,6 +4345,90 @@ impl EditorState {
                 tab.sync_highlighter();
             }
         }
+    }
+
+    // Chunk: docs/chunks/incremental_parse - Incremental syntax tree update
+    /// Notifies the active tab's highlighter of a buffer edit for incremental parsing.
+    ///
+    /// This is more efficient than `sync_active_tab_highlighter` because it only
+    /// updates the affected portion of the syntax tree rather than doing a full reparse.
+    fn notify_active_tab_edit(&mut self, event: lite_edit_syntax::EditEvent) {
+        if let Some(ws) = self.editor.active_workspace_mut() {
+            if let Some(tab) = ws.active_tab_mut() {
+                tab.notify_edit(event);
+            }
+        }
+    }
+
+    // Chunk: docs/chunks/treesitter_indent - Apply intelligent indentation
+    /// Applies auto-indentation to the current line after Enter is pressed.
+    ///
+    /// This computes the correct indentation based on the parse tree structure
+    /// (e.g., +1 indent after opening brace, matching indent for closing brace)
+    /// and inserts it at the start of the current line.
+    ///
+    /// Should be called after the highlighter has been synced (so the tree is up-to-date).
+    fn apply_auto_indent(&mut self) {
+        // Get the indent string to insert
+        let indent_str = {
+            let ws = match self.editor.active_workspace() {
+                Some(ws) => ws,
+                None => return,
+            };
+            let tab = match ws.active_tab() {
+                Some(tab) => tab,
+                None => return,
+            };
+            let buffer = match tab.as_text_buffer() {
+                Some(buf) => buf,
+                None => return,
+            };
+
+            let cursor_line = buffer.cursor_position().line;
+            let config = lite_edit_syntax::IndentConfig::default();
+            let indent = tab.compute_indent_for_line(cursor_line, &config);
+
+            // Don't insert if no indent computed
+            if indent.is_empty() {
+                return;
+            }
+
+            indent
+        };
+
+        // Insert the indent string and update highlighter
+        // We need separate borrows to satisfy the borrow checker
+        let edit_info = {
+            let ws = match self.editor.active_workspace_mut() {
+                Some(ws) => ws,
+                None => return,
+            };
+            let tab = match ws.active_tab_mut() {
+                Some(tab) => tab,
+                None => return,
+            };
+
+            // Get buffer and viewport together to avoid borrow conflicts
+            let (buffer, _viewport) = match tab.buffer_and_viewport_mut() {
+                Some(bv) => bv,
+                None => return,
+            };
+
+            // Insert the indent string at cursor position
+            // The cursor is at the start of the new line after Enter
+            let result = buffer.insert_str_tracked(&indent_str);
+
+            result.edit_info
+        };
+
+        // Notify the highlighter of the indent insertion
+        if let Some(edit_info) = edit_info {
+            self.notify_active_tab_edit(edit_info.into());
+        }
+
+        // Mark the line dirty for rendering
+        // Use Layout invalidation since we modified the buffer content
+        self.invalidation.merge(InvalidationKind::Layout);
     }
 
     /// Returns the window title based on the current file association.
@@ -3672,6 +4499,12 @@ impl EditorState {
                     // Chunk: docs/chunks/conflict_mode_lifecycle - Clear conflict mode
                     tab.conflict_mode = false;
                 }
+            }
+
+            // Chunk: docs/chunks/treesitter_symbol_index - Update symbol index for saved file
+            // Re-index the saved file to update cross-file go-to-definition
+            if let Some(ws) = self.editor.active_workspace_mut() {
+                ws.update_symbol_index_for_file(&path, &self.language_registry);
             }
 
             // Chunk: docs/chunks/conflict_mode_lifecycle - Re-check disk after conflict resolution
@@ -3822,6 +4655,11 @@ impl EditorState {
 
         // Mark full viewport dirty
         self.invalidation.merge(InvalidationKind::Layout);
+
+        // Chunk: docs/chunks/cache_reload_invalidation - Clear cache on buffer replace
+        // The buffer content was replaced from disk, so the styled line cache
+        // must be fully cleared to prevent stale rendered lines.
+        self.clear_styled_line_cache = true;
 
         true
     }
@@ -4005,6 +4843,12 @@ impl EditorState {
         } else {
             // First workspace gets empty file tab (for welcome screen)
             self.editor.new_workspace(label, selected_dir.clone());
+        }
+
+        // Chunk: docs/chunks/treesitter_symbol_index - Start symbol indexing for cross-file go-to-def
+        // Start background symbol indexing for the new workspace
+        if let Some(ws) = self.editor.active_workspace_mut() {
+            ws.start_symbol_indexing(Arc::clone(&self.language_registry));
         }
 
         // Chunk: docs/chunks/buffer_file_watching - Update buffer file watcher root
@@ -4371,6 +5215,14 @@ impl EditorState {
             return;
         }
 
+        // Generate label based on existing terminal count
+        let existing_count = self.terminal_tab_count();
+        let label = if existing_count == 0 {
+            "Terminal".to_string()
+        } else {
+            format!("Terminal {}", existing_count + 1)
+        };
+
         // Create terminal buffer with 5000 scrollback lines
         let mut terminal = TerminalBuffer::new(cols, rows, 5000);
 
@@ -4392,23 +5244,18 @@ impl EditorState {
             terminal.spawn_shell(&cwd)
         };
 
-        // Log error but don't fail
-        if let Err(e) = spawn_result {
-            eprintln!("Failed to spawn shell: {}", e);
-        }
-
-        // Generate label based on existing terminal count
-        let existing_count = self.terminal_tab_count();
-        let label = if existing_count == 0 {
-            "Terminal".to_string()
-        } else {
-            format!("Terminal {}", existing_count + 1)
-        };
-
-        // Create and add the terminal tab
+        // Chunk: docs/chunks/terminal_spawn_reliability - Error state for failed terminal spawns
+        // Create and add the tab - either a working terminal or an error tab
         let tab_id = self.editor.gen_tab_id();
         let line_height = self.editor.line_height();
-        let new_tab = Tab::new_terminal(tab_id, terminal, label, line_height);
+        let new_tab = match spawn_result {
+            Ok(()) => Tab::new_terminal(tab_id, terminal, label, line_height),
+            Err(e) => {
+                // Create an error tab instead of a dead terminal
+                let error_msg = format!("{}", e);
+                Tab::new_error(tab_id, error_msg, label, line_height)
+            }
+        };
 
         if let Some(workspace) = self.editor.active_workspace_mut() {
             workspace.add_tab(new_tab);
@@ -4437,6 +5284,98 @@ impl EditorState {
 
         // Ensure the new tab is visible in the tab bar
         self.ensure_active_tab_visible();
+        self.invalidation.merge(InvalidationKind::Layout);
+    }
+
+    // Chunk: docs/chunks/terminal_spawn_reliability - Retry failed terminal spawn
+    /// Retries spawning a terminal for the active error tab.
+    ///
+    /// If the active tab is an error tab (from a failed terminal spawn), this method
+    /// replaces it with a new terminal tab. The new terminal uses the same label and
+    /// attempts to spawn a shell again.
+    ///
+    /// If the retry also fails, the tab remains an error tab with the new error message.
+    pub fn retry_terminal_spawn(&mut self) {
+        use crate::left_rail::RAIL_WIDTH;
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        use crate::workspace::Tab;
+        use lite_edit_terminal::TerminalBuffer;
+
+        // Check if active tab is an error tab
+        let (tab_id, label) = {
+            let Some(ws) = self.editor.active_workspace() else { return };
+            let Some(tab) = ws.active_tab() else { return };
+            if !tab.is_error_tab() {
+                return;
+            }
+            (tab.id, tab.label.clone())
+        };
+
+        // Get pane dimensions for terminal sizing
+        let pane_dimensions = self.editor.active_workspace()
+            .map(|ws| ws.active_pane_id)
+            .and_then(|pane_id| self.get_pane_content_dimensions(pane_id));
+
+        let (content_height, content_width) = match pane_dimensions {
+            Some((height, width)) => (height, width),
+            None => (self.view_height - TAB_BAR_HEIGHT, self.view_width - RAIL_WIDTH),
+        };
+
+        if content_height <= 0.0 || content_width <= 0.0 {
+            return;
+        }
+
+        let rows = (content_height as f64 / self.font_metrics.line_height).floor() as usize;
+        let cols = (content_width as f64 / self.font_metrics.advance_width).floor() as usize;
+
+        if rows == 0 || cols == 0 {
+            return;
+        }
+
+        // Create and spawn new terminal
+        let mut terminal = TerminalBuffer::new(cols, rows, 5000);
+        let cwd = self
+            .editor
+            .active_workspace()
+            .map(|ws| ws.root_path.clone())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+        let spawn_result = if let Some(wakeup) = self.create_pty_wakeup() {
+            terminal.spawn_shell_with_wakeup(&cwd, wakeup)
+        } else {
+            terminal.spawn_shell(&cwd)
+        };
+
+        // Replace the error tab with either a working terminal or a new error tab
+        let line_height = self.editor.line_height();
+        let new_tab = match spawn_result {
+            Ok(()) => Tab::new_terminal(tab_id, terminal, label, line_height),
+            Err(e) => {
+                let error_msg = format!("{}", e);
+                Tab::new_error(tab_id, error_msg, label, line_height)
+            }
+        };
+
+        // Replace the active tab
+        if let Some(workspace) = self.editor.active_workspace_mut() {
+            if let Some(pane) = workspace.active_pane_mut() {
+                let active_idx = pane.active_tab;
+                if active_idx < pane.tabs.len() {
+                    pane.tabs[active_idx] = new_tab;
+                }
+            }
+        }
+
+        // Initialize viewport for the new tab
+        if let Some(workspace) = self.editor.active_workspace_mut() {
+            if let Some(tab) = workspace.active_tab_mut() {
+                let line_count = tab.buffer().line_count();
+                tab.viewport.update_size(content_height, line_count);
+            }
+        }
+
+        self.sync_active_tab_viewport();
+        self.sync_pane_viewports();
         self.invalidation.merge(InvalidationKind::Layout);
     }
 
@@ -5747,6 +6686,37 @@ mod tests {
 
         // Should be dirty after association
         assert!(state.is_dirty());
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    // Chunk: docs/chunks/cache_reload_invalidation - Test cache clear on associate_file
+    #[test]
+    fn test_associate_file_clears_styled_line_cache() {
+        use std::io::Write;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Clear any pre-existing cache flag
+        let _ = state.take_clear_styled_line_cache();
+        assert!(!state.take_clear_styled_line_cache(), "should start false");
+
+        // Create a temporary file with content
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_associate_cache.txt");
+        {
+            let mut f = std::fs::File::create(&temp_file).unwrap();
+            f.write_all(b"File content").unwrap();
+        }
+
+        state.associate_file(temp_file.clone());
+
+        // Cache flag should be set after associating a file
+        assert!(
+            state.take_clear_styled_line_cache(),
+            "associate_file should set clear_styled_line_cache"
+        );
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_file);
@@ -8645,8 +9615,10 @@ mod tests {
 
         // The terminal shell needs time to start and produce output.
         // Poll repeatedly until we get dirty activity.
+        // Use generous timeout (10s) because shell startup is slow under parallel test load
+        // (many tests spawn shells concurrently).
         let mut found_dirty = false;
-        for _ in 0..50 {
+        for _ in 0..500 {
             std::thread::sleep(Duration::from_millis(20));
             let (dirty, _needs_rewakeup) = state.poll_agents();
             if dirty.is_dirty() {
@@ -8749,9 +9721,11 @@ mod tests {
         // Create a terminal tab
         state.new_terminal_tab();
 
-        // Wait for shell startup and poll for PTY events
+        // Wait for shell startup and poll for PTY events.
+        // Use generous timeout (10s) because shell startup is slow under parallel test load
+        // (many tests spawn shells concurrently).
         let mut found_dirty = false;
-        for _ in 0..50 {
+        for _ in 0..500 {
             std::thread::sleep(Duration::from_millis(20));
             let (dirty, _needs_rewakeup) = state.poll_agents();
             if dirty.is_dirty() {
@@ -10572,6 +11546,126 @@ mod tests {
         );
     }
 
+    // Chunk: docs/chunks/terminal_size_accuracy - Terminal size vs render width test
+    /// Tests that the terminal column count matches the renderer's cols_per_row.
+    ///
+    /// This is the key test for the terminal_size_accuracy chunk. The terminal's
+    /// column count (used by the PTY for line wrapping) must match the renderer's
+    /// cols_per_row (used for visual wrapping) to prevent misalignment.
+    #[test]
+    fn test_terminal_cols_matches_wrap_layout_cols_per_row() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        use crate::left_rail::RAIL_WIDTH;
+        use crate::wrap_layout::WrapLayout;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        let fm = test_font_metrics();
+
+        // Set up viewport with typical dimensions
+        let view_width = 800.0;
+        let view_height = 600.0 + TAB_BAR_HEIGHT;
+        state.update_viewport_dimensions(view_width, view_height);
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Get terminal column count
+        let terminal_cols = {
+            let ws = state.editor.active_workspace().unwrap();
+            let tab = ws.active_pane().unwrap().active_tab().unwrap();
+            let term = tab.as_terminal_buffer().unwrap();
+            term.size().0 // columns
+        };
+
+        // Calculate what the renderer would use for cols_per_row
+        // The renderer uses content_width = view_width - RAIL_WIDTH for single-pane
+        let content_width = view_width - RAIL_WIDTH;
+        let wrap_layout = WrapLayout::new(content_width, &fm);
+        let render_cols = wrap_layout.cols_per_row();
+
+        eprintln!(
+            "[TEST] view_width={}, RAIL_WIDTH={}, content_width={}, advance_width={:.4}",
+            view_width, RAIL_WIDTH, content_width, fm.advance_width
+        );
+        eprintln!(
+            "[TEST] terminal_cols={}, render_cols={}, expected_cols={}",
+            terminal_cols,
+            render_cols,
+            (content_width as f64 / fm.advance_width).floor() as usize
+        );
+
+        assert_eq!(
+            terminal_cols, render_cols,
+            "Terminal columns ({}) should match renderer's cols_per_row ({}). \
+             content_width={}, advance_width={:.4}",
+            terminal_cols, render_cols, content_width, fm.advance_width
+        );
+    }
+
+    // Chunk: docs/chunks/terminal_size_accuracy - Test with realistic font metrics
+    /// Tests terminal cols vs render cols with Intel One Mono at 2x scale.
+    ///
+    /// This simulates production conditions where advance_width is ~17.19 pixels.
+    #[test]
+    fn test_terminal_cols_with_realistic_font_metrics() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        use crate::left_rail::RAIL_WIDTH;
+        use crate::wrap_layout::WrapLayout;
+        use crate::font::FontMetrics;
+
+        // Simulate Intel One Mono at 2x scale (based on actual measurements)
+        let fm = FontMetrics {
+            advance_width: 17.1920,
+            line_height: 38.6397,
+            ascent: 30.5199,
+            descent: 8.1198,
+            leading: 0.0,
+            point_size: 28.0,
+        };
+
+        let mut state = EditorState::empty(fm);
+
+        // Use typical Retina display dimensions (scaled)
+        // e.g., 1400px window * 2 = 2800 physical pixels
+        let view_width = 2800.0;
+        let view_height = 1200.0 + TAB_BAR_HEIGHT;
+        state.update_viewport_dimensions(view_width, view_height);
+
+        // Create a terminal tab
+        state.new_terminal_tab();
+
+        // Get terminal column count
+        let terminal_cols = {
+            let ws = state.editor.active_workspace().unwrap();
+            let tab = ws.active_pane().unwrap().active_tab().unwrap();
+            let term = tab.as_terminal_buffer().unwrap();
+            term.size().0 // columns
+        };
+
+        // Calculate what the renderer would use for cols_per_row
+        let content_width = view_width - RAIL_WIDTH;
+        let wrap_layout = WrapLayout::new(content_width, &fm);
+        let render_cols = wrap_layout.cols_per_row();
+
+        eprintln!(
+            "[TEST realistic] view_width={}, RAIL_WIDTH={}, content_width={}, advance_width={:.4}",
+            view_width, RAIL_WIDTH, content_width, fm.advance_width
+        );
+        eprintln!(
+            "[TEST realistic] terminal_cols={}, render_cols={}, expected_cols={}",
+            terminal_cols,
+            render_cols,
+            (content_width as f64 / fm.advance_width).floor() as usize
+        );
+
+        assert_eq!(
+            terminal_cols, render_cols,
+            "Terminal columns ({}) should match renderer's cols_per_row ({}). \
+             This test uses realistic font metrics (Intel One Mono at 2x scale).",
+            terminal_cols, render_cols
+        );
+    }
+
     // =========================================================================
     // Confirm dialog mouse interaction tests
     // Chunk: docs/chunks/generic_yes_no_modal - Mouse click tests for confirm dialog
@@ -12005,5 +13099,498 @@ mod tests {
         let buffer = TextBuffer::from_str("hello\nworld");
         let pos = clamp_position_to_buffer(Position::new(0, 0), &buffer);
         assert_eq!(pos, Position::new(0, 0)); // unchanged
+    }
+
+    // =========================================================================
+    // Cache Invalidation Tests (Chunk: docs/chunks/cache_reload_invalidation)
+    // =========================================================================
+
+    #[test]
+    fn test_reload_file_tab_clears_styled_line_cache() {
+        use std::io::Write;
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Create a temporary file with initial content
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_reload_cache.txt");
+        {
+            let mut f = std::fs::File::create(&temp_file).unwrap();
+            f.write_all(b"Initial content").unwrap();
+        }
+
+        // Associate the file with the current tab (loads it and makes it "clean")
+        state.associate_file(temp_file.clone());
+
+        // Clear any pre-existing cache flag (from associate_file)
+        let _ = state.take_clear_styled_line_cache();
+        assert!(!state.take_clear_styled_line_cache(), "should start false after take");
+
+        // Modify the file on disk
+        {
+            let mut f = std::fs::File::create(&temp_file).unwrap();
+            f.write_all(b"Modified content").unwrap();
+        }
+
+        // Reload the file tab
+        let reloaded = state.reload_file_tab(&temp_file);
+        assert!(reloaded, "reload_file_tab should succeed");
+
+        // Cache flag should be set after reload
+        assert!(
+            state.take_clear_styled_line_cache(),
+            "reload_file_tab should set clear_styled_line_cache"
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    // =========================================================================
+    // Status Message Tests (Chunk: docs/chunks/treesitter_gotodef)
+    // =========================================================================
+
+    #[test]
+    fn test_status_message_creation() {
+        let msg = StatusMessage::new("Test message");
+        assert_eq!(msg.text, "Test message");
+        assert!(!msg.is_expired());
+    }
+
+    #[test]
+    fn test_status_message_expiry() {
+        use std::thread;
+
+        // Create a message with a very short duration
+        let mut msg = StatusMessage::new("Test");
+        msg.duration = Duration::from_millis(50);
+
+        // Initially not expired
+        assert!(!msg.is_expired());
+
+        // Wait for expiry
+        thread::sleep(Duration::from_millis(60));
+        assert!(msg.is_expired());
+    }
+
+    #[test]
+    fn test_status_message_cleared_on_keypress() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Set a status message
+        state.status_message = Some(StatusMessage::new("Test message"));
+        assert!(state.status_message.is_some());
+
+        // Handle a key event
+        state.handle_key(KeyEvent::char('a'));
+
+        // Status message should be cleared
+        assert!(state.status_message.is_none());
+    }
+
+    #[test]
+    fn test_current_status_message_returns_text() {
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // No message initially
+        assert!(state.current_status_message().is_none());
+
+        // Set a message
+        state.status_message = Some(StatusMessage::new("Definition not found"));
+
+        // Should return the message text
+        assert_eq!(
+            state.current_status_message(),
+            Some("Definition not found")
+        );
+    }
+
+    #[test]
+    fn test_current_status_message_clears_expired() {
+        use std::thread;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_size(160.0);
+
+        // Set a message with short expiry
+        let mut msg = StatusMessage::new("Test");
+        msg.duration = Duration::from_millis(50);
+        state.status_message = Some(msg);
+
+        // Initially present
+        assert!(state.current_status_message().is_some());
+
+        // Wait for expiry
+        thread::sleep(Duration::from_millis(60));
+
+        // Should return None and clear the message
+        assert!(state.current_status_message().is_none());
+        assert!(state.status_message.is_none());
+    }
+
+    // =========================================================================
+    // Cross-file goto-definition tests (Chunk: docs/chunks/gotodef_cross_file_nav)
+    // =========================================================================
+
+    /// Test: Cross-file goto opens new tab when target file is not already open.
+    ///
+    /// Setup: workspace with one tab containing file A
+    /// Action: call `goto_cross_file_definition` with target file B
+    /// Assert: workspace now has two tabs, active tab is file B, cursor at definition
+    #[test]
+    fn test_goto_cross_file_definition_opens_new_tab() {
+        use tempfile::TempDir;
+        use std::fs;
+
+        // Create temp files
+        let temp = TempDir::new().unwrap();
+        let file_a = temp.path().join("file_a.rs");
+        let file_b = temp.path().join("file_b.rs");
+
+        fs::write(&file_a, "fn main() {}\n").unwrap();
+        fs::write(&file_b, "pub struct Foo;\npub fn bar() {}\n").unwrap();
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Associate file_a with the initial tab
+        state.associate_file(file_a.clone());
+
+        // Verify initial state: one tab with file_a
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.tab_count(), 1, "Should have 1 tab initially");
+        let initial_tab_id = ws.active_tab().unwrap().id;
+        assert_eq!(
+            ws.active_tab().unwrap().associated_file.as_ref(),
+            Some(&file_a),
+            "Initial tab should be file_a"
+        );
+
+        // Get the pane_id and current position for the goto call
+        let pane_id = ws.active_pane_id;
+        let from_pos = Position::new(0, 5);
+
+        // Call goto_cross_file_definition targeting file_b, line 1, col 7
+        // (where "bar" function starts)
+        state.goto_cross_file_definition(pane_id, from_pos, file_b.clone(), 1, 7);
+
+        // Verify result: two tabs, active is file_b, cursor at (1, 7)
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.tab_count(), 2, "Should now have 2 tabs");
+
+        let active_tab = ws.active_tab().unwrap();
+        assert_eq!(
+            active_tab.associated_file.as_ref(),
+            Some(&file_b),
+            "Active tab should be file_b"
+        );
+        assert_ne!(
+            active_tab.id, initial_tab_id,
+            "Active tab should be the new tab"
+        );
+
+        // Check cursor position
+        if let Some(buffer) = active_tab.as_text_buffer() {
+            let cursor = buffer.cursor_position();
+            assert_eq!(cursor.line, 1, "Cursor should be at line 1");
+            assert_eq!(cursor.col, 7, "Cursor should be at col 7");
+        } else {
+            panic!("Active tab should have a text buffer");
+        }
+    }
+
+    /// Test: Cross-file goto switches to existing tab when target file is already open.
+    ///
+    /// Setup: workspace with tab A (active) and tab B
+    /// Action: call `goto_cross_file_definition` targeting file B
+    /// Assert: still two tabs, active tab is now B, cursor at definition
+    #[test]
+    fn test_goto_cross_file_definition_switches_to_existing_tab() {
+        use tempfile::TempDir;
+        use std::fs;
+        use crate::workspace::Tab;
+        use lite_edit_buffer::TextBuffer;
+
+        let temp = TempDir::new().unwrap();
+        let file_a = temp.path().join("file_a.rs");
+        let file_b = temp.path().join("file_b.rs");
+
+        fs::write(&file_a, "fn main() {}\n").unwrap();
+        fs::write(&file_b, "pub struct Foo;\npub fn bar() {}\n").unwrap();
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Associate file_a with the initial tab
+        state.associate_file(file_a.clone());
+
+        // Add a second tab for file_b
+        let line_height = state.editor.line_height();
+        let tab_id_b = state.editor.gen_tab_id();
+        let content_b = fs::read_to_string(&file_b).unwrap();
+        let buffer_b = TextBuffer::from_str(&content_b);
+        let tab_b = Tab::new_file(tab_id_b, buffer_b, "file_b.rs".to_string(), Some(file_b.clone()), line_height);
+
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.add_tab(tab_b);
+        }
+
+        // Switch back to the first tab (file_a)
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.active_pane_mut().unwrap().switch_tab(0);
+        }
+
+        // Verify initial state
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.tab_count(), 2, "Should have 2 tabs");
+        // Tab A is now active after switching back to tab 0
+        assert_eq!(
+            ws.active_tab().unwrap().associated_file.as_ref(),
+            Some(&file_a),
+            "Should be on file_a tab"
+        );
+
+        // Get the pane_id and position for the goto call
+        let pane_id = ws.active_pane_id;
+        let from_pos = Position::new(0, 3);
+
+        // Call goto_cross_file_definition targeting file_b
+        state.goto_cross_file_definition(pane_id, from_pos, file_b.clone(), 1, 4);
+
+        // Verify result: still 2 tabs, active is file_b with cursor at (1, 4)
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(ws.tab_count(), 2, "Should still have 2 tabs");
+
+        let active_tab = ws.active_tab().unwrap();
+        assert_eq!(
+            active_tab.associated_file.as_ref(),
+            Some(&file_b),
+            "Active tab should be file_b"
+        );
+        assert_eq!(active_tab.id, tab_id_b, "Should have switched to the existing file_b tab");
+
+        // Check cursor position
+        if let Some(buffer) = active_tab.as_text_buffer() {
+            let cursor = buffer.cursor_position();
+            assert_eq!(cursor.line, 1, "Cursor should be at line 1");
+            assert_eq!(cursor.col, 4, "Cursor should be at col 4");
+        } else {
+            panic!("Active tab should have a text buffer");
+        }
+    }
+
+    /// Test: Cross-file goto preserves the original file's content.
+    ///
+    /// Setup: workspace with tab A containing edits
+    /// Action: call `goto_cross_file_definition` targeting file B
+    /// Assert: tab A still exists with original content unchanged
+    #[test]
+    fn test_goto_cross_file_definition_preserves_original_file() {
+        use tempfile::TempDir;
+        use std::fs;
+
+        let temp = TempDir::new().unwrap();
+        let file_a = temp.path().join("file_a.rs");
+        let file_b = temp.path().join("file_b.rs");
+
+        fs::write(&file_a, "fn main() {}\n").unwrap();
+        fs::write(&file_b, "pub struct Foo;\n").unwrap();
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Associate file_a with the initial tab
+        state.associate_file(file_a.clone());
+
+        // Make an edit to the buffer (simulating user edits)
+        state.buffer_mut().insert_str("// Edited content\n");
+        let edited_content = state.buffer().content().to_string();
+        let original_tab_id = state.editor.active_workspace().unwrap().active_tab().unwrap().id;
+
+        // Get the pane_id and position
+        let ws = state.editor.active_workspace().unwrap();
+        let pane_id = ws.active_pane_id;
+        let from_pos = Position::new(0, 0);
+
+        // Call goto_cross_file_definition
+        state.goto_cross_file_definition(pane_id, from_pos, file_b.clone(), 0, 0);
+
+        // Switch back to the original tab
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.switch_to_tab_by_id(original_tab_id);
+        }
+
+        // Verify original content is preserved
+        let ws = state.editor.active_workspace().unwrap();
+        let original_tab = ws.active_tab().unwrap();
+        assert_eq!(
+            original_tab.id, original_tab_id,
+            "Should be back on original tab"
+        );
+        if let Some(buffer) = original_tab.as_text_buffer() {
+            assert_eq!(
+                buffer.content(),
+                edited_content,
+                "Original tab content should be unchanged"
+            );
+        } else {
+            panic!("Original tab should have a text buffer");
+        }
+    }
+
+    /// Test: Go-back navigates to a different tab.
+    ///
+    /// Setup: workspace with tabs A and B, jump stack has entry for A, active is B
+    /// Action: call `go_back()`
+    /// Assert: active tab is now A, cursor at jump stack position
+    #[test]
+    fn test_go_back_navigates_to_different_tab() {
+        use tempfile::TempDir;
+        use std::fs;
+        use crate::workspace::{Tab, JumpPosition};
+        use lite_edit_buffer::TextBuffer;
+
+        let temp = TempDir::new().unwrap();
+        let file_a = temp.path().join("file_a.rs");
+        let file_b = temp.path().join("file_b.rs");
+
+        fs::write(&file_a, "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
+        fs::write(&file_b, "pub struct Foo;\n").unwrap();
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Set up two tabs
+        state.associate_file(file_a.clone());
+        let tab_a_id = state.editor.active_workspace().unwrap().active_tab().unwrap().id;
+
+        let line_height = state.editor.line_height();
+        let tab_b_id = state.editor.gen_tab_id();
+        let content_b = fs::read_to_string(&file_b).unwrap();
+        let buffer_b = TextBuffer::from_str(&content_b);
+        let tab_b = Tab::new_file(tab_b_id, buffer_b, "file_b.rs".to_string(), Some(file_b.clone()), line_height);
+
+        // Get pane_id before adding the tab
+        let pane_id = state.editor.active_workspace().unwrap().active_pane_id;
+
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.add_tab(tab_b);
+        }
+
+        // Now active is tab B (add_tab switches to it)
+
+        // Push a jump position for tab A (as if we just navigated from A to B)
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.jump_stack.push(JumpPosition {
+                tab_id: tab_a_id,
+                pane_id,
+                line: 1,
+                col: 4,
+            });
+        }
+
+        // Verify we're on tab B
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(
+            ws.active_tab().unwrap().id, tab_b_id,
+            "Should be on tab B"
+        );
+
+        // Call go_back
+        state.go_back();
+
+        // Verify we're now on tab A with cursor at (1, 4)
+        let ws = state.editor.active_workspace().unwrap();
+        let active_tab = ws.active_tab().unwrap();
+        assert_eq!(
+            active_tab.id, tab_a_id,
+            "Should have switched to tab A"
+        );
+        assert_eq!(
+            active_tab.associated_file.as_ref(),
+            Some(&file_a),
+            "Active tab should be file_a"
+        );
+
+        // Check cursor position
+        if let Some(buffer) = active_tab.as_text_buffer() {
+            let cursor = buffer.cursor_position();
+            assert_eq!(cursor.line, 1, "Cursor should be at line 1");
+            assert_eq!(cursor.col, 4, "Cursor should be at col 4");
+        } else {
+            panic!("Active tab should have a text buffer");
+        }
+    }
+
+    /// Test: Go-back + goto round-trip.
+    ///
+    /// Setup: file A with cursor at a position, then goto-definition to file B
+    /// Action: goto_definition from A, then go_back
+    /// Assert: back in file A at original position
+    #[test]
+    fn test_goto_and_go_back_round_trip() {
+        use tempfile::TempDir;
+        use std::fs;
+
+        let temp = TempDir::new().unwrap();
+        let file_a = temp.path().join("file_a.rs");
+        let file_b = temp.path().join("file_b.rs");
+
+        fs::write(&file_a, "fn main() {\n    let x = Foo::new();\n}\n").unwrap();
+        fs::write(&file_b, "pub struct Foo;\nimpl Foo {\n    pub fn new() -> Self { Foo }\n}\n").unwrap();
+
+        let mut state = EditorState::empty(test_font_metrics());
+        state.update_viewport_dimensions(800.0, 600.0);
+
+        // Set up file A
+        state.associate_file(file_a.clone());
+        let tab_a_id = state.editor.active_workspace().unwrap().active_tab().unwrap().id;
+
+        // Position cursor in file A at line 1, col 12 (on "Foo")
+        state.buffer_mut().set_cursor(Position::new(1, 12));
+
+        // Get pane_id and from_pos
+        let ws = state.editor.active_workspace().unwrap();
+        let pane_id = ws.active_pane_id;
+        let from_pos = Position::new(1, 12); // on "Foo"
+
+        // Call goto_cross_file_definition to file_b line 2 col 11 (inside new())
+        state.goto_cross_file_definition(pane_id, from_pos, file_b.clone(), 2, 11);
+
+        // Verify we're now in file_b
+        let ws = state.editor.active_workspace().unwrap();
+        assert_eq!(
+            ws.active_tab().unwrap().associated_file.as_ref(),
+            Some(&file_b),
+            "Should be in file_b after goto"
+        );
+        assert_eq!(ws.tab_count(), 2, "Should have 2 tabs");
+
+        // Call go_back
+        state.go_back();
+
+        // Verify we're back in file_a at original position
+        let ws = state.editor.active_workspace().unwrap();
+        let active_tab = ws.active_tab().unwrap();
+        assert_eq!(
+            active_tab.id, tab_a_id,
+            "Should be back on tab A"
+        );
+        assert_eq!(
+            active_tab.associated_file.as_ref(),
+            Some(&file_a),
+            "Should be in file_a after go_back"
+        );
+
+        // Check cursor position is restored
+        if let Some(buffer) = active_tab.as_text_buffer() {
+            let cursor = buffer.cursor_position();
+            assert_eq!(cursor.line, 1, "Cursor should be at line 1 (original position)");
+            assert_eq!(cursor.col, 12, "Cursor should be at col 12 (original position)");
+        } else {
+            panic!("Active tab should have a text buffer");
+        }
     }
 }

@@ -86,6 +86,7 @@ use scissor::{buffer_content_scissor_rect, full_viewport_scissor_rect};
 // Renderer
 // =============================================================================
 
+// Chunk: docs/chunks/metal_surface - Metal rendering pipeline with command queue
 /// The Metal renderer responsible for drawing to the surface
 pub struct Renderer {
     /// The Metal command queue for submitting work
@@ -408,6 +409,7 @@ impl Renderer {
     /// Note: This method does NOT update the glyph buffer - the caller must
     /// pass a BufferView to update_glyph_buffer before calling this method,
     /// or use render_with_editor which handles this automatically.
+    // Chunk: docs/chunks/metal_surface - Frame rendering with clear-to-background-color render pass
     #[allow(dead_code)]
     pub fn render(&mut self, view: &MetalView) {
         let metal_layer = view.metal_layer();

@@ -7,7 +7,7 @@ code_paths:
 - crates/editor/src/glyph_buffer.rs
 - crates/editor/src/buffer_target.rs
 - crates/editor/src/viewport.rs
-- crates/editor/src/renderer.rs
+- crates/editor/src/renderer/mod.rs
 - crates/editor/src/main.rs
 - crates/editor/tests/wrap_test.rs
 code_references:
@@ -31,7 +31,7 @@ code_references:
     implements: "Wrap-aware hit-testing: module provides pixel_to_buffer_position_wrapped (private helper) for converting pixel coordinates to buffer position by walking screen rows"
   - ref: crates/editor/src/viewport.rs#Viewport::ensure_visible_wrapped
     implements: "Wrap-aware cursor visibility ensuring the specific screen row containing cursor is visible"
-  - ref: crates/editor/src/renderer.rs#Renderer::wrap_layout
+  - ref: crates/editor/src/renderer/mod.rs#Renderer::wrap_layout
     implements: "Factory method creating WrapLayout from current viewport width and font metrics"
 narrative: null
 investigation: null
