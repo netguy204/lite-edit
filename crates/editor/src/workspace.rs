@@ -1389,8 +1389,14 @@ impl Workspace {
                             // advance the viewport to show new content
                             let now_alt_screen = terminal.is_alt_screen();
 
-                            // Handle mode transition: alt -> primary means snap to bottom
-                            if was_alt_screen && !now_alt_screen {
+                            // Chunk: docs/chunks/terminal_alt_screen_viewport_reset - Reset viewport on primary→alt
+                            if !was_alt_screen && now_alt_screen {
+                                // Entering alt screen: reset scroll position.
+                                // Alt screen line_count = screen_lines ≤ visible_lines, so this
+                                // effectively sets scroll_offset_px to 0.
+                                viewport.scroll_to_bottom(terminal.line_count());
+                            } else if was_alt_screen && !now_alt_screen {
+                                // Handle mode transition: alt -> primary means snap to bottom
                                 viewport.scroll_to_bottom(terminal.line_count());
                             } else if !now_alt_screen && was_at_bottom {
                                 // Primary screen auto-follow
