@@ -1392,6 +1392,12 @@ impl Workspace {
                             // Handle mode transition: alt -> primary means snap to bottom
                             if was_alt_screen && !now_alt_screen {
                                 viewport.scroll_to_bottom(terminal.line_count());
+                            } else if !was_alt_screen && now_alt_screen {
+                                // Chunk: docs/chunks/alt_screen_viewport_reset
+                                // Primary -> alt screen: reset scroll to 0
+                                // Alt screen has line_count = screen_lines <= visible_lines,
+                                // so scroll_to_bottom sets offset to 0
+                                viewport.scroll_to_bottom(terminal.line_count());
                             } else if !now_alt_screen && was_at_bottom {
                                 // Primary screen auto-follow
                                 viewport.scroll_to_bottom(terminal.line_count());

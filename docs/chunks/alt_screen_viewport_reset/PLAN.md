@@ -8,170 +8,120 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This is a targeted bugfix in `workspace.rs` that adds a missing branch to the
+terminal screen mode transition handling in `poll_standalone_terminals`.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The existing code correctly handles:
+1. **alt → primary transition**: `was_alt_screen && !now_alt_screen` — snaps viewport to bottom of primary scrollback
+2. **primary auto-follow**: `!now_alt_screen && was_at_bottom` — advances viewport to show new output
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+But it's missing:
+3. **primary → alt transition**: `!was_alt_screen && now_alt_screen` — should reset viewport to 0
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/alt_screen_viewport_reset/GOAL.md)
-with references to the files that you expect to touch.
--->
+When entering alt-screen after scrolling in primary mode, the `scroll_offset_px` from primary
+(potentially thousands of pixels due to scrollback) carries over to alt-screen. But alt-screen
+has `line_count = screen_lines ≈ 40`, so the scroll position points far past the end of content.
+The viewport's `visible_range` becomes empty and nothing renders.
+
+The fix is simple: add a branch for `!was_alt_screen && now_alt_screen` that calls
+`viewport.scroll_to_bottom(terminal.line_count())`. Since alt-screen's `line_count()` equals
+`screen_lines` which is ≤ `visible_lines`, `scroll_to_bottom` will set `scroll_offset_px` to 0
+(per the implementation at viewport.rs:231-234).
+
+This follows the viewport_scroll subsystem's patterns: we use the existing `scroll_to_bottom`
+method rather than directly manipulating `scroll_offset_px`.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+- **docs/subsystems/viewport_scroll** (DOCUMENTED): This chunk USES the viewport_scroll
+  subsystem. Specifically, it calls `Viewport::scroll_to_bottom` which is already documented
+  as the method for "snap-to-bottom for keypress and mode transition reset (terminal scrollback)".
+  The fix follows the existing pattern established by the alt→primary transition handler.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing test for primary→alt transition
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add a unit test to `workspace.rs` that verifies the viewport scroll position is reset when
+a terminal enters alternate screen mode after scrolling.
 
-Example:
+The test should:
+1. Create a terminal tab with a viewport that has non-zero scroll offset
+2. Simulate a poll cycle where the terminal transitions from primary to alt screen
+3. Assert that the viewport's scroll offset is reset to 0
 
-### Step 1: Define the SegmentHeader struct
+**Note**: The terminal buffer's `is_alt_screen()` state is controlled by Alacritty's parser
+processing escape sequences, which makes direct unit testing challenging. We have two options:
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+a) **Preferred**: Mock the screen mode by exposing test helpers on TerminalBuffer
+b) **Alternative**: Test via integration test that sends actual escape sequences
 
-Location: src/segment/format.rs
+Given TDD constraints, start with option (a) if feasible, otherwise document that this is
+a case where TDD is impractical (per TESTING_PHILOSOPHY.md) and verify manually.
 
-### Step 2: Implement header serialization
+Location: `crates/editor/src/workspace.rs` (test module) or integration test
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+### Step 2: Add primary→alt transition branch
 
-### Step 3: ...
+In `poll_standalone_terminals` (workspace.rs ~line 1392), add a new condition to handle
+the primary→alt screen transition:
 
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+// Handle mode transition: alt -> primary means snap to bottom
+if was_alt_screen && !now_alt_screen {
+    viewport.scroll_to_bottom(terminal.line_count());
+} else if !was_alt_screen && now_alt_screen {
+    // Chunk: docs/chunks/alt_screen_viewport_reset
+    // Primary -> alt screen: reset scroll to 0
+    // Alt screen has line_count = screen_lines <= visible_lines,
+    // so scroll_to_bottom sets offset to 0
+    viewport.scroll_to_bottom(terminal.line_count());
+} else if !now_alt_screen && was_at_bottom {
+    // Primary screen auto-follow
+    viewport.scroll_to_bottom(terminal.line_count());
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+Location: `crates/editor/src/workspace.rs` (~line 1392-1398)
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+### Step 3: Manual verification
 
-## Dependencies
+Build and run the editor. Test the reproduction case:
+1. Open a terminal tab
+2. `cat` a large file (causes scrolling/scrollback)
+3. Run `vim` (enters alt-screen)
+4. Verify vim's welcome screen renders correctly
+5. Exit vim (`:q`)
+6. Verify primary screen content is visible at bottom
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+Also test:
+- `htop` after scrolling
+- `less <file>` after scrolling
+- Fresh terminal (no prior scrolling) still works
+- Alt→primary transition (exiting vim) still snaps to bottom correctly
 
-If there are no dependencies, delete this section.
--->
+### Step 4: Run existing tests
+
+Ensure no regressions in terminal-related tests:
+
+```bash
+cargo test -p lite-edit-editor
+cargo test -p lite-edit-terminal
+```
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Test feasibility**: The terminal's `is_alt_screen()` state depends on Alacritty's parser
+   processing escape sequences. Creating a unit test may require test helpers that don't
+   currently exist. If unit testing proves impractical, manual verification is acceptable
+   per TESTING_PHILOSOPHY.md ("GPU rendering, macOS window management... verify visually").
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **No race condition concerns**: `poll_standalone_terminals` runs synchronously on the
+   main thread and both `was_alt_screen` and `now_alt_screen` are sampled within the same
+   poll cycle, so there's no TOCTOU risk.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

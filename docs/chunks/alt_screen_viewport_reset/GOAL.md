@@ -1,18 +1,21 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/editor/src/workspace.rs
 code_references: []
 narrative: null
 investigation: terminal_scroll_viewport
-subsystems: []
+subsystems:
+  - subsystem_id: viewport_scroll
+    relationship: uses
 friction_entries: []
 bug_type: semantic
 depends_on: []
-created_after: ["terminal_size_accuracy"]
+created_after:
+- terminal_size_accuracy
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
