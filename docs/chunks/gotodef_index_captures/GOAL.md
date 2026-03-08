@@ -1,18 +1,27 @@
 ---
-status: FUTURE
+status: HISTORICAL
 ticket: null
 parent_chunk: null
-code_paths: []
-code_references: []
+code_paths:
+  - crates/syntax/src/symbol_index.rs
+code_references:
+  - ref: crates/syntax/src/symbol_index.rs#SymbolKind::from_capture_name
+    implements: "Filter reference captures to prevent call sites from being indexed"
+  - ref: crates/syntax/src/symbol_index.rs#index_file
+    implements: "Switch from QueryCaptures to QueryMatches to fix method interleaving"
+  - ref: crates/syntax/src/symbol_index.rs#tests::test_methods_in_impl_blocks_indexed
+    implements: "Test verifying methods inside impl blocks are indexed"
+  - ref: crates/syntax/src/symbol_index.rs#tests::test_reference_captures_not_indexed
+    implements: "Test verifying reference captures are NOT indexed"
 narrative: null
 investigation: cross_file_goto_definition
 subsystems: []
 friction_entries: []
 bug_type: implementation
 depends_on: []
-created_after: ["alt_screen_viewport_reset"]
+created_after:
+- alt_screen_viewport_reset
 ---
-
 # Chunk Goal
 
 ## Minor Goal
