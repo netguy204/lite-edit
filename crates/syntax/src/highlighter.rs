@@ -32,6 +32,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor, Tree};
 
 // Chunk: docs/chunks/highlight_capture_alloc - Reduce per-frame allocations in hot path
+// Chunk: docs/chunks/highlight_capture_alloc - u32 capture index instead of String allocation
 /// A capture entry: (start_byte, end_byte, capture_index).
 ///
 /// The capture_index is a `u32` used to look up the capture name from `Query::capture_names()`.
@@ -542,6 +543,7 @@ impl SyntaxHighlighter {
         }
     }
 
+    // Chunk: docs/chunks/highlight_injection - Injection region identification
     /// Internal implementation of injection region identification.
     ///
     /// Takes the query by reference to avoid borrow conflicts.
@@ -966,6 +968,7 @@ impl SyntaxHighlighter {
         }
     }
 
+    // Chunk: docs/chunks/highlight_injection - Lazy parsing of injection trees
     /// Internal helper to ensure an injection tree is parsed.
     ///
     /// Separate from `ensure_injection_tree` to work with mutable borrows.
