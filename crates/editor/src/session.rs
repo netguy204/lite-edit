@@ -983,6 +983,46 @@ mod tests {
     // SplitDirection Conversion Tests
     // =========================================================================
 
+    // Chunk: docs/chunks/highlight_restore - Characterization test: restored tabs lack highlighters
+    #[test]
+    fn test_restored_tabs_have_no_highlighter() {
+        // Session restore creates tabs via Tab::new_file() which sets highlighter: None.
+        // This is expected at the session layer — highlighting is applied later by
+        // EditorState::setup_all_tab_highlighting() after restore.
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().to_path_buf();
+
+        let file_path = root.join("test.rs");
+        std::fs::write(&file_path, "fn main() {}").unwrap();
+
+        let session = SessionData {
+            schema_version: SCHEMA_VERSION,
+            active_workspace: 0,
+            workspaces: vec![WorkspaceData {
+                root_path: root.clone(),
+                label: "Test".to_string(),
+                active_pane_id: 0,
+                pane_root: PaneLayoutData::Leaf(PaneData {
+                    id: 0,
+                    tabs: vec![TabData {
+                        file_path: file_path.clone(),
+                    }],
+                    active_tab: 0,
+                }),
+            }],
+        };
+
+        let editor = session.restore_into_editor(TEST_LINE_HEIGHT).unwrap();
+        let ws = editor.active_workspace().unwrap();
+        let tab = ws.active_tab().unwrap();
+
+        // Restored tab should have no highlighter (session.rs doesn't have LanguageRegistry)
+        assert!(
+            tab.highlighter().is_none(),
+            "Restored tab should have highlighter: None at the session layer"
+        );
+    }
+
     #[test]
     fn test_split_direction_conversion() {
         assert_eq!(

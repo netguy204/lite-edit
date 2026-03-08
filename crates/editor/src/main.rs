@@ -412,6 +412,9 @@ impl AppDelegate {
                         // session restore (the most common startup path).
                         state.initialize_symbol_indexing_for_all_workspaces();
 
+                        // Chunk: docs/chunks/highlight_restore - Apply highlighting to restored tabs
+                        state.setup_all_tab_highlighting();
+
                         Some(state)
                     }
                     Err(e) => {

@@ -1,8 +1,12 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/editor/src/editor_state.rs
+- crates/editor/src/main.rs
+- crates/editor/src/session.rs
+- crates/editor/tests/session_persistence.rs
 code_references: []
 narrative: null
 investigation: null
@@ -10,9 +14,9 @@ subsystems: []
 friction_entries: []
 bug_type: implementation
 depends_on: []
-created_after: ["tsx_goto_functions"]
+created_after:
+- tsx_goto_functions
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

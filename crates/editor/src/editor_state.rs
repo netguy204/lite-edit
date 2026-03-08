@@ -647,6 +647,23 @@ impl EditorState {
         self.invalidation.merge(InvalidationKind::Layout);
     }
 
+    // Chunk: docs/chunks/highlight_restore - Apply highlighting to all restored tabs
+    /// Sets up syntax highlighting for all file tabs across all workspaces.
+    ///
+    /// This should be called after session restore to ensure all restored tabs
+    /// have syntax highlighting. During normal file open, `setup_highlighting()`
+    /// is called per-tab, but session restore creates tabs without highlighters.
+    pub fn setup_all_tab_highlighting(&mut self) {
+        for ws in &mut self.editor.workspaces {
+            for pane in ws.all_panes_mut() {
+                for tab in &mut pane.tabs {
+                    let theme = SyntaxTheme::catppuccin_mocha();
+                    tab.setup_highlighting(&self.language_registry, theme);
+                }
+            }
+        }
+    }
+
     // Chunk: docs/chunks/gotodef_session_restore - Initialize symbol indexing after session restore
     /// Initializes symbol indexing for all workspaces.
     ///
@@ -13662,5 +13679,96 @@ mod tests {
         } else {
             panic!("Active tab should have a text buffer");
         }
+    }
+
+    // =========================================================================
+    // Highlight Restore Tests
+    // =========================================================================
+
+    // Chunk: docs/chunks/highlight_restore - Verify highlighting after session restore
+    #[test]
+    fn test_setup_all_tab_highlighting_after_restore() {
+        use crate::session::{SessionData, WorkspaceData, PaneLayoutData, PaneData, TabData};
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().to_path_buf();
+
+        // Create files with recognized extensions
+        let rs_file = root.join("main.rs");
+        let py_file = root.join("script.py");
+        // Create a file with an unrecognized extension
+        let xyz_file = root.join("data.xyz");
+        std::fs::write(&rs_file, "fn main() {}").unwrap();
+        std::fs::write(&py_file, "print('hello')").unwrap();
+        std::fs::write(&xyz_file, "unknown format").unwrap();
+
+        // Build session data referencing those files
+        let session = SessionData {
+            schema_version: 1,
+            active_workspace: 0,
+            workspaces: vec![WorkspaceData {
+                root_path: root.clone(),
+                label: "Test".to_string(),
+                active_pane_id: 0,
+                pane_root: PaneLayoutData::Leaf(PaneData {
+                    id: 0,
+                    tabs: vec![
+                        TabData { file_path: rs_file.clone() },
+                        TabData { file_path: py_file.clone() },
+                        TabData { file_path: xyz_file.clone() },
+                    ],
+                    active_tab: 0,
+                }),
+            }],
+        };
+
+        // Restore into editor (tabs will have no highlighters)
+        let editor = session.restore_into_editor(16.0).unwrap();
+        let mut state = EditorState::new_deferred(test_font_metrics());
+        state.editor = editor;
+
+        // Verify no tabs have highlighters before calling setup
+        let ws = &state.editor.workspaces[0];
+        let pane = ws.active_pane().unwrap();
+        for tab in &pane.tabs {
+            assert!(tab.highlighter().is_none(), "Tabs should have no highlighter before setup");
+        }
+
+        // Apply highlighting
+        state.setup_all_tab_highlighting();
+
+        // Verify results
+        let ws = &state.editor.workspaces[0];
+        let pane = ws.active_pane().unwrap();
+
+        // .rs file should have highlighting
+        assert!(
+            pane.tabs[0].highlighter().is_some(),
+            ".rs tab should have a highlighter after setup"
+        );
+
+        // .py file should have highlighting
+        assert!(
+            pane.tabs[1].highlighter().is_some(),
+            ".py tab should have a highlighter after setup"
+        );
+
+        // .xyz file should NOT have highlighting (unrecognized extension)
+        assert!(
+            pane.tabs[2].highlighter().is_none(),
+            ".xyz tab should not have a highlighter (unrecognized extension)"
+        );
+    }
+
+    // Chunk: docs/chunks/highlight_restore - Verify no panic on empty workspaces
+    #[test]
+    fn test_setup_all_tab_highlighting_no_workspaces() {
+        let mut state = EditorState::new_deferred(test_font_metrics());
+
+        // No workspaces - should not panic
+        state.setup_all_tab_highlighting();
+
+        assert_eq!(state.editor.workspace_count(), 0);
     }
 }

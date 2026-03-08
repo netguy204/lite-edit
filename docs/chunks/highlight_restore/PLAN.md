@@ -8,155 +8,157 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+Add a new `EditorState` method `setup_all_tab_highlighting()` that iterates
+every workspace → every pane → every tab and calls `Tab::setup_highlighting()`
+with the `LanguageRegistry` and `SyntaxTheme`. Call this method from `main.rs`
+immediately after session restore, alongside the existing
+`initialize_symbol_indexing_for_all_workspaces()` call.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+This mirrors the established pattern: `gotodef_session_restore` added
+`initialize_symbol_indexing_for_all_workspaces()` at the same call site to fix
+a similar "works on normal open, missing after restore" gap. The fix follows
+the same structure — a post-restore initialization method on `EditorState`
+that walks all workspaces.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+The implementation keeps `session.rs` focused on data restoration (no
+highlighting concern leaks in) and puts the highlighting setup in
+`editor_state.rs` where `language_registry` and the theme are naturally
+accessible.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/highlight_restore/GOAL.md)
-with references to the files that you expect to touch.
--->
+Testing follows TDD per TESTING_PHILOSOPHY.md: a unit test in `session.rs`
+verifies that restored tabs have `highlighter: None` (confirming the bug
+exists at the data layer), then an integration test verifies that after
+calling the new method, all restored tabs have highlighters for recognized
+extensions.
 
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+<!-- No subsystems are relevant to this chunk. The renderer, spatial_layout,
+     and viewport_scroll subsystems are not touched by this fix. -->
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write a failing test confirming the bug
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add a unit test in `crates/editor/src/session.rs` (in the existing `#[cfg(test)]`
+module) that:
 
-Example:
+1. Creates a `SessionData` with a workspace containing a `.rs` file tab
+2. Calls `restore_into_editor()` to get an `Editor`
+3. Asserts that the restored tab's `highlighter` is `None`
 
-### Step 1: Define the SegmentHeader struct
+This test documents the current broken behavior and will remain as a
+characterization test (it asserts what session.rs produces — no highlighter —
+since session.rs doesn't have access to `LanguageRegistry`).
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Location: `crates/editor/src/session.rs` test module
 
-Location: src/segment/format.rs
+### Step 2: Add `setup_all_tab_highlighting()` to EditorState
 
-### Step 2: Implement header serialization
+Add a new public method to `EditorState` in `crates/editor/src/editor_state.rs`:
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+// Chunk: docs/chunks/highlight_restore - Apply highlighting to all restored tabs
+/// Sets up syntax highlighting for all file tabs across all workspaces.
+///
+/// This should be called after session restore to ensure all restored tabs
+/// have syntax highlighting. During normal file open, `setup_highlighting()`
+/// is called per-tab, but session restore creates tabs without highlighters.
+pub fn setup_all_tab_highlighting(&mut self) {
+    let theme = SyntaxTheme::catppuccin_mocha();
+    for ws in &mut self.editor.workspaces {
+        for pane in ws.all_panes_mut() {
+            for tab in &mut pane.tabs {
+                tab.setup_highlighting(&self.language_registry, theme);
+            }
+        }
+    }
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+This follows the exact same traversal pattern as
+`initialize_symbol_indexing_for_all_workspaces()` but goes one level deeper
+(into tabs within panes). The `setup_highlighting()` call on each tab is a
+no-op for tabs without a file path or unrecognized extensions (returns `false`),
+so no filtering is needed.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+**Borrow checker note:** `self.language_registry` is an `Arc<LanguageRegistry>`,
+so we can take a shared reference to it while mutably iterating `self.editor.workspaces`.
+The `theme` is a value type (`SyntaxTheme`) created before the loop. No borrow
+conflicts.
+
+Location: `crates/editor/src/editor_state.rs`, near `initialize_symbol_indexing_for_all_workspaces()`
+
+### Step 3: Call `setup_all_tab_highlighting()` after session restore in main.rs
+
+In `crates/editor/src/main.rs`, at the session restore success path (around
+line 413, after `state.initialize_symbol_indexing_for_all_workspaces()`), add:
+
+```rust
+// Chunk: docs/chunks/highlight_restore - Apply highlighting to restored tabs
+state.setup_all_tab_highlighting();
+```
+
+This mirrors the pattern of `initialize_symbol_indexing_for_all_workspaces()`
+being called at the same location.
+
+Location: `crates/editor/src/main.rs`, inside the `Ok(editor)` arm of session restore
+
+### Step 4: Write an integration test for post-restore highlighting
+
+Add a test in `crates/editor/tests/session_persistence.rs` that verifies
+end-to-end highlighting after restore:
+
+1. Create a temp directory with `.rs` and `.py` files (recognized extensions)
+   and a `.xyz` file (unrecognized)
+2. Build a `SessionData` referencing those files
+3. Call `restore_into_editor()` to get an `Editor`
+4. Create an `EditorState` with `new_deferred()`, assign the restored editor
+5. Call `setup_all_tab_highlighting()`
+6. Assert that the `.rs` tab has `highlighter.is_some()`
+7. Assert that the `.py` tab has `highlighter.is_some()`
+8. Assert that the `.xyz` tab has `highlighter.is_none()` (unrecognized extension)
+
+This test verifies the success criteria: restored buffers have syntax
+highlighting immediately after session restore for recognized languages.
+
+Location: `crates/editor/tests/session_persistence.rs`
+
+### Step 5: Build and run all tests
+
+Run `cargo build` and `cargo test` to verify:
+- The new method compiles
+- The integration test passes
+- No regressions in existing session or highlighting tests
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+None. All required infrastructure exists:
+- `Tab::setup_highlighting()` is already implemented
+- `LanguageRegistry` is already constructed in `EditorState`
+- `SyntaxTheme::catppuccin_mocha()` is already the standard theme
+- `Workspace::all_panes_mut()` provides the traversal API
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Startup latency**: `setup_highlighting()` creates a tree-sitter parser and
+  does an initial full parse per tab. For sessions with many tabs (e.g., 20+
+  files), this could add noticeable startup delay. Mitigation: tree-sitter
+  parsing is fast (sub-millisecond for typical files), and this matches what
+  already happens when opening files individually. If it becomes a problem,
+  lazy initialization (highlight on first render) would be a separate chunk.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **Theme hardcoding**: All call sites use `SyntaxTheme::catppuccin_mocha()`.
+  This is an existing pattern, not a new one. If theme selection is added later,
+  this method would need updating alongside all other call sites.
 
 ## Deviations
+
+- Step 2: `SyntaxTheme` is not `Copy` or `Clone`, so `catppuccin_mocha()` must
+  be called per-tab rather than once before the loop. No functional impact.
+
+- Step 4: Integration test placed in `editor_state.rs` test module instead of
+  `session_persistence.rs`. `EditorState` is a private module in `main.rs` (not
+  exported via `lib.rs`), so integration tests in `crates/editor/tests/` cannot
+  access it. Moving the test to `editor_state.rs` keeps the same coverage.
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
