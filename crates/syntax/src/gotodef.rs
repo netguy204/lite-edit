@@ -1133,6 +1133,177 @@ function greet(name: string): void {
         );
     }
 
+    // Chunk: docs/chunks/tsx_goto_import - TSX import resolution tests
+
+    #[test]
+    fn test_tsx_named_import_resolution() {
+        let resolver = make_tsx_resolver();
+        let code = r#"
+import { useState } from 'react';
+
+const App = () => {
+    const [count, setCount] = useState(0);
+    return <div>{count}</div>;
+};
+"#;
+        let tree = parse_tsx(code);
+        let source = code.as_bytes();
+
+        // Find the reference to useState in the function body
+        let ref_pos = code.find("useState(0)").unwrap();
+        let result = resolver.find_definition(&tree, source, ref_pos);
+
+        assert!(result.is_some(), "Should find definition for useState");
+        let range = result.unwrap();
+        let def_text = &code[range.clone()];
+        assert_eq!(
+            def_text, "useState",
+            "Definition should be 'useState', got '{}'",
+            def_text
+        );
+        // Should resolve to the import specifier, not any other location
+        let import_pos = code.find("import { useState }").unwrap() + 9; // "useState" inside import
+        assert_eq!(
+            range.start, import_pos,
+            "Should resolve to the import specifier identifier"
+        );
+    }
+
+    #[test]
+    fn test_tsx_default_import_resolution() {
+        let resolver = make_tsx_resolver();
+        let code = r#"
+import React from 'react';
+
+const element = React.createElement('div');
+"#;
+        let tree = parse_tsx(code);
+        let source = code.as_bytes();
+
+        // Find the reference to React in the expression
+        let ref_pos = code.find("React.createElement").unwrap();
+        let result = resolver.find_definition(&tree, source, ref_pos);
+
+        assert!(result.is_some(), "Should find definition for React");
+        let range = result.unwrap();
+        let def_text = &code[range.clone()];
+        assert_eq!(
+            def_text, "React",
+            "Definition should be 'React', got '{}'",
+            def_text
+        );
+    }
+
+    #[test]
+    fn test_tsx_namespace_import_resolution() {
+        let resolver = make_tsx_resolver();
+        let code = r#"
+import * as R from 'ramda';
+
+const result = R.map(x => x + 1, [1, 2, 3]);
+"#;
+        let tree = parse_tsx(code);
+        let source = code.as_bytes();
+
+        // Find the reference to R in the expression
+        let ref_pos = code.find("R.map").unwrap();
+        let result = resolver.find_definition(&tree, source, ref_pos);
+
+        assert!(result.is_some(), "Should find definition for R");
+        let range = result.unwrap();
+        let def_text = &code[range.clone()];
+        assert_eq!(
+            def_text, "R",
+            "Definition should be 'R', got '{}'",
+            def_text
+        );
+    }
+
+    #[test]
+    fn test_tsx_local_definition_shadows_import() {
+        let resolver = make_tsx_resolver();
+        let code = r#"
+import { foo } from 'bar';
+
+function test() {
+    const foo = 42;
+    console.log(foo);
+}
+"#;
+        let tree = parse_tsx(code);
+        let source = code.as_bytes();
+
+        // Find the reference to foo in console.log (inside function scope)
+        let ref_pos = code.find("log(foo)").unwrap() + 4;
+        let result = resolver.find_definition(&tree, source, ref_pos);
+
+        assert!(result.is_some(), "Should find definition for foo");
+        let range = result.unwrap();
+        let def_text = &code[range.clone()];
+        assert_eq!(
+            def_text, "foo",
+            "Definition should be 'foo', got '{}'",
+            def_text
+        );
+        // Should resolve to the local const declaration, not the import
+        let local_def_pos = code.find("const foo").unwrap() + 6;
+        assert_eq!(
+            range.start, local_def_pos,
+            "Should resolve to local definition, not import"
+        );
+    }
+
+    #[test]
+    fn test_tsx_type_import_resolution() {
+        let resolver = make_tsx_resolver();
+        let code = r#"
+import { type FC } from 'react';
+
+const MyComponent: FC = () => {
+    return <div>hello</div>;
+};
+"#;
+        let tree = parse_tsx(code);
+        let source = code.as_bytes();
+
+        // Find the reference to FC in the type annotation
+        let ref_pos = code.find("MyComponent: FC").unwrap() + 13;
+        let result = resolver.find_definition(&tree, source, ref_pos);
+
+        assert!(result.is_some(), "Should find definition for FC");
+        let range = result.unwrap();
+        let def_text = &code[range.clone()];
+        assert_eq!(
+            def_text, "FC",
+            "Definition should be 'FC', got '{}'",
+            def_text
+        );
+    }
+
+    #[test]
+    fn test_tsx_on_import_definition_returns_none() {
+        let resolver = make_tsx_resolver();
+        let code = r#"
+import { useState } from 'react';
+
+const App = () => {
+    const [count, setCount] = useState(0);
+    return <div>{count}</div>;
+};
+"#;
+        let tree = parse_tsx(code);
+        let source = code.as_bytes();
+
+        // Place cursor ON the import specifier identifier itself
+        let import_pos = code.find("import { useState }").unwrap() + 9;
+        let result = resolver.find_definition(&tree, source, import_pos);
+
+        assert!(
+            result.is_none(),
+            "Should return None when cursor is on the import definition itself"
+        );
+    }
+
     #[test]
     fn test_identifier_at_position_tsx_jsx_element() {
         let code = r#"const App = () => <MyComponent />;"#;

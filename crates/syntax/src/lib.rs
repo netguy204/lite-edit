@@ -56,3 +56,4 @@ pub use registry::{LanguageConfig, LanguageRegistry};
 // Chunk: docs/chunks/treesitter_symbol_index - Export symbol index types
 pub use symbol_index::{SymbolIndex, SymbolKind, SymbolLocation};
 pub use theme::SyntaxTheme;
+
