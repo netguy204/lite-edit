@@ -1,5 +1,5 @@
 ---
-status: IMPLEMENTING
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
@@ -15,15 +15,20 @@ code_references:
 - ref: crates/editor/src/selector_overlay.rs#StatusBarGlyphBuffer
   implements: "Glyph buffer for status bar rendering"
 - ref: crates/editor/src/selector_overlay.rs#calculate_status_bar_geometry
-  implements: "Pure geometry calculation function"
-- ref: crates/editor/src/renderer/status_bar.rs#draw_status_bar
+  implements: "Pure geometry calculation function for full-viewport status bar"
+- ref: crates/editor/src/selector_overlay.rs#calculate_status_bar_geometry_in_pane
+  implements: "Pane-aware geometry calculation for multi-pane layouts"
+- ref: crates/editor/src/renderer/status_bar.rs#Renderer::draw_status_bar
   implements: "Render method for status bar"
-- ref: crates/editor/src/drain_loop.rs#render_if_dirty
+- ref: crates/editor/src/renderer/status_bar.rs#Renderer::draw_status_bar_in_pane
+  implements: "Render method for multi-pane status bar"
+- ref: crates/editor/src/drain_loop.rs#DrainLoop::render_if_dirty
   implements: "Integration point calling current_status_message()"
 narrative: null
 investigation: cross_file_goto_definition
 subsystems:
-- renderer
+  - subsystem_id: renderer
+    relationship: implements
 friction_entries: []
 bug_type: null
 depends_on: []
