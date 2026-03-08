@@ -1,5 +1,5 @@
 ---
-status: IMPLEMENTING
+status: HISTORICAL
 ticket: null
 parent_chunk: null
 code_paths:
@@ -7,9 +7,9 @@ code_paths:
   - crates/editor/src/main.rs
 code_references:
   - ref: crates/editor/src/editor_state.rs#EditorState::initialize_symbol_indexing_for_all_workspaces
-    implements: "New method to initialize symbol indexing for all workspaces after session restore"
-  - ref: crates/editor/src/main.rs#402-413
-    implements: "Call to initialize_symbol_indexing_for_all_workspaces after session restore"
+    implements: "Method to initialize symbol indexing for all workspaces after session restore"
+  - ref: crates/editor/src/main.rs#AppDelegate::setup_window
+    implements: "Calls initialize_symbol_indexing_for_all_workspaces after session restore"
 narrative: null
 investigation: cross_file_goto_definition
 subsystems: []
