@@ -327,6 +327,23 @@ mod tests {
         .expect("JS resolver should be created")
     }
 
+    // Chunk: docs/chunks/tsx_goto_functions - TSX resolver and parser for go-to-definition tests
+    fn make_tsx_resolver() -> LocalsResolver {
+        LocalsResolver::new(
+            tree_sitter_typescript::LANGUAGE_TSX.into(),
+            crate::queries::typescript::LOCALS_QUERY,
+        )
+        .expect("TSX resolver should be created")
+    }
+
+    fn parse_tsx(code: &str) -> Tree {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_typescript::LANGUAGE_TSX.into())
+            .unwrap();
+        parser.parse(code, None).unwrap()
+    }
+
     fn parse_rust(code: &str) -> Tree {
         let mut parser = tree_sitter::Parser::new();
         parser
@@ -967,6 +984,169 @@ struct Outer {
             def_text, "Inner",
             "Definition should be 'Inner', got '{}'",
             def_text
+        );
+    }
+
+    // Chunk: docs/chunks/tsx_goto_functions - TSX go-to-definition tests
+
+    #[test]
+    fn test_tsx_function_declaration() {
+        let resolver = make_tsx_resolver();
+        let code = r#"
+function greet(name: string): string {
+    return "Hello, " + name;
+}
+
+const result = greet("World");
+"#;
+        let tree = parse_tsx(code);
+        let source = code.as_bytes();
+
+        // Find the reference to greet in the call expression
+        let ref_pos = code.find("greet(\"World\")").unwrap();
+        let result = resolver.find_definition(&tree, source, ref_pos);
+
+        assert!(result.is_some(), "Should find definition for greet");
+        let range = result.unwrap();
+        let def_text = &code[range.clone()];
+        assert_eq!(
+            def_text, "greet",
+            "Definition should be 'greet', got '{}'",
+            def_text
+        );
+    }
+
+    #[test]
+    fn test_tsx_arrow_function() {
+        let resolver = make_tsx_resolver();
+        let code = r#"
+const Foo = () => {
+    return <div>hello</div>;
+};
+
+const element = Foo();
+"#;
+        let tree = parse_tsx(code);
+        let source = code.as_bytes();
+
+        // Find the reference to Foo in the call
+        let ref_pos = code.find("Foo()").unwrap();
+        let result = resolver.find_definition(&tree, source, ref_pos);
+
+        assert!(result.is_some(), "Should find definition for Foo");
+        let range = result.unwrap();
+        let def_text = &code[range.clone()];
+        assert_eq!(
+            def_text, "Foo",
+            "Definition should be 'Foo', got '{}'",
+            def_text
+        );
+    }
+
+    #[test]
+    fn test_tsx_jsx_element_resolution() {
+        let resolver = make_tsx_resolver();
+        let code = r#"
+const MyComponent = () => {
+    return <div>hello</div>;
+};
+
+const App = () => {
+    return <MyComponent />;
+};
+"#;
+        let tree = parse_tsx(code);
+        let source = code.as_bytes();
+
+        // Find the reference to MyComponent inside JSX
+        let ref_pos = code.find("<MyComponent />").unwrap() + 1; // Position on "MyComponent"
+        let result = resolver.find_definition(&tree, source, ref_pos);
+
+        assert!(
+            result.is_some(),
+            "Should find definition for MyComponent in JSX element"
+        );
+        let range = result.unwrap();
+        let def_text = &code[range.clone()];
+        assert_eq!(
+            def_text, "MyComponent",
+            "Definition should be 'MyComponent', got '{}'",
+            def_text
+        );
+    }
+
+    #[test]
+    fn test_tsx_class_declaration() {
+        let resolver = make_tsx_resolver();
+        let code = r#"
+class Widget {
+    render() {
+        return <div />;
+    }
+}
+
+const w: Widget = new Widget();
+"#;
+        let tree = parse_tsx(code);
+        let source = code.as_bytes();
+
+        // Find the reference to Widget in the type annotation
+        let ref_pos = code.find("w: Widget").unwrap() + 3; // Position on "Widget"
+        let result = resolver.find_definition(&tree, source, ref_pos);
+
+        assert!(result.is_some(), "Should find definition for class Widget");
+        let range = result.unwrap();
+        let def_text = &code[range.clone()];
+        assert_eq!(
+            def_text, "Widget",
+            "Definition should be 'Widget', got '{}'",
+            def_text
+        );
+    }
+
+    #[test]
+    fn test_tsx_typescript_local_variable_with_custom_query() {
+        // This test verifies that the custom query fixes the existing
+        // test_typescript_local_variable scenario (which was previously skipped
+        // due to the upstream query being too minimal).
+        let resolver = make_tsx_resolver();
+        let code = r#"
+function greet(name: string): void {
+    const message = "Hello, " + name;
+    console.log(message);
+}
+"#;
+        let tree = parse_tsx(code);
+        let source = code.as_bytes();
+
+        // Find the reference to message in console.log
+        let ref_pos = code.find("log(message)").unwrap() + 4;
+        let result = resolver.find_definition(&tree, source, ref_pos);
+
+        assert!(result.is_some(), "Should find definition for message");
+        let range = result.unwrap();
+        let def_text = &code[range.clone()];
+        assert_eq!(
+            def_text, "message",
+            "Definition should be 'message', got '{}'",
+            def_text
+        );
+    }
+
+    #[test]
+    fn test_identifier_at_position_tsx_jsx_element() {
+        let code = r#"const App = () => <MyComponent />;"#;
+        let tree = parse_tsx(code);
+        let source = code.as_bytes();
+
+        // Point at "MyComponent" inside JSX
+        let pos = code.find("MyComponent").unwrap();
+        let result = super::identifier_at_position(&tree, source, pos);
+
+        assert_eq!(
+            result,
+            Some("MyComponent".to_string()),
+            "Should extract identifier from JSX element"
         );
     }
 }

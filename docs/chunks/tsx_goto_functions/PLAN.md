@@ -8,170 +8,150 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+Two-pronged fix following the established pattern of custom query files (see `crates/syntax/src/queries/rust.rs` and `python.rs`) and the highlight-layering pattern (JS+TS combined query, established in the `typescript_highlight_layering` chunk):
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+1. **Custom `locals.scm` for TypeScript/TSX** — Write a `crates/syntax/src/queries/typescript.rs` module providing a `LOCALS_QUERY` constant that captures function declarations, arrow functions (via `variable_declarator`), class declarations, `const`/`let`/`var` bindings, and proper scopes. The upstream `tree_sitter_typescript::LOCALS_QUERY` only captures `required_parameter` and `optional_parameter`, which is far too minimal for goto-def to work.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+2. **Combined JS+TS tags query** — Apply the same layering pattern used for highlights: concatenate `tree_sitter_javascript::TAGS_QUERY` with `tree_sitter_typescript::TAGS_QUERY` so the `SymbolIndex` captures both JS-base constructs (function declarations, class declarations, arrow functions assigned to variables) and TS-specific constructs (interfaces, type aliases, abstract classes, modules). Currently the TS/TSX tags query only captures TS-specific symbols.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/tsx_goto_functions/GOAL.md)
-with references to the files that you expect to touch.
--->
-
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+3. **Tests first (TDD)** — Per TESTING_PHILOSOPHY.md, write failing tests for each success criterion before implementing. Tests cover: same-file function declaration resolution, arrow function resolution, JSX element resolution, and cross-file fallthrough verification.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing tests for TSX same-file goto-def
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add test helper functions and test cases to `crates/syntax/src/gotodef.rs`:
 
-Example:
+- `make_tsx_resolver()` — Creates a `LocalsResolver` using the TSX language and the new custom locals query
+- `parse_tsx()` — Parses TSX code using `tree_sitter_typescript::LANGUAGE_TSX`
+- `test_tsx_function_declaration()` — Cmd+click on `greet()` call resolves to `function greet()` definition
+- `test_tsx_arrow_function()` — Cmd+click on `Foo` reference resolves to `const Foo = () => ...` declaration
+- `test_tsx_jsx_element_resolution()` — Cmd+click inside `<MyComponent />` resolves to the `MyComponent` function/const definition
+- `test_tsx_class_declaration()` — Cmd+click on class name reference resolves to `class Foo {}` definition
 
-### Step 1: Define the SegmentHeader struct
+These tests should reference the new custom query via `crate::queries::typescript::LOCALS_QUERY` and will fail to compile until Step 2.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Location: `crates/syntax/src/gotodef.rs` (test module)
 
-Location: src/segment/format.rs
+### Step 2: Create custom TypeScript locals query
 
-### Step 2: Implement header serialization
+Create `crates/syntax/src/queries/typescript.rs` with a `LOCALS_QUERY` constant. This query must compile against both `LANGUAGE_TYPESCRIPT` and `LANGUAGE_TSX` grammars.
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
+**Scopes** (nodes that create a new name-resolution scope):
 ```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+[
+  (statement_block)
+  (function_expression)
+  (function_declaration)
+  (arrow_function)
+  (method_definition)
+  (class_declaration)
+  (class)
+  (for_statement)
+  (for_in_statement)
+  (while_statement)
+  (do_statement)
+  (if_statement)
+  (switch_case)
+] @local.scope
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+**Definitions** (nodes that introduce a name):
+- `(variable_declarator name: (identifier) @local.definition)` — catches `const Foo = ...`, `let x = ...`, `var y = ...`
+- `(function_declaration name: (identifier) @local.definition)` — `function foo() {}`
+- `(class_declaration name: (type_identifier) @local.definition)` — `class Foo {}`
+- `(required_parameter (identifier) @local.definition)` — TS function params
+- `(optional_parameter (identifier) @local.definition)` — TS optional params
+- `(pattern/identifier) @local.definition` — destructuring patterns (if the TSX grammar supports the `pattern/` anchor; otherwise use `(required_parameter pattern: (identifier) ...)`)
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+**References**:
+- `(identifier) @local.reference`
+- `(type_identifier) @local.reference` — for type references like interface names
 
-## Dependencies
+Include unit tests in the module:
+- `test_typescript_locals_query_compiles_ts()` — Compiles against `LANGUAGE_TYPESCRIPT`
+- `test_typescript_locals_query_compiles_tsx()` — Compiles against `LANGUAGE_TSX`
+- `test_typescript_locals_query_has_expected_captures()` — Has `@local.scope`, `@local.definition`, `@local.reference`
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+Register the module in `crates/syntax/src/queries/mod.rs` by adding `pub mod typescript;`.
 
-If there are no dependencies, delete this section.
--->
+Location: `crates/syntax/src/queries/typescript.rs`, `crates/syntax/src/queries/mod.rs`
+
+### Step 3: Wire custom locals query into registry
+
+Update `crates/syntax/src/registry.rs` to use the new custom query for both TypeScript and TSX:
+
+**TypeScript config** (line ~175): Replace `tree_sitter_typescript::LOCALS_QUERY` with `queries::typescript::LOCALS_QUERY`.
+
+**TSX config** (line ~189): Replace `tree_sitter_typescript::LOCALS_QUERY` with `queries::typescript::LOCALS_QUERY`.
+
+Add backreference comments:
+```rust
+// Chunk: docs/chunks/tsx_goto_functions - Custom locals query for TS/TSX go-to-definition
+```
+
+Location: `crates/syntax/src/registry.rs`
+
+### Step 4: Combine JS+TS tags queries for cross-file resolution
+
+In `crates/syntax/src/registry.rs`, create a combined tags query following the same pattern as `ts_combined_query` for highlights:
+
+```rust
+// Chunk: docs/chunks/tsx_goto_functions - Combined JS/TS tags for cross-file go-to-definition
+let ts_combined_tags: &'static str = Box::leak(
+    format!("{}\n{}", tree_sitter_javascript::TAGS_QUERY, tree_sitter_typescript::TAGS_QUERY)
+        .into_boxed_str(),
+);
+```
+
+Use `ts_combined_tags` for both the TypeScript and TSX `LanguageConfig` entries (replacing the `tree_sitter_typescript::TAGS_QUERY` argument).
+
+This ensures the `SymbolIndex` captures:
+- **From JS tags**: `function_declaration`, `function_expression`, `generator_function`, `class_declaration`, arrow functions assigned via `lexical_declaration`/`variable_declaration`, method definitions
+- **From TS tags**: `function_signature`, `method_signature`, `abstract_method_signature`, `abstract_class_declaration`, `module`, `interface_declaration`
+
+Location: `crates/syntax/src/registry.rs`
+
+### Step 5: Verify JSX element identifier extraction
+
+Verify that `identifier_at_position()` already handles JSX elements correctly. In TSX, `<MyComponent />` is parsed as `jsx_self_closing_element` → `identifier` (for the tag name). The `identifier` node kind is already in `IDENTIFIER_KINDS`, so no code change should be needed.
+
+Add a test `test_identifier_at_position_tsx_jsx_element()` in `gotodef.rs` that:
+1. Parses `const App = () => <MyComponent />;` with the TSX parser
+2. Calls `identifier_at_position()` at the position of `MyComponent` inside the JSX
+3. Asserts it returns `Some("MyComponent")`
+
+Location: `crates/syntax/src/gotodef.rs` (test module)
+
+### Step 6: Run full test suite and iterate
+
+Run `cargo test -p syntax` (or equivalent) to confirm:
+- The new custom query compiles against both TS and TSX grammars
+- All new TSX goto-def tests pass (function declarations, arrow functions, JSX elements, classes)
+- The existing TypeScript test (`test_typescript_local_variable`) now passes instead of being skipped
+- All existing Rust, Python, JavaScript tests still pass
+- Symbol index tests for TS/TSX files still pass with the combined tags query
+
+Fix any compilation errors or test failures from node type mismatches (the TSX grammar may use slightly different node names than expected — consult `tree-sitter-typescript` grammar source if needed).
+
+### Step 7: Update GOAL.md code_paths
+
+Update the `code_paths` field in `docs/chunks/tsx_goto_functions/GOAL.md` with the files touched:
+- `crates/syntax/src/queries/typescript.rs` (new file)
+- `crates/syntax/src/queries/mod.rs` (add module)
+- `crates/syntax/src/registry.rs` (wire custom query + combined tags)
+- `crates/syntax/src/gotodef.rs` (tests only)
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **TSX grammar node types**: The exact node names in `tree-sitter-typescript` 0.23 may differ from what's documented above. For example, arrow function parameter patterns may use `(identifier)` directly rather than `(pattern/identifier)`. If the query fails to compile, inspect the grammar's `node-types.json` or use `tree.root_node().to_sexp()` on sample code to discover the actual node structure.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **JS TAGS_QUERY predicates**: The JavaScript `TAGS_QUERY` uses `#strip!`, `#select-adjacent!`, and `#not-eq?` predicates. Tree-sitter's Rust binding ignores unknown predicates at query execution time (they're treated as metadata). The JS tags query already works for `.js` files in the `SymbolIndex`, so combining it with the TS query should work without predicate handling. However, if unexpected behavior arises, the `#not-eq?` predicate (which tree-sitter does understand natively) could interact with the TS query patterns.
+
+- **`type_identifier` vs `identifier` for classes**: In the TS grammar, `class_declaration` uses `type_identifier` for the name, but JSX references to classes use `identifier`. The locals query captures both `(identifier)` and `(type_identifier)` as references, and the `find_definition()` algorithm matches by text equality, so cross-kind matches (identifier referencing a type_identifier definition) should work. But this needs verification.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

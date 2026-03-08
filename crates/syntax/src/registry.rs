@@ -166,30 +166,41 @@ impl LanguageRegistry {
             format!("{}\n{}", tree_sitter_javascript::HIGHLIGHT_QUERY, tree_sitter_typescript::HIGHLIGHTS_QUERY)
                 .into_boxed_str(),
         );
+        // Chunk: docs/chunks/tsx_goto_functions - Combined JS/TS tags for cross-file go-to-definition
+        // The TS tags query only captures TS-specific constructs (interfaces, type aliases, etc.).
+        // The JS tags query captures base constructs (function_declaration, class_declaration,
+        // arrow functions via lexical_declaration/variable_declaration, etc.).
+        // Combining them ensures the SymbolIndex captures all definitions for cross-file lookup.
+        let ts_combined_tags: &'static str = Box::leak(
+            format!("{}\n{}", tree_sitter_javascript::TAGS_QUERY, tree_sitter_typescript::TAGS_QUERY)
+                .into_boxed_str(),
+        );
         // Chunk: docs/chunks/treesitter_indent - TypeScript indent query
         // Chunk: docs/chunks/treesitter_symbol_index - TypeScript tags query for cross-file go-to-def
+        // Chunk: docs/chunks/tsx_goto_functions - Custom locals query for TS/TSX go-to-definition
         let typescript_config = LanguageConfig::new(
             tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             ts_combined_query,
             "",
-            tree_sitter_typescript::LOCALS_QUERY,
+            queries::typescript::LOCALS_QUERY,
             "typescript",
             include_str!("../queries/typescript/indents.scm"),
-            tree_sitter_typescript::TAGS_QUERY,
+            ts_combined_tags,
         );
         configs.insert("ts", typescript_config);
 
         // TSX also needs the JavaScript base (it extends TypeScript which extends JavaScript)
         // Chunk: docs/chunks/treesitter_indent - TSX shares TypeScript indent query
         // Chunk: docs/chunks/treesitter_symbol_index - TSX shares TypeScript tags query
+        // Chunk: docs/chunks/tsx_goto_functions - Custom locals query for TS/TSX go-to-definition
         let tsx_config = LanguageConfig::new(
             tree_sitter_typescript::LANGUAGE_TSX.into(),
             ts_combined_query,  // Reuse the combined query
             "",
-            tree_sitter_typescript::LOCALS_QUERY,
+            queries::typescript::LOCALS_QUERY,
             "tsx",
             include_str!("../queries/typescript/indents.scm"),  // Reuse TS indent query
-            tree_sitter_typescript::TAGS_QUERY,  // Reuse TS tags query
+            ts_combined_tags,  // Reuse combined TS tags query
         );
         configs.insert("tsx", tsx_config);
 
