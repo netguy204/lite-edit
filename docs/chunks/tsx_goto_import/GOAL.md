@@ -1,18 +1,21 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/syntax/src/queries/typescript.rs
+- crates/syntax/src/gotodef.rs
 code_references: []
 narrative: null
 investigation: null
 subsystems: []
 friction_entries: []
 bug_type: null
-depends_on: ["tsx_goto_functions"]
-created_after: ["tsx_goto_functions"]
+depends_on:
+- tsx_goto_functions
+created_after:
+- tsx_goto_functions
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

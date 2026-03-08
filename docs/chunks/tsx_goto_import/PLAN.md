@@ -8,170 +8,136 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+Extend the existing TypeScript/TSX `LOCALS_QUERY` in `crates/syntax/src/queries/typescript.rs`
+with tree-sitter patterns that capture import bindings as `@local.definition`. This is the
+same approach Python uses (see `crates/syntax/src/queries/python.rs` lines 124-131 for
+`aliased_import` and `import_from_statement` patterns).
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+Because import statements are at module level (root scope), the `LocalsResolver` will find
+them via `find_definition_at_root()` — but only after failing to find a same-file definition
+in any inner scope. This gives us the "fallback" behavior described in the goal: local
+definitions naturally take priority through scope-based resolution (innermost-first search).
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+No changes to the resolution pipeline in `editor_state.rs` are needed. The `LocalsResolver`
+already handles root-scope definitions. No new resolver type is required.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/tsx_goto_import/GOAL.md)
-with references to the files that you expect to touch.
--->
+The tree-sitter TypeScript grammar represents imports as:
+- **Named imports** (`import { foo } from 'bar'`): `import_statement > import_clause > named_imports > import_specifier > identifier`
+- **Default imports** (`import React from 'react'`): `import_statement > import_clause > identifier`
+- **Namespace imports** (`import * as R from 'ramda'`): `import_statement > import_clause > namespace_import > identifier`
 
-## Subsystem Considerations
-
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+Per `docs/trunk/TESTING_PHILOSOPHY.md`, tests will be written first (failing) and then the
+query patterns added to make them pass. Tests will assert semantic properties matching each
+success criterion: named, default, and namespace import resolution, plus local-definition
+priority over imports.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing tests for import resolution
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add four new tests to `crates/syntax/src/gotodef.rs` using the existing `make_tsx_resolver()`
+and `parse_tsx()` test helpers:
 
-Example:
+1. **`test_tsx_named_import_resolution`** — Source code with `import { useState } from 'react'`
+   and a reference to `useState` later in the file. Assert that `find_definition` returns the
+   byte range of the `useState` identifier inside the import specifier.
 
-### Step 1: Define the SegmentHeader struct
+2. **`test_tsx_default_import_resolution`** — Source code with `import React from 'react'` and
+   a reference to `React`. Assert resolution to the `React` identifier in the import clause.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+3. **`test_tsx_namespace_import_resolution`** — Source code with `import * as R from 'ramda'`
+   and a reference to `R`. Assert resolution to the `R` identifier in the namespace import.
 
-Location: src/segment/format.rs
+4. **`test_tsx_local_definition_shadows_import`** — Source code with both
+   `import { foo } from 'bar'` and `const foo = 42` in the same scope, with a reference to
+   `foo` after the local definition. Assert that `find_definition` resolves to the local
+   `const` declaration, NOT the import. This validates priority behavior.
 
-### Step 2: Implement header serialization
+Run `cargo test -p lite-edit-syntax` to confirm all four tests fail (the query doesn't capture
+import bindings yet).
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+Location: `crates/syntax/src/gotodef.rs` (test module at bottom of file)
 
-### Step 3: ...
+### Step 2: Add import binding patterns to LOCALS_QUERY
 
----
+Add three new tree-sitter patterns to the `LOCALS_QUERY` constant in
+`crates/syntax/src/queries/typescript.rs`, in the Definitions section:
 
-**BACKREFERENCE COMMENTS**
+```scheme
+; Import bindings
+; Named imports: import { foo, bar } from 'baz'
+(import_specifier
+  name: (identifier) @local.definition)
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
+; Default imports: import Foo from 'bar'
+(import_clause
+  (identifier) @local.definition)
 
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+; Namespace imports: import * as Foo from 'bar'
+(namespace_import
+  (identifier) @local.definition)
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+These patterns capture the binding identifier (not the module source string) as a definition
+at root scope, making them findable by the `LocalsResolver`'s `find_definition_at_root()`.
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+**Important caveat**: The `(import_clause (identifier))` pattern for default imports will
+match the bare `identifier` child of `import_clause`. This is correct because default imports
+produce `import_clause > identifier` in the tree (see exploration output). Named and namespace
+imports produce different sub-structures (`named_imports`, `namespace_import`) that won't
+match this pattern.
+
+Also update the module-level doc comment and `///` doc comment on `LOCALS_QUERY` to mention
+import binding captures.
+
+Location: `crates/syntax/src/queries/typescript.rs`
+
+### Step 3: Run tests and verify
+
+Run `cargo test -p lite-edit-syntax` and verify all four new tests pass, plus all existing
+tests continue to pass. The existing TSX tests (`test_tsx_function_declaration`,
+`test_tsx_arrow_function`, `test_tsx_jsx_element_resolution`, `test_tsx_class_declaration`,
+`test_tsx_typescript_local_variable_with_custom_query`) must not regress.
+
+Also run the query compilation tests (`test_typescript_locals_query_compiles_ts`,
+`test_typescript_locals_query_compiles_tsx`) to ensure the new patterns are valid.
+
+### Step 4: Add edge case test for type imports
+
+Add a test `test_tsx_type_import_resolution` verifying that `import { type FC } from 'react'`
+with a reference to `FC` resolves to the import specifier. The tree-sitter grammar represents
+this as `import_specifier > type > name: identifier`, so the same `import_specifier name:`
+pattern should match. If it doesn't, adjust the pattern.
+
+Location: `crates/syntax/src/gotodef.rs` (test module)
+
+### Step 5: Add test for on-import-definition returns None
+
+Add a test `test_tsx_on_import_definition_returns_none` that places the cursor ON the import
+specifier identifier itself (e.g., cursor on `useState` in `import { useState } from 'react'`).
+Assert that `find_definition` returns `None` — the existing `is_definition` check in
+`LocalsResolver` should handle this, since the identifier node will be captured as both
+`@local.definition` and `@local.reference`.
+
+Location: `crates/syntax/src/gotodef.rs` (test module)
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+- **tsx_goto_functions** (ACTIVE): Provides the custom `LOCALS_QUERY` and TSX test infrastructure (`make_tsx_resolver`, `parse_tsx`) that this chunk extends.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
-
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- The `(import_clause (identifier))` pattern for default imports might also match other
+  identifier children of `import_clause` in edge cases. The tree exploration shows default
+  imports produce exactly one bare `identifier` child, while named imports produce a
+  `named_imports` child. However, if future grammar versions change this structure, the
+  pattern may need updating. The compilation and behavioral tests will catch any regression.
+- `import { type FC }` (type-only imports) use an `import_specifier` with a `type` keyword
+  child. The `name: (identifier)` field selector should still match since `name` is a
+  field, not a positional child. Step 4 explicitly validates this.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

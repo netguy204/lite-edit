@@ -1,4 +1,5 @@
 // Chunk: docs/chunks/tsx_goto_functions - Custom locals query for TS/TSX go-to-definition
+// Chunk: docs/chunks/tsx_goto_import - Import binding captures for go-to-definition fallback
 //!
 //! TypeScript/TSX `locals.scm` query for scope-aware go-to-definition.
 //!
@@ -8,13 +9,16 @@
 //! (including arrow functions), or class declarations.
 //!
 //! This custom query captures the same constructs as the JavaScript locals
-//! query plus TypeScript-specific parameter forms.
+//! query plus TypeScript-specific parameter forms. It also captures import
+//! bindings (named, default, and namespace imports) as definitions at module
+//! scope, enabling goto-definition to fall back to import statements when
+//! no same-file definition exists.
 
 /// TypeScript/TSX locals query for scope and definition tracking.
 ///
 /// Captures:
 /// - `@local.scope`: Functions, classes, blocks, loops, conditionals
-/// - `@local.definition`: Variable declarations, function names, class names, parameters
+/// - `@local.definition`: Variable declarations, function names, class names, parameters, import bindings
 /// - `@local.reference`: All identifiers and type identifiers
 pub const LOCALS_QUERY: &str = r#"
 ; Scopes
@@ -59,6 +63,19 @@ pub const LOCALS_QUERY: &str = r#"
 
 ; TypeScript optional parameters: (name?: Type)
 (optional_parameter
+  (identifier) @local.definition)
+
+; Import bindings
+; Named imports: import { foo, bar } from 'baz'
+(import_specifier
+  name: (identifier) @local.definition)
+
+; Default imports: import Foo from 'bar'
+(import_clause
+  (identifier) @local.definition)
+
+; Namespace imports: import * as Foo from 'bar'
+(namespace_import
   (identifier) @local.definition)
 
 ; References
