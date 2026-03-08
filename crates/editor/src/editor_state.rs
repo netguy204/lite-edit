@@ -866,6 +866,7 @@ impl EditorState {
     /// a `TextBuffer` and use a different rendering path.
     // Chunk: docs/chunks/tab_click_cursor_placement - Viewport sync on tab activation
     // Chunk: docs/chunks/tiling_workspace_integration - Resolve through pane tree
+    // Chunk: docs/chunks/terminal_scroll_leak - Pane-aware viewport sync
     fn sync_active_tab_viewport(&mut self) {
         // Skip if view_height hasn't been set yet (initial state before first resize)
         let view_height = self.view_height;
@@ -873,21 +874,27 @@ impl EditorState {
             return;
         }
 
-        // Get the line count from the active tab's text buffer, if it exists.
+        // Get the line count and active pane ID from the active tab's text buffer.
         // Terminal tabs don't have a TextBuffer, so we skip viewport sync for them.
-        let line_count = match self.editor.active_workspace()
-            .and_then(|ws| ws.active_pane())
-            .and_then(|pane| pane.active_tab())
-            .and_then(|tab| tab.as_text_buffer())
+        let (line_count, pane_id) = match self.editor.active_workspace()
+            .and_then(|ws| {
+                let pane_id = ws.active_pane_id;
+                ws.active_pane()
+                    .and_then(|pane| pane.active_tab())
+                    .and_then(|tab| tab.as_text_buffer())
+                    .map(|buf| (buf.line_count(), pane_id))
+            })
         {
-            Some(buf) => buf.line_count(),
-            None => return, // Non-file tab, skip viewport sync
+            Some(pair) => pair,
+            None => return, // Non-file tab or no workspace, skip viewport sync
         };
 
-        // Sync the viewport to the content height (window height minus tab bar).
-        // This matches update_viewport_size/update_viewport_dimensions which also
-        // subtract TAB_BAR_HEIGHT to compute visible_lines correctly.
-        let content_height = view_height - TAB_BAR_HEIGHT;
+        // Use pane-specific content height in multi-pane layouts to avoid
+        // inflating visible_rows. Falls back to full window height for
+        // single-pane layouts or when pane dimensions aren't available yet.
+        let content_height = self.get_pane_content_dimensions(pane_id)
+            .map(|(h, _w)| h)
+            .unwrap_or(view_height - TAB_BAR_HEIGHT);
         self.viewport_mut().update_size(content_height, line_count);
     }
 
@@ -975,8 +982,19 @@ impl EditorState {
                     continue;
                 };
 
-                // Update the tab's viewport with the pane's content height
-                tab.viewport.update_size(pane_content_height, line_count);
+                // Chunk: docs/chunks/terminal_scroll_leak - Skip redundant viewport update for stable panes
+                // For non-terminal tabs, skip update if visible_rows wouldn't change.
+                // This prevents unnecessary scroll re-clamping when sibling panes
+                // change but this pane's dimensions are stable.
+                if tab.as_terminal_buffer().is_some() {
+                    // Terminal tabs always get update_size (PTY resize guard is separate)
+                    tab.viewport.update_size(pane_content_height, line_count);
+                } else {
+                    let new_visible = (pane_content_height / tab.viewport.line_height()).floor() as usize;
+                    if tab.viewport.visible_lines() != new_visible {
+                        tab.viewport.update_size(pane_content_height, line_count);
+                    }
+                }
             }
         }
     }
@@ -13770,5 +13788,221 @@ mod tests {
         state.setup_all_tab_highlighting();
 
         assert_eq!(state.editor.workspace_count(), 0);
+    }
+
+    // =========================================================================
+    // Terminal Scroll Leak Tests (Chunk: docs/chunks/terminal_scroll_leak)
+    // =========================================================================
+
+    /// Tests that opening a new terminal in one side of a vertical split does not
+    /// affect the scroll position of a buffer in the other side.
+    #[test]
+    fn test_new_terminal_preserves_sibling_buffer_scroll() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        use crate::pane_layout::Direction;
+
+        // Create a buffer with many lines (200 lines)
+        let content = (0..200)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut state = EditorState::new(
+            lite_edit_buffer::TextBuffer::from_str(&content),
+            test_font_metrics(),
+        );
+        state.update_viewport_dimensions(800.0, 600.0 + TAB_BAR_HEIGHT);
+
+        // Scroll the buffer to the bottom
+        let line_count = state.buffer().line_count();
+        state.viewport_mut().set_scroll_offset_px(99999.0, line_count);
+        let scroll_after_bottom = state.viewport().scroll_offset_px();
+        assert!(scroll_after_bottom > 0.0, "Buffer should be scrolled down");
+
+        // Create a vertical split by adding a new tab and moving it right
+        state.new_tab();
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.move_active_tab(Direction::Right);
+        }
+        state.sync_pane_viewports();
+
+        // After move_active_tab, focus is on the new right pane (ID 1).
+        // The original buffer remains in pane 0 (the left pane).
+        // Switch focus back to pane 0 to scroll the buffer.
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.active_pane_id = 0;
+        }
+
+        // Sync the active tab viewport (now pane-aware) then scroll to bottom.
+        // This ensures visible_lines is correct for the pane before we scroll.
+        state.sync_active_tab_viewport();
+        let line_count = state.buffer().line_count();
+        state.viewport_mut().set_scroll_offset_px(99999.0, line_count);
+        let scroll_before = state.viewport().scroll_offset_px();
+        assert!(scroll_before > 0.0, "Buffer should be scrolled");
+
+        // Switch to right pane (ID 1) and create a new terminal
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.active_pane_id = 1;
+        }
+        state.new_terminal_tab();
+
+        // Check the left pane's buffer scroll position is preserved
+        // Access pane 0's tab directly
+        let scroll_after = {
+            let ws = state.editor.active_workspace().unwrap();
+            let pane = ws.pane_root.get_pane(0).unwrap();
+            pane.active_tab().unwrap().viewport.scroll_offset_px()
+        };
+
+        assert!(
+            (scroll_before - scroll_after).abs() < 0.001,
+            "Buffer scroll position should be preserved after terminal creation in sibling pane. \
+             Before: {}, After: {}",
+            scroll_before, scroll_after
+        );
+    }
+
+    /// Tests that sync_active_tab_viewport uses the pane height (not full window)
+    /// in multi-pane layouts.
+    #[test]
+    fn test_sync_active_tab_viewport_uses_pane_height() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        use crate::pane_layout::Direction;
+
+        // Create a buffer with many lines
+        let content = (0..200)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut state = EditorState::new(
+            lite_edit_buffer::TextBuffer::from_str(&content),
+            test_font_metrics(),
+        );
+        let view_height = 600.0 + TAB_BAR_HEIGHT;
+        state.update_viewport_dimensions(800.0, view_height);
+
+        // Create a vertical split (two panes stacked)
+        state.new_tab();
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.move_active_tab(Direction::Down);
+        }
+        state.sync_pane_viewports();
+
+        // Switch to pane 0 (original buffer, top pane)
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.active_pane_id = 0;
+        }
+
+        // Record visible_lines after sync_pane_viewports (should be based on half height)
+        let visible_after_sync = state.viewport().visible_lines();
+
+        // Now call sync_active_tab_viewport and check visible_lines didn't change
+        state.sync_active_tab_viewport();
+        let visible_after_active_sync = state.viewport().visible_lines();
+
+        assert_eq!(
+            visible_after_sync, visible_after_active_sync,
+            "sync_active_tab_viewport should use pane height, not full window height. \
+             After sync_pane_viewports: {}, After sync_active_tab_viewport: {}",
+            visible_after_sync, visible_after_active_sync
+        );
+
+        // Verify it's actually using the pane height (roughly half of full)
+        let full_content_height = view_height - TAB_BAR_HEIGHT;
+        let full_visible = (full_content_height / test_font_metrics().line_height as f32).floor() as usize;
+        assert!(
+            visible_after_active_sync < full_visible,
+            "visible_lines should be less than full window ({}) in split layout, got {}",
+            full_visible, visible_after_active_sync
+        );
+    }
+
+    /// Tests that buffer scroll position adjusts correctly when a sibling pane is
+    /// closed (the split collapses and the buffer gets more vertical space).
+    #[test]
+    fn test_buffer_scroll_preserved_across_sibling_close() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+        use crate::pane_layout::Direction;
+
+        // Create a buffer with many lines scrolled to bottom
+        let content = (0..200)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut state = EditorState::new(
+            lite_edit_buffer::TextBuffer::from_str(&content),
+            test_font_metrics(),
+        );
+        let view_height = 600.0 + TAB_BAR_HEIGHT;
+        state.update_viewport_dimensions(800.0, view_height);
+
+        // Create a vertical split
+        state.new_tab();
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.move_active_tab(Direction::Down);
+        }
+        state.sync_pane_viewports();
+
+        // After move_active_tab, focus is on the new bottom pane (ID 1).
+        // The original buffer remains in pane 0 (the top pane).
+        // Focus top pane and scroll to bottom.
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.active_pane_id = 0;
+        }
+        state.sync_active_tab_viewport();
+        let line_count = state.buffer().line_count();
+        state.viewport_mut().set_scroll_offset_px(99999.0, line_count);
+        let scroll_before_close = state.viewport().scroll_offset_px();
+        assert!(scroll_before_close > 0.0, "Buffer should be scrolled before close");
+
+        // Focus the bottom pane (ID 1) and close its tab (this collapses the split)
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            ws.active_pane_id = 1;
+        }
+        state.close_active_tab();
+        state.sync_pane_viewports();
+
+        // The buffer should still be scrolled (the scroll position shouldn't
+        // have been reset to 0). With more visible space, the max offset may
+        // change but the buffer should still show content near the bottom.
+        let scroll_after_close = state.viewport().scroll_offset_px();
+        assert!(
+            scroll_after_close > 0.0,
+            "Buffer should still be scrolled after sibling pane close, got {}",
+            scroll_after_close
+        );
+    }
+
+    /// Tests that sync_active_tab_viewport still uses full window height in
+    /// single-pane layouts (fallback path).
+    #[test]
+    fn test_sync_active_tab_viewport_single_pane_unchanged() {
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        // Create a buffer with many lines
+        let content = (0..50)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut state = EditorState::new(
+            lite_edit_buffer::TextBuffer::from_str(&content),
+            test_font_metrics(),
+        );
+        let view_height = 600.0 + TAB_BAR_HEIGHT;
+        state.update_viewport_dimensions(800.0, view_height);
+
+        // In single-pane layout, sync_active_tab_viewport should still work
+        state.sync_active_tab_viewport();
+        let visible = state.viewport().visible_lines();
+
+        // Should match full window content height
+        let expected_content_height = view_height - TAB_BAR_HEIGHT;
+        let expected_visible = (expected_content_height / test_font_metrics().line_height as f32).floor() as usize;
+
+        assert_eq!(
+            visible, expected_visible,
+            "Single-pane visible_lines should match full window. Expected {}, got {}",
+            expected_visible, visible
+        );
     }
 }

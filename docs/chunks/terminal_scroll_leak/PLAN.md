@@ -8,153 +8,128 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The bug is caused by a two-part interaction between `sync_active_tab_viewport()` and `sync_pane_viewports()` in `crates/editor/src/editor_state.rs`.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Root cause**: `sync_active_tab_viewport()` (line ~869) uses the full window height (`self.view_height - TAB_BAR_HEIGHT`) to compute `visible_lines`, regardless of whether the active tab is in a split pane. In a multi-pane layout, this gives buffer tabs an inflated `visible_rows` count. When the user scrolls to "bottom" with this inflated count, they reach `max_offset = (line_count - V_full) * line_height`. Later, when `sync_pane_viewports()` corrects the viewport to the actual pane height, `visible_rows` decreases to the correct value and the viewport suddenly shows fewer lines — making it appear the buffer scrolled up by one page.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+**Event sequence that triggers the bug**:
+1. Vertical split exists: terminal left, buffer right
+2. User interacts with the right buffer pane → `sync_active_tab_viewport()` sets viewport to full window height (too tall)
+3. User scrolls buffer to bottom (using the inflated max_offset)
+4. User switches to left pane and creates a new terminal → `new_terminal_tab()` calls `sync_pane_viewports()` (line 5320)
+5. `sync_pane_viewports()` corrects the right buffer's viewport to actual pane height → `visible_rows` halves → user sees fewer lines from the same scroll position → content appears to jump up
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/terminal_scroll_leak/GOAL.md)
-with references to the files that you expect to touch.
--->
+**Fix strategy** (two complementary changes):
+
+1. **Primary fix**: Make `sync_active_tab_viewport()` pane-aware. When the active tab is in a multi-pane layout, use the actual pane content height instead of the full window height. This prevents the viewport from ever being set to incorrect dimensions.
+
+2. **Defense in depth**: In `sync_pane_viewports()`, skip `viewport.update_size()` for non-terminal tabs whose `visible_rows` would not change. This ensures that even if a viewport is already at the correct dimensions, redundant `update_size` calls don't trigger unnecessary re-clamping.
+
+The `viewport_scroll` subsystem's Hard Invariant #7 ("Resize re-clamps scroll offset") is correct for actual dimension changes. The issue is that `sync_active_tab_viewport()` is setting incorrect dimensions, and then the correction triggers an unwanted re-clamp. The fix ensures dimensions are always correct, so re-clamping only happens when pane geometry genuinely changes.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+- **docs/subsystems/viewport_scroll** (DOCUMENTED): This chunk USES the viewport scroll subsystem. It operates on `Viewport::update_size` and `RowScroller::update_size`, which implement Hard Invariant #7 (resize re-clamps). The fix preserves this invariant — we're correcting the input dimensions, not changing the clamping behavior. No deviation from subsystem patterns.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing tests that reproduce the bug
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add tests to the existing test module in `crates/editor/src/editor_state.rs` that capture the two aspects of the bug:
 
-Example:
+**Test A — `test_new_terminal_preserves_sibling_buffer_scroll`**:
+1. Set up an `EditorState` with view dimensions (e.g., 800×600)
+2. Open a buffer with many lines (e.g., 200 lines) and scroll it to the bottom
+3. Create a vertical split (move tab to create two panes)
+4. Call `sync_pane_viewports()` to establish correct pane heights
+5. Record the right buffer's `scroll_offset_px`
+6. Call `new_terminal_tab()` (creates terminal in the left pane)
+7. Assert the right buffer's `scroll_offset_px` is unchanged
 
-### Step 1: Define the SegmentHeader struct
+**Test B — `test_sync_active_tab_viewport_uses_pane_height`**:
+1. Set up an `EditorState` with a vertical split
+2. Call `sync_pane_viewports()` to establish correct pane heights
+3. Record the right buffer's `visible_lines` (should be based on half-height pane)
+4. Switch focus to the right pane
+5. Call `sync_active_tab_viewport()`
+6. Assert `visible_lines` is unchanged (still based on pane height, not full window)
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+Location: `crates/editor/src/editor_state.rs` (in the `#[cfg(test)]` module, near existing `sync_pane_viewports` tests around line 10734)
 
-Location: src/segment/format.rs
+### Step 2: Make `sync_active_tab_viewport()` pane-aware
 
-### Step 2: Implement header serialization
+Modify `sync_active_tab_viewport()` (line ~869) to compute content height from the active pane's geometry rather than the full window height.
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+Current code:
+```rust
+let content_height = view_height - TAB_BAR_HEIGHT;
+self.viewport_mut().update_size(content_height, line_count);
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+New approach:
+1. Get the active pane ID from the workspace
+2. Call `self.get_pane_content_dimensions(pane_id)` to get the actual pane height
+3. Use the pane content height for `update_size`
+4. Fall back to `view_height - TAB_BAR_HEIGHT` only in single-pane layouts (where pane height == window height)
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+This mirrors the pattern already used in `new_terminal_tab()` at lines 5229-5239, which calls `get_pane_content_dimensions()` for pane-aware sizing.
 
-## Dependencies
+Location: `crates/editor/src/editor_state.rs`, `sync_active_tab_viewport()` method (line ~869)
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+### Step 3: Add dimension-change guard to `sync_pane_viewports()`
 
-If there are no dependencies, delete this section.
--->
+In `sync_pane_viewports()` (line ~907), add a guard before calling `tab.viewport.update_size()` for non-terminal tabs. Skip the call if the pane content height would produce the same `visible_rows` count.
+
+Current code (line 979):
+```rust
+tab.viewport.update_size(pane_content_height, line_count);
+```
+
+New approach:
+```rust
+// For non-terminal tabs, skip update if visible_rows wouldn't change.
+// This prevents unnecessary scroll re-clamping when sibling panes
+// change but this pane's dimensions are stable.
+let new_visible = (pane_content_height / tab.viewport.line_height()).floor() as usize;
+if tab.viewport.visible_lines() != new_visible {
+    tab.viewport.update_size(pane_content_height, line_count);
+}
+```
+
+Terminal tabs always get `update_size` called (they already have a dimension-change guard for the PTY resize at line 961, and their viewport sync is important for correct PTY sizing).
+
+Location: `crates/editor/src/editor_state.rs`, `sync_pane_viewports()` method, inside the per-tab loop (line ~978)
+
+### Step 4: Verify tests pass and add edge case tests
+
+Run the tests from Step 1 to confirm they pass. Then add additional edge case tests:
+
+**Test C — `test_buffer_scroll_preserved_across_sibling_close`**:
+1. Set up a vertical split with buffer in right pane scrolled to bottom
+2. Close the left pane's tab (collapsing the split)
+3. Assert the buffer's scroll position adjusts correctly for the new (larger) viewport without jumping to an unexpected position
+
+**Test D — `test_sync_active_tab_viewport_single_pane_unchanged`**:
+1. Set up a single-pane layout (no split)
+2. Verify `sync_active_tab_viewport()` still uses `view_height - TAB_BAR_HEIGHT` (the fallback path)
+3. This ensures the pane-aware change doesn't regress single-pane behavior
+
+Location: `crates/editor/src/editor_state.rs` (test module)
+
+### Step 5: Add chunk backreferences
+
+Add backreference comments to the modified code:
+
+- On `sync_active_tab_viewport()`: `// Chunk: docs/chunks/terminal_scroll_leak - Pane-aware viewport sync`
+- On the dimension-change guard in `sync_pane_viewports()`: `// Chunk: docs/chunks/terminal_scroll_leak - Skip redundant viewport update for stable panes`
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Wrap layout interaction**: In vertical splits, pane width changes affect soft line wrapping, which changes the effective "screen row count." `viewport.update_size()` only takes height and line_count (not wrapped row count). If wrapping is enabled, skipping `update_size` based on `visible_rows` alone should still be correct because `update_size` doesn't recalculate wrap state — that happens via `set_scroll_offset_px_wrapped`. Verify this doesn't cause issues with wrapped buffers in splits.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **get_pane_content_dimensions availability**: `get_pane_content_dimensions()` may return `None` if the pane tree hasn't been laid out yet (e.g., during initial setup). The fallback to full window height handles this case, but verify the early startup sequence works correctly.
+
+- **Terminal viewport in sync_active_tab_viewport**: The current code early-returns for terminal tabs (`None => return` at line 884). The pane-aware change should preserve this behavior since it only affects the content_height computation, which comes before the terminal check.
 
 ## Deviations
 
