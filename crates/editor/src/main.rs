@@ -405,6 +405,13 @@ impl AppDelegate {
                         // Session restored successfully
                         let mut state = EditorState::new_deferred(font_metrics);
                         state.editor = editor;
+
+                        // Chunk: docs/chunks/gotodef_session_restore - Initialize symbol indexing
+                        // Start background symbol indexing for all restored workspaces.
+                        // This ensures cross-file go-to-definition works correctly after
+                        // session restore (the most common startup path).
+                        state.initialize_symbol_indexing_for_all_workspaces();
+
                         Some(state)
                     }
                     Err(e) => {

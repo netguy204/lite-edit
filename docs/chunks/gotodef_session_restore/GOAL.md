@@ -1,18 +1,24 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
-code_references: []
+code_paths:
+  - crates/editor/src/editor_state.rs
+  - crates/editor/src/main.rs
+code_references:
+  - ref: crates/editor/src/editor_state.rs#EditorState::initialize_symbol_indexing_for_all_workspaces
+    implements: "New method to initialize symbol indexing for all workspaces after session restore"
+  - ref: crates/editor/src/main.rs#402-413
+    implements: "Call to initialize_symbol_indexing_for_all_workspaces after session restore"
 narrative: null
 investigation: cross_file_goto_definition
 subsystems: []
 friction_entries: []
 bug_type: implementation
 depends_on: []
-created_after: ["alt_screen_viewport_reset"]
+created_after:
+- alt_screen_viewport_reset
 ---
-
 # Chunk Goal
 
 ## Minor Goal

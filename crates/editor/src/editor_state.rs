@@ -647,6 +647,22 @@ impl EditorState {
         self.invalidation.merge(InvalidationKind::Layout);
     }
 
+    // Chunk: docs/chunks/gotodef_session_restore - Initialize symbol indexing after session restore
+    /// Initializes symbol indexing for all workspaces.
+    ///
+    /// This method should be called after session restore to ensure cross-file
+    /// go-to-definition works correctly. Session restoration creates workspaces
+    /// without initializing their symbol indices, so this method must be called
+    /// afterwards to start background indexing for each workspace.
+    ///
+    /// Unlike `add_startup_workspace()` which initializes only the active workspace,
+    /// this method iterates all workspaces since session restore may have multiple.
+    pub fn initialize_symbol_indexing_for_all_workspaces(&mut self) {
+        for ws in &mut self.editor.workspaces {
+            ws.start_symbol_indexing(Arc::clone(&self.language_registry));
+        }
+    }
+
     /// Returns the font metrics.
     pub fn font_metrics(&self) -> &FontMetrics {
         &self.font_metrics
@@ -10179,6 +10195,56 @@ mod tests {
 
         let ws = state.editor.active_workspace().unwrap();
         assert_eq!(ws.label, "workspace");
+    }
+
+    // =========================================================================
+    // Session Restore Symbol Indexing Tests
+    // Chunk: docs/chunks/gotodef_session_restore - Tests for symbol index initialization
+    // =========================================================================
+
+    #[test]
+    fn test_initialize_symbol_indexing_for_all_workspaces() {
+        use tempfile::TempDir;
+
+        // Create temp directories to serve as workspace roots
+        let temp1 = TempDir::new().unwrap();
+        let temp2 = TempDir::new().unwrap();
+        let root1 = temp1.path().to_path_buf();
+        let root2 = temp2.path().to_path_buf();
+
+        // Create an editor with two workspaces (simulating session restore)
+        let mut state = EditorState::new_deferred(test_font_metrics());
+
+        // Manually create workspaces like session restore does (without symbol indexing)
+        state.editor.new_workspace("Workspace 1".to_string(), root1);
+        state.editor.new_workspace("Workspace 2".to_string(), root2);
+
+        // Verify both workspaces have no symbol index initially
+        assert!(state.editor.workspaces[0].symbol_index.is_none(),
+            "Workspace 0 should have no symbol index before initialization");
+        assert!(state.editor.workspaces[1].symbol_index.is_none(),
+            "Workspace 1 should have no symbol index before initialization");
+
+        // Call initialize_symbol_indexing_for_all_workspaces (what we call after session restore)
+        state.initialize_symbol_indexing_for_all_workspaces();
+
+        // Verify both workspaces now have a symbol index
+        assert!(state.editor.workspaces[0].symbol_index.is_some(),
+            "Workspace 0 should have symbol index after initialization");
+        assert!(state.editor.workspaces[1].symbol_index.is_some(),
+            "Workspace 1 should have symbol index after initialization");
+    }
+
+    #[test]
+    fn test_initialize_symbol_indexing_with_empty_workspaces() {
+        // Test that initialization works when there are no workspaces
+        let mut state = EditorState::new_deferred(test_font_metrics());
+
+        // No workspaces - this should not panic
+        state.initialize_symbol_indexing_for_all_workspaces();
+
+        // Should still have no workspaces
+        assert_eq!(state.editor.workspace_count(), 0);
     }
 
     // =========================================================================
