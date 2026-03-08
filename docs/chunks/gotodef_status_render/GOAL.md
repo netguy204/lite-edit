@@ -1,18 +1,40 @@
 ---
-status: FUTURE
+status: ACTIVE
 ticket: null
 parent_chunk: null
-code_paths: []
-code_references: []
+code_paths:
+- crates/editor/src/selector_overlay.rs
+- crates/editor/src/renderer/mod.rs
+- crates/editor/src/renderer/status_bar.rs
+- crates/editor/src/drain_loop.rs
+code_references:
+- ref: crates/editor/src/selector_overlay.rs#StatusBarState
+  implements: "State struct for passing status message to renderer"
+- ref: crates/editor/src/selector_overlay.rs#StatusBarGeometry
+  implements: "Geometry calculation for status bar positioning"
+- ref: crates/editor/src/selector_overlay.rs#StatusBarGlyphBuffer
+  implements: "Glyph buffer for status bar rendering"
+- ref: crates/editor/src/selector_overlay.rs#calculate_status_bar_geometry
+  implements: "Pure geometry calculation function for full-viewport status bar"
+- ref: crates/editor/src/selector_overlay.rs#calculate_status_bar_geometry_in_pane
+  implements: "Pane-aware geometry calculation for multi-pane layouts"
+- ref: crates/editor/src/renderer/status_bar.rs#Renderer::draw_status_bar
+  implements: "Render method for status bar"
+- ref: crates/editor/src/renderer/status_bar.rs#Renderer::draw_status_bar_in_pane
+  implements: "Render method for multi-pane status bar"
+- ref: crates/editor/src/drain_loop.rs#DrainLoop::render_if_dirty
+  implements: "Integration point calling current_status_message()"
 narrative: null
 investigation: cross_file_goto_definition
-subsystems: []
+subsystems:
+  - subsystem_id: renderer
+    relationship: implements
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["alt_screen_viewport_reset"]
+created_after:
+- alt_screen_viewport_reset
 ---
-
 # Chunk Goal
 
 ## Minor Goal
