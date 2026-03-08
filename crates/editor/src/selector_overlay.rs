@@ -625,6 +625,376 @@ impl SelectorGlyphBuffer {
 }
 
 // =============================================================================
+// Status Bar (Chunk: docs/chunks/gotodef_status_render)
+// =============================================================================
+
+// Chunk: docs/chunks/gotodef_status_render - Status bar state for render pass
+/// State needed to render the status bar overlay.
+///
+/// This is passed to render_with_editor to enable status bar rendering
+/// when there is an active status message. The status bar shows transient
+/// messages like "Definition not found" or "Indexing workspace...".
+pub struct StatusBarState<'a> {
+    /// The status message text to display
+    pub text: &'a str,
+}
+
+// Chunk: docs/chunks/gotodef_status_render - Status bar geometry
+/// Computed geometry for the status bar overlay.
+///
+/// All values are in screen coordinates (pixels). This struct is computed
+/// by `calculate_status_bar_geometry` and used by `StatusBarGlyphBuffer` to
+/// position quads correctly.
+#[derive(Debug, Clone, Copy)]
+pub struct StatusBarGeometry {
+    /// Left edge of the strip in screen coordinates
+    pub strip_x: f32,
+    /// Top edge of the strip
+    pub strip_y: f32,
+    /// Width of the strip
+    pub strip_width: f32,
+    /// Height of the strip (line_height + 2*padding)
+    pub strip_height: f32,
+    /// X where status text starts
+    pub text_x: f32,
+    /// Y coordinate for text baseline area
+    pub text_y: f32,
+    /// Width of a single glyph
+    pub glyph_width: f32,
+    /// Line height
+    pub line_height: f32,
+}
+
+/// Horizontal padding for the status bar
+pub const STATUS_BAR_PADDING_X: f32 = 8.0;
+
+/// Vertical padding inside the status bar
+pub const STATUS_BAR_PADDING_Y: f32 = 4.0;
+
+// Chunk: docs/chunks/gotodef_status_render - Status bar geometry calculation
+/// Calculates the geometry for the status bar.
+///
+/// The status bar is anchored to the bottom of the viewport, is 1 line tall
+/// (plus padding), and spans the full width. This matches the find strip
+/// positioning for visual consistency.
+///
+/// # Arguments
+/// * `view_width` - The window/viewport width in pixels
+/// * `view_height` - The window/viewport height in pixels
+/// * `line_height` - The height of a text line in pixels
+/// * `glyph_width` - The width of a single glyph
+pub fn calculate_status_bar_geometry(
+    view_width: f32,
+    view_height: f32,
+    line_height: f32,
+    glyph_width: f32,
+) -> StatusBarGeometry {
+    let strip_height = line_height + 2.0 * STATUS_BAR_PADDING_Y;
+    let strip_y = view_height - strip_height;
+
+    let text_x = STATUS_BAR_PADDING_X;
+
+    StatusBarGeometry {
+        strip_x: 0.0,
+        strip_y,
+        strip_width: view_width,
+        strip_height,
+        text_x,
+        text_y: strip_y + STATUS_BAR_PADDING_Y,
+        glyph_width,
+        line_height,
+    }
+}
+
+// Chunk: docs/chunks/gotodef_status_render - Pane-aware status bar geometry
+/// Calculates the geometry for the status bar within a pane's bounds.
+///
+/// This function positions the status bar at the bottom of the given pane
+/// rather than at the bottom of the full viewport. Used for multi-pane layouts
+/// where the status bar should appear within the focused pane.
+///
+/// # Arguments
+/// * `pane_x` - X position of the pane's left edge
+/// * `pane_y` - Y position of the pane's top edge
+/// * `pane_width` - Width of the pane
+/// * `pane_height` - Height of the pane
+/// * `line_height` - The height of a text line in pixels
+/// * `glyph_width` - The width of a single glyph
+pub fn calculate_status_bar_geometry_in_pane(
+    pane_x: f32,
+    pane_y: f32,
+    pane_width: f32,
+    pane_height: f32,
+    line_height: f32,
+    glyph_width: f32,
+) -> StatusBarGeometry {
+    let strip_height = line_height + 2.0 * STATUS_BAR_PADDING_Y;
+    // Position at bottom of pane (pane_y is the top, so add pane_height - strip_height)
+    let strip_y = pane_y + pane_height - strip_height;
+
+    // Text position is relative to the pane's left edge
+    let text_x = pane_x + STATUS_BAR_PADDING_X;
+
+    StatusBarGeometry {
+        strip_x: pane_x,
+        strip_y,
+        strip_width: pane_width,
+        strip_height,
+        text_x,
+        text_y: strip_y + STATUS_BAR_PADDING_Y,
+        glyph_width,
+        line_height,
+    }
+}
+
+// Chunk: docs/chunks/gotodef_status_render - Status bar glyph buffer
+/// Manages vertex and index buffers for rendering the status bar.
+///
+/// Similar to `FindStripGlyphBuffer` but specialized for the status bar UI.
+/// The status bar is a simple display-only overlay (no cursor, no input).
+pub struct StatusBarGlyphBuffer {
+    /// The vertex buffer containing quad vertices
+    vertex_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
+    /// The index buffer for drawing triangles
+    index_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
+    /// Total number of indices
+    index_count: usize,
+    /// Layout calculator for glyph positioning
+    layout: GlyphLayout,
+
+    // Quad ranges for different draw phases
+    /// Background rect quad
+    background_range: QuadRange,
+    /// Status text glyphs
+    text_range: QuadRange,
+
+    /// Persistent vertex data buffer, reused across frames
+    persistent_vertices: Vec<GlyphVertex>,
+    /// Persistent index data buffer, reused across frames
+    persistent_indices: Vec<u32>,
+}
+
+impl StatusBarGlyphBuffer {
+    /// Creates a new empty status bar glyph buffer
+    pub fn new(layout: GlyphLayout) -> Self {
+        Self {
+            vertex_buffer: None,
+            index_buffer: None,
+            index_count: 0,
+            layout,
+            background_range: QuadRange::default(),
+            text_range: QuadRange::default(),
+            persistent_vertices: Vec::new(),
+            persistent_indices: Vec::new(),
+        }
+    }
+
+    /// Returns the vertex buffer, if any
+    pub fn vertex_buffer(&self) -> Option<&ProtocolObject<dyn MTLBuffer>> {
+        self.vertex_buffer.as_deref()
+    }
+
+    /// Returns the index buffer, if any
+    pub fn index_buffer(&self) -> Option<&ProtocolObject<dyn MTLBuffer>> {
+        self.index_buffer.as_deref()
+    }
+
+    /// Returns the total number of indices
+    pub fn index_count(&self) -> usize {
+        self.index_count
+    }
+
+    /// Returns the index range for the background quad
+    pub fn background_range(&self) -> QuadRange {
+        self.background_range
+    }
+
+    /// Returns the index range for text glyphs
+    pub fn text_range(&self) -> QuadRange {
+        self.text_range
+    }
+
+    /// Updates the buffers with status bar content
+    ///
+    /// # Arguments
+    /// * `device` - The Metal device for buffer creation
+    /// * `atlas` - The glyph atlas for text rendering
+    /// * `text` - The status message text
+    /// * `geometry` - The computed status bar geometry
+    pub fn update(
+        &mut self,
+        device: &ProtocolObject<dyn MTLDevice>,
+        atlas: &GlyphAtlas,
+        text: &str,
+        geometry: &StatusBarGeometry,
+    ) {
+        // Estimate capacity: 1 bg quad + text chars
+        let text_len = text.chars().count();
+        let estimated_quads = 1 + text_len;
+
+        // Reuse persistent buffers instead of allocating new ones
+        self.persistent_vertices.clear();
+        self.persistent_indices.clear();
+        let estimated_vertices = estimated_quads * 4;
+        let estimated_indices = estimated_quads * 6;
+        if self.persistent_vertices.capacity() < estimated_vertices {
+            self.persistent_vertices.reserve(estimated_vertices - self.persistent_vertices.capacity());
+        }
+        if self.persistent_indices.capacity() < estimated_indices {
+            self.persistent_indices.reserve(estimated_indices - self.persistent_indices.capacity());
+        }
+
+        let mut vertex_offset: u32 = 0;
+
+        // Reset ranges
+        self.background_range = QuadRange::default();
+        self.text_range = QuadRange::default();
+
+        let solid_glyph = atlas.solid_glyph();
+
+        // Text color for status text (Catppuccin Mocha text - same as find strip)
+        let text_color: [f32; 4] = [0.804, 0.839, 0.957, 1.0];
+
+        // ==================== Phase 1: Background Rect ====================
+        let bg_start = self.persistent_indices.len();
+        {
+            let quad = self.create_rect_quad(
+                geometry.strip_x,
+                geometry.strip_y,
+                geometry.strip_width,
+                geometry.strip_height,
+                solid_glyph,
+                OVERLAY_BACKGROUND_COLOR,
+            );
+            self.persistent_vertices.extend_from_slice(&quad);
+            Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
+            vertex_offset += 4;
+        }
+        self.background_range = QuadRange::new(bg_start, self.persistent_indices.len() - bg_start);
+
+        // ==================== Phase 2: Status Text ====================
+        let text_start = self.persistent_indices.len();
+        {
+            let mut x = geometry.text_x;
+            let y = geometry.text_y;
+            let max_x = geometry.strip_x + geometry.strip_width - STATUS_BAR_PADDING_X;
+
+            for c in text.chars() {
+                // Skip if past content boundary (clip long messages)
+                if x + geometry.glyph_width > max_x {
+                    break;
+                }
+
+                if c == ' ' {
+                    x += geometry.glyph_width;
+                    continue;
+                }
+
+                if let Some(glyph) = atlas.get_glyph(c) {
+                    let quad = self.create_glyph_quad_at(x, y, glyph, text_color);
+                    self.persistent_vertices.extend_from_slice(&quad);
+                    Self::push_quad_indices(&mut self.persistent_indices, vertex_offset);
+                    vertex_offset += 4;
+                }
+                x += geometry.glyph_width;
+            }
+        }
+        self.text_range = QuadRange::new(text_start, self.persistent_indices.len() - text_start);
+
+        // ==================== Create GPU Buffers ====================
+        if self.persistent_vertices.is_empty() {
+            self.vertex_buffer = None;
+            self.index_buffer = None;
+            self.index_count = 0;
+            return;
+        }
+
+        // Create the vertex buffer
+        let vertex_data_size = self.persistent_vertices.len() * VERTEX_SIZE;
+        let vertex_ptr =
+            NonNull::new(self.persistent_vertices.as_ptr() as *mut std::ffi::c_void).expect("vertex ptr not null");
+
+        let vertex_buffer = unsafe {
+            device
+                .newBufferWithBytes_length_options(
+                    vertex_ptr,
+                    vertex_data_size,
+                    MTLResourceOptions::StorageModeShared,
+                )
+                .expect("Failed to create vertex buffer")
+        };
+
+        // Create the index buffer
+        let index_data_size = self.persistent_indices.len() * std::mem::size_of::<u32>();
+        let index_ptr =
+            NonNull::new(self.persistent_indices.as_ptr() as *mut std::ffi::c_void).expect("index ptr not null");
+
+        let index_buffer = unsafe {
+            device
+                .newBufferWithBytes_length_options(
+                    index_ptr,
+                    index_data_size,
+                    MTLResourceOptions::StorageModeShared,
+                )
+                .expect("Failed to create index buffer")
+        };
+
+        self.vertex_buffer = Some(vertex_buffer);
+        self.index_buffer = Some(index_buffer);
+        self.index_count = self.persistent_indices.len();
+    }
+
+    /// Creates a solid rectangle quad at the given position with the specified color
+    fn create_rect_quad(
+        &self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        solid_glyph: &GlyphInfo,
+        color: [f32; 4],
+    ) -> [GlyphVertex; 4] {
+        let (u0, v0) = solid_glyph.uv_min;
+        let (u1, v1) = solid_glyph.uv_max;
+
+        [
+            GlyphVertex::new(x, y, u0, v0, color),                 // top-left
+            GlyphVertex::new(x + width, y, u1, v0, color),         // top-right
+            GlyphVertex::new(x + width, y + height, u1, v1, color), // bottom-right
+            GlyphVertex::new(x, y + height, u0, v1, color),        // bottom-left
+        ]
+    }
+
+    /// Creates a glyph quad at an absolute position with the specified color
+    fn create_glyph_quad_at(&self, x: f32, y: f32, glyph: &GlyphInfo, color: [f32; 4]) -> [GlyphVertex; 4] {
+        let (u0, v0) = glyph.uv_min;
+        let (u1, v1) = glyph.uv_max;
+
+        let w = glyph.width;
+        let h = glyph.height;
+
+        [
+            GlyphVertex::new(x, y, u0, v0, color),         // top-left
+            GlyphVertex::new(x + w, y, u1, v0, color),     // top-right
+            GlyphVertex::new(x + w, y + h, u1, v1, color), // bottom-right
+            GlyphVertex::new(x, y + h, u0, v1, color),     // bottom-left
+        ]
+    }
+
+    /// Pushes indices for a quad (two triangles)
+    fn push_quad_indices(indices: &mut Vec<u32>, vertex_offset: u32) {
+        // Triangle 1: top-left, top-right, bottom-right
+        indices.push(vertex_offset);
+        indices.push(vertex_offset + 1);
+        indices.push(vertex_offset + 2);
+        // Triangle 2: top-left, bottom-right, bottom-left
+        indices.push(vertex_offset);
+        indices.push(vertex_offset + 2);
+        indices.push(vertex_offset + 3);
+    }
+}
+
+// =============================================================================
 // Find Strip (Chunk: docs/chunks/find_in_file)
 // =============================================================================
 
@@ -1331,6 +1701,123 @@ mod tests {
             16.0,
             8.0,
             0,
+        );
+
+        // strip_x differs: pane starts at 100, viewport starts at 0
+        assert_ne!(pane_geom.strip_x, viewport_geom.strip_x);
+        assert_eq!(pane_geom.strip_x, 100.0);
+        assert_eq!(viewport_geom.strip_x, 0.0);
+
+        // strip_width differs: pane is 400, viewport is 500
+        assert_ne!(pane_geom.strip_width, viewport_geom.strip_width);
+    }
+
+    // =========================================================================
+    // calculate_status_bar_geometry tests
+    // Chunk: docs/chunks/gotodef_status_render - Status bar geometry tests
+    // =========================================================================
+
+    #[test]
+    fn status_bar_geometry_positions_at_bottom() {
+        let geom = calculate_status_bar_geometry(1000.0, 800.0, 20.0, 8.0);
+
+        // Status bar should be at the bottom
+        // strip_y = view_height - strip_height = 800 - (20 + 2*4) = 800 - 28 = 772
+        let expected_strip_height = 20.0 + 2.0 * STATUS_BAR_PADDING_Y;
+        assert_eq!(geom.strip_height, expected_strip_height);
+        assert_eq!(geom.strip_y, 800.0 - expected_strip_height);
+        assert!(geom.strip_y + geom.strip_height <= 800.0);
+    }
+
+    #[test]
+    fn status_bar_geometry_spans_full_width() {
+        let geom = calculate_status_bar_geometry(1000.0, 800.0, 20.0, 8.0);
+
+        // Status bar should span full viewport width
+        assert_eq!(geom.strip_x, 0.0);
+        assert_eq!(geom.strip_width, 1000.0);
+    }
+
+    #[test]
+    fn status_bar_geometry_text_position() {
+        let geom = calculate_status_bar_geometry(1000.0, 800.0, 20.0, 8.0);
+
+        // Text should start at padding offset
+        assert_eq!(geom.text_x, STATUS_BAR_PADDING_X);
+        // Text y should be strip_y + padding
+        assert_eq!(geom.text_y, geom.strip_y + STATUS_BAR_PADDING_Y);
+    }
+
+    #[test]
+    fn status_bar_geometry_stores_metrics() {
+        let geom = calculate_status_bar_geometry(1000.0, 800.0, 20.0, 8.0);
+
+        // Should store the passed metrics
+        assert_eq!(geom.glyph_width, 8.0);
+        assert_eq!(geom.line_height, 20.0);
+    }
+
+    #[test]
+    fn status_bar_in_pane_positions_at_pane_bottom() {
+        let geom = calculate_status_bar_geometry_in_pane(
+            100.0,  // pane_x
+            50.0,   // pane_y
+            400.0,  // pane_width
+            300.0,  // pane_height
+            16.0,   // line_height
+            8.0,    // glyph_width
+        );
+
+        // strip_y should be at bottom of pane, not viewport
+        // pane bottom = pane_y + pane_height = 50 + 300 = 350
+        // strip_y = pane_bottom - strip_height = 350 - (16 + 2*4) = 350 - 24 = 326
+        let expected_strip_height = 16.0 + 2.0 * STATUS_BAR_PADDING_Y;
+        let expected_strip_y = 50.0 + 300.0 - expected_strip_height;
+        assert_eq!(geom.strip_y, expected_strip_y);
+
+        // strip_x should start at pane_x, not 0
+        assert_eq!(geom.strip_x, 100.0);
+
+        // strip_width should be pane_width, not viewport width
+        assert_eq!(geom.strip_width, 400.0);
+    }
+
+    #[test]
+    fn status_bar_in_pane_text_position() {
+        let geom = calculate_status_bar_geometry_in_pane(
+            100.0,  // pane_x
+            50.0,   // pane_y
+            400.0,  // pane_width
+            300.0,  // pane_height
+            16.0,   // line_height
+            8.0,    // glyph_width
+        );
+
+        // text_x should be pane_x + padding, not just padding
+        assert_eq!(geom.text_x, 100.0 + STATUS_BAR_PADDING_X);
+
+        // text_y should be within strip bounds
+        assert!(geom.text_y >= geom.strip_y);
+        assert!(geom.text_y < geom.strip_y + geom.strip_height);
+    }
+
+    #[test]
+    fn status_bar_in_pane_vs_viewport_geometry_differs() {
+        // Verify that pane geometry produces different results than viewport geometry
+        let pane_geom = calculate_status_bar_geometry_in_pane(
+            100.0,  // pane_x (not at 0)
+            50.0,   // pane_y
+            400.0,  // pane_width
+            300.0,  // pane_height
+            16.0,
+            8.0,
+        );
+
+        let viewport_geom = calculate_status_bar_geometry(
+            500.0,  // view_width
+            400.0,  // view_height
+            16.0,
+            8.0,
         );
 
         // strip_x differs: pane starts at 100, viewport starts at 0

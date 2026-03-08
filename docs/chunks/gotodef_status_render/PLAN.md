@@ -1,177 +1,294 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+Render transient status messages (e.g., "Definition not found", "Indexing workspace...") as a lightweight text overlay at the bottom of the viewport. The approach follows the existing overlay rendering pattern established by `FindStripGlyphBuffer`: create a geometry struct, a glyph buffer, and a render method that draws text on a semi-transparent background.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Key design decisions:**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. **Status message renders similarly to find strip** — Use the same bottom-of-viewport placement as the find strip, but simpler (no query input, no cursor). The status message is display-only.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/gotodef_status_render/GOAL.md)
-with references to the files that you expect to touch.
--->
+2. **Find strip takes precedence** — When the find-in-file strip is visible (`FocusLayer::FindInFile`), status messages are not rendered. This avoids visual clutter and respects the user's active interaction.
+
+3. **Selector overlay takes precedence** — Similarly, when a selector is active (`FocusLayer::Selector`), status messages are hidden since the overlay covers the bottom of the screen.
+
+4. **Single-pane and multi-pane aware** — In single-pane mode, the status message spans the full content width. In multi-pane mode, it appears in the focused pane only, similar to how find strip behaves.
+
+5. **Reuse existing glyph buffer patterns** — Follow the `FindStripGlyphBuffer` structure: lazy-initialized buffer, `update()` method that builds vertices, render method that issues Metal draw calls. This follows the renderer subsystem patterns.
+
+6. **Pure geometry calculation** — Keep `calculate_status_bar_geometry()` as a pure function for testability per Humble View Architecture.
+
+**Testing strategy:**
+
+Per TESTING_PHILOSOPHY.md, the testable components are:
+- `StatusMessage::is_expired()` — already tested
+- `EditorState::current_status_message()` — already tested
+- Geometry calculation — pure function, unit testable
+- Integration: calling `current_status_message()` from render path — structural wiring
+
+The Metal rendering itself is a humble view (not unit tested) but the geometry math and state management are fully testable.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+- **docs/subsystems/renderer** (DOCUMENTED): This chunk IMPLEMENTS a new overlay rendering feature following the subsystem's patterns for glyph buffers and render methods. The implementation will add `StatusBarGlyphBuffer` alongside existing overlay buffers and integrate into `render_with_editor`.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Add StatusBarState struct for passing status to renderer
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create a struct similar to `FindStripState` that holds the status message text for rendering.
 
-Example:
+**Location**: `crates/editor/src/selector_overlay.rs`
 
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+```rust
+// Chunk: docs/chunks/gotodef_status_render - Status bar state for render pass
+/// State needed to render the status bar overlay.
+pub struct StatusBarState<'a> {
+    /// The status message text to display
+    pub text: &'a str,
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+### Step 2: Add StatusBarGeometry and calculate_status_bar_geometry()
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Create a geometry struct and pure calculation function for status bar positioning.
 
-## Dependencies
+**Location**: `crates/editor/src/selector_overlay.rs`
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+The status bar is positioned at the bottom of the viewport (or pane in multi-pane mode), same as find strip. It is one line tall with padding.
 
-If there are no dependencies, delete this section.
--->
+```rust
+// Chunk: docs/chunks/gotodef_status_render - Status bar geometry
+#[derive(Debug, Clone, Copy)]
+pub struct StatusBarGeometry {
+    pub strip_x: f32,
+    pub strip_y: f32,
+    pub strip_width: f32,
+    pub strip_height: f32,
+    pub text_x: f32,
+    pub text_y: f32,
+    pub line_height: f32,
+}
+
+pub fn calculate_status_bar_geometry(
+    view_width: f32,
+    view_height: f32,
+    line_height: f32,
+) -> StatusBarGeometry
+```
+
+### Step 3: Add StatusBarGlyphBuffer
+
+Create a glyph buffer for rendering the status bar. This follows the `FindStripGlyphBuffer` pattern: persistent vertex/index buffers, background quad, text glyphs.
+
+**Location**: `crates/editor/src/selector_overlay.rs`
+
+```rust
+// Chunk: docs/chunks/gotodef_status_render - Status bar glyph buffer
+pub struct StatusBarGlyphBuffer {
+    vertex_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
+    index_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
+    index_count: usize,
+    layout: GlyphLayout,
+    persistent_vertices: Vec<GlyphVertex>,
+    persistent_indices: Vec<u32>,
+}
+
+impl StatusBarGlyphBuffer {
+    pub fn new(layout: GlyphLayout) -> Self;
+    pub fn vertex_buffer(&self) -> Option<&ProtocolObject<dyn MTLBuffer>>;
+    pub fn index_buffer(&self) -> Option<&ProtocolObject<dyn MTLBuffer>>;
+    pub fn index_count(&self) -> usize;
+    pub fn update(
+        &mut self,
+        device: &ProtocolObject<dyn MTLDevice>,
+        atlas: &GlyphAtlas,
+        text: &str,
+        geometry: &StatusBarGeometry,
+    );
+}
+```
+
+The `update()` method builds:
+1. Background rect (same color as overlays: `OVERLAY_BACKGROUND_COLOR`)
+2. Text glyphs (white text, Catppuccin Mocha text color)
+
+### Step 4: Add status_bar_buffer field to Renderer
+
+Add the lazy-initialized status bar buffer to the Renderer struct.
+
+**Location**: `crates/editor/src/renderer/mod.rs`
+
+Add field:
+```rust
+/// The glyph buffer for status bar rendering (lazy-initialized)
+// Chunk: docs/chunks/gotodef_status_render - Status bar buffer
+status_bar_buffer: Option<StatusBarGlyphBuffer>,
+```
+
+Initialize in `Renderer::new()` as `None`.
+
+### Step 5: Add draw_status_bar method to Renderer
+
+Create the render method that draws the status bar.
+
+**Location**: `crates/editor/src/renderer/` — create new file `status_bar.rs` or add to `find_strip.rs`
+
+Following the renderer decomposition pattern, create `crates/editor/src/renderer/status_bar.rs`:
+
+```rust
+// Chunk: docs/chunks/gotodef_status_render - Status bar rendering
+
+impl Renderer {
+    pub(super) fn draw_status_bar(
+        &mut self,
+        encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        view: &MetalView,
+        text: &str,
+    );
+}
+```
+
+The method:
+1. Gets view dimensions
+2. Calculates geometry via `calculate_status_bar_geometry()`
+3. Lazy-initializes `status_bar_buffer` if `None`
+4. Calls `update()` on the buffer
+5. Issues Metal draw calls (same pattern as `draw_find_strip`)
+
+### Step 6: Integrate status bar into render_with_editor
+
+Modify `render_with_editor` to call `draw_status_bar` when there is a status message and no overlay is active.
+
+**Location**: `crates/editor/src/renderer/mod.rs`
+
+Add a new parameter to `render_with_editor`:
+```rust
+pub fn render_with_editor(
+    &mut self,
+    view: &MetalView,
+    editor: &Editor,
+    selector: Option<&SelectorWidget>,
+    selector_cursor_visible: bool,
+    find_strip: Option<FindStripState<'_>>,
+    status_bar: Option<StatusBarState<'_>>,  // NEW
+)
+```
+
+**Render logic:**
+- If `selector.is_some()` → draw selector overlay (status bar hidden)
+- Else if `find_strip.is_some()` → draw find strip (status bar hidden)
+- Else if `status_bar.is_some()` → draw status bar
+- The status bar renders in the same position as find strip, so they are mutually exclusive
+
+For single-pane mode, draw after content but before selector overlay.
+For multi-pane mode, draw in the focused pane's bounds (add `draw_status_bar_in_pane` similar to `draw_find_strip_in_pane`).
+
+### Step 7: Call current_status_message() from drain_loop render path
+
+Modify the drain_loop to pass the status message to `render_with_editor`.
+
+**Location**: `crates/editor/src/drain_loop.rs`
+
+In `render_if_dirty()`, for the `FocusLayer::Buffer | FocusLayer::GlobalShortcuts` branch:
+
+```rust
+FocusLayer::Buffer | FocusLayer::GlobalShortcuts => {
+    self.renderer.set_cursor_visible(self.state.cursor_visible);
+    // Chunk: docs/chunks/gotodef_status_render - Pass status message to renderer
+    let status_msg = self.state.current_status_message();
+    let status_bar = status_msg.map(|text| StatusBarState { text });
+    self.renderer.render_with_editor(
+        &self.metal_view,
+        &self.state.editor,
+        None,
+        self.state.cursor_visible,
+        None, // No find strip
+        status_bar,
+    );
+}
+```
+
+Note: `current_status_message()` takes `&mut self` because it clears expired messages. This is called once per frame, which is correct.
+
+### Step 8: Update other render_with_editor call sites
+
+Update all call sites of `render_with_editor` to pass `None` for status_bar when an overlay is active:
+
+**Locations:**
+- `FocusLayer::Selector` branch → `status_bar: None`
+- `FocusLayer::FindInFile` branch → `status_bar: None`
+- `FocusLayer::ConfirmDialog` → uses `render_with_confirm_dialog`, no change needed
+
+Also update `render_with_confirm_dialog` signature if needed (likely pass `None` for status_bar when calling internal render logic).
+
+### Step 9: Add draw_status_bar_in_pane for multi-pane support
+
+For multi-pane mode, status bar should appear within the focused pane's bounds.
+
+**Location**: `crates/editor/src/renderer/status_bar.rs`
+
+```rust
+pub(super) fn draw_status_bar_in_pane(
+    &mut self,
+    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    view: &MetalView,
+    text: &str,
+    pane_rect: &PaneRect,
+    view_width: f32,
+    view_height: f32,
+);
+```
+
+Add `calculate_status_bar_geometry_in_pane()` similar to `calculate_find_strip_geometry_in_pane()`.
+
+Update `render_with_editor` multi-pane branch to call this.
+
+### Step 10: Add unit tests
+
+Add tests for the geometry calculation function.
+
+**Location**: `crates/editor/src/selector_overlay.rs` (test module)
+
+```rust
+#[test]
+fn test_status_bar_geometry_positions_at_bottom() {
+    let geom = calculate_status_bar_geometry(1000.0, 800.0, 20.0);
+    // Status bar at bottom
+    assert!(geom.strip_y > 700.0);
+    assert!(geom.strip_y + geom.strip_height <= 800.0);
+}
+
+#[test]
+fn test_status_bar_geometry_in_pane() {
+    let geom = calculate_status_bar_geometry_in_pane(
+        100.0, 0.0, 400.0, 400.0,
+        20.0, 1000.0, 800.0,
+    );
+    // Should be within pane bounds
+    assert!(geom.strip_x >= 100.0);
+    assert!(geom.strip_x + geom.strip_width <= 500.0);
+}
+```
+
+### Step 11: Verify integration manually
+
+Run the editor and test:
+1. Trigger "Definition not found" by using go-to-definition on an unknown symbol
+2. Verify the message appears at the bottom of the viewport
+3. Verify the message disappears after 2 seconds
+4. Open find-in-file (Cmd+F) while status message is visible → status message should hide
+5. Open file picker while status message is visible → status message should hide
+6. In multi-pane mode, verify status bar appears in focused pane only
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+1. **Mutable borrow conflict**: `current_status_message()` takes `&mut self` on `EditorState`. In `drain_loop`, we already have `&mut self.state`. Need to ensure the status message string is extracted before calling render methods that might also need `&self.state`. Solution: Extract to a local `Option<String>` before the render call.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+2. **Tab bar height**: In single-pane mode, the content area is offset by `TAB_BAR_HEIGHT`. Need to ensure status bar geometry accounts for this (render within content area, not overlapping tab bar). The find strip already handles this, so follow its pattern.
+
+3. **Text truncation**: Long status messages might overflow the viewport width. Decision: truncate with ellipsis if needed, similar to how find strip handles long queries.
 
 ## Deviations
 
-<!--
-POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
--->
+<!-- POPULATE DURING IMPLEMENTATION -->

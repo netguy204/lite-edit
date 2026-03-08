@@ -43,6 +43,7 @@ mod left_rail;
 mod overlay;
 mod panes;
 mod scissor;
+mod status_bar;
 mod tab_bar;
 mod welcome;
 
@@ -69,7 +70,10 @@ use crate::selector::SelectorWidget;
 // Chunk: docs/chunks/renderer_styled_content - Per-vertex colors, overlay colors now in vertices
 // Chunk: docs/chunks/find_in_file - Find strip rendering
 // Chunk: docs/chunks/find_strip_multi_pane - Pane-aware find strip rendering
-use crate::selector_overlay::{FindStripGlyphBuffer, FindStripState, SelectorGlyphBuffer};
+// Chunk: docs/chunks/gotodef_status_render - Status bar rendering
+use crate::selector_overlay::{
+    FindStripGlyphBuffer, FindStripState, SelectorGlyphBuffer, StatusBarGlyphBuffer, StatusBarState,
+};
 use crate::shader::GlyphPipeline;
 // Chunk: docs/chunks/content_tab_bar - Content tab bar rendering
 use crate::tab_bar::{TabBarGlyphBuffer, TAB_BAR_HEIGHT};
@@ -117,6 +121,9 @@ pub struct Renderer {
     tab_bar_buffer: Option<TabBarGlyphBuffer>,
     /// The glyph buffer for find strip rendering (lazy-initialized)
     find_strip_buffer: Option<FindStripGlyphBuffer>,
+    // Chunk: docs/chunks/gotodef_status_render - Status bar rendering
+    /// The glyph buffer for status bar rendering (lazy-initialized)
+    status_bar_buffer: Option<StatusBarGlyphBuffer>,
     // Chunk: docs/chunks/welcome_screen - Welcome screen rendering
     /// The glyph buffer for welcome screen rendering (lazy-initialized)
     welcome_screen_buffer: Option<crate::welcome_screen::WelcomeScreenGlyphBuffer>,
@@ -212,6 +219,7 @@ impl Renderer {
             left_rail_buffer: None,
             tab_bar_buffer: None,
             find_strip_buffer: None,
+            status_bar_buffer: None,
             welcome_screen_buffer: None,
             pane_frame_buffer: None,
             confirm_dialog_buffer: None,
@@ -587,7 +595,9 @@ impl Renderer {
     /// * `selector` - Optional selector widget to render as an overlay
     /// * `selector_cursor_visible` - Whether the selector's query cursor should be visible
     /// * `find_strip` - Optional find strip state for rendering find-in-file UI
+    /// * `status_bar` - Optional status bar state for rendering transient status messages
     // Chunk: docs/chunks/find_strip_multi_pane - Find strip parameter for pane-aware rendering
+    // Chunk: docs/chunks/gotodef_status_render - Status bar parameter for status message rendering
     pub fn render_with_editor(
         &mut self,
         view: &MetalView,
@@ -595,6 +605,7 @@ impl Renderer {
         selector: Option<&SelectorWidget>,
         selector_cursor_visible: bool,
         find_strip: Option<FindStripState<'_>>,
+        status_bar: Option<StatusBarState<'_>>,
     ) {
         // Set content area offset to account for left rail and tab bar
         self.set_content_x_offset(RAIL_WIDTH);
@@ -777,6 +788,13 @@ impl Renderer {
                     find_state.cursor_col,
                     find_state.cursor_visible,
                 );
+            } else if let Some(ref status_state) = status_bar {
+                // Chunk: docs/chunks/gotodef_status_render - Status bar rendering in single-pane mode
+                // Draw status bar at the bottom of the viewport (full width)
+                // Only render if find strip is not active (find strip takes precedence)
+                let full_scissor = full_viewport_scissor_rect(view_width, view_height);
+                encoder.setScissorRect(full_scissor);
+                self.draw_status_bar(&encoder, view, status_state.text);
             }
         } else {
             // Multi-pane case: render each pane independently
@@ -797,6 +815,20 @@ impl Renderer {
                         find_state.query,
                         find_state.cursor_col,
                         find_state.cursor_visible,
+                        focused_rect,
+                        view_width,
+                        view_height,
+                    );
+                }
+            } else if let Some(ref status_state) = status_bar {
+                // Chunk: docs/chunks/gotodef_status_render - Status bar rendering in multi-pane mode
+                // Draw status bar within the focused pane's bounds
+                // Only render if find strip is not active (find strip takes precedence)
+                if let Some(focused_rect) = pane_rects.iter().find(|r| r.pane_id == focused_pane_id) {
+                    self.draw_status_bar_in_pane(
+                        &encoder,
+                        view,
+                        status_state.text,
                         focused_rect,
                         view_width,
                         view_height,

@@ -39,7 +39,8 @@ use crate::metal_view::{CursorRect, CursorRegions, MetalView};
 use crate::renderer::Renderer;
 use crate::confirm_dialog::calculate_confirm_dialog_geometry;
 // Chunk: docs/chunks/find_strip_multi_pane - Import FindStripState for pane-aware rendering
-use crate::selector_overlay::{calculate_overlay_geometry, FindStripState};
+// Chunk: docs/chunks/gotodef_status_render - Import StatusBarState for status message rendering
+use crate::selector_overlay::{calculate_overlay_geometry, FindStripState, StatusBarState};
 use crate::left_rail::RAIL_WIDTH;
 use crate::pane_layout::calculate_pane_rects;
 use crate::tab_bar::TAB_BAR_HEIGHT;
@@ -546,6 +547,7 @@ impl EventDrainLoop {
                         self.state.active_selector.as_ref(),
                         self.state.overlay_cursor_visible,
                         None, // No find strip when selector is active
+                        None, // No status bar when selector is active (selector takes precedence)
                     );
                 }
                 // Chunk: docs/chunks/find_strip_multi_pane - Use render_with_editor for find strip
@@ -569,17 +571,25 @@ impl EventDrainLoop {
                                 cursor_col,
                                 cursor_visible: self.state.overlay_cursor_visible,
                             }),
+                            None, // No status bar when find is active (find strip takes precedence)
                         );
                     }
                 }
                 FocusLayer::Buffer | FocusLayer::GlobalShortcuts => {
                     self.renderer.set_cursor_visible(self.state.cursor_visible);
+                    // Chunk: docs/chunks/gotodef_status_render - Pass status message to renderer
+                    // Get the current status message (if any) and build StatusBarState.
+                    // Note: current_status_message() takes &mut self because it clears expired messages.
+                    // We extract the text to a local String to avoid borrow conflicts.
+                    let status_text = self.state.current_status_message().map(|s| s.to_owned());
+                    let status_bar = status_text.as_ref().map(|text| StatusBarState { text });
                     self.renderer.render_with_editor(
                         &self.metal_view,
                         &self.state.editor,
                         None,
                         self.state.cursor_visible,
                         None, // No find strip
+                        status_bar,
                     );
                 }
                 // Chunk: docs/chunks/dirty_tab_close_confirm - Confirm dialog rendering
