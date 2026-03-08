@@ -1,8 +1,9 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+  - crates/syntax/src/symbol_index.rs
 code_references: []
 narrative: null
 investigation: cross_file_goto_definition
@@ -10,9 +11,9 @@ subsystems: []
 friction_entries: []
 bug_type: implementation
 depends_on: []
-created_after: ["alt_screen_viewport_reset"]
+created_after:
+- alt_screen_viewport_reset
 ---
-
 # Chunk Goal
 
 ## Minor Goal

@@ -85,12 +85,15 @@ impl SymbolKind {
     ///
     /// Tags capture names follow the pattern `@definition.{kind}` or just
     /// `@name` when nested inside a definition pattern.
+    // Chunk: docs/chunks/gotodef_index_captures - Filter reference captures, fix method interleaving
     fn from_capture_name(name: &str) -> Option<Self> {
         // Handle both "definition.function" and "name" capture patterns
         let kind_str = if name.starts_with("definition.") {
             &name["definition.".len()..]
         } else if name == "name" {
             return None; // We need the definition capture, not the name
+        } else if name.starts_with("reference.") {
+            return None; // Filter out @reference.call, @reference.implementation
         } else {
             name
         };
@@ -318,65 +321,41 @@ fn index_file(
     let query = Query::new(&config.language, config.tags_query)
         .map_err(|e| IndexError::QueryError(format!("{:?}", e)))?;
 
+    // Use QueryMatches instead of QueryCaptures to avoid interleaving issues.
+    // QueryMatches groups all captures for a single match together, ensuring
+    // we see both @name and @definition.* captures before processing.
+    // Both are StreamingIterators, but QueryMatches yields complete matches.
     let mut cursor = QueryCursor::new();
+    let mut matches_iter = cursor.matches(&query, tree.root_node(), content.as_bytes());
 
-    // Collect all captures - QueryCaptures is a StreamingIterator, not Iterator
-    let mut captures_iter = cursor.captures(&query, tree.root_node(), content.as_bytes());
+    while let Some(query_match) = matches_iter.next() {
+        let mut symbol_name: Option<String> = None;
+        let mut symbol_kind: Option<SymbolKind> = None;
+        let mut name_start_byte: Option<usize> = None;
 
-    // Track the current match to group captures together
-    let mut current_match_id: Option<u32> = None;
-    let mut symbol_name: Option<String> = None;
-    let mut symbol_kind: Option<SymbolKind> = None;
-    let mut name_start_byte: Option<usize> = None;
+        for capture in query_match.captures {
+            let capture_name = query.capture_names()[capture.index as usize];
 
-    while let Some((mat, capture_idx)) = captures_iter.next() {
-        let capture = &mat.captures[*capture_idx];
-        let capture_name = query.capture_names()[capture.index as usize];
-
-        // Check if we're starting a new match
-        if current_match_id != Some(mat.id()) {
-            // Process the previous match if we had both name and kind
-            if let (Some(name), Some(kind), Some(start_byte)) =
-                (symbol_name.take(), symbol_kind.take(), name_start_byte.take())
-            {
-                let (line, col) = byte_offset_to_position(&content, start_byte);
-                let loc = SymbolLocation {
-                    file_path: file_path.to_path_buf(),
-                    line,
-                    col,
-                    kind,
-                };
-                let mut guard = index.write().unwrap();
-                guard.entry(name).or_default().push(loc);
+            if capture_name == "name" {
+                symbol_name = capture.node.utf8_text(content.as_bytes()).ok().map(String::from);
+                name_start_byte = Some(capture.node.start_byte());
+            } else if let Some(kind) = SymbolKind::from_capture_name(capture_name) {
+                symbol_kind = Some(kind);
             }
-
-            current_match_id = Some(mat.id());
-            symbol_name = None;
-            symbol_kind = None;
-            name_start_byte = None;
         }
 
-        // Process this capture
-        if capture_name == "name" {
-            let node = capture.node;
-            symbol_name = node.utf8_text(content.as_bytes()).ok().map(String::from);
-            name_start_byte = Some(node.start_byte());
-        } else if let Some(kind) = SymbolKind::from_capture_name(capture_name) {
-            symbol_kind = Some(kind);
+        // Insert if we have both name and kind
+        if let (Some(name), Some(kind), Some(start_byte)) = (symbol_name, symbol_kind, name_start_byte) {
+            let (line, col) = byte_offset_to_position(&content, start_byte);
+            let loc = SymbolLocation {
+                file_path: file_path.to_path_buf(),
+                line,
+                col,
+                kind,
+            };
+            let mut guard = index.write().unwrap();
+            guard.entry(name).or_default().push(loc);
         }
-    }
-
-    // Process the last match
-    if let (Some(name), Some(kind), Some(start_byte)) = (symbol_name, symbol_kind, name_start_byte) {
-        let (line, col) = byte_offset_to_position(&content, start_byte);
-        let loc = SymbolLocation {
-            file_path: file_path.to_path_buf(),
-            line,
-            col,
-            kind,
-        };
-        let mut guard = index.write().unwrap();
-        guard.entry(name).or_default().push(loc);
     }
 
     Ok(())
@@ -772,6 +751,155 @@ class Greeter:
         // New function should be present
         let new_results = index.lookup("updated_function");
         assert_eq!(new_results.len(), 1, "Expected to find updated_function");
+    }
+
+    /// Test that methods inside impl blocks are indexed.
+    ///
+    /// The tags query matches methods as @definition.method. However, due to
+    /// capture interleaving in QueryCaptures, methods can be dropped from the
+    /// index. This test verifies the fix using QueryMatches.
+    #[test]
+    fn test_methods_in_impl_blocks_indexed() {
+        use tempfile::TempDir;
+        use std::fs::File;
+        use std::io::Write;
+
+        let temp = TempDir::new().unwrap();
+        let file_path = temp.path().join("test.rs");
+
+        // Create a file with a struct and impl block containing methods
+        let mut file = File::create(&file_path).unwrap();
+        writeln!(file, r#"
+struct Foo {{
+    field: i32,
+}}
+
+impl Foo {{
+    fn new() -> Self {{
+        Self {{ field: 0 }}
+    }}
+
+    fn bar(&self) -> i32 {{
+        self.field
+    }}
+
+    fn baz(&mut self, value: i32) {{
+        self.field = value;
+    }}
+}}
+"#).unwrap();
+
+        let registry = LanguageRegistry::new();
+        let index = Arc::new(RwLock::new(HashMap::new()));
+
+        index_file(&index, &file_path, &registry).unwrap();
+
+        let guard = index.read().unwrap();
+
+        // Debug: print what we found
+        eprintln!("Found symbols: {:?}", guard.keys().collect::<Vec<_>>());
+        for (name, locs) in guard.iter() {
+            eprintln!("  {}: {} locations", name, locs.len());
+            for loc in locs {
+                eprintln!("    line {}, col {}, kind {:?}", loc.line, loc.col, loc.kind);
+            }
+        }
+
+        // "Foo" should be in the index (the struct)
+        assert!(guard.contains_key("Foo"), "Foo struct should be indexed");
+
+        // "new" should be in the index (method in impl block)
+        assert!(
+            guard.contains_key("new"),
+            "new method should be indexed, but only found: {:?}",
+            guard.keys().collect::<Vec<_>>()
+        );
+
+        // "bar" should be in the index
+        assert!(
+            guard.contains_key("bar"),
+            "bar method should be indexed, but only found: {:?}",
+            guard.keys().collect::<Vec<_>>()
+        );
+
+        // "baz" should be in the index
+        assert!(
+            guard.contains_key("baz"),
+            "baz method should be indexed, but only found: {:?}",
+            guard.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// Test that @reference.call captures are NOT indexed.
+    ///
+    /// The tags query produces @reference.call captures for function call sites,
+    /// but we only want to index definitions, not call sites.
+    #[test]
+    fn test_reference_captures_not_indexed() {
+        use tempfile::TempDir;
+        use std::fs::File;
+        use std::io::Write;
+
+        let temp = TempDir::new().unwrap();
+        let file_path = temp.path().join("test.rs");
+
+        // Create a file with a function definition AND call sites
+        let mut file = File::create(&file_path).unwrap();
+        writeln!(file, r#"
+fn foo() {{
+    println!("I am foo");
+}}
+
+fn bar() {{
+    // These are call sites - should NOT be indexed
+    foo();
+    foo();
+}}
+
+fn main() {{
+    bar();
+    foo();
+}}
+"#).unwrap();
+
+        let registry = LanguageRegistry::new();
+        let index = Arc::new(RwLock::new(HashMap::new()));
+
+        index_file(&index, &file_path, &registry).unwrap();
+
+        let guard = index.read().unwrap();
+
+        // Debug: print what we found
+        eprintln!("Found symbols: {:?}", guard.keys().collect::<Vec<_>>());
+        for (name, locs) in guard.iter() {
+            eprintln!("  {}: {} locations", name, locs.len());
+            for loc in locs {
+                eprintln!("    line {}, col {}, kind {:?}", loc.line, loc.col, loc.kind);
+            }
+        }
+
+        // "foo" should appear EXACTLY ONCE (the definition at line 2)
+        let foo_locs = guard.get("foo").expect("foo should be in index");
+        assert_eq!(
+            foo_locs.len(), 1,
+            "foo should appear exactly once (definition only), but found {} times",
+            foo_locs.len()
+        );
+        // The definition is on line 2 (0-indexed: line 1)
+        assert_eq!(foo_locs[0].line, 1, "foo definition should be on line 1 (0-indexed)");
+        assert!(
+            foo_locs[0].kind == SymbolKind::Function,
+            "foo should be a function definition, got {:?}",
+            foo_locs[0].kind
+        );
+
+        // "bar" should appear exactly once
+        let bar_locs = guard.get("bar").expect("bar should be in index");
+        assert_eq!(bar_locs.len(), 1, "bar should appear exactly once");
+
+        // "main" should appear exactly once
+        let main_locs = guard.get("main").expect("main should be in index");
+        assert_eq!(main_locs.len(), 1, "main should appear exactly once");
     }
 
     /// Performance test for workspace indexing.

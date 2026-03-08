@@ -8,170 +8,208 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+This chunk fixes two bugs in `crates/syntax/src/symbol_index.rs` that prevent cross-file go-to-definition from working correctly, as identified in the `cross_file_goto_definition` investigation.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+**Bug 1: Reference captures being indexed as definitions**
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+The `from_capture_name` function has incomplete filtering. When it encounters `@reference.call` or `@reference.implementation` captures from the tags query:
+1. It checks if the name starts with `"definition."` — it doesn't
+2. It checks if the name equals `"name"` — it doesn't
+3. It falls through to the else branch where `kind_str = name`, which hits `_ => SymbolKind::Unknown`
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/gotodef_index_captures/GOAL.md)
-with references to the files that you expect to touch.
--->
+This causes every function call site to be indexed as a symbol with `SymbolKind::Unknown`, polluting the index.
+
+**Fix:** Return `None` for capture names starting with `"reference."`, same as we do for `"name"` captures.
+
+**Bug 2: QueryCaptures delivers captures interleaved across matches**
+
+The `index_file` function uses `QueryCaptures`, a `StreamingIterator` that delivers captures one at a time. The code assumes all captures for match N arrive before match N+1 starts. This assumption is violated when a node matches multiple query patterns simultaneously.
+
+For methods inside `impl` blocks, the function matches both:
+- `@definition.method` (inside `declaration_list`)
+- `@definition.function` (general `function_item`)
+
+The captures interleave: `@definition.method` (match 3) → `@definition.function` (match 4) → `@name` (match 3) → `@name` (match 4). When the state machine sees match 4 start, it tries to finalize match 3, but only has `symbol_kind` (no `symbol_name` yet), so the method is silently dropped.
+
+**Fix:** Switch from `QueryCaptures` to `QueryMatches`. `QueryMatches` is a standard `Iterator` (not `StreamingIterator`) that yields `QueryMatch` objects containing all captures for a single match grouped together. This eliminates the interleaving problem and simplifies the code.
+
+**Testing Strategy:** Following docs/trunk/TESTING_PHILOSOPHY.md:
+- Write failing tests first that demonstrate the bugs
+- Implement fixes to make tests pass
+- Tests assert semantic properties (methods are indexed, call sites are NOT indexed)
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No existing subsystems are relevant to this bug fix. The symbol index is part of the tree-sitter infrastructure established by `treesitter_symbol_index` chunk, but no subsystem documentation exists for tree-sitter patterns in this codebase.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing test for reference capture filtering
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Add a test that creates a Rust file with function calls (which produce `@reference.call` captures) and verifies that the call sites are NOT indexed — only definitions should appear.
 
-Example:
+**Test file:** `crates/syntax/src/symbol_index.rs` (in the `#[cfg(test)]` module)
 
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
----
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+**Test structure:**
+```rust
+#[test]
+fn test_reference_captures_not_indexed() {
+    // Create a Rust file with:
+    // - A function definition: `fn foo() {}`
+    // - A call site: `foo();` inside another function
+    // Index the file and verify:
+    // - "foo" appears exactly once in the index (the definition)
+    // - The location points to the definition line, not the call site
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+### Step 2: Fix from_capture_name to filter reference captures
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Modify `SymbolKind::from_capture_name` in `crates/syntax/src/symbol_index.rs`:
+
+**Current behavior (lines 88-112):**
+```rust
+fn from_capture_name(name: &str) -> Option<Self> {
+    let kind_str = if name.starts_with("definition.") {
+        &name["definition.".len()..]
+    } else if name == "name" {
+        return None;
+    } else {
+        name  // BUG: "reference.call" falls through here
+    };
+    Some(match kind_str { ... _ => SymbolKind::Unknown })
+}
+```
+
+**Fix:** Add a check for `"reference."` prefix before the fallback:
+```rust
+fn from_capture_name(name: &str) -> Option<Self> {
+    let kind_str = if name.starts_with("definition.") {
+        &name["definition.".len()..]
+    } else if name == "name" {
+        return None;
+    } else if name.starts_with("reference.") {
+        return None;  // Filter out @reference.call, @reference.implementation
+    } else {
+        name
+    };
+    // ... rest unchanged
+}
+```
+
+**Verify:** The test from Step 1 should now pass.
+
+### Step 3: Write failing test for method capture in impl blocks
+
+Add a test that creates a Rust file with methods inside `impl` blocks and verifies they ARE indexed.
+
+**Test structure:**
+```rust
+#[test]
+fn test_methods_in_impl_blocks_indexed() {
+    // Create a Rust file with:
+    // - A struct: `struct Foo {}`
+    // - An impl block: `impl Foo { fn new() -> Self { ... } fn bar(&self) {} }`
+    // Index the file and verify:
+    // - "new" is in the index with kind Method or Function
+    // - "bar" is in the index with kind Method or Function
+    // - "Foo" is in the index (the struct)
+}
+```
+
+This test will fail initially because the current `QueryCaptures` state machine drops methods due to capture interleaving.
+
+### Step 4: Switch from QueryCaptures to QueryMatches
+
+Refactor `index_file` in `crates/syntax/src/symbol_index.rs` to use `QueryMatches` instead of `QueryCaptures`.
+
+**Current approach (lines 321-381):**
+- Uses `cursor.captures()` which returns a `StreamingIterator`
+- Manual state machine tracking `current_match_id`, `symbol_name`, `symbol_kind`
+- Processes captures one at a time, grouping by match ID
+
+**New approach:**
+- Use `cursor.matches()` which returns a standard `Iterator<Item = QueryMatch>`
+- Each `QueryMatch` contains all captures for that match, already grouped
+- Iterate over matches, then iterate over captures within each match
+- Simpler code, no state machine needed
+
+**Implementation:**
+```rust
+let mut cursor = QueryCursor::new();
+for query_match in cursor.matches(&query, tree.root_node(), content.as_bytes()) {
+    let mut symbol_name: Option<String> = None;
+    let mut symbol_kind: Option<SymbolKind> = None;
+    let mut name_start_byte: Option<usize> = None;
+
+    for capture in query_match.captures {
+        let capture_name = query.capture_names()[capture.index as usize];
+        if capture_name == "name" {
+            symbol_name = capture.node.utf8_text(content.as_bytes()).ok().map(String::from);
+            name_start_byte = Some(capture.node.start_byte());
+        } else if let Some(kind) = SymbolKind::from_capture_name(capture_name) {
+            symbol_kind = Some(kind);
+        }
+    }
+
+    // Insert if we have both name and kind
+    if let (Some(name), Some(kind), Some(start_byte)) = (symbol_name, symbol_kind, name_start_byte) {
+        let (line, col) = byte_offset_to_position(&content, start_byte);
+        let loc = SymbolLocation { file_path: file_path.to_path_buf(), line, col, kind };
+        let mut guard = index.write().unwrap();
+        guard.entry(name).or_default().push(loc);
+    }
+}
+```
+
+**Note:** Remove the `use streaming_iterator::StreamingIterator;` import since we no longer need it for this function (it may be used elsewhere).
+
+**Verify:** The test from Step 3 should now pass.
+
+### Step 5: Remove unused StreamingIterator import if no longer needed
+
+Check if `streaming_iterator::StreamingIterator` is still used elsewhere in `symbol_index.rs`. If not, remove the import.
+
+### Step 6: Run all existing tests
+
+Run `cargo test -p lite-edit-syntax` to ensure:
+- All existing symbol index tests pass
+- The new tests pass
+- No regressions in other syntax-related tests
+
+### Step 7: Add a backreference comment
+
+Add a chunk backreference to the `from_capture_name` function documenting the bug fix:
+
+```rust
+// Chunk: docs/chunks/gotodef_index_captures - Filter reference captures, fix method interleaving
+fn from_capture_name(name: &str) -> Option<Self> {
+```
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+None. This chunk builds on the existing symbol index infrastructure from `treesitter_symbol_index` which is already ACTIVE.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+**Risk: Duplicate entries for methods**
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+Methods in impl blocks match BOTH `@definition.method` and `@definition.function` patterns. With `QueryMatches`, we'll get separate matches for each pattern. This could result in the same method being indexed twice.
+
+**Mitigation:** After fixing the interleaving, check if duplicates appear. If they do, either:
+1. De-duplicate in `index_file` by checking if a symbol at the same location already exists
+2. Accept duplicates (both point to the same location, so go-to-definition will work)
+
+Option 2 is simpler and has no functional impact — the disambiguation UI will just show the same method twice, which is acceptable for this bug fix. A future chunk can optimize de-duplication if needed.
+
+**Risk: Performance regression**
+
+`QueryMatches` may have different performance characteristics than `QueryCaptures`. The original code may have chosen `QueryCaptures` for performance.
+
+**Mitigation:** The existing performance test (`test_indexing_performance_1000_files`) will catch any significant regression. The test asserts indexing 1000 files completes in under 5 seconds.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->
