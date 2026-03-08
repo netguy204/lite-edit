@@ -1,5 +1,5 @@
 ---
-status: ONGOING
+status: SOLVED
 trigger: "Cmd+click on symbols defined in other files does not navigate to the definition. Same-file go-to-definition works, but cross-file resolution fails silently or shows 'Definition not found'."
 proposed_chunks:
   - prompt: "Fix symbol index to filter out @reference.* captures and fix method capture interleaving by switching from QueryCaptures to QueryMatches"
@@ -276,17 +276,14 @@ Methods match TWO query patterns simultaneously — `@definition.method` (inside
 
 ## Resolution Rationale
 
+Three root causes identified and fixed via two chunks:
+
+1. **`gotodef_index_captures`**: Fixed `QueryCaptures` interleaving (H5) by switching to `QueryMatches`, and filtered `@reference.*` captures from the index.
+2. **`gotodef_session_restore`**: Initialized symbol indexing for all workspaces after session restore (H3).
+
+Verified working: Cmd+click on `DirtyLines` in `buffer_view.rs` navigates to its definition in `types.rs`.
+
 <!--
-GUIDANCE:
-
-When marking this investigation as SOLVED, NOTED, or DEFERRED, explain why.
-This captures the decision-making for future reference.
-
-Questions to answer:
-- What evidence supports this resolution?
-- If SOLVED: What was the answer or solution?
-- If NOTED: Why is no action warranted? What would change this assessment?
-- If DEFERRED: What conditions would trigger revisiting? What's the cost of delay?
 
 Example (SOLVED):
 Root cause was identified (unbounded ImageCache) and fix is straightforward (LRU eviction).
