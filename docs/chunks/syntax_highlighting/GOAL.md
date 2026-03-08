@@ -35,6 +35,8 @@ code_references:
     implements: "Incremental parse tree update (~120µs per single-char edit)"
   - ref: crates/syntax/src/highlighter.rs#SyntaxHighlighter::highlight_line
     implements: "Line highlighting with cache lookup (refactored by syntax_highlight_perf to use viewport cache and QueryCursor instead of per-line HighlightEvents)"
+  - ref: crates/syntax/src/highlighter.rs#merge_spans
+    implements: "Optimizes span list by merging adjacent spans with same style"
   - ref: crates/syntax/src/edit.rs#EditEvent
     implements: "Edit descriptor with byte offsets and row/col positions for tree-sitter InputEdit"
   - ref: crates/syntax/src/edit.rs#position_to_byte_offset

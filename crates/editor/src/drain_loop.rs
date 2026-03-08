@@ -276,36 +276,17 @@ impl EventDrainLoop {
         }
 
         // Chunk: docs/chunks/conflict_mode_lifecycle - Ignore events for tabs in conflict mode
-        // When a tab is in conflict mode (has unresolved merge conflicts), we suppress
-        // further auto-merge. The user must save (Cmd+S) to signal they've resolved
-        // the conflicts, which clears conflict mode and allows auto-merge to resume.
         if self.state.is_tab_in_conflict_mode(&path) {
             // Ignore - tab is resolving conflicts, don't auto-merge
             return;
         }
 
         // Chunk: docs/chunks/base_snapshot_reload - File change event handler
-        // Attempt to reload the file tab. The reload_file_tab method:
-        // - Finds the tab across all workspaces
-        // - Checks if the tab is clean (dirty == false)
-        // - Reloads the buffer content from disk if clean
-        // - Updates base_content and re-applies syntax highlighting
-        // - Returns false if no matching tab or if tab is dirty
         if self.state.reload_file_tab(&path) {
             return;
         }
 
         // Chunk: docs/chunks/three_way_merge - Merge for dirty buffers
-        // If reload returned false and a matching dirty tab exists, try merge.
-        // The merge_file_tab method:
-        // - Finds the tab across all workspaces
-        // - Checks if the tab is dirty (dirty == true)
-        // - Performs three-way merge: base_content → buffer, base_content → disk
-        // - Updates buffer with merged content (including any conflict markers)
-        // - Updates base_content to new disk content
-        // - Re-applies syntax highlighting
-        // - Sets conflict_mode = true if merge produced conflicts
-        // - Returns Some(MergeResult) if merge was performed
         let _merge_result = self.state.merge_file_tab(&path);
     }
 

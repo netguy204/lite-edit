@@ -266,35 +266,6 @@ impl LanguageRegistry {
         configs.insert("md", md_config.clone());
         configs.insert("markdown", md_config);
 
-        // Chunk: docs/chunks/highlight_md_inline - Markdown inline grammar for injection
-        // The markdown_inline language handles inline content (bold, italic, code spans, links)
-        // within markdown documents. It's used as an injection target by the block grammar.
-        let md_inline_config = LanguageConfig::new(
-            tree_sitter_md::INLINE_LANGUAGE.into(),
-            tree_sitter_md::HIGHLIGHT_QUERY_INLINE,
-            tree_sitter_md::INJECTION_QUERY_INLINE,
-            "",
-            "markdown_inline",
-            "", // No indent query for inline grammar
-            "", // No tags query for inline grammar
-        );
-        // Register under the injection language name (not an extension)
-        configs.insert("markdown_inline", md_inline_config);
-
-        // Chunk: docs/chunks/highlight_md_inline - YAML grammar for frontmatter injection
-        // YAML is used for frontmatter blocks in markdown documents.
-        let yaml_config = LanguageConfig::new(
-            tree_sitter_yaml::LANGUAGE.into(),
-            tree_sitter_yaml::HIGHLIGHTS_QUERY,
-            "", // No injection query for YAML
-            "",
-            "yaml",
-            "", // No indent query for YAML
-            "", // No tags query for YAML
-        );
-        configs.insert("yaml", yaml_config.clone());
-        configs.insert("yml", yaml_config);
-
         // HTML (uses HIGHLIGHTS_QUERY)
         // Chunk: docs/chunks/treesitter_indent - HTML indent query
         // Chunk: docs/chunks/treesitter_symbol_index - No tags query for HTML (markup format)
@@ -391,7 +362,6 @@ impl LanguageRegistry {
         let name = name.trim();
 
         // Map language name to extension
-        // Chunk: docs/chunks/highlight_md_inline - Added markdown_inline and yaml/yml
         let ext = match name {
             "rust" => "rs",
             "python" => "py",
@@ -407,9 +377,6 @@ impl LanguageRegistry {
             "cpp" | "c++" => "cpp",
             "go" | "golang" => "go",
             "markdown" | "md" => "md",
-            // Injection-only languages (not associated with file extensions)
-            "markdown_inline" => "markdown_inline",
-            "yaml" | "yml" => "yaml",
             // Pass through extension names directly
             other => other,
         };

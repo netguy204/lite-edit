@@ -858,14 +858,19 @@ fn handle_fs_event(
                 }
             }
             // Chunk: docs/chunks/file_change_events - Content modification detection
-            EventKind::Modify(ModifyKind::Data(DataChange::Content)) => {
+            // Match both specific Content events and the catch-all Any variant.
+            // On macOS, FSEvents often cannot determine the exact modification type
+            // and the notify crate falls back to DataChange::Any or ModifyKind::Any.
+            EventKind::Modify(ModifyKind::Data(DataChange::Content))
+            | EventKind::Modify(ModifyKind::Data(DataChange::Any))
+            | EventKind::Modify(ModifyKind::Any) => {
                 // Content modification detected - register with debouncer
                 // The path is absolute for the callback
                 debouncer.register(path.clone(), Instant::now());
             }
             EventKind::Modify(_) => {
-                // Other modification types (metadata, etc.) don't affect the path list
-                // and we don't forward them as content changes
+                // Other modification types (metadata, name/rename handled above)
+                // don't affect the path list and we don't forward them
             }
             _ => {}
         }

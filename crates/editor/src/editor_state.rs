@@ -704,6 +704,10 @@ impl EditorState {
             self.buffer_file_watcher.set_workspace_root(ws.root_path.clone());
         }
 
+        // Wire up file event callbacks for all workspaces (including any
+        // that were created before the sender was available)
+        self.editor.set_event_sender(sender.clone());
+
         self.event_sender = Some(sender);
     }
 

@@ -851,6 +851,32 @@ impl Workspace {
         }
     }
 
+    /// Restarts the FileIndex with event callbacks wired to the given sender.
+    ///
+    /// This is used when the event sender becomes available after the workspace
+    /// was already created (e.g., the initial workspace created in Editor::new).
+    /// The old FileIndex is dropped (stopping its watcher) and a new one is
+    /// started with the full set of file event callbacks.
+    pub fn restart_file_index_with_sender(&mut self, sender: EventSender) {
+        let change_sender = sender.clone();
+        let delete_sender = sender.clone();
+        let rename_sender = sender;
+
+        self.file_index = FileIndex::start_with_callbacks(
+            self.root_path.clone(),
+            Some(move |path| {
+                let _ = change_sender.send_file_changed(path);
+            }),
+            Some(move |path| {
+                let _ = delete_sender.send_file_deleted(path);
+            }),
+            Some(move |from, to| {
+                let _ = rename_sender.send_file_renamed(from, to);
+            }),
+        );
+        self.last_cache_version = 0;
+    }
+
     /// Creates a new workspace with a single empty tab.
     ///
     /// The workspace is initialized with a single pane containing one empty file tab.
@@ -1509,13 +1535,16 @@ impl Editor {
     ///
     /// When set, new workspaces will receive a clone of this sender, enabling
     /// their FileIndex to forward file content changes to the event channel.
-    /// Existing workspaces are not affected (they were created before the
-    /// sender was available).
     ///
-    /// This should be called early in application startup, before creating
-    /// the workspaces that need file change events.
+    /// Any existing workspaces that were created before the sender was
+    /// available will have their FileIndex restarted with callbacks.
     pub fn set_event_sender(&mut self, sender: EventSender) {
-        self.event_sender = Some(sender);
+        self.event_sender = Some(sender.clone());
+
+        // Restart FileIndex for existing workspaces that were created without callbacks
+        for ws in &mut self.workspaces {
+            ws.restart_file_index_with_sender(sender.clone());
+        }
     }
 
     /// Generates a new unique workspace ID.

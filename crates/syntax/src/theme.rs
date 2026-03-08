@@ -336,27 +336,8 @@ impl SyntaxTheme {
             },
         );
 
-        // Chunk: docs/chunks/highlight_md_inline - Inline markdown emphasis/strong styles
-        // Emphasis - text with single asterisks/underscores (*italic* or _italic_)
-        styles.insert(
-            "text.emphasis",
-            Style {
-                italic: true,
-                ..Style::default()
-            },
-        );
-        // Strong emphasis - text with double asterisks/underscores (**bold** or __bold__)
-        styles.insert(
-            "text.strong",
-            Style {
-                bold: true,
-                ..Style::default()
-            },
-        );
-
         // Build the ordered capture names list
         // This order matters for tree-sitter-highlight - more specific names first
-        // Chunk: docs/chunks/highlight_md_inline - Added text.emphasis and text.strong
         let capture_names = vec![
             "attribute",
             "comment.documentation",
@@ -377,10 +358,8 @@ impl SyntaxTheme {
             "punctuation.delimiter",
             "punctuation.special",
             "string",
-            "text.emphasis",
             "text.literal",
             "text.reference",
-            "text.strong",
             "text.title",
             "text.uri",
             "type.builtin",
@@ -445,26 +424,13 @@ mod tests {
     #[test]
     fn test_styles_use_rgb_colors() {
         let theme = SyntaxTheme::catppuccin_mocha();
-        // Chunk: docs/chunks/highlight_md_inline - Some captures only change formatting
-        // text.emphasis and text.strong only set italic/bold without changing color,
-        // which is standard practice for emphasis styling in editors.
-        let formatting_only = ["text.emphasis", "text.strong"];
         for name in theme.capture_names() {
             let style = theme.style_for_capture(name).unwrap();
-            if formatting_only.contains(name) {
-                // These captures intentionally use default color with formatting changes
-                assert!(
-                    style.italic || style.bold,
-                    "Capture '{}' should have formatting (italic or bold)",
-                    name
-                );
-            } else {
-                assert!(
-                    matches!(style.fg, Color::Rgb { .. }),
-                    "Capture '{}' should have RGB fg color",
-                    name
-                );
-            }
+            assert!(
+                matches!(style.fg, Color::Rgb { .. }),
+                "Capture '{}' should have RGB fg color",
+                name
+            );
         }
     }
 
