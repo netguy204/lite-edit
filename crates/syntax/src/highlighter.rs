@@ -615,7 +615,18 @@ impl SyntaxHighlighter {
                     host.eq_ignore_ascii_case(&lang)
                 });
 
-                if !is_same_language {
+                // Chunk: docs/chunks/highlight_md_inline - Defensive skip for unregistered injections
+                // Skip injection regions for languages that aren't registered.
+                // This prevents phantom regions from suppressing host captures when the
+                // injection language has no actual highlighter (e.g., markdown_inline before
+                // it was registered). Without this check, the injection region exists but
+                // produces no highlights, yet still causes host captures to be skipped.
+                let is_registered = {
+                    let registry = self.get_registry();
+                    registry.config_for_language_name(&lang).is_some()
+                };
+
+                if !is_same_language && is_registered {
                     regions.push(InjectionRegion {
                         byte_range: node.start_byte()..node.end_byte(),
                         language_name: lang,
@@ -1032,14 +1043,19 @@ impl SyntaxHighlighter {
         let first_injection = injection_captures
             .partition_point(|(_, end, _)| *end <= line_start);
 
-        // Build a list of injection regions that overlap this line (for quick lookup)
-        let mut injection_regions: Vec<(usize, usize)> = Vec::new();
-        if let Some(ref layer) = self.injection_layer {
-            let layer = layer.borrow();
-            for region in &layer.regions {
-                if region.byte_range.end > line_start && region.byte_range.start < line_end {
-                    injection_regions.push((region.byte_range.start, region.byte_range.end));
-                }
+        // Chunk: docs/chunks/highlight_md_inline - Build injection ranges from actual captures
+        // Build a list of ranges that have actual injection captures (not just injection regions).
+        // This ensures host captures are only suppressed when injection captures actually exist.
+        // Previously, we used InjectionRegion byte_ranges, which suppressed host captures even
+        // when the injection language didn't produce any captures for that range (e.g.,
+        // markdown_inline doesn't capture plain heading text, only emphasis/strong/etc.).
+        let mut injection_ranges: Vec<(usize, usize)> = Vec::new();
+        for &(start, end, _) in &injection_captures[first_injection..] {
+            if start >= line_end {
+                break;
+            }
+            if end > line_start && start < line_end {
+                injection_ranges.push((start, end));
             }
         }
 
@@ -1055,21 +1071,21 @@ impl SyntaxHighlighter {
         let mut host_iter = captures[first_relevant..].iter().peekable();
         let mut inj_iter = injection_captures[first_injection..].iter().peekable();
 
-        // Helper function to check if a byte offset is inside any injection region
-        let is_in_injection = |pos: usize, regions: &[(usize, usize)]| {
-            regions.iter().any(|(s, e)| pos >= *s && pos < *e)
+        // Helper function to check if a byte offset is inside any injection range
+        let is_in_injection = |pos: usize, ranges: &[(usize, usize)]| {
+            ranges.iter().any(|(s, e)| pos >= *s && pos < *e)
         };
-        let _is_fully_inside_injection = |start: usize, end: usize, regions: &[(usize, usize)]| {
-            regions.iter().any(|(s, e)| start >= *s && end <= *e)
+        let _is_fully_inside_injection = |start: usize, end: usize, ranges: &[(usize, usize)]| {
+            ranges.iter().any(|(s, e)| start >= *s && end <= *e)
         };
-        // Check if a range overlaps with any injection region
-        let overlaps_injection = |start: usize, end: usize, regions: &[(usize, usize)]| {
-            regions.iter().any(|(s, e)| start < *e && end > *s)
+        // Check if a range overlaps with any injection capture range
+        let overlaps_injection = |start: usize, end: usize, ranges: &[(usize, usize)]| {
+            ranges.iter().any(|(s, e)| start < *e && end > *s)
         };
 
         loop {
-            // Check if we're inside an injection region (for potential future use)
-            let _in_injection_region = is_in_injection(covered_until, &injection_regions);
+            // Check if we're inside an injection range (for potential future use)
+            let _in_injection_region = is_in_injection(covered_until, &injection_ranges);
 
             // Determine next capture to process
             let next_host = host_iter.peek().filter(|(start, _, _)| *start < line_end);
@@ -1082,11 +1098,13 @@ impl SyntaxHighlighter {
                 (Some(host_cap), None) => {
                     let (hs, he, hi) = **host_cap;
                     host_iter.next();
-                    // Skip host captures that overlap with injection regions when we're in one
-                    // The injection captures will provide the styling for those regions
+                    // Skip host captures that overlap with injection capture ranges
+                    // Chunk: docs/chunks/highlight_md_inline - Use injection_ranges (actual captures)
+                    // not injection regions, so host captures aren't suppressed when injections
+                    // don't produce captures (e.g., plain heading text in markdown_inline)
                     let host_clamped_start = hs.max(line_start);
                     let host_clamped_end = he.min(line_end);
-                    if overlaps_injection(host_clamped_start, host_clamped_end, &injection_regions) {
+                    if overlaps_injection(host_clamped_start, host_clamped_end, &injection_ranges) {
                         continue;
                     }
                     let style = self.query.capture_names()
@@ -1103,10 +1121,10 @@ impl SyntaxHighlighter {
                 (Some(host_cap), Some(inj_cap)) => {
                     let (hs, he, hi) = **host_cap;
                     let (is, ie, ref name) = **inj_cap;
-                    // Both available - check if host capture overlaps with injection regions
+                    // Both available - check if host capture overlaps with injection capture ranges
                     let host_clamped_start = hs.max(line_start);
                     let host_clamped_end = he.min(line_end);
-                    let host_overlaps_inj = overlaps_injection(host_clamped_start, host_clamped_end, &injection_regions);
+                    let host_overlaps_inj = overlaps_injection(host_clamped_start, host_clamped_end, &injection_ranges);
 
                     // Prefer injection captures when:
                     // 1. Injection starts at or before host, OR
@@ -1246,14 +1264,16 @@ impl SyntaxHighlighter {
         let first_injection = injection_captures
             .partition_point(|(_, end, _)| *end <= line_start);
 
-        // Build a list of injection regions that overlap this line
-        let mut injection_regions: Vec<(usize, usize)> = Vec::new();
-        if let Some(ref layer) = self.injection_layer {
-            let layer = layer.borrow();
-            for region in &layer.regions {
-                if region.byte_range.end > line_start && region.byte_range.start < line_end {
-                    injection_regions.push((region.byte_range.start, region.byte_range.end));
-                }
+        // Chunk: docs/chunks/highlight_md_inline - Build injection ranges from actual captures
+        // Use actual injection captures to build ranges, not InjectionRegion byte_ranges.
+        // This ensures host captures aren't suppressed when injections don't produce captures.
+        let mut injection_ranges: Vec<(usize, usize)> = Vec::new();
+        for &(start, end, _) in &injection_captures[first_injection..] {
+            if start >= line_end {
+                break;
+            }
+            if end > line_start && start < line_end {
+                injection_ranges.push((start, end));
             }
         }
 
@@ -1263,12 +1283,12 @@ impl SyntaxHighlighter {
         let mut spans = Vec::new();
         let mut covered_until = line_start;
 
-        // Helper functions for injection region checks
-        let _is_in_injection = |pos: usize, regions: &[(usize, usize)]| {
-            regions.iter().any(|(s, e)| pos >= *s && pos < *e)
+        // Helper functions for injection range checks
+        let _is_in_injection = |pos: usize, ranges: &[(usize, usize)]| {
+            ranges.iter().any(|(s, e)| pos >= *s && pos < *e)
         };
-        let overlaps_injection = |start: usize, end: usize, regions: &[(usize, usize)]| {
-            regions.iter().any(|(s, e)| start < *e && end > *s)
+        let overlaps_injection = |start: usize, end: usize, ranges: &[(usize, usize)]| {
+            ranges.iter().any(|(s, e)| start < *e && end > *s)
         };
 
         // Merge host and injection captures
@@ -1284,10 +1304,10 @@ impl SyntaxHighlighter {
                 (Some(host_cap), None) => {
                     let (hs, he, hi) = **host_cap;
                     host_iter.next();
-                    // Skip host captures that overlap with injection regions
+                    // Skip host captures that overlap with injection capture ranges
                     let host_clamped_start = hs.max(line_start);
                     let host_clamped_end = he.min(line_end);
-                    if overlaps_injection(host_clamped_start, host_clamped_end, &injection_regions) {
+                    if overlaps_injection(host_clamped_start, host_clamped_end, &injection_ranges) {
                         continue;
                     }
                     let style = self.query.capture_names()
@@ -1304,10 +1324,10 @@ impl SyntaxHighlighter {
                 (Some(host_cap), Some(inj_cap)) => {
                     let (hs, he, hi) = **host_cap;
                     let (is, ie, ref name) = **inj_cap;
-                    // Check if host capture overlaps with injection regions
+                    // Check if host capture overlaps with injection capture ranges
                     let host_clamped_start = hs.max(line_start);
                     let host_clamped_end = he.min(line_end);
-                    let host_overlaps_inj = overlaps_injection(host_clamped_start, host_clamped_end, &injection_regions);
+                    let host_overlaps_inj = overlaps_injection(host_clamped_start, host_clamped_end, &injection_ranges);
 
                     if is <= hs || host_overlaps_inj {
                         inj_iter.next();
@@ -1505,19 +1525,20 @@ impl SyntaxHighlighter {
         let first_relevant = captures.partition_point(|(_, cap_end, _)| *cap_end <= line_start);
         let first_injection = injection_captures.partition_point(|(_, end, _)| *end <= line_start);
 
-        // Build injection regions for overlap checking
-        let mut injection_regions: Vec<(usize, usize)> = Vec::new();
-        if let Some(ref layer) = self.injection_layer {
-            let layer = layer.borrow();
-            for region in &layer.regions {
-                if region.byte_range.end > line_start && region.byte_range.start < line_end {
-                    injection_regions.push((region.byte_range.start, region.byte_range.end));
-                }
+        // Chunk: docs/chunks/highlight_md_inline - Build injection ranges from actual captures
+        // Use actual injection captures to build ranges, not InjectionRegion byte_ranges.
+        let mut injection_ranges: Vec<(usize, usize)> = Vec::new();
+        for &(start, end, _) in &injection_captures[first_injection..] {
+            if start >= line_end {
+                break;
+            }
+            if end > line_start && start < line_end {
+                injection_ranges.push((start, end));
             }
         }
 
-        let overlaps_injection = |start: usize, end: usize, regions: &[(usize, usize)]| {
-            regions.iter().any(|(s, e)| start < *e && end > *s)
+        let overlaps_injection = |start: usize, end: usize, ranges: &[(usize, usize)]| {
+            ranges.iter().any(|(s, e)| start < *e && end > *s)
         };
 
         let mut spans = Vec::new();
@@ -1538,7 +1559,7 @@ impl SyntaxHighlighter {
                     host_iter.next();
                     let host_clamped_start = hs.max(line_start);
                     let host_clamped_end = he.min(line_end);
-                    if overlaps_injection(host_clamped_start, host_clamped_end, &injection_regions) {
+                    if overlaps_injection(host_clamped_start, host_clamped_end, &injection_ranges) {
                         continue;
                     }
                     let style = self.query.capture_names()
@@ -1557,7 +1578,7 @@ impl SyntaxHighlighter {
                     let (is, ie, ref name) = **inj_cap;
                     let host_clamped_start = hs.max(line_start);
                     let host_clamped_end = he.min(line_end);
-                    let host_overlaps_inj = overlaps_injection(host_clamped_start, host_clamped_end, &injection_regions);
+                    let host_overlaps_inj = overlaps_injection(host_clamped_start, host_clamped_end, &injection_ranges);
 
                     if is <= hs || host_overlaps_inj {
                         inj_iter.next();
@@ -2962,5 +2983,78 @@ fn 你好() {
             let _ = hl.highlight_line(0);
             source = new_source;
         }
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/highlight_md_inline - Markdown heading styling tests
+    // =========================================================================
+
+    #[test]
+    fn test_markdown_heading_styled() {
+        // Markdown headings should have text.title styling (mauve, bold)
+        // This tests that the markdown_inline injection doesn't suppress host captures
+        let source = "# Hello World\n\nSome text.";
+        let hl = make_markdown_highlighter(source).expect("Should create MD highlighter");
+
+        hl.highlight_viewport(0, 3);
+
+        // Line 0 is "# Hello World" - the heading text should be styled
+        let styled = hl.highlight_line(0);
+
+        // Expected: mauve color (0xcb, 0xa6, 0xf7) for text.title
+        let mauve = Color::Rgb { r: 0xcb, g: 0xa6, b: 0xf7 };
+
+        // Find spans containing the heading text (not just the # marker)
+        let hello_span = styled.spans.iter().find(|s| s.text.contains("Hello"));
+        assert!(
+            hello_span.is_some(),
+            "Should have a span containing 'Hello', spans: {:?}",
+            styled.spans.iter().map(|s| &s.text).collect::<Vec<_>>()
+        );
+
+        let hello_span = hello_span.unwrap();
+        assert_eq!(
+            hello_span.style.fg, mauve,
+            "Heading text should be mauve (text.title), got {:?}",
+            hello_span.style.fg
+        );
+        assert!(
+            hello_span.style.bold,
+            "Heading text should be bold (text.title)"
+        );
+    }
+
+    #[test]
+    fn test_markdown_yaml_frontmatter_styled() {
+        // YAML frontmatter should receive yaml syntax highlighting via injection
+        let source = r#"---
+title: Hello World
+date: 2024-01-01
+---
+
+# Content
+"#;
+        let hl = make_markdown_highlighter(source).expect("Should create MD highlighter");
+
+        hl.highlight_viewport(0, 7);
+
+        // Line 1 is "title: Hello World" - should have yaml-style highlighting
+        let styled = hl.highlight_line(1);
+
+        // The key "title" should be styled (yaml uses property or type capture)
+        let title_span = styled.spans.iter().find(|s| s.text.contains("title"));
+        assert!(
+            title_span.is_some(),
+            "Should have a span containing 'title', spans: {:?}",
+            styled.spans.iter().map(|s| &s.text).collect::<Vec<_>>()
+        );
+
+        // Just verify it's not default color - yaml keys should be styled
+        let title_span = title_span.unwrap();
+        assert!(
+            !matches!(title_span.style.fg, Color::Default),
+            "YAML key 'title' should be styled, not default. Got style: {:?}",
+            title_span.style
+        );
     }
 }
