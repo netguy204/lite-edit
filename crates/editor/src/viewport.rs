@@ -290,16 +290,16 @@ impl Viewport {
     /// # Arguments
     /// * `cursor_line` - The buffer line containing the cursor
     /// * `cursor_col` - The buffer column of the cursor
-    /// * `first_visible_line` - The first visible buffer line
     /// * `line_count` - Total number of buffer lines
     /// * `wrap_layout` - The wrap layout for calculating screen rows
     /// * `line_len_fn` - Closure to get the character count of a buffer line
+    // Chunk: docs/chunks/wrap_scroll_to_cursor - Fix coordinate space: always compute from buffer line 0
+    // Subsystem: docs/subsystems/viewport_scroll - Wrap-aware cursor-following scroll
     // Chunk: docs/chunks/line_wrap_rendering - Wrap-aware cursor visibility ensuring
     pub fn ensure_visible_wrapped<F>(
         &mut self,
         cursor_line: usize,
         cursor_col: usize,
-        first_visible_line: usize,
         line_count: usize,
         wrap_layout: &crate::wrap_layout::WrapLayout,
         line_len_fn: F,
@@ -311,57 +311,45 @@ impl Viewport {
         let line_height = self.line_height();
         let visible_lines = self.visible_lines();
 
-        // Calculate the cumulative screen row of the cursor
-        // We need to know: "what screen row (from viewport top) is the cursor on?"
-        let mut cumulative_screen_row: usize = 0;
-
-        // First, calculate screen rows for lines before the cursor line
-        for buffer_line in first_visible_line..cursor_line.min(line_count) {
+        // Always compute the absolute screen row of the cursor from buffer line 0.
+        // Previously this iterated from a caller-provided `first_visible_line`, but
+        // that value was a screen-row index (from first_visible_line()), not a buffer
+        // line index. This caused under-counting when wrapped lines were present.
+        let mut cursor_abs_screen_row: usize = 0;
+        for buffer_line in 0..cursor_line.min(line_count) {
             let line_len = line_len_fn(buffer_line);
-            cumulative_screen_row += wrap_layout.screen_rows_for_line(line_len);
+            cursor_abs_screen_row += wrap_layout.screen_rows_for_line(line_len);
         }
 
-        // Now add the row offset within the cursor's line
+        // Add the row offset within the cursor's wrapped line
         let (cursor_row_offset, _) = wrap_layout.buffer_col_to_screen_pos(cursor_col);
+        cursor_abs_screen_row += cursor_row_offset;
 
-        // If cursor is before first_visible_line, we need to scroll up
-        if cursor_line < first_visible_line {
-            // Calculate how many screen rows from the absolute start
-            let mut abs_screen_row: usize = 0;
-            for buffer_line in 0..cursor_line.min(line_count) {
-                let line_len = line_len_fn(buffer_line);
-                abs_screen_row += wrap_layout.screen_rows_for_line(line_len);
-            }
-            abs_screen_row += cursor_row_offset;
+        // Derive the current top screen row from scroll_offset_px
+        let current_top_screen_row = self.first_visible_screen_row();
 
-            // Scroll to put cursor's screen row at the top
-            let target_px = abs_screen_row as f32 * line_height;
-            // Use a reasonable max based on wrapping
-            // For simplicity, use a large value; proper clamping happens in set_scroll_offset_px
+        if cursor_abs_screen_row < current_top_screen_row {
+            // Cursor is above viewport - scroll up to put cursor at top
+            let target_px = cursor_abs_screen_row as f32 * line_height;
             let max_screen_rows = self.compute_total_screen_rows(line_count, wrap_layout, &line_len_fn);
             let max_offset_px = max_screen_rows.saturating_sub(visible_lines) as f32 * line_height;
             self.set_scroll_offset_px_direct(target_px.clamp(0.0, max_offset_px));
-        } else {
-            // Cursor is at or after first_visible_line
-            let cursor_screen_row = cumulative_screen_row + cursor_row_offset;
-
+        } else if cursor_abs_screen_row > current_top_screen_row + visible_lines {
             // Chunk: docs/chunks/viewport_keystroke_jostle - Fix off-by-one
             // +1 accounts for partially visible bottom row (matching visible_range semantics)
             // Subsystem: docs/subsystems/viewport_scroll - Invariant 5
             //
-            // The change from `>=` to `>` means screen row `visible_lines` is now
+            // The `>` (not `>=`) means screen row `current_top + visible_lines` is
             // considered visible (it's the partial row that visible_range includes).
-            if cursor_screen_row > visible_lines {
-                // Cursor is below viewport - scroll down
-                // Put the cursor's screen row at the bottom of the viewport
-                let new_top_row = cursor_screen_row.saturating_sub(visible_lines.saturating_sub(1));
-                let target_px = new_top_row as f32 * line_height;
-                let max_screen_rows = self.compute_total_screen_rows(line_count, wrap_layout, &line_len_fn);
-                let max_offset_px = max_screen_rows.saturating_sub(visible_lines) as f32 * line_height;
-                self.set_scroll_offset_px_direct(target_px.clamp(0.0, max_offset_px));
-            }
-            // else: cursor is visible, no scroll needed
+
+            // Cursor is below viewport - scroll down to put cursor at bottom
+            let new_top_row = cursor_abs_screen_row.saturating_sub(visible_lines.saturating_sub(1));
+            let target_px = new_top_row as f32 * line_height;
+            let max_screen_rows = self.compute_total_screen_rows(line_count, wrap_layout, &line_len_fn);
+            let max_offset_px = max_screen_rows.saturating_sub(visible_lines) as f32 * line_height;
+            self.set_scroll_offset_px_direct(target_px.clamp(0.0, max_offset_px));
         }
+        // else: cursor is visible, no scroll needed
 
         self.scroll_offset_px() != old_offset_px
     }
@@ -2590,7 +2578,6 @@ mod tests {
         let scrolled = vp.ensure_visible_wrapped(
             10,    // cursor_line
             0,     // cursor_col
-            0,     // first_visible_line
             20,    // line_count
             &wrap_layout,
             line_len_fn,
@@ -2606,7 +2593,6 @@ mod tests {
         let scrolled = vp.ensure_visible_wrapped(
             11,    // cursor_line
             0,     // cursor_col
-            0,     // first_visible_line
             20,    // line_count
             &wrap_layout,
             line_len_fn,
@@ -2617,6 +2603,127 @@ mod tests {
             "Screen row 11 is beyond the partial row, SHOULD scroll"
         );
         assert!(vp.first_visible_line() > 0, "Should have scrolled down");
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/wrap_scroll_to_cursor - Coordinate-space fix tests
+    // =========================================================================
+
+    /// Helper: create a Viewport + WrapLayout with 100 cols per screen row,
+    /// 16px line height, and the given number of visible lines.
+    fn make_wrap_test_viewport(visible_lines: usize) -> (Viewport, crate::wrap_layout::WrapLayout) {
+        let mut vp = Viewport::new(16.0);
+        // visible_lines = height / line_height → height = visible_lines * 16
+        vp.update_size(visible_lines as f32 * 16.0, 100);
+
+        let metrics = crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        };
+        // 800px / 8px = 100 cols per screen row
+        let wrap = crate::wrap_layout::WrapLayout::new(800.0, &metrics);
+        (vp, wrap)
+    }
+
+    #[test]
+    fn test_wrap_scroll_cursor_below_viewport_with_wrapped_lines_above() {
+        // Test A: Cursor at buffer line 4, lines 0-2 each wrap to 3 screen rows
+        // (250 chars at 100 cols/row → ceil(250/100)=3). Line 3 is short (50 chars, 1 row).
+        // Absolute screen row of cursor line 4 = 3+3+3+1 = 10.
+        // With 10 visible rows and scroll at 0, cursor at screen row 10 is on the
+        // partial row → should NOT scroll (matching visible_range semantics).
+        let (mut vp, wrap) = make_wrap_test_viewport(10);
+        let line_lengths: Vec<usize> = vec![250, 250, 250, 50, 50];
+        let line_len_fn = |line: usize| line_lengths.get(line).copied().unwrap_or(0);
+
+        let scrolled = vp.ensure_visible_wrapped(4, 0, 5, &wrap, line_len_fn);
+        assert!(!scrolled, "Cursor at screen row 10 (partial row) should be visible with 10 visible lines");
+
+        // Now add a 6th line, cursor at line 5 → screen row 11. Must scroll.
+        let line_lengths2: Vec<usize> = vec![250, 250, 250, 50, 50, 50];
+        let line_len_fn2 = |line: usize| line_lengths2.get(line).copied().unwrap_or(0);
+        let scrolled = vp.ensure_visible_wrapped(5, 0, 6, &wrap, line_len_fn2);
+        assert!(scrolled, "Cursor at screen row 11 should trigger scroll down");
+        assert!(vp.scroll_offset_px() > 0.0);
+    }
+
+    #[test]
+    fn test_wrap_scroll_cursor_above_viewport_with_wrapped_lines() {
+        // Test B: Scroll viewport down, then move cursor to line 0.
+        // Lines: 5 lines, first 3 wrap to 3 rows each (250 chars), rest are short.
+        // Scroll viewport to screen row 5 (past line 0's 3 rows + 2 rows into line 1).
+        let (mut vp, wrap) = make_wrap_test_viewport(10);
+        let line_lengths: Vec<usize> = vec![250, 250, 250, 50, 50];
+        let line_len_fn = |line: usize| line_lengths.get(line).copied().unwrap_or(0);
+
+        // Manually scroll down to screen row 5
+        vp.set_scroll_offset_px_unclamped(5.0 * 16.0);
+        assert_eq!(vp.first_visible_screen_row(), 5);
+
+        // Cursor at line 0, col 0 → absolute screen row 0, which is above viewport
+        let scrolled = vp.ensure_visible_wrapped(0, 0, 5, &wrap, line_len_fn);
+        assert!(scrolled, "Cursor above viewport should trigger scroll up");
+        assert_eq!(vp.scroll_offset_px(), 0.0, "Should scroll to top for cursor at line 0");
+    }
+
+    #[test]
+    fn test_wrap_scroll_cursor_on_continuation_row() {
+        // Test C: Cursor at column 150 on a 250-char line → that's on the 2nd
+        // screen row of the line (cols 100-199). If the viewport is scrolled past
+        // this row, it should scroll back to make it visible.
+        let (mut vp, wrap) = make_wrap_test_viewport(10);
+        // Need enough content so the document is taller than the viewport.
+        // Line 0: 250 chars (3 screen rows), lines 1-9: 50 chars each (1 row each)
+        // Total: 3 + 9 = 12 screen rows > 10 visible → scrolling possible.
+        let line_lengths: Vec<usize> = vec![250, 50, 50, 50, 50, 50, 50, 50, 50, 50];
+        let line_count = line_lengths.len();
+        let line_len_fn = |line: usize| line_lengths.get(line).copied().unwrap_or(0);
+
+        // Cursor at line 0, col 150 → row offset 1 within the line (second screen row)
+        // Absolute screen row = 0 (no lines before) + 1 = 1
+        let scrolled = vp.ensure_visible_wrapped(0, 150, line_count, &wrap, line_len_fn);
+        assert!(!scrolled, "Continuation row 1 should be visible from scroll position 0");
+
+        // Now scroll viewport down past the continuation row
+        vp.set_scroll_offset_px_unclamped(3.0 * 16.0);  // screen row 3
+        assert_eq!(vp.first_visible_screen_row(), 3);
+
+        // Cursor at line 0, col 150 → absolute screen row 1 → above viewport
+        let scrolled = vp.ensure_visible_wrapped(0, 150, line_count, &wrap, line_len_fn);
+        assert!(scrolled, "Cursor on continuation row above viewport should scroll up");
+        // Should scroll to put cursor's screen row (1) at the top
+        assert_eq!(vp.scroll_offset_px(), 1.0 * 16.0);
+    }
+
+    #[test]
+    fn test_wrap_scroll_non_wrapped_document_regression() {
+        // Test D: All lines fit in one screen row (no wrapping). Behavior should
+        // match the simple case where screen rows == buffer lines.
+        let (mut vp, wrap) = make_wrap_test_viewport(10);
+        // 20 short lines, 50 chars each (fit in 100 cols)
+        let line_lengths: Vec<usize> = vec![50; 20];
+        let line_len_fn = |line: usize| line_lengths.get(line).copied().unwrap_or(0);
+
+        // Cursor at line 5 - visible in 10-row viewport starting at 0
+        let scrolled = vp.ensure_visible_wrapped(5, 0, 20, &wrap, line_len_fn);
+        assert!(!scrolled, "Cursor at line 5 should be visible");
+
+        // Cursor at line 15 - should scroll down
+        let scrolled = vp.ensure_visible_wrapped(15, 0, 20, &wrap, line_len_fn);
+        assert!(scrolled, "Cursor at line 15 should trigger scroll down");
+
+        // Verify it scrolled to a reasonable position
+        let top_row = vp.first_visible_screen_row();
+        assert!(top_row > 0 && top_row <= 15, "Top row should be between 1 and 15, got {}", top_row);
+
+        // Now cursor at line 0 - should scroll up
+        let scrolled = vp.ensure_visible_wrapped(0, 0, 20, &wrap, line_len_fn);
+        assert!(scrolled, "Cursor at line 0 should trigger scroll up");
+        assert_eq!(vp.scroll_offset_px(), 0.0, "Should scroll back to top");
     }
 
     // Chunk: docs/chunks/terminal_selection_offset - Terminal click coordinate mapping test

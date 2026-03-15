@@ -4338,7 +4338,7 @@ impl EditorState {
                     let line_lens: Vec<usize> = (0..line_count)
                         .map(|line| buffer.line_len(line))
                         .collect();
-                    Some((cursor.line, cursor.col, line_count, line_lens, tab.viewport.first_visible_line()))
+                    Some((cursor.line, cursor.col, line_count, line_lens))
                 } else {
                     None
                 }
@@ -4350,7 +4350,7 @@ impl EditorState {
         };
 
         // Now use that information to scroll the viewport
-        if let Some((cursor_line, cursor_col, line_count, line_lens, first_visible)) = cursor_info {
+        if let Some((cursor_line, cursor_col, line_count, line_lens)) = cursor_info {
             let wrap_layout = crate::wrap_layout::WrapLayout::new(self.view_width, &self.font_metrics);
 
             if let Some(ws) = self.editor.active_workspace_mut() {
@@ -4358,7 +4358,6 @@ impl EditorState {
                     if tab.viewport.ensure_visible_wrapped(
                         cursor_line,
                         cursor_col,
-                        first_visible,
                         line_count,
                         &wrap_layout,
                         |line| line_lens.get(line).copied().unwrap_or(0),

@@ -1,22 +1,24 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: cursor_wrap_scroll_alignment
 code_paths:
 - crates/editor/src/viewport.rs
 - crates/editor/src/editor_state.rs
+- crates/editor/src/context.rs
 code_references: []
 narrative: null
 investigation: null
 subsystems:
-  - subsystem_id: "viewport_scroll"
-    relationship: implements
+- subsystem_id: viewport_scroll
+  relationship: implements
 friction_entries: []
 bug_type: semantic
 depends_on: []
-created_after: ["terminal_scroll_leak", "tsx_goto_import"]
+created_after:
+- terminal_scroll_leak
+- tsx_goto_import
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

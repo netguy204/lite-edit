@@ -1,177 +1,167 @@
-<!--
-This document captures HOW you'll achieve the chunk's GOAL.
-It should be specific enough that each step is a reasonable unit of work
-to hand to an agent.
--->
-
 # Implementation Plan
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+The bug is a coordinate-space confusion: `ensure_visible_wrapped` receives
+`first_visible_line()` (which returns a screen-row-derived value in wrapped
+mode) as its `first_visible_line` parameter, then uses it as a buffer line index
+in its accumulation loop. This causes the loop to start at the wrong buffer line
+and under-count cumulative screen rows, producing incorrect scroll targets.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The fix has two parts:
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+1. **Remove `first_visible_line` as a parameter to `ensure_visible_wrapped`.**
+   The function already computes its own max and does its own clamping. It
+   doesn't actually need an external "first visible line" — it needs to know the
+   cursor's absolute screen row position, which it can compute by iterating from
+   buffer line 0. The current code only iterates from `first_visible_line` as an
+   optimization (to avoid re-counting rows already scrolled past), but this
+   optimization is the source of the bug. Replace the partial loop with a
+   full loop from buffer line 0 to the cursor line, computing the absolute
+   screen row of the cursor. This is O(line_count) but that's already the cost
+   of `compute_total_screen_rows` called in the same function.
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/wrap_scroll_to_cursor/GOAL.md)
-with references to the files that you expect to touch.
--->
+2. **Update all call sites** (`editor_state.rs`, `context.rs`, and tests) to
+   stop passing `first_visible_line()`.
+
+This follows the viewport_scroll subsystem's pattern: `ensure_visible_wrapped`
+does its own clamping (Soft Convention 1), so it should also do its own
+coordinate computation rather than trusting a caller-provided value.
+
+Tests follow the TDD approach from TESTING_PHILOSOPHY.md: write failing tests
+first that demonstrate the coordinate confusion, then apply the fix.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+- **docs/subsystems/viewport_scroll** (DOCUMENTED): This chunk IMPLEMENTS a fix
+  to `Viewport::ensure_visible_wrapped`, which is a core method in the
+  subsystem. The fix strengthens Hard Invariant 1 (scroll_offset_px as single
+  source of truth) by ensuring `ensure_visible_wrapped` computes cursor position
+  from buffer-line-0 rather than depending on a caller-provided value that may
+  be in the wrong coordinate space.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Write failing tests
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Location: `crates/editor/src/viewport.rs` (in the `#[cfg(test)]` module)
 
-Example:
+Write tests that demonstrate the bug by constructing scenarios where
+`first_visible_line()` returns a screen row number that differs from the actual
+buffer line index:
 
-### Step 1: Define the SegmentHeader struct
+**Test A: Cursor below viewport with wrapped lines above.**
+Set up a viewport with 10 visible rows. Create a buffer with 5 lines where
+lines 0-2 each wrap to 3 screen rows (e.g., 250 chars at 100 cols/row). Place
+cursor at buffer line 4. If we incorrectly pass screen row N (large) as
+`first_visible_line`, the accumulation loop starts too late and under-counts,
+causing wrong scroll target. The test asserts correct scroll position.
 
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
+**Test B: Cursor above viewport with wrapped lines below.**
+Scroll the viewport down past several wrapped lines, then move cursor to line 0.
+The `cursor_line < first_visible_line` branch fires. Assert that scrolling up
+places the cursor at the correct position (screen row 0).
 
-Location: src/segment/format.rs
+**Test C: Cursor on a continuation row of a wrapped line.**
+Place cursor at a column that falls on the second screen row of a wrapped line.
+Assert the viewport scrolls to make that specific continuation row visible.
 
-### Step 2: Implement header serialization
+**Test D: Non-wrapped document (regression guard).**
+All lines fit in one screen row. Assert that behavior is unchanged from the
+current implementation (screen rows == buffer lines, so the bug doesn't
+manifest, and the fix shouldn't regress).
 
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
+### Step 2: Remove `first_visible_line` parameter from `ensure_visible_wrapped`
 
-### Step 3: ...
+Location: `crates/editor/src/viewport.rs`
 
----
+Change the signature of `ensure_visible_wrapped` to remove the
+`first_visible_line: usize` parameter.
 
-**BACKREFERENCE COMMENTS**
+Replace the accumulation loop body:
 
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+**Before** (lines 319-322):
+```rust
+for buffer_line in first_visible_line..cursor_line.min(line_count) {
+    let line_len = line_len_fn(buffer_line);
+    cumulative_screen_row += wrap_layout.screen_rows_for_line(line_len);
+}
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+**After**: Always iterate from buffer line 0 to compute the absolute screen row:
+```rust
+for buffer_line in 0..cursor_line.min(line_count) {
+    let line_len = line_len_fn(buffer_line);
+    cumulative_screen_row += wrap_layout.screen_rows_for_line(line_len);
+}
+```
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+Also simplify the `cursor_line < first_visible_line` branch — since we now
+always compute the absolute screen row from line 0, the "scroll up" path and
+"scroll down" path can share the same computation. The absolute cursor screen
+row is `cumulative_screen_row + cursor_row_offset`. Then:
 
-## Dependencies
+- If `cursor_screen_row < current_top_screen_row`: scroll up (set
+  `scroll_offset_px = cursor_screen_row * line_height`).
+- If `cursor_screen_row > current_top_screen_row + visible_lines`: scroll down
+  (set `scroll_offset_px = (cursor_screen_row - visible_lines + 1) * line_height`).
+- Otherwise: cursor is visible, no scroll needed.
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
+The "current top screen row" is derived from the existing `scroll_offset_px`
+via `first_visible_screen_row()`.
 
-If there are no dependencies, delete this section.
--->
+Add backreference comment:
+```rust
+// Chunk: docs/chunks/wrap_scroll_to_cursor - Fix coordinate space: always compute from buffer line 0
+// Subsystem: docs/subsystems/viewport_scroll - Wrap-aware cursor-following scroll
+```
+
+### Step 3: Update call sites
+
+**Location: `crates/editor/src/editor_state.rs` (~line 4341)**
+
+Remove `tab.viewport.first_visible_line()` from the gathered tuple and from the
+call to `ensure_visible_wrapped`. The function no longer takes that parameter.
+
+**Location: `crates/editor/src/context.rs` (~line 156)**
+
+Remove `let first_visible_line = self.viewport.first_visible_line();` and remove
+the parameter from the `ensure_visible_wrapped` call.
+
+### Step 4: Update existing test
+
+Location: `crates/editor/src/viewport.rs`, test
+`test_ensure_visible_wrapped_partial_row_should_not_scroll` (~line 2558)
+
+Remove the `first_visible_line` argument (third positional arg, value `0`) from
+both `ensure_visible_wrapped` calls in this test.
+
+### Step 5: Run tests and verify
+
+Run `cargo test -p editor` to ensure:
+- All new tests pass (Step 1 tests, which were written to fail before the fix,
+  now pass)
+- The existing partial-row test still passes
+- No regressions in other viewport/scroll tests
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
+- **Performance of full iteration from line 0**: `ensure_visible_wrapped` will
+  now always iterate from buffer line 0 to the cursor line. For very large files
+  (100K+ lines), this is O(N) per cursor movement. However,
+  `compute_total_screen_rows` (called in the same function) already iterates all
+  lines, so the total cost only increases by a constant factor. If this becomes
+  a bottleneck, a prefix-sum cache could be added later, but that's out of scope
+  for this bug fix.
 
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **`pixel_to_buffer_position_wrapped` in editor_state.rs:3083**: This call site
+  passes `viewport.first_visible_line()` where the parameter is named
+  `first_visible_screen_row`. This is a potential related coordinate confusion
+  for click handling in wrapped mode, but it's a separate bug (click position,
+  not scroll-to-cursor) and out of scope for this chunk.
 
 ## Deviations
 
 <!--
 POPULATE DURING IMPLEMENTATION, not at planning time.
-
-When reality diverges from the plan, document it here:
-- What changed?
-- Why?
-- What was the impact?
-
-Minor deviations (renamed a function, used a different helper) don't need
-documentation. Significant deviations (changed the approach, skipped a step,
-added steps) do.
-
-Example:
-- Step 4: Originally planned to use std::fs::rename for atomic swap.
-  Testing revealed this isn't atomic across filesystems. Changed to
-  write-fsync-rename-fsync sequence per platform best practices.
 -->

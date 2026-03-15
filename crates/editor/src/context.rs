@@ -153,8 +153,6 @@ impl<'a> EditorContext<'a> {
         let cursor_pos = self.buffer.cursor_position();
         let line_count = self.buffer.line_count();
         let wrap_layout = self.wrap_layout();
-        let first_visible_line = self.viewport.first_visible_line();
-
         // Capture line lengths to avoid borrowing conflicts
         let line_lens: Vec<usize> = (0..line_count)
             .map(|line| self.buffer.line_len(line))
@@ -163,7 +161,6 @@ impl<'a> EditorContext<'a> {
         if self.viewport.ensure_visible_wrapped(
             cursor_pos.line,
             cursor_pos.col,
-            first_visible_line,
             line_count,
             &wrap_layout,
             |line| line_lens.get(line).copied().unwrap_or(0),
