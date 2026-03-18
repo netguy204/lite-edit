@@ -1,8 +1,10 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/editor/src/file_index.rs
+- crates/editor/Cargo.toml
 code_references: []
 narrative: null
 investigation: null
@@ -10,9 +12,9 @@ subsystems: []
 friction_entries: []
 bug_type: null
 depends_on: []
-created_after: ["wrap_scroll_to_cursor"]
+created_after:
+- wrap_scroll_to_cursor
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

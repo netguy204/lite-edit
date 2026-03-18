@@ -28,6 +28,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -114,6 +115,10 @@ pub struct FileIndex {
     paused: Arc<AtomicBool>,
     /// Stores callbacks for use on resume.
     callbacks: Arc<Mutex<Option<FileEventCallbacks>>>,
+    // Chunk: docs/chunks/fuzzy_finder_hidden_files - Git-aware exclusion flag
+    /// True when the root directory is inside a git repository.
+    /// Determines which exclusion strategy is used for watcher events and queries.
+    is_git: bool,
 }
 
 impl FileIndex {
@@ -204,11 +209,15 @@ impl FileIndex {
         // Check if root exists before starting the walk
         let root_exists = root.is_dir();
 
+        // Chunk: docs/chunks/fuzzy_finder_hidden_files - Detect git repo for file discovery
+        let is_git = root_exists && is_git_repo(&root);
+
         // Spawn the walker thread
         let walker_state = Arc::clone(&state);
         let walker_version = Arc::clone(&version);
         let walker_indexing = Arc::clone(&indexing);
         let walker_root = root.clone();
+        let walker_is_git = is_git;
 
         let walker_handle = thread::spawn(move || {
             if !root_exists {
@@ -217,8 +226,31 @@ impl FileIndex {
                 return;
             }
 
-            // Perform the recursive walk
-            walk_directory(&walker_root, &walker_root, &walker_state, &walker_version);
+            // Chunk: docs/chunks/fuzzy_finder_hidden_files - Git-based or fallback walk
+            if walker_is_git {
+                // In a git repo, use git ls-files for an atomic snapshot of all
+                // tracked + untracked-but-not-ignored files.
+                if let Some(paths) = git_ls_files(&walker_root) {
+                    let file_paths: Vec<PathBuf> = paths
+                        .into_iter()
+                        .filter(|p| walker_root.join(p).is_file())
+                        .collect();
+
+                    if !file_paths.is_empty() {
+                        let mut state = walker_state.lock().unwrap();
+                        state.cache.extend(file_paths);
+                        state.cache.sort();
+                        drop(state);
+                        walker_version.fetch_add(1, Ordering::Relaxed);
+                    }
+                } else {
+                    // git ls-files failed; fall back to directory walk
+                    walk_directory(&walker_root, &walker_root, &walker_state, &walker_version);
+                }
+            } else {
+                // Non-git directory: walk with fallback exclusion rules
+                walk_directory(&walker_root, &walker_root, &walker_state, &walker_version);
+            }
 
             // Mark indexing as complete
             walker_indexing.store(false, Ordering::Relaxed);
@@ -258,6 +290,7 @@ impl FileIndex {
         // Chunk: docs/chunks/app_nap_file_watcher_pause - Pass pause flag to watcher thread
         let watcher_paused = Arc::clone(&paused);
 
+        let watcher_is_git = is_git;
         let watcher_handle = thread::spawn(move || {
             process_watcher_events(
                 &watcher_root,
@@ -267,6 +300,7 @@ impl FileIndex {
                 stop_rx,
                 callbacks,
                 watcher_paused,
+                watcher_is_git,
             );
         });
 
@@ -281,6 +315,7 @@ impl FileIndex {
             _watcher: watcher,
             paused,
             callbacks: stored_callbacks,
+            is_git,
         }
     }
 
@@ -310,13 +345,14 @@ impl FileIndex {
     }
 
     /// Handle empty query: recency-first, then alphabetical.
+    // Chunk: docs/chunks/fuzzy_finder_hidden_files - Git-aware query filtering
     fn query_empty(&self, cache: &[PathBuf], recency: &VecDeque<PathBuf>) -> Vec<MatchResult> {
         let mut results = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
         // First: recent files in recency order (filtered to those in cache)
         for path in recency {
-            if cache.contains(path) && !is_excluded(path) {
+            if cache.contains(path) && !self.should_exclude(path) {
                 seen.insert(path.clone());
                 results.push(MatchResult {
                     path: path.clone(),
@@ -328,7 +364,7 @@ impl FileIndex {
         // Second: remaining cached paths alphabetically
         let mut remaining: Vec<_> = cache
             .iter()
-            .filter(|p| !seen.contains(*p) && !is_excluded(p))
+            .filter(|p| !seen.contains(*p) && !self.should_exclude(p))
             .cloned()
             .collect();
         remaining.sort();
@@ -352,7 +388,7 @@ impl FileIndex {
     fn query_fuzzy(&self, cache: &[PathBuf], query: &str) -> Vec<MatchResult> {
         let mut results: Vec<MatchResult> = cache
             .iter()
-            .filter(|p| !is_excluded(p))
+            .filter(|p| !self.should_exclude(p))
             .filter_map(|path| {
                 // Compute filename score
                 let filename_score = path
@@ -526,6 +562,23 @@ impl FileIndex {
     pub fn is_paused(&self) -> bool {
         self.paused.load(Ordering::Relaxed)
     }
+
+    // Chunk: docs/chunks/fuzzy_finder_hidden_files - Unified exclusion check
+    /// Returns true if a relative path should be excluded from query results.
+    ///
+    /// In git repos, the cache is already filtered by `git ls-files`, so we only
+    /// need to exclude `.git/` paths (which git itself wouldn't list, but might
+    /// appear via watcher events). In non-git repos, we apply the fallback rules.
+    fn should_exclude(&self, path: &Path) -> bool {
+        if self.is_git {
+            // In git repos, the walk already used git ls-files which excludes
+            // ignored files. We only need to guard against .git/ paths that
+            // might have been added by watcher events.
+            has_git_dir_component(path)
+        } else {
+            is_excluded_fallback(path)
+        }
+    }
 }
 
 // Chunk: docs/chunks/app_nap_file_watcher_pause - State preserved across pause/resume
@@ -549,28 +602,114 @@ impl Drop for FileIndex {
 }
 
 // =============================================================================
-// Exclusion Rules
+// Git-Aware File Discovery
 // =============================================================================
+// Chunk: docs/chunks/fuzzy_finder_hidden_files - Git-aware file discovery
 
-/// Returns true if the path should be excluded from indexing and query results.
+/// Returns true if the given root directory is inside a git repository.
 ///
-/// Exclusions:
-/// - Any path component starting with `.` (dotfiles / dot-directories)
-/// - Directories named `target` (Rust build artifacts)
-/// - Directories named `node_modules`
-fn is_excluded(path: &Path) -> bool {
+/// Checks for a `.git` directory or file (worktrees use a `.git` file)
+/// by ascending from root to the filesystem root. This avoids subprocess
+/// overhead and works regardless of git availability.
+fn is_git_repo(root: &Path) -> bool {
+    let mut current = root.to_path_buf();
+    loop {
+        let git_path = current.join(".git");
+        if git_path.exists() {
+            return true;
+        }
+        if !current.pop() {
+            return false;
+        }
+    }
+}
+
+/// Returns the list of files tracked by git (and untracked but not ignored).
+///
+/// Runs `git ls-files --cached --others --exclude-standard -z` from the given
+/// root directory. Returns `None` if the command fails.
+fn git_ls_files(root: &Path) -> Option<Vec<PathBuf>> {
+    let output = Command::new("git")
+        .args(["ls-files", "--cached", "--others", "--exclude-standard", "-z"])
+        .current_dir(root)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let paths: Vec<PathBuf> = output
+        .stdout
+        .split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| {
+            let path = PathBuf::from(String::from_utf8_lossy(s).into_owned());
+            // Always exclude .git/ contents even if git somehow lists them
+            if has_git_dir_component(&path) {
+                None
+            } else {
+                Some(path)
+            }
+        })
+        .collect();
+
+    Some(paths)
+}
+
+/// Returns true if the given path is ignored by git.
+///
+/// Uses `git check-ignore --quiet <path>`. Returns `true` if ignored (exit 0),
+/// `false` if not ignored (exit 1) or on any error.
+fn is_git_ignored(root: &Path, relative: &Path) -> bool {
+    // Always exclude .git/ directory itself
+    if has_git_dir_component(relative) {
+        return true;
+    }
+
+    Command::new("git")
+        .args(["check-ignore", "--quiet"])
+        .arg(relative)
+        .current_dir(root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Returns true if any component of the path is `.git`.
+fn has_git_dir_component(path: &Path) -> bool {
+    path.components().any(|c| {
+        matches!(c, std::path::Component::Normal(name) if name == ".git")
+    })
+}
+
+// =============================================================================
+// Fallback Exclusion Rules (non-git directories)
+// =============================================================================
+// Chunk: docs/chunks/fuzzy_finder_hidden_files - Fallback exclusion for non-git dirs
+
+/// Returns true if the path should be excluded in a non-git directory.
+///
+/// Excludes:
+/// - `.git/` directory
+/// - `target/` directory (Rust build artifacts)
+/// - `node_modules/` directory
+///
+/// Does NOT blanket-exclude all dotfiles — files in `.github/`, `.config/`,
+/// etc. are allowed.
+fn is_excluded_fallback(path: &Path) -> bool {
     for component in path.components() {
         if let std::path::Component::Normal(name) = component {
             let name_str = name.to_string_lossy();
-            // Dotfiles / dot-directories
-            if name_str.starts_with('.') {
+            if name_str == ".git" {
                 return true;
             }
-            // Rust build artifacts
             if name_str == "target" {
                 return true;
             }
-            // Node modules
             if name_str == "node_modules" {
                 return true;
             }
@@ -631,6 +770,10 @@ fn save_recency(root: &Path, recency: &VecDeque<PathBuf>) {
 // =============================================================================
 
 /// Recursively walks a directory, adding non-excluded paths to the cache.
+///
+/// Uses `is_excluded_fallback` for filtering — this is only called for non-git
+/// directories or when `git ls-files` fails.
+// Chunk: docs/chunks/fuzzy_finder_hidden_files - Fallback walk uses fallback exclusion
 fn walk_directory(
     root: &Path,
     dir: &Path,
@@ -651,8 +794,8 @@ fn walk_directory(
             Err(_) => continue,
         };
 
-        // Skip excluded paths
-        if is_excluded(&relative) {
+        // Skip excluded paths (using fallback rules for non-git dirs)
+        if is_excluded_fallback(&relative) {
             continue;
         }
 
@@ -698,6 +841,7 @@ fn process_watcher_events(
     stop_rx: Receiver<()>,
     callbacks: FileEventCallbacks,
     paused: Arc<AtomicBool>,
+    is_git: bool,
 ) {
     // Debouncer for file content changes (only used if callback is provided)
     let mut debouncer = FileChangeDebouncer::with_default();
@@ -718,7 +862,7 @@ fn process_watcher_events(
         match event_rx.recv_timeout(std::time::Duration::from_millis(100)) {
             Ok(event) => {
                 if !is_paused {
-                    handle_fs_event(root, state, version, &event, &mut debouncer, &callbacks);
+                    handle_fs_event(root, state, version, &event, &mut debouncer, &callbacks, is_git);
                 }
                 // When paused, events are discarded. On resume, the caller is responsible
                 // for checking file mtimes to detect any changes that occurred while paused.
@@ -749,6 +893,7 @@ fn process_watcher_events(
 /// modification events (`Modify(Data(Content))`), registers the path with
 /// the debouncer for later emission. For deletion and rename events,
 /// immediately invokes the corresponding callback (if provided).
+// Chunk: docs/chunks/fuzzy_finder_hidden_files - Git-aware watcher filtering
 fn handle_fs_event(
     root: &Path,
     state: &Arc<Mutex<SharedState>>,
@@ -756,6 +901,7 @@ fn handle_fs_event(
     event: &Event,
     debouncer: &mut FileChangeDebouncer,
     callbacks: &FileEventCallbacks,
+    is_git: bool,
 ) {
     let mut changed = false;
 
@@ -765,8 +911,13 @@ fn handle_fs_event(
             Err(_) => continue,
         };
 
-        // Skip excluded paths
-        if is_excluded(&relative) {
+        // Skip excluded paths using git-aware or fallback check
+        let excluded = if is_git {
+            is_git_ignored(root, &relative)
+        } else {
+            is_excluded_fallback(&relative)
+        };
+        if excluded {
             continue;
         }
 
@@ -811,10 +962,12 @@ fn handle_fs_event(
                             if let (Ok(from_rel), Ok(to_rel)) =
                                 (from_path.strip_prefix(root), to_path.strip_prefix(root))
                             {
-                                if !is_excluded(from_rel) || !is_excluded(to_rel) {
+                                let from_excluded = if is_git { is_git_ignored(root, from_rel) } else { is_excluded_fallback(from_rel) };
+                                let to_excluded = if is_git { is_git_ignored(root, to_rel) } else { is_excluded_fallback(to_rel) };
+                                if !from_excluded || !to_excluded {
                                     let mut state = state.lock().unwrap();
                                     state.cache.retain(|p| p != from_rel);
-                                    if to_path.is_file() && !is_excluded(to_rel) &&
+                                    if to_path.is_file() && !to_excluded &&
                                        !state.cache.contains(&to_rel.to_path_buf()) {
                                         state.cache.push(to_rel.to_path_buf());
                                         state.cache.sort();
@@ -1024,37 +1177,48 @@ mod tests {
     use tempfile::TempDir;
 
     // -------------------------------------------------------------------------
-    // Exclusion Rules Tests
+    // Fallback Exclusion Rules Tests
     // -------------------------------------------------------------------------
+    // Chunk: docs/chunks/fuzzy_finder_hidden_files - Updated exclusion tests
 
     #[test]
-    fn test_is_excluded_gitignore() {
-        assert!(is_excluded(Path::new(".gitignore")));
+    fn test_fallback_excludes_git_dir() {
+        assert!(is_excluded_fallback(Path::new(".git/config")));
+        assert!(is_excluded_fallback(Path::new(".git/HEAD")));
     }
 
     #[test]
-    fn test_is_excluded_git_config() {
-        assert!(is_excluded(Path::new(".git/config")));
+    fn test_fallback_allows_dotfiles() {
+        // Dotfiles other than .git are allowed in fallback mode
+        assert!(!is_excluded_fallback(Path::new(".gitignore")));
+        assert!(!is_excluded_fallback(Path::new(".github/workflows/ci.yml")));
+        assert!(!is_excluded_fallback(Path::new(".config/settings.toml")));
+        assert!(!is_excluded_fallback(Path::new(".claude/commands/foo.md")));
     }
 
     #[test]
-    fn test_is_excluded_src_main() {
-        assert!(!is_excluded(Path::new("src/main.rs")));
+    fn test_fallback_allows_normal_files() {
+        assert!(!is_excluded_fallback(Path::new("src/main.rs")));
     }
 
     #[test]
-    fn test_is_excluded_target() {
-        assert!(is_excluded(Path::new("target/debug/editor")));
+    fn test_fallback_excludes_target() {
+        assert!(is_excluded_fallback(Path::new("target/debug/editor")));
     }
 
     #[test]
-    fn test_is_excluded_node_modules() {
-        assert!(is_excluded(Path::new("foo/node_modules/bar.js")));
+    fn test_fallback_excludes_node_modules() {
+        assert!(is_excluded_fallback(Path::new("foo/node_modules/bar.js")));
     }
 
     #[test]
-    fn test_is_excluded_hidden_in_path() {
-        assert!(is_excluded(Path::new("src/.hidden/file.rs")));
+    fn test_has_git_dir_component() {
+        assert!(has_git_dir_component(Path::new(".git/config")));
+        assert!(has_git_dir_component(Path::new(".git/HEAD")));
+        assert!(has_git_dir_component(Path::new("foo/.git/bar")));
+        assert!(!has_git_dir_component(Path::new(".github/workflows/ci.yml")));
+        assert!(!has_git_dir_component(Path::new(".gitignore")));
+        assert!(!has_git_dir_component(Path::new("src/main.rs")));
     }
 
     // -------------------------------------------------------------------------
@@ -1263,9 +1427,17 @@ mod tests {
 
         let results = index.query("");
 
-        // Only "exists.rs" should appear
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].path, PathBuf::from("exists.rs"));
+        // "exists.rs" should appear; "does_not_exist.rs" should not.
+        // Note: .lite-edit-recent may also appear since dotfiles are no longer
+        // blanket-excluded; we just verify the recency filtering works.
+        assert!(
+            results.iter().any(|r| r.path == PathBuf::from("exists.rs")),
+            "exists.rs should appear"
+        );
+        assert!(
+            !results.iter().any(|r| r.path == PathBuf::from("does_not_exist.rs")),
+            "does_not_exist.rs should not appear"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -1378,13 +1550,17 @@ mod tests {
         assert_eq!(results[0].path, PathBuf::from("config.rs"));
     }
 
+    // Chunk: docs/chunks/fuzzy_finder_hidden_files - Dotfiles now visible in non-git dirs
     #[test]
-    fn test_dotfiles_excluded_from_query() {
+    fn test_dotfiles_visible_in_non_git_query() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
 
+        // Non-git directory: dotfiles should now appear (except .git/)
         File::create(root.join(".gitignore")).unwrap();
         File::create(root.join("readme.md")).unwrap();
+        fs::create_dir_all(root.join(".config")).unwrap();
+        File::create(root.join(".config/settings.toml")).unwrap();
 
         let index = FileIndex::start(root.to_path_buf());
 
@@ -1394,10 +1570,12 @@ mod tests {
 
         let results = index.query("");
 
-        // .gitignore should not appear
-        assert!(!results.iter().any(|r| r.path == PathBuf::from(".gitignore")));
+        // .gitignore should now appear (no longer blanket-excluded)
+        assert!(results.iter().any(|r| r.path == PathBuf::from(".gitignore")));
         // readme.md should appear
         assert!(results.iter().any(|r| r.path == PathBuf::from("readme.md")));
+        // .config/settings.toml should appear
+        assert!(results.iter().any(|r| r.path == PathBuf::from(".config/settings.toml")));
     }
 
     #[test]
@@ -2004,5 +2182,314 @@ mod tests {
         // Note: On some platforms, create events might include a data change event too
         // so we just verify the basic flow doesn't crash
         let _ = call_count.load(Ordering::SeqCst);
+    }
+
+    // -------------------------------------------------------------------------
+    // Git-Aware File Discovery Integration Tests
+    // Chunk: docs/chunks/fuzzy_finder_hidden_files
+    // -------------------------------------------------------------------------
+
+    /// Helper: create a temporary directory that looks like a git repo for detection.
+    ///
+    /// Creates a `.git` directory with a HEAD file. This is NOT a real git repo
+    /// but is sufficient for `is_git_repo` detection. For tests that need real
+    /// git operations (ls-files, check-ignore), use `#[ignore]` tests that
+    /// create actual repos.
+    fn create_fake_git_dir(root: &Path) {
+        let git_dir = root.join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    }
+
+    #[test]
+    fn test_is_git_repo_detection() {
+        // Directory with .git/ should be detected
+        let temp = TempDir::new().unwrap();
+        create_fake_git_dir(temp.path());
+        assert!(is_git_repo(temp.path()));
+
+        // Non-git dir should not be detected
+        let temp2 = TempDir::new().unwrap();
+        assert!(!is_git_repo(temp2.path()));
+    }
+
+    #[test]
+    fn test_is_git_repo_detects_parent() {
+        // Subdirectory of a git repo should also be detected
+        let temp = TempDir::new().unwrap();
+        create_fake_git_dir(temp.path());
+        let subdir = temp.path().join("src/nested");
+        fs::create_dir_all(&subdir).unwrap();
+        assert!(is_git_repo(&subdir));
+    }
+
+    /// Integration test: git repo includes tracked dotfiles.
+    ///
+    /// NOTE: This test requires creating a real git repository with subprocess
+    /// calls. Marked #[ignore] because it may not work in all environments
+    /// (sandboxed CI, worktree restrictions). Run with `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn test_git_repo_includes_tracked_dotfiles() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        Command::new("git").args(["init"]).arg(root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status().expect("git init failed");
+
+        // Create .github/workflows/ci.yml and track it
+        fs::create_dir_all(root.join(".github/workflows")).unwrap();
+        File::create(root.join(".github/workflows/ci.yml")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        File::create(root.join("src/main.rs")).unwrap();
+        Command::new("git").args(["add", "."]).current_dir(root)
+            .stdout(std::process::Stdio::null()).status().unwrap();
+
+        let index = FileIndex::start(root.to_path_buf());
+        while index.is_indexing() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let results = index.query("");
+        assert!(results.iter().any(|r| r.path == PathBuf::from(".github/workflows/ci.yml")),
+            "Tracked .github/workflows/ci.yml should appear");
+        assert!(results.iter().any(|r| r.path == PathBuf::from("src/main.rs")),
+            "src/main.rs should appear");
+    }
+
+    /// Integration test: git repo excludes gitignored files.
+    #[test]
+    #[ignore]
+    fn test_git_repo_excludes_gitignored() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        Command::new("git").args(["init"]).arg(root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status().expect("git init failed");
+
+        fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        fs::create_dir_all(root.join("target/debug")).unwrap();
+        File::create(root.join("target/debug/foo")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        File::create(root.join("src/main.rs")).unwrap();
+        Command::new("git").args(["add", "."]).current_dir(root)
+            .stdout(std::process::Stdio::null()).status().unwrap();
+
+        let index = FileIndex::start(root.to_path_buf());
+        while index.is_indexing() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let results = index.query("");
+        assert!(!results.iter().any(|r| r.path.starts_with("target/")),
+            "target/ should NOT appear");
+    }
+
+    /// Integration test: git repo excludes .git/ directory.
+    #[test]
+    #[ignore]
+    fn test_git_repo_excludes_git_dir() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        Command::new("git").args(["init"]).arg(root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status().expect("git init failed");
+
+        File::create(root.join("readme.md")).unwrap();
+        Command::new("git").args(["add", "."]).current_dir(root)
+            .stdout(std::process::Stdio::null()).status().unwrap();
+
+        let index = FileIndex::start(root.to_path_buf());
+        while index.is_indexing() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let results = index.query("");
+        assert!(!results.iter().any(|r| r.path.starts_with(".git/")),
+            ".git/ should never appear");
+    }
+
+    /// Integration test: untracked non-ignored files appear.
+    #[test]
+    #[ignore]
+    fn test_git_repo_includes_untracked_non_ignored() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        Command::new("git").args(["init"]).arg(root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status().expect("git init failed");
+
+        File::create(root.join("tracked.rs")).unwrap();
+        Command::new("git").args(["add", "tracked.rs"]).current_dir(root)
+            .stdout(std::process::Stdio::null()).status().unwrap();
+        File::create(root.join("untracked.rs")).unwrap();
+
+        let index = FileIndex::start(root.to_path_buf());
+        while index.is_indexing() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let results = index.query("");
+        assert!(results.iter().any(|r| r.path == PathBuf::from("untracked.rs")),
+            "Untracked but not ignored file should appear");
+    }
+
+    #[test]
+    fn test_non_git_fallback_excludes_target() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::create_dir_all(root.join("target/debug")).unwrap();
+        File::create(root.join("target/debug/binary")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        File::create(root.join("src/main.rs")).unwrap();
+
+        let index = FileIndex::start(root.to_path_buf());
+
+        while index.is_indexing() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let results = index.query("");
+
+        assert!(
+            !results.iter().any(|r| r.path.starts_with("target/")),
+            "target/ should be excluded in non-git fallback"
+        );
+        assert!(
+            results.iter().any(|r| r.path == PathBuf::from("src/main.rs")),
+            "src/main.rs should be included"
+        );
+    }
+
+    #[test]
+    fn test_non_git_fallback_allows_dotfiles() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::create_dir_all(root.join(".config")).unwrap();
+        File::create(root.join(".config/settings.toml")).unwrap();
+        File::create(root.join(".env")).unwrap();
+
+        let index = FileIndex::start(root.to_path_buf());
+
+        while index.is_indexing() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let results = index.query("");
+
+        assert!(
+            results.iter().any(|r| r.path == PathBuf::from(".config/settings.toml")),
+            ".config/settings.toml should appear in non-git fallback"
+        );
+        assert!(
+            results.iter().any(|r| r.path == PathBuf::from(".env")),
+            ".env should appear in non-git fallback"
+        );
+    }
+
+    #[test]
+    fn test_non_git_fallback_excludes_git_dir() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        // Manually create a .git directory
+        fs::create_dir_all(root.join(".git")).unwrap();
+        File::create(root.join(".git/HEAD")).unwrap();
+        File::create(root.join("readme.md")).unwrap();
+
+        // This temp dir will be detected as a git repo (has .git/),
+        // but git ls-files will fail, so it falls back to walk_directory
+        // with is_excluded_fallback. Either way, .git/ should be excluded.
+        let index = FileIndex::start(root.to_path_buf());
+
+        while index.is_indexing() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let results = index.query("");
+
+        assert!(
+            !results.iter().any(|r| r.path.starts_with(".git/")),
+            ".git/ should be excluded"
+        );
+    }
+
+    /// Integration tests for git ls-files and check-ignore.
+    /// Marked #[ignore] because they require creating real git repos.
+    #[test]
+    #[ignore]
+    fn test_git_ls_files_returns_tracked_files() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        Command::new("git").args(["init"]).arg(root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status().expect("git init failed");
+
+        File::create(root.join("hello.rs")).unwrap();
+        fs::create_dir_all(root.join(".github")).unwrap();
+        File::create(root.join(".github/ci.yml")).unwrap();
+
+        Command::new("git").args(["add", "hello.rs", ".github/ci.yml"])
+            .current_dir(root).stdout(std::process::Stdio::null()).status().unwrap();
+
+        let files = git_ls_files(root).expect("git ls-files should succeed");
+        assert!(files.contains(&PathBuf::from("hello.rs")));
+        assert!(files.contains(&PathBuf::from(".github/ci.yml")));
+    }
+
+    #[test]
+    #[ignore]
+    fn test_git_ls_files_excludes_ignored() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        Command::new("git").args(["init"]).arg(root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status().expect("git init failed");
+
+        fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+        Command::new("git").args(["add", ".gitignore"]).current_dir(root)
+            .stdout(std::process::Stdio::null()).status().unwrap();
+
+        File::create(root.join("debug.log")).unwrap();
+        File::create(root.join("main.rs")).unwrap();
+
+        let files = git_ls_files(root).expect("git ls-files should succeed");
+        assert!(!files.contains(&PathBuf::from("debug.log")));
+        assert!(files.contains(&PathBuf::from("main.rs")));
+    }
+
+    #[test]
+    #[ignore]
+    fn test_git_check_ignore() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        Command::new("git").args(["init"]).arg(root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status().expect("git init failed");
+
+        fs::write(root.join(".gitignore"), "target/\n*.log\n").unwrap();
+        Command::new("git").args(["add", ".gitignore"]).current_dir(root)
+            .stdout(std::process::Stdio::null()).status().unwrap();
+
+        assert!(is_git_ignored(root, Path::new("target/debug/foo")));
+        assert!(is_git_ignored(root, Path::new("debug.log")));
+        assert!(!is_git_ignored(root, Path::new("src/main.rs")));
+        assert!(is_git_ignored(root, Path::new(".git/HEAD")));
     }
 }
