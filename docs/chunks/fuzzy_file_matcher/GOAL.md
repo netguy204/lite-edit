@@ -21,8 +21,8 @@ code_references:
     implements: "Flag indicating whether background walk is still in progress"
   - ref: crates/editor/src/file_index.rs#MatchResult
     implements: "Query result struct with path and score"
-  - ref: crates/editor/src/file_index.rs#is_excluded
-    implements: "Exclusion rules for dotfiles, target/, and node_modules/"
+  - ref: crates/editor/src/file_index.rs#is_excluded_fallback
+    implements: "Fallback exclusion rules for non-git directories (target/, node_modules/, .git/ but not all dotfiles)"
   - ref: crates/editor/src/file_index.rs#score_match
     implements: "Fuzzy scoring algorithm with consecutive run, prefix, and filename length bonuses"
   - ref: crates/editor/src/file_index.rs#walk_directory
