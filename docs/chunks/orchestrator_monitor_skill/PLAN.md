@@ -10,153 +10,194 @@ to hand to an agent.
 
 ## Approach
 
-<!--
-How will you build this? Describe the strategy at a high level.
-What patterns or techniques will you use?
-What existing code will you build on?
+Create a new `.claude/commands/orchestrator-monitor.md` skill file that defines
+the `/orchestrator-monitor` slash command. This is a documentation-only chunk —
+the deliverable is a markdown procedure file, not Rust code.
 
-Reference docs/trunk/DECISIONS.md entries where relevant.
-If this approach represents a new significant decision, ask the user
-if we should add it to DECISIONS.md and reference it here.
+The skill follows the same structure as the existing
+`.claude/commands/orchestrator-investigate.md` skill: YAML frontmatter with a
+description, tips section, multi-phase instructions that guide the agent through
+the monitoring workflow. The key difference is that this skill sets up a
+recurring `/loop 3m` poll rather than a one-shot investigation.
 
-Always include tests in your implementation plan and adhere to
-docs/trunk/TESTING_PHILOSOPHY.md in your planning.
+The procedure will:
+1. Accept a chunk name as `$ARGUMENTS`
+2. Validate the chunk exists in the orchestrator via `ve orch work-unit show`
+3. Set up `/loop 3m` to poll `ve orch ps --status` for the chunk
+4. On each tick: check status, take action based on state (RUNNING → no-op,
+   NEEDS_ATTENTION → investigate, DONE → summarize + cancel loop,
+   FAILED → summarize)
 
-Remember to update code_paths in the chunk's GOAL.md (e.g., docs/chunks/orchestrator_monitor_skill/GOAL.md)
-with references to the files that you expect to touch.
--->
+The skill also needs to be registered in CLAUDE.md's Available Commands and
+Orchestrator sections.
+
+No automated tests apply here — this is a procedural skill file. Verification
+is that the file exists, follows the established command file conventions, and
+covers all status transitions described in the goal.
 
 ## Subsystem Considerations
 
-<!--
-Before designing your implementation, check docs/subsystems/ for relevant
-cross-cutting patterns.
-
-QUESTIONS TO CONSIDER:
-- Does this chunk touch any existing subsystem's scope?
-- Will this chunk implement part of a subsystem (contribute code) or use it
-  (depend on it)?
-- Did you discover code during exploration that should be part of a subsystem
-  but doesn't follow its patterns?
-
-If no subsystems are relevant, delete this section.
-
-WHEN SUBSYSTEMS ARE RELEVANT:
-List each relevant subsystem with its status and your relationship:
-- **docs/subsystems/validation** (DOCUMENTED): This chunk USES the validation
-  subsystem to check input
-- **docs/subsystems/error_handling** (REFACTORING): This chunk IMPLEMENTS a
-  new error type following the subsystem's patterns
-
-HOW SUBSYSTEM STATUS AFFECTS YOUR WORK:
-
-DOCUMENTED subsystems: The subsystem's patterns are captured but deviations are not
-being actively fixed. If you discover code that deviates from the subsystem's
-patterns, add it to the subsystem's Known Deviations section. Do NOT prioritize
-fixing those deviations—your chunk has its own goals.
-
-REFACTORING subsystems: The subsystem is being actively consolidated. If your chunk
-work touches code that deviates from the subsystem's patterns, attempt to bring it
-into compliance as part of your work. This is "opportunistic improvement"—improve
-what you touch, but don't expand scope to fix unrelated deviations.
-
-WHEN YOU DISCOVER DEVIATING CODE:
-- Add it to the subsystem's Known Deviations section
-- Note whether you will address it (REFACTORING status + relevant to your work)
-  or leave it for future work (DOCUMENTED status or outside your chunk's scope)
-
-Example:
-- **Discovered deviation**: src/legacy/parser.py#validate_input does its own
-  validation instead of using the validation subsystem
-  - Added to docs/subsystems/validation Known Deviations
-  - Action: Will not address (subsystem is DOCUMENTED; deviation outside chunk scope)
--->
+No subsystems are relevant. This chunk creates a standalone skill file.
 
 ## Sequence
 
-<!--
-Ordered steps to implement this chunk. Each step should be:
-- Small enough to reason about in isolation
-- Large enough to be meaningful
-- Clear about its inputs and outputs
+### Step 1: Create the skill file `.claude/commands/orchestrator-monitor.md`
 
-This sequence is your contract with yourself (and with agents).
-Work through it in order. Don't skip ahead.
+Create the file with YAML frontmatter and the full monitoring procedure. The
+file structure should mirror `orchestrator-investigate.md`:
 
-Example:
-
-### Step 1: Define the SegmentHeader struct
-
-Create the struct that represents a segment's header with fields for:
-- magic number (4 bytes)
-- version (2 bytes)
-- segment_id (8 bytes)
-- message_count (4 bytes)
-- checksum (4 bytes)
-
-Location: src/segment/format.rs
-
-### Step 2: Implement header serialization
-
-Add `to_bytes()` and `from_bytes()` methods to SegmentHeader.
-Use little-endian encoding per SPEC.md Section 3.1.
-
-### Step 3: ...
-
+**Frontmatter:**
+```yaml
 ---
-
-**BACKREFERENCE COMMENTS**
-
-When implementing code, add backreference comments to help future agents trace
-code back to its governing documentation.
-
-**Valid backreference types:**
-- `# Subsystem: docs/subsystems/<name>` - For architectural patterns
-- `# Chunk: docs/chunks/<name>` - For implementation work
-
-Place comments at the appropriate level:
-- **Module-level**: If this code implements the subsystem/chunk's core functionality
-- **Class-level**: If this class is part of the pattern
-- **Method-level**: If this method implements a specific behavior
-
-Format (place immediately before the symbol):
-```
-# Subsystem: docs/subsystems/workflow_artifacts - Workflow artifact manager pattern
-# Chunk: docs/chunks/auth_refactor - Authentication system redesign
+description: Monitor an orchestrator chunk through to completion with periodic polling.
+---
 ```
 
-Do NOT add narrative backreferences. Narratives decompose into chunks; reference
-the implementing chunk instead.
+**Tips section:** Same boilerplate as other commands (ve is a CLI tool, run directly).
 
-**Task context note**: In multi-project tasks, always use local paths (e.g.,
-`docs/chunks/chunk_name`) for chunk backreferences, not paths to the external
-artifact repo. Each project has `external.yaml` pointers that resolve to the
-actual chunk content.
--->
+**Instructions body — organized into these sections:**
+
+#### Section: Initial Setup
+
+- Accept `$ARGUMENTS` as the chunk name to monitor
+- If no argument provided, run `ve orch ps` and ask the operator which chunk
+- Validate the chunk exists: `ve orch work-unit show $ARGUMENTS`
+- If the chunk is already DONE or FAILED, report status and stop (no loop needed)
+- Start the polling loop: `/loop 3m /orchestrator-monitor $ARGUMENTS`
+- Confirm to the operator that monitoring is active
+
+#### Section: Per-Tick Status Check
+
+On each loop iteration:
+
+```bash
+ve orch work-unit show $ARGUMENTS --json
+```
+
+Parse the status field and branch:
+
+| Status | Action |
+|--------|--------|
+| `RUNNING` | No action. Report briefly: "⏳ `<chunk>` still RUNNING (phase: `<phase>`)" |
+| `READY` / `QUEUED` | No action. Report briefly: "⏳ `<chunk>` waiting to be scheduled" |
+| `NEEDS_ATTENTION` | Escalate — see NEEDS_ATTENTION Resolution section |
+| `DONE` | Celebrate — see Completion Handling section |
+| `FAILED` | Report — see Failure Handling section |
+
+#### Section: NEEDS_ATTENTION Resolution
+
+When status is NEEDS_ATTENTION:
+
+1. Run `ve orch work-unit show $ARGUMENTS` to get the `attention_reason`
+2. Based on attention_reason, provide guidance:
+
+   **ASK_OPERATOR** — The agent has a question:
+   - Show the question to the operator
+   - Use `ve orch answer $ARGUMENTS "<answer>"` to respond
+   - The work unit will automatically resume
+
+   **MERGE_CONFLICT** — Post-implementation merge failed:
+   - Check if the branch has useful commits: `git log --oneline orch/$ARGUMENTS..HEAD 2>/dev/null || git log --oneline orch/$ARGUMENTS -5`
+   - If implementation looks complete, attempt merge resolution:
+     ```bash
+     git merge orch/$ARGUMENTS --no-edit
+     # resolve conflicts
+     git branch -d orch/$ARGUMENTS
+     ve orch work-unit status $ARGUMENTS DONE
+     ```
+   - If implementation is incomplete, reset for retry:
+     `ve orch work-unit status $ARGUMENTS READY`
+
+   **AGENT_FAILED** — The agent process crashed or errored:
+   - Check the tail of the phase log: `tail -c 10000 .ve/chunks/$ARGUMENTS/log/*.txt | tail -100`
+   - If transient failure (timeout, resource issue), retry: `ve orch work-unit retry $ARGUMENTS`
+   - If persistent failure, escalate to operator with log summary
+
+   **Other / Unknown** — Run `/orchestrator-investigate $ARGUMENTS` for full
+   diagnostic workflow.
+
+3. After resolution, the next loop tick will pick up the new status.
+
+#### Section: Completion Handling (DONE)
+
+When status is DONE:
+
+1. Run `ve orch work-unit show $ARGUMENTS` to confirm
+2. Check that the branch was merged: `git log --oneline -5` (look for the chunk's commits)
+3. Post a completion summary to the operator:
+   ```
+   ✅ Chunk `<chunk>` completed successfully.
+   - Phase: DONE
+   - Branch: merged to main
+   ```
+4. Cancel the monitoring loop (stop the `/loop`)
+
+#### Section: Failure Handling (FAILED)
+
+When status is FAILED:
+
+1. Run `ve orch work-unit show $ARGUMENTS` for details
+2. Check phase logs: `tail -c 10000 .ve/chunks/$ARGUMENTS/log/*.txt | tail -100`
+3. Post a failure summary:
+   ```
+   ❌ Chunk `<chunk>` FAILED.
+   - Phase: <phase where it failed>
+   - Reason: <summary from logs>
+   ```
+4. Suggest next steps: retry (`ve orch work-unit retry $ARGUMENTS`), investigate
+   (`/orchestrator-investigate $ARGUMENTS`), or delete (`ve orch work-unit delete $ARGUMENTS`)
+5. Cancel the monitoring loop
+
+Location: `.claude/commands/orchestrator-monitor.md`
+
+### Step 2: Register the skill in CLAUDE.md
+
+Add `/orchestrator-monitor` to the Orchestrator section of `CLAUDE.md` where
+the existing orchestrator commands are listed (line ~90):
+
+```
+Commands: `/orchestrator-submit-future`, `/orchestrator-investigate`, `/orchestrator-monitor`
+```
+
+Location: `CLAUDE.md`
+
+### Step 3: Update code_paths in GOAL.md frontmatter
+
+Set `code_paths` to:
+```yaml
+code_paths:
+  - .claude/commands/orchestrator-monitor.md
+  - CLAUDE.md
+```
+
+Location: `docs/chunks/orchestrator_monitor_skill/GOAL.md`
+
+### Step 4: Verify
+
+- Confirm the file exists and has valid YAML frontmatter
+- Confirm all status transitions from the goal's success criteria are covered:
+  - ✅ Initial `/loop` setup
+  - ✅ Per-tick status checks via `ve orch ps` / `ve orch work-unit show`
+  - ✅ NEEDS_ATTENTION resolution with `ve orch work-unit show`, branch inspection, merge or reset
+  - ✅ DONE handling with summary + loop cancel
+  - ✅ FAILED handling
+- Confirm key commands documented: `ve orch ps`, `ve orch work-unit show`,
+  `ve orch work-unit status <chunk> DONE`, `ve orch work-unit status <chunk> READY`
 
 ## Dependencies
 
-<!--
-What must exist before this chunk can be implemented?
-- Other chunks that must be complete
-- External libraries to add
-- Infrastructure or configuration
-
-If there are no dependencies, delete this section.
--->
+No dependencies. The `/loop` skill and `/orchestrator-investigate` command
+already exist. This chunk creates a new file that references them.
 
 ## Risks and Open Questions
 
-<!--
-What might go wrong? What are you unsure about?
-Being explicit about uncertainty helps you (and agents) know where to
-be careful and when to stop and ask questions.
-
-Example:
-- fsync behavior may differ across filesystems; need to verify on ext4 and APFS
-- Unclear whether concurrent reads during write are safe; may need mutex
-- Performance target is aggressive; may need to iterate on buffer sizes
--->
+- **`/loop` cancellation mechanism**: The plan assumes `/loop` can be cancelled
+  from within the looped command. If `/loop` doesn't support self-cancellation,
+  the DONE/FAILED handlers will need to instruct the operator to cancel manually.
+  Deviation will be noted if discovered during implementation.
+- **`ve orch work-unit show --json` output schema**: The exact JSON field names
+  for status, phase, and attention_reason need to be verified at implementation
+  time. The plan uses names observed in `orchestrator-investigate.md`.
 
 ## Deviations
 
