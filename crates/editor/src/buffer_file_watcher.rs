@@ -428,12 +428,24 @@ fn spawn_watcher_thread(
             // The 50ms timeout serves as our debounce flush interval
             match event_rx.recv_timeout(std::time::Duration::from_millis(50)) {
                 Ok(Ok(event)) => {
-                    // Filter for content changes on our target files
-                    if matches!(
+                    // Chunk: docs/chunks/external_edit_reload - Handle atomic-write events
+                    // Filter for content changes on our target files.
+                    // In addition to Modify(Data) events, also handle Create and
+                    // Rename events for tracked files. External tools that use
+                    // atomic writes (write-temp + rename) produce Create/Rename
+                    // events rather than Modify events.
+                    let is_content_change = matches!(
                         event.kind,
                         EventKind::Modify(ModifyKind::Data(DataChange::Content))
                             | EventKind::Modify(ModifyKind::Data(DataChange::Any))
-                    ) {
+                            | EventKind::Modify(ModifyKind::Any)
+                    );
+                    let is_create_or_rename = matches!(
+                        event.kind,
+                        EventKind::Create(_)
+                            | EventKind::Modify(ModifyKind::Name(_))
+                    );
+                    if is_content_change || is_create_or_rename {
                         let targets = target_files.lock().unwrap();
                         for path in &event.paths {
                             let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());

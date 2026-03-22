@@ -13,6 +13,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use crate::event_channel::EventSender;
 use crate::file_index::FileIndex;
@@ -326,6 +327,13 @@ pub struct Tab {
     /// conflict resolution.
     // Chunk: docs/chunks/conflict_mode_lifecycle - Conflict mode flag
     pub conflict_mode: bool,
+    // Chunk: docs/chunks/external_edit_reload - Per-tab mtime tracking
+    /// The last known modification time of the associated file on disk.
+    ///
+    /// Populated when a file is loaded, saved, or reloaded. Used as a safety
+    /// net to detect external modifications when the file watcher misses events
+    /// (e.g., on pane focus change or workspace switch).
+    pub last_known_mtime: Option<SystemTime>,
 }
 
 impl Tab {
@@ -344,6 +352,7 @@ impl Tab {
             welcome_scroll_offset_px: 0.0,
             base_content: None,
             conflict_mode: false,
+            last_known_mtime: None,
         }
     }
 
@@ -370,6 +379,7 @@ impl Tab {
             welcome_scroll_offset_px: 0.0,
             base_content: None,
             conflict_mode: false,
+            last_known_mtime: None,
         }
     }
 
@@ -388,6 +398,7 @@ impl Tab {
             welcome_scroll_offset_px: 0.0,
             base_content: None,
             conflict_mode: false,
+            last_known_mtime: None,
         }
     }
 
@@ -410,6 +421,7 @@ impl Tab {
             welcome_scroll_offset_px: 0.0,
             base_content: None,
             conflict_mode: false,
+            last_known_mtime: None,
         }
     }
 

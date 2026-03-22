@@ -922,13 +922,25 @@ fn handle_fs_event(
         }
 
         match &event.kind {
+            // Chunk: docs/chunks/external_edit_reload - Handle atomic-write Create events
+            // External tools (git, vim, Claude Code) often write files atomically:
+            // write to a temp file, then rename over the target. On macOS FSEvents,
+            // this produces Create events rather than Modify events. If the file was
+            // already known (i.e., it's a recreate after an atomic write), register
+            // it with the debouncer so the on_change callback fires.
             EventKind::Create(_) => {
                 if path.is_file() {
                     let mut state = state.lock().unwrap();
-                    if !state.cache.contains(&relative) {
+                    let was_known = state.cache.contains(&relative);
+                    if !was_known {
                         state.cache.push(relative.clone());
                         state.cache.sort();
                         changed = true;
+                    }
+                    // For recreated files (atomic writes), register with debouncer
+                    // so file change callback fires
+                    if was_known {
+                        debouncer.register(path.clone(), Instant::now());
                     }
                 }
             }
@@ -966,6 +978,11 @@ fn handle_fs_event(
                                 let to_excluded = if is_git { is_git_ignored(root, to_rel) } else { is_excluded_fallback(to_rel) };
                                 if !from_excluded || !to_excluded {
                                     let mut state = state.lock().unwrap();
+                                    // Chunk: docs/chunks/external_edit_reload - Detect atomic-write renames
+                                    // If the "to" path was already known, this is an atomic
+                                    // write (rename over existing file). Register with debouncer
+                                    // so the file change callback fires.
+                                    let to_was_known = state.cache.contains(&to_rel.to_path_buf());
                                     state.cache.retain(|p| p != from_rel);
                                     if to_path.is_file() && !to_excluded &&
                                        !state.cache.contains(&to_rel.to_path_buf()) {
@@ -973,6 +990,9 @@ fn handle_fs_event(
                                         state.cache.sort();
                                     }
                                     changed = true;
+                                    if to_was_known {
+                                        debouncer.register(to_path.clone(), Instant::now());
+                                    }
                                 }
                             }
 
@@ -989,11 +1009,18 @@ fn handle_fs_event(
                         // We handle both add and remove based on whether the path exists
                         let mut state = state.lock().unwrap();
                         if path.exists() && path.is_file() {
+                            // Chunk: docs/chunks/external_edit_reload - Detect atomic-write renames (non-Both)
+                            // If the path was already known, this is a rename-over (atomic write).
+                            // Register with debouncer so the file change callback fires.
+                            let was_known = state.cache.contains(&relative);
                             // New path (target of rename)
-                            if !state.cache.contains(&relative) {
+                            if !was_known {
                                 state.cache.push(relative.clone());
                                 state.cache.sort();
                                 changed = true;
+                            }
+                            if was_known {
+                                debouncer.register(path.clone(), Instant::now());
                             }
                         } else {
                             // Old path (source of rename)
@@ -2491,5 +2518,97 @@ mod tests {
         assert!(is_git_ignored(root, Path::new("debug.log")));
         assert!(!is_git_ignored(root, Path::new("src/main.rs")));
         assert!(is_git_ignored(root, Path::new(".git/HEAD")));
+    }
+
+    // -------------------------------------------------------------------------
+    // Chunk: docs/chunks/external_edit_reload - Atomic write detection tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_create_event_registers_debouncer_for_known_file() {
+        use crate::file_change_debouncer::FileChangeDebouncer;
+
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+
+        // Create a file and populate the cache
+        let test_file = root.join("test.txt");
+        fs::write(&test_file, "content").unwrap();
+
+        let state = Arc::new(Mutex::new(SharedState {
+            cache: vec![PathBuf::from("test.txt")],
+            recency: VecDeque::new(),
+        }));
+        let version = Arc::new(AtomicU64::new(0));
+        let mut debouncer = FileChangeDebouncer::with_default();
+        let callbacks = FileEventCallbacks {
+            on_change: None,
+            on_delete: None,
+            on_rename: None,
+        };
+
+        // Simulate a Create event for an already-known file (atomic write)
+        let event = Event {
+            kind: EventKind::Create(notify::event::CreateKind::File),
+            paths: vec![test_file.clone()],
+            attrs: Default::default(),
+        };
+
+        handle_fs_event(root, &state, &version, &event, &mut debouncer, &callbacks, false);
+
+        // The debouncer should have the path registered
+        // Flush with a future time to see if anything comes out
+        let future = Instant::now() + std::time::Duration::from_millis(200);
+        let ready = debouncer.flush_ready(future);
+        assert!(
+            ready.iter().any(|p| p == &test_file),
+            "Create event for known file should register with debouncer, got: {:?}",
+            ready
+        );
+    }
+
+    #[test]
+    fn test_create_event_does_not_register_debouncer_for_new_file() {
+        use crate::file_change_debouncer::FileChangeDebouncer;
+
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+
+        // Create a file but DON'T put it in the cache
+        let test_file = root.join("new_file.txt");
+        fs::write(&test_file, "content").unwrap();
+
+        let state = Arc::new(Mutex::new(SharedState {
+            cache: vec![],
+            recency: VecDeque::new(),
+        }));
+        let version = Arc::new(AtomicU64::new(0));
+        let mut debouncer = FileChangeDebouncer::with_default();
+        let callbacks = FileEventCallbacks {
+            on_change: None,
+            on_delete: None,
+            on_rename: None,
+        };
+
+        // Simulate a Create event for a brand-new file
+        let event = Event {
+            kind: EventKind::Create(notify::event::CreateKind::File),
+            paths: vec![test_file.clone()],
+            attrs: Default::default(),
+        };
+
+        handle_fs_event(root, &state, &version, &event, &mut debouncer, &callbacks, false);
+
+        // The file should be added to the cache
+        assert!(state.lock().unwrap().cache.contains(&PathBuf::from("new_file.txt")));
+
+        // But the debouncer should NOT have the path (it's a new file, not a recreate)
+        let future = Instant::now() + std::time::Duration::from_millis(200);
+        let ready = debouncer.flush_ready(future);
+        assert!(
+            ready.is_empty(),
+            "Create event for new file should NOT register with debouncer, got: {:?}",
+            ready
+        );
     }
 }

@@ -1,8 +1,13 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/editor/src/file_index.rs
+- crates/editor/src/buffer_file_watcher.rs
+- crates/editor/src/editor_state.rs
+- crates/editor/src/workspace.rs
+- crates/editor/src/drain_loop.rs
 code_references: []
 narrative: null
 investigation: null
@@ -10,9 +15,9 @@ subsystems: []
 friction_entries: []
 bug_type: semantic
 depends_on: []
-created_after: ["orchestrator_monitor_skill"]
+created_after:
+- orchestrator_monitor_skill
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

@@ -1227,6 +1227,8 @@ impl EditorState {
                     if let Some(workspace) = self.editor.active_workspace_mut() {
                         if workspace.switch_focus(dir) {
                             self.invalidation.merge(InvalidationKind::Layout);
+                            // Chunk: docs/chunks/external_edit_reload - Staleness check on pane focus
+                            self.check_active_tab_staleness();
                         }
                     }
                     return;
@@ -3022,6 +3024,7 @@ impl EditorState {
         };
 
         // Chunk: docs/chunks/tiling_focus_keybindings - Click-to-focus pane switching
+        // Chunk: docs/chunks/external_edit_reload - Staleness check on pane focus change
         // Check which pane was clicked and update focus if different (on MouseDown in Content zone)
         if let MouseEventKind::Down = event.kind {
             if let Some(ref hit) = hit {
@@ -3030,6 +3033,8 @@ impl EditorState {
                         if hit.pane_id != ws.active_pane_id {
                             ws.active_pane_id = hit.pane_id;
                             self.invalidation.merge(InvalidationKind::Layout);
+                            // Check staleness of the newly focused pane's active tab
+                            self.check_active_tab_staleness();
                         }
                     }
                 }
@@ -4213,9 +4218,13 @@ impl EditorState {
 
                     // Chunk: docs/chunks/base_snapshot_reload - Populate base on load
                     // Store base content snapshot for three-way merge
+                    // Chunk: docs/chunks/external_edit_reload - Populate mtime on load
                     if let Some(ws) = self.editor.active_workspace_mut() {
                         if let Some(tab) = ws.active_tab_mut() {
                             tab.base_content = Some(contents.to_string());
+                            tab.last_known_mtime = std::fs::metadata(&path)
+                                .and_then(|m| m.modified())
+                                .ok();
                         }
                     }
                 }
@@ -4296,6 +4305,11 @@ impl EditorState {
 
         // Set base content for merge tracking
         new_tab.base_content = base_content;
+
+        // Chunk: docs/chunks/external_edit_reload - Populate mtime on new tab open
+        new_tab.last_known_mtime = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok();
 
         // Set up syntax highlighting
         let theme = SyntaxTheme::catppuccin_mocha();
@@ -4552,6 +4566,10 @@ impl EditorState {
                     tab.base_content = Some(content.clone());
                     // Chunk: docs/chunks/conflict_mode_lifecycle - Clear conflict mode
                     tab.conflict_mode = false;
+                    // Chunk: docs/chunks/external_edit_reload - Update mtime on save
+                    tab.last_known_mtime = std::fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .ok();
                 }
             }
 
@@ -4703,6 +4721,11 @@ impl EditorState {
         // Update base_content
         tab.base_content = Some(new_content);
 
+        // Chunk: docs/chunks/external_edit_reload - Update mtime on reload
+        tab.last_known_mtime = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok();
+
         // Re-apply syntax highlighting
         let theme = SyntaxTheme::catppuccin_mocha();
         tab.setup_highlighting(&self.language_registry, theme);
@@ -4818,6 +4841,11 @@ impl EditorState {
         // (so subsequent saves will correctly detect what changed)
         tab.base_content = Some(theirs_content);
 
+        // Chunk: docs/chunks/external_edit_reload - Update mtime on merge
+        tab.last_known_mtime = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok();
+
         // Dirty flag remains true - user still has unsaved merged changes
 
         // Chunk: docs/chunks/conflict_mode_lifecycle - Set conflict_mode when merge produces conflicts
@@ -4834,6 +4862,101 @@ impl EditorState {
         self.invalidation.merge(InvalidationKind::Layout);
 
         Some(merge_result)
+    }
+
+    // Chunk: docs/chunks/external_edit_reload - Mtime-based staleness check on pane focus change
+    /// Checks the active tab in the current pane for staleness and reloads if needed.
+    ///
+    /// This is a safety net for cases where the file watcher missed an event.
+    /// Called when the user clicks into or navigates to a different pane.
+    ///
+    /// - If the disk mtime is newer and the tab is clean → reload
+    /// - If the disk mtime is newer and the tab is dirty → merge
+    /// - If the file no longer exists or has no associated file → skip
+    pub fn check_active_tab_staleness(&mut self) {
+        // Collect info from the active tab without holding mutable borrows
+        let tab_info = self.editor.active_workspace().and_then(|ws| {
+            ws.active_tab().and_then(|tab| {
+                let path = tab.associated_file.as_ref()?;
+                let known_mtime = tab.last_known_mtime?;
+                Some((path.clone(), known_mtime, tab.dirty, tab.conflict_mode))
+            })
+        });
+
+        let (path, known_mtime, dirty, conflict_mode) = match tab_info {
+            Some(info) => info,
+            None => return,
+        };
+
+        // Skip tabs in conflict mode (same as handle_file_changed)
+        if conflict_mode {
+            return;
+        }
+
+        // Stat the file to get current mtime
+        let disk_mtime = match std::fs::metadata(&path).and_then(|m| m.modified()) {
+            Ok(mtime) => mtime,
+            Err(_) => return, // File doesn't exist or can't be stat'd
+        };
+
+        // Compare mtimes
+        if disk_mtime > known_mtime {
+            // Check self-write suppression (our own saves)
+            if self.is_file_change_suppressed(&path) {
+                return;
+            }
+
+            if !dirty {
+                self.reload_file_tab(&path);
+            } else {
+                let _ = self.merge_file_tab(&path);
+            }
+        }
+    }
+
+    // Chunk: docs/chunks/external_edit_reload - Mtime-based staleness check on workspace switch
+    /// Checks ALL tabs in ALL panes of a workspace for staleness and reloads as needed.
+    ///
+    /// Called when switching workspaces so that any files modified while the workspace
+    /// was inactive are updated when the user returns.
+    pub fn check_workspace_staleness(&mut self, ws_idx: usize) {
+        // Collect all stale tab info first to avoid borrow conflicts
+        let stale_tabs: Vec<(std::path::PathBuf, bool)> = {
+            let ws = match self.editor.workspaces.get(ws_idx) {
+                Some(ws) => ws,
+                None => return,
+            };
+
+            ws.pane_root.all_panes().iter().flat_map(|pane| {
+                pane.tabs.iter().filter_map(|tab| {
+                    let path = tab.associated_file.as_ref()?;
+                    let known_mtime = tab.last_known_mtime?;
+                    if tab.conflict_mode {
+                        return None;
+                    }
+                    let disk_mtime = std::fs::metadata(path)
+                        .and_then(|m| m.modified())
+                        .ok()?;
+                    if disk_mtime > known_mtime {
+                        Some((path.clone(), tab.dirty))
+                    } else {
+                        None
+                    }
+                })
+            }).collect()
+        };
+
+        // Now process the stale tabs
+        for (path, dirty) in stale_tabs {
+            if self.is_file_change_suppressed(&path) {
+                continue;
+            }
+            if !dirty {
+                self.reload_file_tab(&path);
+            } else {
+                let _ = self.merge_file_tab(&path);
+            }
+        }
     }
 }
 
@@ -4940,6 +5063,8 @@ impl EditorState {
             if let Some(ws) = self.editor.active_workspace() {
                 self.buffer_file_watcher.set_workspace_root(ws.root_path.clone());
             }
+            // Chunk: docs/chunks/external_edit_reload - Staleness check on workspace switch
+            self.check_workspace_staleness(index);
             self.invalidation.merge(InvalidationKind::Layout);
         }
     }
@@ -5593,6 +5718,8 @@ impl EditorState {
                 self.close_tab(tab_index);
             } else {
                 self.switch_tab(tab_index);
+                // Chunk: docs/chunks/external_edit_reload - Staleness check on tab switch
+                self.check_active_tab_staleness();
             }
         }
     }
@@ -14003,5 +14130,213 @@ mod tests {
             "Single-pane visible_lines should match full window. Expected {}, got {}",
             expected_visible, visible
         );
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/external_edit_reload - Staleness detection tests
+    // =========================================================================
+
+    #[test]
+    fn test_staleness_check_detects_modified_file() {
+        let mut state = EditorState::empty(test_font_metrics());
+
+        // Create a temp file
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("test.txt");
+        std::fs::write(&test_file, "original content").unwrap();
+
+        // Associate the file with the active tab
+        state.associate_file(test_file.clone());
+        assert_eq!(state.buffer().content(), "original content");
+
+        // Verify mtime is set
+        let ws = state.editor.active_workspace().unwrap();
+        let tab = ws.active_tab().unwrap();
+        assert!(tab.last_known_mtime.is_some());
+
+        // Modify the file externally (sleep to ensure different mtime)
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(&test_file, "modified content").unwrap();
+
+        // Check staleness - should detect and reload
+        state.check_active_tab_staleness();
+
+        assert_eq!(state.buffer().content(), "modified content");
+    }
+
+    #[test]
+    fn test_staleness_check_skips_clean_unchanged_file() {
+        let mut state = EditorState::empty(test_font_metrics());
+
+        // Create a temp file
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("test.txt");
+        std::fs::write(&test_file, "original content").unwrap();
+
+        // Associate the file
+        state.associate_file(test_file.clone());
+        assert_eq!(state.buffer().content(), "original content");
+
+        // Don't modify the file - check staleness
+        state.check_active_tab_staleness();
+
+        // Buffer should be unchanged
+        assert_eq!(state.buffer().content(), "original content");
+    }
+
+    #[test]
+    fn test_staleness_check_merges_dirty_buffer() {
+        let mut state = EditorState::empty(test_font_metrics());
+
+        // Create a temp file
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("test.txt");
+        std::fs::write(&test_file, "line 1\nline 2\nline 3\n").unwrap();
+
+        // Associate the file
+        state.associate_file(test_file.clone());
+
+        // Make local edits (mark dirty)
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            if let Some(tab) = ws.active_tab_mut() {
+                tab.dirty = true;
+            }
+        }
+
+        // Modify the file externally
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(&test_file, "line 1\nline 2 modified\nline 3\n").unwrap();
+
+        // Check staleness - should trigger merge (not reload)
+        state.check_active_tab_staleness();
+
+        // The merge should have been attempted (buffer content updated)
+        // Since the buffer was dirty, merge_file_tab is called
+        let content = state.buffer().content();
+        assert!(content.contains("modified"), "Merge should incorporate external changes: {}", content);
+    }
+
+    #[test]
+    fn test_staleness_check_handles_missing_file() {
+        let mut state = EditorState::empty(test_font_metrics());
+
+        // Create a temp file
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("test.txt");
+        std::fs::write(&test_file, "content").unwrap();
+
+        // Associate the file
+        state.associate_file(test_file.clone());
+
+        // Delete the file
+        std::fs::remove_file(&test_file).unwrap();
+
+        // Check staleness - should not crash
+        state.check_active_tab_staleness();
+
+        // Buffer should be unchanged (deletion is handled separately)
+        assert_eq!(state.buffer().content(), "content");
+    }
+
+    #[test]
+    fn test_staleness_check_handles_no_associated_file() {
+        let mut state = EditorState::empty(test_font_metrics());
+
+        // Default tab has no associated file - should be a no-op
+        state.check_active_tab_staleness();
+
+        // Should not crash, buffer unchanged
+        assert!(state.buffer().is_empty());
+    }
+
+    #[test]
+    fn test_workspace_staleness_check() {
+        let mut state = EditorState::empty(test_font_metrics());
+
+        // Create temp files
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("test.txt");
+        std::fs::write(&test_file, "original").unwrap();
+
+        // Associate file with tab in workspace 0
+        state.associate_file(test_file.clone());
+
+        // Modify externally
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(&test_file, "modified").unwrap();
+
+        // Check workspace staleness
+        state.check_workspace_staleness(0);
+
+        assert_eq!(state.buffer().content(), "modified");
+    }
+
+    #[test]
+    fn test_staleness_check_skips_conflict_mode() {
+        let mut state = EditorState::empty(test_font_metrics());
+
+        // Create a temp file
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("test.txt");
+        std::fs::write(&test_file, "original").unwrap();
+
+        // Associate the file
+        state.associate_file(test_file.clone());
+
+        // Set conflict mode
+        if let Some(ws) = state.editor.active_workspace_mut() {
+            if let Some(tab) = ws.active_tab_mut() {
+                tab.conflict_mode = true;
+            }
+        }
+
+        // Modify the file externally
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(&test_file, "modified").unwrap();
+
+        // Check staleness - should skip due to conflict mode
+        state.check_active_tab_staleness();
+
+        // Buffer should be unchanged (conflict mode skipped)
+        assert_eq!(state.buffer().content(), "original");
+    }
+
+    #[test]
+    fn test_mtime_populated_on_associate() {
+        let mut state = EditorState::empty(test_font_metrics());
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("test.txt");
+        std::fs::write(&test_file, "content").unwrap();
+
+        state.associate_file(test_file.clone());
+
+        let ws = state.editor.active_workspace().unwrap();
+        let tab = ws.active_tab().unwrap();
+        assert!(tab.last_known_mtime.is_some(), "mtime should be set after associate_file");
+    }
+
+    #[test]
+    fn test_mtime_updated_on_reload() {
+        let mut state = EditorState::empty(test_font_metrics());
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("test.txt");
+        std::fs::write(&test_file, "original").unwrap();
+
+        state.associate_file(test_file.clone());
+
+        let original_mtime = state.editor.active_workspace().unwrap()
+            .active_tab().unwrap().last_known_mtime;
+
+        // Modify and reload
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(&test_file, "modified").unwrap();
+        state.reload_file_tab(&test_file);
+
+        let new_mtime = state.editor.active_workspace().unwrap()
+            .active_tab().unwrap().last_known_mtime;
+
+        assert_ne!(original_mtime, new_mtime, "mtime should be updated after reload");
     }
 }
