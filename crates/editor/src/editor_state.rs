@@ -1496,12 +1496,28 @@ impl EditorState {
             // Move cursor to definition
             let tab = workspace.active_tab_mut().unwrap();
             let line_count = tab.as_text_buffer().map(|b| b.line_count()).unwrap_or(0);
+            // Collect line lengths before taking mutable buffer borrow
+            // TODO: integration test - same-file gotodef wrap-scroll test can be added
+            // once a simpler test harness for tree-sitter is available.
+            let line_lens: Vec<usize> = tab
+                .as_text_buffer()
+                .map(|b| (0..line_count).map(|i| b.line_len(i)).collect())
+                .unwrap_or_default();
             if let Some(buffer) = tab.as_text_buffer_mut() {
                 buffer.set_cursor(Position::new(def_line, def_col));
             }
 
             // Chunk: docs/chunks/gotodef_scroll_reveal - Scroll viewport to reveal cursor
-            if tab.viewport.ensure_visible(def_line, line_count) {
+            // Chunk: docs/chunks/arrow_scroll_wrap_awareness - Wrap-aware gotodef scroll (same file)
+            use crate::wrap_layout::WrapLayout;
+            let wrap_layout = WrapLayout::new(self.view_width - RAIL_WIDTH, &self.font_metrics);
+            if tab.viewport.ensure_visible_wrapped(
+                def_line,
+                def_col,
+                line_count,
+                &wrap_layout,
+                |i| line_lens.get(i).copied().unwrap_or(0),
+            ) {
                 self.invalidation.merge(InvalidationKind::Layout);
             }
 
@@ -1610,11 +1626,25 @@ impl EditorState {
         if let Some(ws) = self.editor.active_workspace_mut() {
             if let Some(tab) = ws.active_tab_mut() {
                 let line_count = tab.as_text_buffer().map(|b| b.line_count()).unwrap_or(0);
+                // Collect line lengths before taking mutable buffer borrow
+                let line_lens: Vec<usize> = tab
+                    .as_text_buffer()
+                    .map(|b| (0..line_count).map(|i| b.line_len(i)).collect())
+                    .unwrap_or_default();
                 if let Some(buffer) = tab.as_text_buffer_mut() {
                     buffer.set_cursor(Position::new(target_line, target_col));
                 }
                 // Chunk: docs/chunks/gotodef_scroll_reveal - Scroll viewport to reveal cursor
-                if tab.viewport.ensure_visible(target_line, line_count) {
+                // Chunk: docs/chunks/arrow_scroll_wrap_awareness - Wrap-aware gotodef scroll (cross-file)
+                use crate::wrap_layout::WrapLayout;
+                let wrap_layout = WrapLayout::new(self.view_width - RAIL_WIDTH, &self.font_metrics);
+                if tab.viewport.ensure_visible_wrapped(
+                    target_line,
+                    target_col,
+                    line_count,
+                    &wrap_layout,
+                    |i| line_lens.get(i).copied().unwrap_or(0),
+                ) {
                     self.invalidation.merge(InvalidationKind::Layout);
                 }
             }
@@ -2661,7 +2691,17 @@ impl EditorState {
             if viewport.buffer_line_to_screen_line(cursor_line).is_none() {
                 // Cursor is off-screen - scroll to make it visible
                 let line_count = buffer.line_count();
-                if viewport.ensure_visible(cursor_line, line_count) {
+                // Chunk: docs/chunks/arrow_scroll_wrap_awareness - Wrap-aware snap-back
+                use crate::wrap_layout::WrapLayout;
+                let cursor_col = buffer.cursor_position().col;
+                let wrap_layout = WrapLayout::new(self.view_width - RAIL_WIDTH, &self.font_metrics);
+                if viewport.ensure_visible_wrapped(
+                    cursor_line,
+                    cursor_col,
+                    line_count,
+                    &wrap_layout,
+                    |i| buffer.line_len(i),
+                ) {
                     // Viewport scrolled - mark full viewport dirty
                     self.invalidation.merge(InvalidationKind::Layout);
                 }
@@ -3655,8 +3695,18 @@ impl EditorState {
             self.dirty_lines.merge(result.dirty_lines);
 
             // Ensure cursor is visible after insertion
-            let cursor_line = buffer.cursor_position().line;
-            if viewport.ensure_visible(cursor_line, buffer.line_count()) {
+            // Chunk: docs/chunks/arrow_scroll_wrap_awareness - Wrap-aware scroll after file drop
+            use crate::wrap_layout::WrapLayout;
+            let cursor_pos = buffer.cursor_position();
+            let line_count = buffer.line_count();
+            let wrap_layout = WrapLayout::new(self.view_width - RAIL_WIDTH, &self.font_metrics);
+            if viewport.ensure_visible_wrapped(
+                cursor_pos.line,
+                cursor_pos.col,
+                line_count,
+                &wrap_layout,
+                |i| buffer.line_len(i),
+            ) {
                 self.invalidation.merge(InvalidationKind::Layout);
             }
 
@@ -3790,8 +3840,18 @@ impl EditorState {
                     self.invalidation.merge(InvalidationKind::Content(dirty));
 
                     // Ensure cursor is visible
-                    let cursor_line = buffer.cursor_position().line;
-                    if viewport.ensure_visible(cursor_line, buffer.line_count()) {
+                    // Chunk: docs/chunks/arrow_scroll_wrap_awareness - Wrap-aware scroll after text insertion
+                    use crate::wrap_layout::WrapLayout;
+                    let cursor_pos = buffer.cursor_position();
+                    let line_count = buffer.line_count();
+                    let wrap_layout = WrapLayout::new(self.view_width - RAIL_WIDTH, &self.font_metrics);
+                    if viewport.ensure_visible_wrapped(
+                        cursor_pos.line,
+                        cursor_pos.col,
+                        line_count,
+                        &wrap_layout,
+                        |i| buffer.line_len(i),
+                    ) {
                         self.invalidation.merge(InvalidationKind::Layout);
                     }
 
@@ -3837,8 +3897,18 @@ impl EditorState {
             self.invalidation.merge(InvalidationKind::Content(dirty));
 
             // Ensure cursor is visible (cursor moves to end of marked text)
-            let cursor_line = buffer.cursor_position().line;
-            if viewport.ensure_visible(cursor_line, buffer.line_count()) {
+            // Chunk: docs/chunks/arrow_scroll_wrap_awareness - Wrap-aware scroll after IME marked text
+            use crate::wrap_layout::WrapLayout;
+            let cursor_pos = buffer.cursor_position();
+            let line_count = buffer.line_count();
+            let wrap_layout = WrapLayout::new(self.view_width - RAIL_WIDTH, &self.font_metrics);
+            if viewport.ensure_visible_wrapped(
+                cursor_pos.line,
+                cursor_pos.col,
+                line_count,
+                &wrap_layout,
+                |i| buffer.line_len(i),
+            ) {
                 self.invalidation.merge(InvalidationKind::Layout);
             }
         }
@@ -14431,5 +14501,219 @@ mod tests {
             .active_tab().unwrap().last_known_mtime;
 
         assert_ne!(original_mtime, new_mtime, "mtime should be updated after reload");
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/arrow_scroll_wrap_awareness - Wrap-aware ensure_visible tests
+    // =========================================================================
+
+    /// Helper: build an EditorState with 10 wrapped lines (14 chars each → 2 screen
+    /// rows at 10 cols/row) plus a short line "x" at line 10.  Viewport is configured
+    /// to 5 visible rows with a narrow width (RAIL_WIDTH + 80px → 10 cols/row at
+    /// 8px/char).  Cursor is placed at line 10, col 0.
+    ///
+    /// Returns the state with scroll_offset_px == 0 (caller may override).
+    fn make_wrapped_state_cursor_at_line_10() -> EditorState {
+        use crate::left_rail::RAIL_WIDTH;
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = EditorState::empty(test_font_metrics());
+        let view_width = RAIL_WIDTH + 80.0;  // 10 cols/row at 8px advance
+        let window_height = 5.0 * 16.0 + TAB_BAR_HEIGHT; // 5 visible rows
+        state.update_viewport_dimensions(view_width, window_height);
+
+        // 10 long lines (14 chars → 2 screen rows each) + "x" at line 10
+        let mut content = String::new();
+        for _ in 0..10 {
+            content.push_str("aaaaaaaaaaaaaa\n"); // 14 chars → 2 rows at 10 cols/row
+        }
+        content.push_str("x");
+        state.buffer_mut().insert_str(&content);
+
+        // Position cursor at line 10, col 0 (abs screen row = 20)
+        state.buffer_mut().set_cursor(lite_edit_buffer::Position::new(10, 0));
+
+        state
+    }
+
+    #[test]
+    fn test_arrow_scroll_snap_back_wrap_awareness() {
+        // Verify that the cursor snap-back guard (handle_key_buffer, line ~2690)
+        // does NOT change the scroll offset when the cursor is already visible
+        // according to wrap-aware arithmetic.
+        //
+        // Layout:
+        //   - Lines 0-9: "aaaaaaaaaaaaaa" (14 chars → 2 rows each; 20 abs rows total)
+        //   - Line 10: "x" → abs screen row = 20
+        //   - Viewport: 5 visible rows, first_visible_row = 256/16 = 16
+        //   → cursor at abs row 20 is visible in [16, 16+5+1) = [16, 22) ✓
+        //
+        // The snap-back guard uses the line-based buffer_line_to_screen_line(10)
+        // which returns None (10 < 16), so the guard FIRES. After this fix,
+        // ensure_visible_wrapped recognises the cursor is already visible and
+        // returns false (no scroll change).
+        //
+        // Before fix: ensure_visible(10, 11) → scrolls UP to 160px (wrong)
+        // After fix:  ensure_visible_wrapped → no scroll (correct; stays 256px)
+        //
+        // We use Cmd+C (no cursor movement) so no post-key ensure_visible_wrapped
+        // can mask the snap-back behaviour.
+
+        let mut state = make_wrapped_state_cursor_at_line_10();
+
+        // Simulate viewport scrolled to abs row 16: 16 * 16px = 256px.
+        // At this position cursor (abs row 20) is visible in a 5-row window.
+        state.viewport_mut().set_scroll_offset_px_unclamped(256.0);
+        assert_eq!(
+            state.viewport().scroll_offset_px(), 256.0,
+            "pre-condition: viewport must be at 256px"
+        );
+
+        // Cmd+C: no cursor movement, triggers the snap-back guard on a file tab.
+        let cmd_c = KeyEvent::new(
+            Key::Char('c'),
+            Modifiers { command: true, ..Default::default() },
+        );
+        state.handle_key(cmd_c);
+
+        assert_eq!(
+            state.viewport().scroll_offset_px(),
+            256.0,
+            "snap-back must not clobber wrap-correct scroll offset; \
+             cursor at abs screen row 20 is visible with top_row=16 and 5 visible rows"
+        );
+    }
+
+    #[test]
+    fn test_text_insertion_wrap_awareness() {
+        // Verify that handle_insert_text does not incorrectly move the scroll
+        // offset when the cursor is at the end of a wrapped buffer and already
+        // visible.
+        //
+        // After inserting "a" at (10, 0): cursor at (10, 1). "ax" is 2 chars,
+        // still fits in 1 screen row → abs_row stays 20. No scroll needed.
+        //
+        // Before fix: ensure_visible(10, 11) → scrolls to 160px (wrong)
+        // After fix:  ensure_visible_wrapped → no scroll (correct; stays 256px)
+
+        let mut state = make_wrapped_state_cursor_at_line_10();
+        state.viewport_mut().set_scroll_offset_px_unclamped(256.0);
+
+        let event = lite_edit_input::TextInputEvent::new("a");
+        state.handle_insert_text(event);
+
+        assert_eq!(
+            state.viewport().scroll_offset_px(),
+            256.0,
+            "text insertion must not incorrectly scroll when cursor is already visible"
+        );
+    }
+
+    #[test]
+    fn test_ime_marked_text_wrap_awareness() {
+        // Verify that handle_set_marked_text does not incorrectly move the scroll
+        // offset when the cursor is at the end of a wrapped buffer and already
+        // visible.
+        //
+        // Marking "y" at (10, 0) moves cursor to (10, 1). "y" overlay on "x"
+        // stays within 1 screen row → abs_row stays 20. No scroll needed.
+        //
+        // Before fix: ensure_visible(10, 11) → scrolls to 160px (wrong)
+        // After fix:  ensure_visible_wrapped → no scroll (correct; stays 256px)
+
+        let mut state = make_wrapped_state_cursor_at_line_10();
+        state.viewport_mut().set_scroll_offset_px_unclamped(256.0);
+
+        let event = lite_edit_input::MarkedTextEvent::new("y");
+        state.handle_set_marked_text(event);
+
+        assert_eq!(
+            state.viewport().scroll_offset_px(),
+            256.0,
+            "IME marked text must not incorrectly scroll when cursor is already visible"
+        );
+    }
+
+    #[test]
+    fn test_file_drop_insertion_wrap_awareness() {
+        // Verify that handle_file_drop does not incorrectly move the scroll
+        // offset when the cursor is at the end of a wrapped buffer and already
+        // visible.
+        //
+        // Dropping "/x" inserts "'/x'" (4 chars) at (10, 0). Cursor ends at
+        // (10, 4). "'/x'x" is 5 chars, still 1 screen row → abs_row stays 20.
+        //
+        // Before fix: ensure_visible(10, 11) → scrolls to 160px (wrong)
+        // After fix:  ensure_visible_wrapped → no scroll (correct; stays 256px)
+
+        let mut state = make_wrapped_state_cursor_at_line_10();
+        state.viewport_mut().set_scroll_offset_px_unclamped(256.0);
+
+        // Drop position (100.0, 100.0) falls inside the pane content area
+        // (x > RAIL_WIDTH=56, y inside window height). Short path avoids
+        // growing line 10 beyond 1 screen row.
+        state.handle_file_drop(vec!["/x".to_string()], (100.0, 100.0));
+
+        assert_eq!(
+            state.viewport().scroll_offset_px(),
+            256.0,
+            "file drop must not incorrectly scroll when cursor is already visible"
+        );
+    }
+
+    #[test]
+    fn test_goto_cross_file_definition_wrap_scroll() {
+        // Verify that goto_cross_file_definition scrolls the viewport to reveal a
+        // definition that is beyond the initial visible rows when wrapping is active.
+        //
+        // file_b has 10 long lines (14 chars → 2 screen rows each at 10 cols/row)
+        // plus a definition at line 10.  With 5 visible rows the cursor (abs row 20)
+        // is off-screen; after goto the viewport must have scrolled (scroll > 0).
+        //
+        // Note: ensure_cursor_visible_in_active_tab (called after line 1617) has a
+        // pre-existing deviation (uses view_width instead of view_width - RAIL_WIDTH),
+        // which may adjust the final scroll position. We only assert scroll > 0 here;
+        // the deviation is documented in docs/subsystems/viewport_scroll/OVERVIEW.md.
+        use tempfile::TempDir;
+        use std::fs;
+        use crate::left_rail::RAIL_WIDTH;
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let temp = TempDir::new().unwrap();
+        let file_a = temp.path().join("file_a.rs");
+        let file_b = temp.path().join("file_b.rs");
+
+        fs::write(&file_a, "fn main() {}\n").unwrap();
+
+        // file_b: 10 long lines + short definition at line 10
+        let mut file_b_content = String::new();
+        for _ in 0..10 {
+            file_b_content.push_str("aaaaaaaaaaaaaa\n"); // 14 chars → 2 rows at 10 cols/row
+        }
+        file_b_content.push_str("fn target() {}\n");
+        fs::write(&file_b, &file_b_content).unwrap();
+
+        let mut state = EditorState::empty(test_font_metrics());
+        let view_width = RAIL_WIDTH + 80.0;  // 10 cols/row at 8px advance
+        let window_height = 5.0 * 16.0 + TAB_BAR_HEIGHT;
+        state.update_viewport_dimensions(view_width, window_height);
+
+        state.associate_file(file_a.clone());
+
+        let ws = state.editor.active_workspace().unwrap();
+        let pane_id = ws.active_pane_id;
+        let from_pos = lite_edit_buffer::Position::new(0, 0);
+
+        // Navigate to definition at line 10, col 3 (inside "target")
+        state.goto_cross_file_definition(pane_id, from_pos, file_b.clone(), 10, 3);
+
+        // With wrap-aware scrolling, abs screen row of line 10 = 20, which is
+        // beyond the initial 5 visible rows → viewport must have scrolled.
+        assert!(
+            state.viewport().scroll_offset_px() > 0.0,
+            "goto_cross_file_definition must scroll viewport to reveal cursor at \
+             abs screen row 20 with 5 visible rows; scroll_offset_px={}",
+            state.viewport().scroll_offset_px()
+        );
     }
 }

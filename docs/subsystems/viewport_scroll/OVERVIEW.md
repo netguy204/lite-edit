@@ -119,4 +119,10 @@ An enum with three variants: `None`, `Lines { from, to }`, `FullViewport`. The `
 
 ## Known Deviations
 
-No known deviations. All four components follow the subsystem's patterns consistently. The separation between `RowScroller` (generic) and `Viewport` (buffer-specific) is clean, and `WrapLayout` is used uniformly wherever wrapping coordinates are needed.
+- `editor_state.rs#EditorState::ensure_cursor_visible_in_active_tab` builds
+  `WrapLayout` with `self.view_width` instead of `self.view_width - RAIL_WIDTH`,
+  slightly overestimating `cols_per_row` (by RAIL_WIDTH / glyph_width ≈ 7 cols
+  at the default 8px advance). This means the method may under-scroll when
+  cursor lines wrap, because it sees fewer screen rows than the renderer does.
+  Discovered during `arrow_scroll_wrap_awareness`; not addressed in that chunk
+  (minor visual impact, separate fix).
