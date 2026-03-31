@@ -1,11 +1,17 @@
 ---
-status: IMPLEMENTING
+status: ACTIVE
 ticket: null
 parent_chunk: null
 code_paths:
 - crates/editor/src/viewport.rs
 - crates/editor/src/editor_state.rs
-code_references: []
+code_references:
+- ref: crates/editor/src/viewport.rs#Viewport::ensure_visible_wrapped_with_margin
+  implements: "Wrap-aware scroll-to-visible with bottom margin; core fix for find match visibility"
+- ref: crates/editor/src/viewport.rs#Viewport::ensure_visible_wrapped
+  implements: "Refactored to delegate to ensure_visible_wrapped_with_margin with margin=0"
+- ref: crates/editor/src/editor_state.rs#EditorState::run_live_search
+  implements: "Uses ensure_visible_wrapped_with_margin(margin=1) for find strip clearance"
 narrative: null
 investigation: null
 subsystems:
@@ -18,14 +24,6 @@ created_after:
 - external_edit_reload
 ---
 <!--
-╔══════════════════════════════════════════════════════════════════════════════╗
-║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║
-║                                                                              ║
-║  AGENT INSTRUCTIONS: When editing this file, preserve this entire comment    ║
-║  block. Only modify the frontmatter YAML and the content sections below      ║
-║  (Minor Goal, Success Criteria, Relationship to Parent). Use targeted edits  ║
-║  that replace specific sections rather than rewriting the entire file.       ║
-╚══════════════════════════════════════════════════════════════════════════════╝
 
 This comment describes schema information that needs to be adhered
 to throughout the process.

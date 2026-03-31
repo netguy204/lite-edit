@@ -17,7 +17,7 @@ code_references:
   - ref: crates/editor/src/dirty_region.rs#DirtyRegion::merge
     implements: "Dirty region merge logic (identity, absorption, range merging)"
   - ref: crates/editor/src/viewport.rs#Viewport
-    implements: "Viewport struct with scroll_offset, visible_lines, and line_height"
+    implements: "Viewport struct wrapping a RowScroller; exposes scroll offset, visible lines, and line height via delegation"
   - ref: crates/editor/src/viewport.rs#Viewport::visible_range
     implements: "Computes which buffer lines are visible in viewport"
   - ref: crates/editor/src/viewport.rs#Viewport::scroll_to

@@ -4,7 +4,7 @@ ticket: null
 parent_chunk: null
 code_paths:
 - crates/editor/src/editor_state.rs
-- crates/editor/src/renderer.rs
+- crates/editor/src/renderer/find_strip.rs
 - crates/editor/src/selector_overlay.rs
 - crates/editor/src/main.rs
 code_references:
@@ -23,7 +23,7 @@ code_references:
 - ref: crates/editor/src/editor_state.rs#EditorState::handle_key_find
   implements: "Key routing for find mode (Escape, Enter, input)"
 - ref: crates/editor/src/editor_state.rs#EditorState::run_live_search
-  implements: "Live search and buffer selection update"
+  implements: "Live search, buffer selection update, and wrap-aware viewport scroll to match"
 - ref: crates/editor/src/editor_state.rs#EditorState::advance_to_next_match
   implements: "Enter advances to next match"
 - ref: crates/editor/src/selector_overlay.rs#FindStripGeometry
@@ -32,7 +32,7 @@ code_references:
   implements: "Calculate find strip positioning"
 - ref: crates/editor/src/selector_overlay.rs#FindStripGlyphBuffer
   implements: "Glyph buffer for rendering find strip"
-- ref: crates/editor/src/renderer.rs#Renderer::draw_find_strip
+- ref: crates/editor/src/renderer/find_strip.rs#Renderer::draw_find_strip
   implements: "Render the find strip at the bottom of the viewport"
 narrative: minibuffer
 investigation: null

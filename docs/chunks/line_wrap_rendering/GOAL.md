@@ -31,6 +31,8 @@ code_references:
     implements: "Wrap-aware hit-testing: module provides pixel_to_buffer_position_wrapped (private helper) for converting pixel coordinates to buffer position by walking screen rows"
   - ref: crates/editor/src/viewport.rs#Viewport::ensure_visible_wrapped
     implements: "Wrap-aware cursor visibility ensuring the specific screen row containing cursor is visible"
+  - ref: crates/editor/src/viewport.rs#Viewport::ensure_visible_wrapped_with_margin
+    implements: "Like ensure_visible_wrapped but reserves bottom_margin_rows rows at the bottom; used by find-in-file scroll when the find strip occludes the last visible row"
   - ref: crates/editor/src/renderer/mod.rs#Renderer::wrap_layout
     implements: "Factory method creating WrapLayout from current viewport width and font metrics"
 narrative: null
