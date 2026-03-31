@@ -2012,12 +2012,32 @@ impl EditorState {
 
                 // Scroll viewport to make match visible.
                 // Chunk: docs/chunks/find_strip_scroll_clearance - Use margin when find strip is active
-                // Use margin=1 because the find strip occludes the last visible row.
-                // This ensures matches land at visible_lines - 2 (one row above the strip).
+                // Chunk: docs/chunks/find_scroll_wrap_awareness - Use wrap-aware scroll for find matches
+                // Use wrap-aware scrolling so that matches on wrapped lines are correctly
+                // revealed. margin=1 because the find strip occludes the last visible row.
                 let line_count = self.buffer().line_count();
                 let match_line = start.line;
-                if self.viewport_mut().ensure_visible_with_margin(match_line, line_count, 1) {
-                    self.invalidation.merge(InvalidationKind::Layout);
+                let match_col = start.col;
+
+                // Pre-collect line lengths to satisfy borrow checker (buffer() and
+                // viewport_mut() cannot coexist as borrows of self).
+                let line_lens: Vec<usize> = (0..line_count)
+                    .map(|i| self.buffer().line_len(i))
+                    .collect();
+
+                {
+                    use crate::wrap_layout::WrapLayout;
+                    let wrap_layout = WrapLayout::new(self.view_width - RAIL_WIDTH, &self.font_metrics);
+                    if self.viewport_mut().ensure_visible_wrapped_with_margin(
+                        match_line,
+                        match_col,
+                        line_count,
+                        &wrap_layout,
+                        1, // margin=1: find strip occludes the last visible row
+                        |i| line_lens.get(i).copied().unwrap_or(0),
+                    ) {
+                        self.invalidation.merge(InvalidationKind::Layout);
+                    }
                 }
             }
             None => {
@@ -8889,6 +8909,79 @@ mod tests {
             first_visible,
             visible_lines,
             visible_lines.saturating_sub(2)
+        );
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/find_scroll_wrap_awareness - Wrap-aware find scroll tests
+    // =========================================================================
+
+    #[test]
+    fn test_find_scroll_wrap_awareness() {
+        // Verify that when find mode is active and lines wrap, the viewport scrolls
+        // to reveal the match correctly using wrap-aware scrolling.
+        //
+        // Setup: narrow viewport so lines wrap (10 cols/row with 8px advance).
+        // Lines 0-3 contain "aaaaaaaaaaaaaa" (14 chars > 10 cols → 2 screen rows each).
+        // Line 4 contains the search keyword "target".
+        //
+        // With 5 visible rows:
+        // - abs screen row of line 4 = 2+2+2+2 = 8
+        // - Old code (line-based): ensure_visible_with_margin(line=4, margin=1) checks
+        //   4 > 0+4 → false → does NOT scroll (BUG: match is off-screen)
+        // - New code (wrap-aware): ensure_visible_wrapped_with_margin checks
+        //   8 > 0+4 → true → SCROLLS (CORRECT)
+        //
+        // RAIL_WIDTH=56, 8px advance, content_width=80 → 10 cols/row.
+        use crate::left_rail::RAIL_WIDTH;
+        use crate::tab_bar::TAB_BAR_HEIGHT;
+
+        let mut state = EditorState::empty(test_font_metrics());
+
+        // Build buffer: lines 0-3 have 14 chars (wrapping to 2 rows each at 10 cols/row)
+        // Line 4 has "target" (the keyword we'll search for)
+        let mut content = String::new();
+        for _ in 0..4 {
+            content.push_str("aaaaaaaaaaaaaa\n");  // 14 chars → 2 screen rows at 10 cols/row
+        }
+        content.push_str("target\n");
+        state.buffer_mut().insert_str(&content);
+
+        // Set narrow view width: RAIL_WIDTH + 80px (10 cols/row at 8px advance width)
+        let view_width = RAIL_WIDTH + 80.0;
+        // Set window height for 5 visible rows: 5*16 + TAB_BAR_HEIGHT = 80+32 = 112
+        let window_height = 5.0 * 16.0 + TAB_BAR_HEIGHT;
+        state.update_viewport_dimensions(view_width, window_height);
+
+        // Sanity check: 5 visible rows
+        assert_eq!(state.viewport().visible_lines(), 5, "Expected 5 visible rows");
+
+        // Scroll to top
+        let line_count = state.buffer().line_count();
+        state.viewport_mut().scroll_to(0, line_count);
+        assert_eq!(state.viewport().scroll_offset_px(), 0.0, "Should start at top");
+
+        // Open find mode (Cmd+F)
+        let cmd_f = KeyEvent::new(
+            Key::Char('f'),
+            Modifiers { command: true, ..Default::default() },
+        );
+        state.handle_key(cmd_f);
+        assert_eq!(state.focus, EditorFocus::FindInFile, "Should enter find mode");
+
+        // Type the search query - this triggers run_live_search on each keystroke
+        for c in "target".chars() {
+            state.handle_key(KeyEvent::char(c));
+        }
+
+        // With wrap-aware scrolling, the viewport must scroll to reveal the match.
+        // The match is on buffer line 4 at abs screen row 8.
+        // With 5 visible rows and margin=1, effective=4; 8 > 0+4 → must scroll.
+        assert!(
+            state.viewport().scroll_offset_px() > 0.0,
+            "Viewport must scroll to reveal match at abs screen row 8 in a 5-row viewport. \
+             scroll_offset_px={}",
+            state.viewport().scroll_offset_px()
         );
     }
 

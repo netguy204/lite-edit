@@ -1,20 +1,22 @@
 ---
-status: FUTURE
+status: IMPLEMENTING
 ticket: null
 parent_chunk: null
-code_paths: []
+code_paths:
+- crates/editor/src/viewport.rs
+- crates/editor/src/editor_state.rs
 code_references: []
 narrative: null
 investigation: null
 subsystems:
-  - subsystem_id: "viewport_scroll"
-    relationship: implements
+- subsystem_id: viewport_scroll
+  relationship: implements
 friction_entries: []
 bug_type: semantic
 depends_on: []
-created_after: ["external_edit_reload"]
+created_after:
+- external_edit_reload
 ---
-
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  DO NOT DELETE THIS COMMENT BLOCK until the chunk complete command is run.   ║

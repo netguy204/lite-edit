@@ -307,49 +307,86 @@ impl Viewport {
     where
         F: Fn(usize) -> usize,
     {
+        self.ensure_visible_wrapped_with_margin(
+            cursor_line, cursor_col, line_count, wrap_layout, 0, line_len_fn,
+        )
+    }
+
+    // Chunk: docs/chunks/find_scroll_wrap_awareness - Wrap-aware find-match scroll with margin
+    /// Like `ensure_visible_wrapped`, but treats the viewport as if it had
+    /// `bottom_margin_rows` fewer rows at the bottom.
+    ///
+    /// Used by find-in-file scrolling when the find strip occludes the last visible row.
+    ///
+    /// Returns `true` if scrolling occurred, `false` if the target was already visible.
+    ///
+    /// # Arguments
+    /// * `target_line` - The buffer line containing the target position
+    /// * `target_col` - The buffer column of the target position
+    /// * `line_count` - Total number of buffer lines
+    /// * `wrap_layout` - The wrap layout for calculating screen rows
+    /// * `bottom_margin_rows` - Number of rows to reserve at the bottom (e.g. for find strip)
+    /// * `line_len_fn` - Closure to get the character count of a buffer line
+    pub fn ensure_visible_wrapped_with_margin<F>(
+        &mut self,
+        target_line: usize,
+        target_col: usize,
+        line_count: usize,
+        wrap_layout: &crate::wrap_layout::WrapLayout,
+        bottom_margin_rows: usize,
+        line_len_fn: F,
+    ) -> bool
+    where
+        F: Fn(usize) -> usize,
+    {
         let old_offset_px = self.scroll_offset_px();
         let line_height = self.line_height();
         let visible_lines = self.visible_lines();
 
-        // Always compute the absolute screen row of the cursor from buffer line 0.
+        // Compute effective visible height, reducing by the bottom margin.
+        // Always at least 1 to avoid edge cases with very small viewports.
+        let effective_visible = visible_lines.saturating_sub(bottom_margin_rows).max(1);
+
+        // Always compute the absolute screen row of the target from buffer line 0.
         // Previously this iterated from a caller-provided `first_visible_line`, but
         // that value was a screen-row index (from first_visible_line()), not a buffer
         // line index. This caused under-counting when wrapped lines were present.
-        let mut cursor_abs_screen_row: usize = 0;
-        for buffer_line in 0..cursor_line.min(line_count) {
+        let mut target_abs_screen_row: usize = 0;
+        for buffer_line in 0..target_line.min(line_count) {
             let line_len = line_len_fn(buffer_line);
-            cursor_abs_screen_row += wrap_layout.screen_rows_for_line(line_len);
+            target_abs_screen_row += wrap_layout.screen_rows_for_line(line_len);
         }
 
-        // Add the row offset within the cursor's wrapped line
-        let (cursor_row_offset, _) = wrap_layout.buffer_col_to_screen_pos(cursor_col);
-        cursor_abs_screen_row += cursor_row_offset;
+        // Add the row offset within the target's wrapped line
+        let (target_row_offset, _) = wrap_layout.buffer_col_to_screen_pos(target_col);
+        target_abs_screen_row += target_row_offset;
 
         // Derive the current top screen row from scroll_offset_px
         let current_top_screen_row = self.first_visible_screen_row();
 
-        if cursor_abs_screen_row < current_top_screen_row {
-            // Cursor is above viewport - scroll up to put cursor at top
-            let target_px = cursor_abs_screen_row as f32 * line_height;
+        if target_abs_screen_row < current_top_screen_row {
+            // Target is above viewport - scroll up to put target at top
+            // Margin does not affect upward scrolling (same as ensure_visible_with_margin)
+            let target_px = target_abs_screen_row as f32 * line_height;
             let max_screen_rows = self.compute_total_screen_rows(line_count, wrap_layout, &line_len_fn);
             let max_offset_px = max_screen_rows.saturating_sub(visible_lines) as f32 * line_height;
             self.set_scroll_offset_px_direct(target_px.clamp(0.0, max_offset_px));
-        } else if cursor_abs_screen_row > current_top_screen_row + visible_lines {
-            // Chunk: docs/chunks/viewport_keystroke_jostle - Fix off-by-one
-            // +1 accounts for partially visible bottom row (matching visible_range semantics)
+        } else if target_abs_screen_row > current_top_screen_row + effective_visible {
             // Subsystem: docs/subsystems/viewport_scroll - Invariant 5
             //
-            // The `>` (not `>=`) means screen row `current_top + visible_lines` is
+            // The `>` (not `>=`) means screen row `current_top + effective_visible` is
             // considered visible (it's the partial row that visible_range includes).
+            // Using effective_visible instead of visible_lines causes scrolling 1 row
+            // earlier when a margin is applied, keeping the match above the find strip.
 
-            // Cursor is below viewport - scroll down to put cursor at bottom
-            let new_top_row = cursor_abs_screen_row.saturating_sub(visible_lines.saturating_sub(1));
+            // Target is below effective viewport - scroll down to put target at bottom
+            let new_top_row = target_abs_screen_row.saturating_sub(effective_visible.saturating_sub(1));
             let target_px = new_top_row as f32 * line_height;
             let max_screen_rows = self.compute_total_screen_rows(line_count, wrap_layout, &line_len_fn);
             let max_offset_px = max_screen_rows.saturating_sub(visible_lines) as f32 * line_height;
             self.set_scroll_offset_px_direct(target_px.clamp(0.0, max_offset_px));
         }
-        // else: cursor is visible, no scroll needed
+        // else: target is visible within effective viewport, no scroll needed
 
         self.scroll_offset_px() != old_offset_px
     }
@@ -2880,5 +2917,203 @@ mod tests {
             correct_doc_line, buggy_doc_line,
             "The fix should produce a different result than the buggy calculation"
         );
+    }
+
+    // =========================================================================
+    // Chunk: docs/chunks/find_scroll_wrap_awareness - ensure_visible_wrapped_with_margin tests
+    // =========================================================================
+
+    /// Helper: 8px glyph width, 16px line height, 80px viewport → 10 cols/row
+    fn wrapped_margin_test_metrics() -> crate::font::FontMetrics {
+        crate::font::FontMetrics {
+            advance_width: 8.0,
+            line_height: 16.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            point_size: 14.0,
+        }
+    }
+
+    #[test]
+    fn test_ensure_visible_wrapped_with_margin_margin0_same_as_no_margin() {
+        // With margin=0 the result should equal ensure_visible_wrapped.
+        use crate::wrap_layout::WrapLayout;
+
+        let metrics = wrapped_margin_test_metrics();
+        // 80px / 8px = 10 cols/row
+        let wrap = WrapLayout::new(80.0, &metrics);
+
+        // 4 lines all short (no wrap)
+        let line_lengths: Vec<usize> = vec![5, 5, 5, 5];
+        let line_len_fn = |i: usize| line_lengths.get(i).copied().unwrap_or(0);
+
+        // Viewport: 3 visible rows; target on line 3 (abs screen row 3)
+        let mut vp1 = Viewport::new(16.0);
+        let mut vp2 = Viewport::new(16.0);
+        vp1.update_size(48.0, 10);  // 3 visible rows
+        vp2.update_size(48.0, 10);
+
+        let scrolled1 = vp1.ensure_visible_wrapped(3, 0, 4, &wrap, |i| line_lengths.get(i).copied().unwrap_or(0));
+        let scrolled2 = vp2.ensure_visible_wrapped_with_margin(3, 0, 4, &wrap, 0, line_len_fn);
+
+        assert_eq!(scrolled1, scrolled2, "margin=0 should give same scrolled flag as no-margin");
+        assert_eq!(
+            vp1.scroll_offset_px(), vp2.scroll_offset_px(),
+            "margin=0 should give same scroll offset as no-margin"
+        );
+    }
+
+    #[test]
+    fn test_ensure_visible_wrapped_with_margin_match_below_scrolls() {
+        // Setup: 5 lines, first 4 lines each wrap to 2 screen rows (total 8 screen rows
+        // before line 4). Viewport shows 5 rows. Match is on line 4, col 0.
+        // Abs screen row of match = 8.
+        // With margin=1, effective_visible=4: 8 > 0+4 → scroll.
+        use crate::wrap_layout::WrapLayout;
+
+        let metrics = wrapped_margin_test_metrics();
+        let wrap = WrapLayout::new(80.0, &metrics);  // 10 cols/row
+        assert_eq!(wrap.cols_per_row(), 10);
+
+        // Lines 0-3: 20 chars each → 2 screen rows each
+        // Line 4: 5 chars → 1 screen row (the match)
+        let line_lengths: Vec<usize> = vec![20, 20, 20, 20, 5];
+        let line_len_fn = |i: usize| line_lengths.get(i).copied().unwrap_or(0);
+
+        // Verify wrap: 20-char line wraps to 2 rows
+        assert_eq!(wrap.screen_rows_for_line(20), 2);
+        // Abs screen row for line 4 = 2+2+2+2 = 8
+        let abs_row_of_match: usize = line_lengths[0..4].iter()
+            .map(|&len| wrap.screen_rows_for_line(len))
+            .sum();
+        assert_eq!(abs_row_of_match, 8);
+
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(80.0, 20);  // 5 visible rows (80px / 16px = 5)
+        assert_eq!(vp.visible_lines(), 5);
+
+        let scrolled = vp.ensure_visible_wrapped_with_margin(
+            4, 0, 5, &wrap, 1, line_len_fn,
+        );
+
+        assert!(scrolled, "Match at abs screen row 8 with 5 visible rows and margin=1 should scroll down");
+        assert!(vp.scroll_offset_px() > 0.0, "Viewport should have scrolled");
+    }
+
+    #[test]
+    fn test_ensure_visible_wrapped_with_margin_match_visible_no_scroll() {
+        // Same layout as match_below_scrolls but viewport already scrolled to show the match.
+        // Lines 0-3 each wrap to 2 rows; match on line 4, abs screen row=8.
+        // Scroll viewport to screen row 4 (so rows 4-8 are visible in a 5-row viewport).
+        // Match at row 8 with top=4 and effective_visible=4: 8 > 4+4 = 8>8 → false, no scroll.
+        use crate::wrap_layout::WrapLayout;
+
+        let metrics = wrapped_margin_test_metrics();
+        let wrap = WrapLayout::new(80.0, &metrics);  // 10 cols/row
+
+        let line_lengths: Vec<usize> = vec![20, 20, 20, 20, 5];
+        let line_len_fn = |i: usize| line_lengths.get(i).copied().unwrap_or(0);
+
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(80.0, 20);  // 5 visible rows
+
+        // Scroll to screen row 4 (4 * 16px = 64px)
+        vp.set_scroll_offset_px_unclamped(64.0);
+        assert_eq!(vp.first_visible_screen_row(), 4);
+
+        let scrolled = vp.ensure_visible_wrapped_with_margin(
+            4, 0, 5, &wrap, 1, line_len_fn,
+        );
+
+        assert!(!scrolled, "Match at abs row 8, top=4, effective_visible=4: 8 > 4+4 is false, should not scroll");
+        assert_eq!(vp.scroll_offset_px(), 64.0, "Scroll offset should be unchanged");
+    }
+
+    #[test]
+    fn test_ensure_visible_wrapped_with_margin_match_above_scrolls_up() {
+        // Viewport scrolled past the match. Margin does not affect upward scrolling.
+        // Lines 0-4 each wrap to 2 rows; match on line 3 (abs screen row=6).
+        // Plus 20 short trailing lines to allow clamped scroll to reach row 6 at top.
+        // Scroll viewport to screen row 7 (past the match at row 6).
+        // 6 < 7 → scroll up so match is at top (row 6).
+        use crate::wrap_layout::WrapLayout;
+
+        let metrics = wrapped_margin_test_metrics();
+        let wrap = WrapLayout::new(80.0, &metrics);  // 10 cols/row
+
+        // Lines 0-2: 20 chars each (wrap to 2 rows), line 3: match (5 chars, 1 row),
+        // then 20 trailing lines (5 chars each, 1 row each) to provide enough content
+        // that scrolling to row 6 at the top is within the valid scroll range.
+        let mut line_lengths: Vec<usize> = vec![20, 20, 20, 5];
+        line_lengths.extend(std::iter::repeat(5).take(20));
+        let line_count = line_lengths.len();
+        let line_len_fn = |i: usize| line_lengths.get(i).copied().unwrap_or(0);
+
+        // Abs screen row for line 3 = 2+2+2 = 6
+        let abs_row: usize = (0..3).map(|i| wrap.screen_rows_for_line(line_lengths[i])).sum();
+        assert_eq!(abs_row, 6, "Match (line 3) should be at abs screen row 6");
+
+        let mut vp = Viewport::new(16.0);
+        vp.update_size(80.0, 100);  // 5 visible rows, 100 line_count cap
+
+        // Scroll to screen row 7 (7 * 16px = 112px)
+        vp.set_scroll_offset_px_unclamped(112.0);
+        assert_eq!(vp.first_visible_screen_row(), 7);
+
+        let scrolled = vp.ensure_visible_wrapped_with_margin(
+            3, 0, line_count, &wrap, 1, line_len_fn,
+        );
+
+        assert!(scrolled, "Match at abs row 6, top=7: 6 < 7 should trigger scroll up");
+        // After upward scroll, match should be at the top
+        assert_eq!(vp.first_visible_screen_row(), 6, "Should scroll to put match at top");
+    }
+
+    #[test]
+    fn test_ensure_visible_wrapped_with_margin_margin_shrinks_effective_window() {
+        // Demonstrate that margin=1 causes scrolling 1 row earlier than margin=0.
+        // Place the match row at exactly current_top + effective_visible (the partial row).
+        // margin=0: no scroll (match is the partial row, within visible range).
+        // margin=1: scroll (match is beyond the effective viewport).
+        //
+        // This directly mirrors test_ensure_visible_with_margin_scrolls_earlier on RowScroller.
+        use crate::wrap_layout::WrapLayout;
+
+        let metrics = wrapped_margin_test_metrics();
+        let wrap = WrapLayout::new(80.0, &metrics);  // 10 cols/row
+
+        // Lines 0-2 each wrap to 2 rows (total 6 rows), match on line 3 (abs screen row=6)
+        let line_lengths: Vec<usize> = vec![20, 20, 20, 5];
+        let line_len_fn = |i: usize| line_lengths.get(i).copied().unwrap_or(0);
+
+        // Viewport: 6 visible rows, scroll at 0
+        // With margin=0 (effective=6): 6 > 0+6 = false → no scroll
+        // With margin=1 (effective=5): 6 > 0+5 = true  → scroll
+        let mut vp0 = Viewport::new(16.0);
+        vp0.update_size(96.0, 20);  // 6 visible rows (96px / 16px = 6)
+        assert_eq!(vp0.visible_lines(), 6);
+
+        let mut vp1 = Viewport::new(16.0);
+        vp1.update_size(96.0, 20);
+
+        // Verify match abs screen row is 6
+        let abs_row: usize = line_lengths[0..3].iter()
+            .map(|&len| wrap.screen_rows_for_line(len))
+            .sum();
+        assert_eq!(abs_row, 6, "Match should be at abs screen row 6");
+
+        // margin=0: match at the partial row → no scroll
+        let scrolled0 = vp0.ensure_visible_wrapped_with_margin(
+            3, 0, 4, &wrap, 0, |i| line_lengths.get(i).copied().unwrap_or(0),
+        );
+        assert!(!scrolled0, "margin=0: match at partial row (abs=6, effective=6) should NOT scroll");
+
+        // margin=1: match beyond effective viewport → scroll
+        let scrolled1 = vp1.ensure_visible_wrapped_with_margin(
+            3, 0, 4, &wrap, 1, line_len_fn,
+        );
+        assert!(scrolled1, "margin=1: match beyond effective viewport (abs=6, effective=5) SHOULD scroll");
+        assert!(vp1.scroll_offset_px() > 0.0, "Viewport should have scrolled down");
     }
 }
