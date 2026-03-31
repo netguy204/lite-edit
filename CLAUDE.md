@@ -72,11 +72,13 @@ Accumulative ledger for pain points. **Read when**: capturing friction, or when 
 See: `docs/trunk/ARTIFACTS.md#friction-log`
 
 
+
 ### External Artifacts
 
 Cross-repository artifact pointers (`external.yaml` files). **Read when**: encountering `external.yaml` files or working in multi-repo contexts.
 
 See: `docs/trunk/EXTERNAL.md`
+
 
 ## Orchestrator (`ve orch`)
 
@@ -112,13 +114,44 @@ Use these slash commands for artifact management:
 
 - `/chunk-review` - Review chunk implementation for alignment with documented intent
 - `/chunk-complete` - Mark a chunk complete and update references
+
 - `/cluster-rename` - Batch-rename chunks matching a prefix
 - `/narrative-create` - Create a new narrative for multi-chunk initiatives
 - `/narrative-compact` - Consolidate multiple chunks into a narrative
 - `/subsystem-discover` - Document an emergent architectural pattern
 - `/investigation-create` - Start a new investigation
 - `/friction-log` - Capture a friction point
+
 - `/validate-fix` - Iteratively fix validation errors until clean
+
+
+### Steward
+
+- `/steward-setup` - Set up a project steward via interactive interview
+- `/steward-watch` - Run the steward watch-respond-rewatch loop
+- `/steward-send` - Send a message to a project's steward
+- `/steward-changelog` - Watch a project's changelog channel
+
+- `/swarm-monitor` - Monitor all changelog channels in a swarm
+
+- `/swarm-request-response` - Send a request and wait for the response on a channel pair
+
+
+#### Cross-project messaging
+
+To send a message to another project's steward, use the channel naming convention `<target-project>-steward`, where `<target-project>` is the project whose steward you're addressing — **not** the project you're sending from.
+
+```
+ve board send <target-project>-steward "<message>" --swarm <swarm_id>
+```
+
+For example, to tell the `vibe-engineer` steward something from any project in the swarm, send to `vibe-engineer-steward`:
+
+```
+ve board send vibe-engineer-steward "Requested API change is ready" --swarm my_swarm
+```
+
+**Common mistake:** Agents often find their local `STEWARD.md`, read its `channel` field, and send to their *own* project's steward channel instead of the target project's channel. Always derive the channel name from the **target** project, not from your local steward configuration.
 
 
 ## Creating Artifacts

@@ -1,4 +1,5 @@
 .artifact-order.json
+.entities/steward/sessions/
 .ve/
 target/
 *.swp
